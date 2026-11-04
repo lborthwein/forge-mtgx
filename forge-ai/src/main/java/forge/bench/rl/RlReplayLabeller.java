@@ -948,6 +948,16 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         });
     }
 
+    /**
+     * label-parallel-1103 (host key label.threads; after {@link #setR3}): the threads one R3 row's units run on. The
+     * rows are the same at any value; 1 (the default) = the sequential loops.
+     */
+    public void setR3Threads(final int n) {
+        if (r3 != null) {
+            r3.setThreads(n);
+        }
+    }
+
     /** A forced choice of a taped seat: a choice row when choose-a-card hooks its kind (the record's answer stands). */
     @SuppressWarnings("unchecked")
     private void r3Seen(final forge.ai.AiTapeController c, final String m, final Object[] a, final int ordinal,

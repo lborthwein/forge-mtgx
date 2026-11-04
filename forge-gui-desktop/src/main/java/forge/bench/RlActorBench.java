@@ -190,6 +190,11 @@ public final class RlActorBench {
         forge.ai.simulation.R3LabelSearch.Spec labelR3 = null;
         JsonObject labelR3Ranker = null;
         /**
+         * label-parallel-1103 (host key {@code label.threads}, default 1; not in the label spec or its sha): the threads
+         * one R3 row's (candidate, world) units run on. Labels are the same at any value; 1 = the sequential loops.
+         */
+        int labelThreads = 1;
+        /**
          * bvw-step1-build-1024 (OPEN-6 ruling; null = off): the read-only face-down-exile scan of replayed tapes
          * ({@link forge.bench.rl.RlExileScan}): {@code exileScan} = {"turns": T, "out": DIR}. Not with a label spec.
          */
@@ -323,6 +328,10 @@ public final class RlActorBench {
             if (c.labelTurns < 1) {
                 throw new IllegalArgumentException("label.turns >= 1, not " + c.labelTurns);
             }
+            c.labelThreads = l.has("threads") ? l.get("threads").getAsInt() : 1; // label-parallel-1103
+            if (c.labelThreads < 1) {
+                throw new IllegalArgumentException("label.threads >= 1, not " + c.labelThreads);
+            }
             if (l.has("band")) {
                 // bvw-step1-build-1024: [lo, hi) turns before the end (refused together with turns)
                 if (l.has("turns")) {
@@ -372,6 +381,10 @@ public final class RlActorBench {
             } else if (l.has("band")) {
                 // review #14: a band is a step-k labeller; step-0 rows come only from the turns window
                 throw new IllegalArgumentException("refused: a label band needs a search block (step-0 rows use turns)");
+            }
+            if (c.labelThreads > 1 && c.labelR3 == null) {
+                // label-parallel-1103: only the R3 rows run units in parallel
+                throw new IllegalArgumentException("refused: label.threads > 1 needs label.r3");
             }
             // review #3: a counter spec runs only under the Forge AI settings it pins
             final String no = c.labelSpec.runtimeRefusal(c.aiTimeoutSec);
@@ -1990,6 +2003,7 @@ public final class RlActorBench {
                                 ? forge.bench.rl.RlReplayLabeller.staticRanker()
                                 : forge.bench.rl.RlReplayLabeller.serviceRanker(cfg.labelR3Ranker.getAsJsonObject("rlsearch"),
                                         cfg.labelR3Ranker.get("valueSha").getAsString(), feat.index(), tobs, jarSha, ruid));
+                        labs[0].setR3Threads(cfg.labelThreads); // label-parallel-1103 (1 = unchanged)
                     }
                     if (trajectoryRef != null) {
                         labs[0].setReference(trajectoryRef.of(t.get("game_uid").getAsString()), trajectoryRef.turns,

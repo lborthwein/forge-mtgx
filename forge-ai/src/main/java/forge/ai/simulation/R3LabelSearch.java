@@ -452,10 +452,71 @@ public final class R3LabelSearch {
 
         /** The first per-row cap this row has reached, or null. */
         String over(final Spec spec) {
+            return over(spec, lines, proofs, steps);
+        }
+
+        static String over(final Spec spec, final long lines, final long proofs, final long steps) {
             if (spec.rowMaxLines > 0 && lines >= spec.rowMaxLines) return "row-lines";
             if (spec.rowMaxProofs > 0 && proofs >= spec.rowMaxProofs) return "row-proofs";
             if (spec.rowMaxSteps > 0 && steps >= spec.rowMaxSteps) return "row-steps";
             return null;
+        }
+
+        /**
+         * label-parallel-1103 (a parallel unit's Work only; null otherwise): the counters at each of the unit's line-start
+         * cap checks and the answer it got, the unit's own counters standing in for the row's (unknown while it runs).
+         */
+        List<long[]> checks;
+        List<String> answers;
+        /** label-parallel-1103 (a parallel unit's Work only; null = the row's map): its lines' in-line counts. */
+        Map<String, Long> inline;
+
+        static Work unit() {
+            final Work w = new Work();
+            w.checks = new ArrayList<>();
+            w.answers = new ArrayList<>();
+            w.inline = new TreeMap<>();
+            return w;
+        }
+
+        /** A line's start: the row cap check ({@link #over}), recorded in a unit's Work. */
+        String lineCheck(final Spec spec) {
+            final String r = over(spec);
+            if (checks != null) {
+                checks.add(new long[] {lines, proofs, steps});
+                answers.add(r);
+            }
+            return r;
+        }
+
+        /**
+         * label-parallel-1103: true when every recorded check answers the same with {@code prefix} (the row's work before
+         * this unit, in the sequential order) added: then the unit ran exactly as it would have in sequence.
+         */
+        boolean sameOn(final Work prefix, final Spec spec) {
+            for (int j = 0; j < checks.size(); j++) {
+                final long[] c = checks.get(j);
+                final String r = over(spec, prefix.lines + c[0], prefix.proofs + c[1], prefix.steps + c[2]);
+                if (!java.util.Objects.equals(r, answers.get(j))) return false;
+            }
+            return true;
+        }
+
+        /** label-parallel-1103: add a kept unit's counters (and its cap reasons). */
+        void add(final Work o) {
+            lines += o.lines;
+            steps += o.steps;
+            copies += o.copies;
+            proofs += o.proofs;
+            proofWins += o.proofWins;
+            proofLosses += o.proofLosses;
+            inlineAsks += o.inlineAsks;
+            inlineDeparted += o.inlineDeparted;
+            oppNodes += o.oppNodes;
+            oppCuts += o.oppCuts;
+            leafValues += o.leafValues;
+            holdPasses += o.holdPasses;
+            for (Map.Entry<String, Integer> e : o.capReasons.entrySet()) capReasons.merge(e.getKey(), e.getValue(), Integer::sum);
         }
 
         JsonObject toJson() {
@@ -1032,7 +1093,7 @@ public final class R3LabelSearch {
     LineOut line(final Game g, final Player me, final int rootTurn, final PCand first, final OppMin.Script script,
             final World world, final Work work, final long seed) {
         final LineOut out = new LineOut();
-        final String rowCap = work.over(spec);
+        final String rowCap = work.lineCheck(spec);
         if (rowCap != null) {
             out.end = "cap:" + rowCap; // review #148 S2-4: the row's work cap, deterministic (counts)
             return out;
@@ -1118,7 +1179,9 @@ public final class R3LabelSearch {
             // heap fix: keep the line's in-line counts, not its engine (the engine holds the line's game copy, so every
             // line of a row stayed reachable until the row ended: 14.5 GB live on the heaviest rows)
             if (inline != null) {
-                for (Map.Entry<String, Long> e : inline.counts.entrySet()) inlineCounts.merge(e.getKey(), e.getValue(), Long::sum);
+                // label-parallel-1103: a parallel unit keeps its own counts until its merge
+                final Map<String, Long> to = work.inline != null ? work.inline : inlineCounts;
+                for (Map.Entry<String, Long> e : inline.counts.entrySet()) to.merge(e.getKey(), e.getValue(), Long::sum);
             }
         }
     }
@@ -1175,6 +1238,208 @@ public final class R3LabelSearch {
             forge.util.IdScope.install(prevIds);
             AiCache.installScope(prevCache);
             MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------ threads
+
+    /**
+     * label-parallel-1103 (the host key {@code label.threads}; never in the spec or its sha): the threads one row's units
+     * run on, this one included. A unit is one (candidate, selection world) or one target world (or draw sequence),
+     * with every oppMin branch of that world inside it. 1 (the default) = the sequential loops, exactly as before.
+     */
+    private int threads = 1;
+
+    public void setThreads(final int n) {
+        if (n < 1) {
+            throw new IllegalArgumentException("label.threads >= 1, not " + n);
+        }
+        threads = n;
+    }
+
+    public int threads() {
+        return threads;
+    }
+
+    /** One unit: its world, against {@code w} (the row's Work in sequence, the unit's own in parallel). */
+    interface UnitFn {
+        WorldOut run(int u, Work w);
+    }
+
+    /** A unit's result in the sequential order; false = stop (the units after it never run, as in sequence). */
+    interface Commit {
+        boolean accept(int u, WorldOut o);
+    }
+
+    /** The stream a parallel unit sees outside its own scopes: a fixed seed, every read counted (expected: none). */
+    static final class RowRandom extends Random {
+        private static final long serialVersionUID = 1L;
+        private final transient java.util.concurrent.atomic.AtomicLong reads;
+
+        RowRandom(final java.util.concurrent.atomic.AtomicLong reads) {
+            super(0x0B5E47EL);
+            this.reads = reads;
+        }
+
+        @Override
+        protected int next(final int bits) {
+            if (reads != null) reads.incrementAndGet();
+            return super.next(bits);
+        }
+    }
+
+    /** Units' worker threads (shared by every game of the JVM; idle threads end after a minute). */
+    private static java.util.concurrent.ExecutorService gamePool, plainPool;
+
+    /**
+     * Worker names follow the row's thread: Forge runs {@code GameAction.invoke} inline only on a "Game" thread
+     * ({@code ThreadUtil.isGameThread}), so a unit sees the same answer on a worker as on the row's thread.
+     */
+    private static synchronized java.util.concurrent.ExecutorService pool(final boolean game) {
+        java.util.concurrent.ExecutorService p = game ? gamePool : plainPool;
+        if (p == null) {
+            final java.util.concurrent.atomic.AtomicInteger n = new java.util.concurrent.atomic.AtomicInteger();
+            final String prefix = game ? "Game-r3label-" : "r3label-";
+            p = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                final Thread t = new Thread(r, prefix + n.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            });
+            if (game) gamePool = p;
+            else plainPool = p;
+        }
+        return p;
+    }
+
+    /**
+     * Why this row runs its units in sequence although threads > 1 (null = parallel): a thread context a worker cannot
+     * carry exactly: a counted Forge AI budget open on this thread, the decision-point census or meter (attributed by
+     * thread), or a copy in progress.
+     */
+    static String sequentialWhy() {
+        if (forge.ai.AiWork.current() != null) return "aiWork";
+        if (forge.ai.dp.DecisionPoints.tracking()) return "dp";
+        if (forge.game.IndependentCopies.active()) return "copying";
+        return null;
+    }
+
+    /**
+     * label-parallel-1103: run units {@code 0..n-1} and hand them to {@code c} in order.
+     *
+     * <p>In sequence (threads 1, one unit, or {@link #sequentialWhy}): unit u runs on the row's Work, then c: exactly the
+     * loops as they were.
+     *
+     * <p>In parallel: the units run on up to {@code threads} threads (this one included), each against its own Work,
+     * in-line counts and (choice rows) choose-a-card deferral, in its own id / AI-cache / random scopes. Then, in order,
+     * unit u is KEPT when each of its line-start row-cap checks answers the same on the row's work so far (the units
+     * before it): it then ran exactly as it would have in sequence, and its counters, counts and deferred writes are
+     * merged. Otherwise (a row cap binds inside it, or it threw) it runs again here, in sequence, on the row's Work, as it
+     * would have. A unit after a stop is dropped: it never ran in sequence, and it leaves nothing.
+     */
+    void runUnits(final int n, final Work row, final ChooseACard.Row choice, final UnitFn f, final Commit c) {
+        if (threads <= 1 || n <= 1 || sequentialWhy() != null) {
+            for (int u = 0; u < n; u++) {
+                if (!c.accept(u, f.run(u, row))) return;
+            }
+            return;
+        }
+        final WorldOut[] outs = new WorldOut[n];
+        final Work[] ws = new Work[n];
+        final ChooseACard.Deferred[] ds = new ChooseACard.Deferred[n];
+        final Throwable[] errs = new Throwable[n];
+        final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicLong reads = new java.util.concurrent.atomic.AtomicLong();
+        final boolean game = forge.util.ThreadUtil.isGameThread();
+        final String diagRow = ForcedWinSolver.DIAG_ROW.get();
+        final java.util.concurrent.atomic.AtomicLong[] acc = forge.ai.CpuAccount.get();
+        final Runnable take = () -> {
+            for (int u = next.getAndIncrement(); u < n; u = next.getAndIncrement()) {
+                final Work w = Work.unit();
+                final ChooseACard.Deferred d = choice == null ? null : choice.deferred();
+                ws[u] = w;
+                ds[u] = d;
+                final Random r0 = MyRandom.getThreadRandom();
+                final Object ids0 = forge.util.IdScope.capture();
+                final Object cache0 = AiCache.captureScope();
+                final String diag0 = ForcedWinSolver.DIAG_ROW.get();
+                final ChooseACard.Deferred d0 = ChooseACard.deferTo(d);
+                MyRandom.setThreadRandom(new RowRandom(reads));
+                forge.util.IdScope.open();
+                AiCache.openScope();
+                if (diagRow == null) ForcedWinSolver.DIAG_ROW.remove();
+                else ForcedWinSolver.DIAG_ROW.set(diagRow);
+                try {
+                    outs[u] = f.run(u, w);
+                } catch (Throwable t) {
+                    errs[u] = t;
+                } finally {
+                    ChooseACard.deferTo(d0);
+                    if (diag0 == null) ForcedWinSolver.DIAG_ROW.remove();
+                    else ForcedWinSolver.DIAG_ROW.set(diag0);
+                    AiCache.installScope(cache0);
+                    forge.util.IdScope.install(ids0);
+                    MyRandom.setThreadRandom(r0);
+                }
+            }
+        };
+        final int helpers = Math.min(threads, n) - 1;
+        final List<java.util.concurrent.Future<?>> fs = new ArrayList<>();
+        final java.util.concurrent.ExecutorService pool = pool(game);
+        for (int h = 0; h < helpers; h++) {
+            fs.add(pool.submit(() -> {
+                // measurement only: a worker's CPU goes to the row thread's accounts (as LookaheadSearch's pool does)
+                final long c0 = acc == null ? 0L : forge.ai.CpuAccount.now();
+                if (acc != null) forge.ai.CpuAccount.set(acc);
+                try {
+                    take.run();
+                } finally {
+                    if (acc != null) {
+                        forge.ai.CpuAccount.set(null);
+                        forge.ai.CpuAccount.charge(acc, forge.ai.CpuAccount.now() - c0);
+                    }
+                }
+            }));
+        }
+        take.run();
+        boolean interrupted = false;
+        for (java.util.concurrent.Future<?> fu : fs) {
+            while (true) {
+                try {
+                    fu.get();
+                    break;
+                } catch (InterruptedException e) {
+                    interrupted = true; // the units still finish: the row waits for them, then keeps the flag
+                } catch (java.util.concurrent.ExecutionException e) {
+                    throw new IllegalStateException("r3 unit worker failed", e.getCause()); // take catches all
+                }
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        if (reads.get() > 0) {
+            System.err.println("[r3-par] WARNING: " + reads.get() + " read(s) of the row thread's random stream outside a "
+                    + "unit's scopes");
+        }
+        int reruns = 0;
+        for (int u = 0; u < n; u++) {
+            final WorldOut o;
+            if (errs[u] == null && ws[u].sameOn(row, spec)) {
+                row.add(ws[u]);
+                for (Map.Entry<String, Long> e : ws[u].inline.entrySet()) inlineCounts.merge(e.getKey(), e.getValue(), Long::sum);
+                if (choice != null) choice.commit(ds[u]);
+                o = outs[u];
+            } else {
+                reruns++;
+                o = f.run(u, row); // in sequence, as it would have run
+            }
+            ws[u] = null;
+            outs[u] = null;
+            ds[u] = null;
+            if (!c.accept(u, o)) break;
+        }
+        if (reruns > 0) {
+            System.err.println("[r3-par] reran " + reruns + " of " + n + " unit(s) in sequence (a row cap or an error)");
         }
     }
 
@@ -1602,11 +1867,11 @@ public final class R3LabelSearch {
                 co.spends = c.spends;
                 res.cands.add(co);
             }
-            selection(res.cands, minSel, (i, w) -> {
+            selection(res.cands, minSel, res.work, null, (i, w, wk) -> {
                 final long ws = LookaheadSearch.mix(seed0, 0x53454C0000L + w); // common across candidates
                 final PCand c = cands.get(i);
-                return world(minSel, res.work, script -> priorityLine(live, liveMe, c, new World(false, ws, -1, 0, null,
-                        null, knownMe, knownOpp), ws, script, res.work));
+                return world(minSel, wk, script -> priorityLine(live, liveMe, c, new World(false, ws, -1, 0, null,
+                        null, knownMe, knownOpp), ws, script, wk));
             });
             for (CandOut co : res.cands) co.close();
             res.pick = argmax(res.cands);
@@ -1630,27 +1895,27 @@ public final class R3LabelSearch {
                 de.addProperty("known", dr.known);
                 de.addProperty("exact", dr.exact);
                 res.extra.add("draws", de);
-                for (int s = 0; s < dr.seqs.size(); s++) {
+                runUnits(dr.seqs.size(), res.work, null, (s, wk) -> {
                     final long ws = LookaheadSearch.mix(ts, 0x5345510000L + s);
                     final World wd = new World(true, ws, -1, 0, dr.seqs.get(s), dr, knownMe, knownOpp);
-                    final WorldOut wo = world(spec.oppMin, res.work, script -> priorityLine(live, liveMe, pc, wd, ws,
-                            script, res.work));
+                    final WorldOut wo = world(spec.oppMin, wk, script -> priorityLine(live, liveMe, pc, wd, ws,
+                            script, wk));
                     wo.draw = String.valueOf(dr.seqs.get(s));
                     wo.weight = dr.weights.get(s);
-                    res.targetWorlds.add(wo);
-                }
+                    return wo;
+                }, (s, wo) -> res.targetWorlds.add(wo));
             } else {
                 final int W = targetCount(liveMe, knownMe);
                 res.targetKind = spec.stratify ? "stratified" : "true";
-                for (int w = 0; w < W; w++) {
+                runUnits(W, res.work, null, (w, wk) -> {
                     final long ws = LookaheadSearch.mix(ts, 0x5457000000L + w);
                     final World wt = new World(true, ws, w, W, null, null, knownMe, knownOpp);
-                    final WorldOut wo = world(spec.oppMin, res.work, script -> priorityLine(live, liveMe, pc, wt, ws,
-                            script, res.work));
+                    final WorldOut wo = world(spec.oppMin, wk, script -> priorityLine(live, liveMe, pc, wt, ws,
+                            script, wk));
                     wo.draw = wt.firstDraw;
                     wo.weight = 1.0 / W;
-                    res.targetWorlds.add(wo);
-                }
+                    return wo;
+                }, (w, wo) -> res.targetWorlds.add(wo));
             }
             closeTarget(res);
             final String rowCap = res.work.over(spec);
@@ -1698,44 +1963,52 @@ public final class R3LabelSearch {
     }
 
     /** Argmax of the resolved means; ties to the lower index; a departure must be strictly better (margin 0). */
+    /** One selection unit: candidate {@code i}'s world {@code k}, against {@code w} ({@link UnitFn}). */
+    interface SelFn {
+        WorldOut run(int i, int k, Work w);
+    }
+
     /**
      * The selection worlds of every candidate, {@code w(i, world)}. With {@code cut} (oppMinIn both, ruling 10-30) the
      * candidates run one at a time and a candidate stops once its mean's upper bound (its remaining worlds at 1) is no
      * better than the best finished mean: it cannot be the argmax (ties go to the lower index). Without, as before.
+     * label-parallel-1103: each (candidate, world) is a {@link #runUnits} unit; with cut, one candidate's worlds at a time.
      */
-    void selection(final List<CandOut> cands, final boolean cut,
-            final java.util.function.BiFunction<Integer, Integer, WorldOut> w) {
+    void selection(final List<CandOut> cands, final boolean cut, final Work row, final ChooseACard.Row choice,
+            final SelFn w) {
         final int W = spec.selectWorlds;
         if (!cut) {
-            for (int k = 0; k < W; k++) {
-                for (int i = 0; i < cands.size(); i++) cands.get(i).worlds.add(w.apply(i, k));
-            }
+            // world-major, candidate-minor (the sequential order; label-parallel-1103: one unit each)
+            final int C = cands.size();
+            runUnits(W * C, row, choice, (u, wk) -> w.run(u % C, u / C, wk), (u, o) -> cands.get(u % C).worlds.add(o));
             return;
         }
-        double best = Double.NaN;
+        final double[] best = {Double.NaN};
         for (int i = 0; i < cands.size(); i++) {
+            final int ci = i;
             final CandOut co = cands.get(i);
-            double sum = 0;
-            int res = 0;
-            for (int k = 0; k < W; k++) {
-                final WorldOut wo = w.apply(i, k);
+            final double[] sum = {0};
+            final int[] res = {0};
+            runUnits(W, row, choice, (k, wk) -> w.run(ci, k, wk), (k, wo) -> {
                 co.worlds.add(wo);
                 if (!Double.isNaN(wo.v)) {
-                    sum += wo.v;
-                    res++;
+                    sum[0] += wo.v;
+                    res[0]++;
                 }
                 final int left = W - k - 1;
-                if (left > 0 && !Double.isNaN(best)) {
-                    final double ub = Math.max(res == 0 ? Double.NEGATIVE_INFINITY : sum / res, (sum + left) / (res + left));
-                    if (ub <= best) {
+                if (left > 0 && !Double.isNaN(best[0])) {
+                    final double ub = Math.max(res[0] == 0 ? Double.NEGATIVE_INFINITY : sum[0] / res[0],
+                            (sum[0] + left) / (res[0] + left));
+                    if (ub <= best[0]) {
                         co.cutAt = k + 1;
-                        break;
+                        return false;
                     }
                 }
-            }
-            if (co.cutAt < 0 && res > 0) {
-                final double m = sum / res;
-                if (Double.isNaN(best) || m > best) best = m;
+                return true;
+            });
+            if (co.cutAt < 0 && res[0] > 0) {
+                final double m = sum[0] / res[0];
+                if (Double.isNaN(best[0]) || m > best[0]) best[0] = m;
             }
         }
     }
@@ -1875,11 +2148,11 @@ public final class R3LabelSearch {
                 co.spends = spentNames.get(i);
                 res.cands.add(co);
             }
-            selection(res.cands, minSel, (j, w) -> {
+            selection(res.cands, minSel, res.work, row, (j, w, wk) -> {
                 final long ws = LookaheadSearch.mix(seed0, 0x53454C0000L + w);
                 final int i = played.get(j);
-                return world(minSel, res.work, script -> choiceLine(row, i, new World(false, ws, -1, 0, null, null,
-                        knownMe, knownOpp), ws, rootTurn, script, res.work));
+                return world(minSel, wk, script -> choiceLine(row, i, new World(false, ws, -1, 0, null, null,
+                        knownMe, knownOpp), ws, rootTurn, script, wk));
             });
             for (CandOut co : res.cands) co.close();
             final int pj = argmax(res.cands);
@@ -1895,15 +2168,14 @@ public final class R3LabelSearch {
             final long ts = LookaheadSearch.mix(seed0, 0x5452554557L);
             final int W = targetCount(liveMe, knownMe);
             res.targetKind = spec.stratify ? "stratified" : "true";
-            for (int w = 0; w < W; w++) {
+            runUnits(W, res.work, row, (w, wk) -> {
                 final long ws = LookaheadSearch.mix(ts, 0x5457000000L + w);
                 final World wt = new World(true, ws, w, W, null, null, knownMe, knownOpp);
-                final WorldOut wo = world(spec.oppMin, res.work, script -> choiceLine(row, pi, wt, ws, rootTurn, script,
-                        res.work));
+                final WorldOut wo = world(spec.oppMin, wk, script -> choiceLine(row, pi, wt, ws, rootTurn, script, wk));
                 wo.draw = wt.firstDraw;
                 wo.weight = 1.0 / W;
-                res.targetWorlds.add(wo);
-            }
+                return wo;
+            }, (w, wo) -> res.targetWorlds.add(wo));
             closeTarget(res);
             final String rowCap = res.work.over(spec);
             if (rowCap != null) {
