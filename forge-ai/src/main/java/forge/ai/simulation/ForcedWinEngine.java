@@ -1000,6 +1000,28 @@ final class ForcedWinEngine {
     private int passCap;
     private long passStart;
     /**
+     * solver-gaps-1104 (enginePassFirst): while a pass move of the root is searched in the turn-crossing pass, its
+     * subtree's node and step share (a third of the pass's budgets each); Long.MAX_VALUE = none. A share stop is a cap only
+     * when the search ends without a line ({@link #shareHit}).
+     */
+    private long shareNodes = Long.MAX_VALUE, shareSteps = Long.MAX_VALUE;
+    private boolean shareHit;
+
+    /** solver-gaps-1104: descend into a root pass move's subtree under its share (enginePassFirst), else plainly. */
+    private List<Step> descendShared(Node node, Step mv, Applied a, int depth) {
+        if (depth != 0 || !lim.passFirst || !lim.passTurn || !mv.pass) {
+            return descend(node, mv, a, depth);
+        }
+        shareNodes = st.nodes + Math.max(1, passCap / 3);
+        shareSteps = lim.totalSteps > 0 ? st.steps - stepBase + Math.max(1, lim.totalSteps / 3) : Long.MAX_VALUE;
+        try {
+            return descend(node, mv, a, depth);
+        } finally {
+            shareNodes = Long.MAX_VALUE;
+            shareSteps = Long.MAX_VALUE;
+        }
+    }
+    /**
      * Part B (solver-gaps-1015): when not null, the search also keeps this turn's non-winning lines with the best static
      * value of the position they reach (Forge's GameStateEvaluator), as likely-win candidates.
      */
@@ -1127,6 +1149,9 @@ final class ForcedWinEngine {
             }
             lim.passTurn = twoTurns;
             lim.nodes = nodeCap;
+            if (win == null && e.shareHit) {
+                e.capAt("nodes-share", st.nodes, lim.nodes); // solver-gaps-1104: a share stop without a line is a cap
+            }
             if (likelyOut != null && e.collect != null) {
                 final int rootScore = e.evaluator.getStaticScore(root.g, root.me).value;
                 e.collect.sort((x, y) -> Integer.compare(y.score, x.score));
@@ -1214,6 +1239,10 @@ final class ForcedWinEngine {
     }
 
     private boolean out() {
+        if (st.nodes >= shareNodes || st.steps - stepBase >= shareSteps) {
+            shareHit = true; // solver-gaps-1104: this root pass move's share is spent (not the search's budget)
+            return true;
+        }
         if (st.nodes >= lim.nodes) {
             if (st.nodes - passStart < passCap) {
                 stoppedByLifetime = true; // review #10: the cap was reached with earlier searches' nodes
@@ -1382,7 +1411,7 @@ final class ForcedWinEngine {
             if (a.child == null) {
                 continue;
             }
-            final List<Step> r = descend(node, mv, a, depth);
+            final List<Step> r = descendShared(node, mv, a, depth);
             if (r != null) {
                 return r;
             }
@@ -1586,7 +1615,7 @@ final class ForcedWinEngine {
             pathCards += pending; // the siblings still waiting stay alive while this child is searched
             final List<Step> r;
             try {
-                r = descend(node, kidMoves.get(i), a, depth);
+                r = descendShared(node, kidMoves.get(i), a, depth);
             } finally {
                 pathCards -= pending;
             }
