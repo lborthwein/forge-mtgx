@@ -279,6 +279,24 @@ final class ForcedWinEngine {
          * card budgets from its own start (as each pass gets its own nodes), not what the this-turn pass left.
          */
         boolean passBudget;
+        /**
+         * solver-gaps-1104 (enginePassFirst; false = off): in the pass that searches lines crossing the turn, the pass
+         * moves are tried first at each node of our turn. They were last, behind the branching cap's distinct moves, so on
+         * a board with that many other moves the second pass never passed (a setup the turn before the kill was never
+         * searched). Deterministic: only the order changes.
+         */
+        boolean passFirst;
+        /**
+         * solver-gaps-1104 (enginePassToEnd; false = off; read with anyWindow): from a node of our turn the second pass
+         * also offers PASS_END, a pass that rests at our priority in the opponent's end step (empty stack) of the next
+         * turn: the instant-speed window before our turn. The node there is not "passed": its moves are what is legal at
+         * instant speed, then a PASS to our next main phase. A setup cast in that window is seen by the opponent only at
+         * its end step.
+         */
+        boolean passToEnd;
+        /** solver-gaps-1104 (engineTriggerTargets; false = off): {@link TriggerTargets#wide}, at most triggerVariants. */
+        boolean triggerTargets;
+        int triggerVariants = 8;
         int loopWindow = 8;
         int loopCap = 128;
         /**
@@ -1126,7 +1144,8 @@ final class ForcedWinEngine {
             if (win == null) {
                 return null;
             }
-            return new Line(win, List.of(), win.contains(Step.PASS) ? 1 : 0, root.me.getLife(), 0, 0, List.of(), "engine");
+            return new Line(win, List.of(), win.stream().anyMatch(x -> x.pass) ? 1 : 0, root.me.getLife(), 0, 0, List.of(),
+                    "engine");
         } catch (RuntimeException | StackOverflowError ex) {
             ForcedWinSolver.receipt("FORCED_WIN engine error " + ex);
             return null;
@@ -1331,7 +1350,7 @@ final class ForcedWinEngine {
                 // the move caused a targeting trigger of ours: try it again with each of a few forced targets next
                 int k = 0;
                 for (String ref : a.triggerCandidates) {
-                    if (k++ >= lim.targetVariants) {
+                    if (k++ >= (lim.triggerTargets ? lim.triggerVariants : lim.targetVariants)) {
                         break;
                     }
                     final Step v = mv.copy();
@@ -1461,7 +1480,7 @@ final class ForcedWinEngine {
             if (mv.triggerRef == null && !a.triggerCandidates.isEmpty()) {
                 int k = 0;
                 for (String ref : a.triggerCandidates) {
-                    if (k++ >= lim.targetVariants) {
+                    if (k++ >= (lim.triggerTargets ? lim.triggerVariants : lim.targetVariants)) {
                         break;
                     }
                     final Step v = mv.copy();
@@ -1583,7 +1602,7 @@ final class ForcedWinEngine {
     private List<Step> descend(Node node, Step mv, Applied a, int depth) {
         a.child.path.addAll(node.path);
         a.child.path.add(mv);
-        a.child.passed = node.passed || mv.pass;
+        a.child.passed = node.passed || mv.pass && !mv.toEnd; // solver-gaps-1104: PASS_END rests before our turn
         a.child.loopsDone = node.loopsDone; // R2-3 (loopMacro only reads it)
         if (lim.cycles) {
             // search-bones-1015 (c): the progress table instead of the exact-key set, and loops fast-forwarded
@@ -1824,7 +1843,15 @@ final class ForcedWinEngine {
             // phase too (a mill loop's kill is the pass; the engine still plays their turn up to the draw)
             out.add(0, Step.PASS);
         } else if (!node.passed && lim.passTurn) {
-            out.add(Step.PASS);
+            if (lim.passFirst && g.getPhaseHandler().isPlayerTurn(me)) {
+                out.add(0, Step.PASS); // solver-gaps-1104: the pass first in the turn-crossing pass (not behind the cap)
+            } else {
+                out.add(Step.PASS);
+            }
+            if (lim.passToEnd && lim.anyWindow && g.getPhaseHandler().isPlayerTurn(me)) {
+                // solver-gaps-1104: also pass to the opponent's end step (an instant-speed window before our turn)
+                out.add(lim.passFirst ? 1 : out.size(), Step.PASS_END);
+            }
         }
         // R3-5: a root outside our turn (a response at their main phase) never attacks there (off: the root is ours)
         if (g.getPhaseHandler().is(PhaseType.MAIN1) && canAttack(me)
@@ -2331,6 +2358,14 @@ final class ForcedWinEngine {
             this.forced = forced;
         }
 
+        /**
+         * solver-gaps-1104 (engineTriggerTargets; false = off, the classic three-way order): every legal target class
+         * (see {@link #wideCandidates}), at most {@link #cap}; a forced ref "C<id>+F<colour>" floats that mana source's
+         * mana in response to the trigger (it resolves after: an untap of a source we just tapped for mana).
+         */
+        boolean wide;
+        int cap = 8;
+
         /** Handle the forced trigger (played here); the rest go back to Forge AI. */
         List<SpellAbility> apply(Game g, Player me, List<SpellAbility> abilities) {
             if (seen) {
@@ -2362,7 +2397,7 @@ final class ForcedWinEngine {
                 final List<String> all = new ArrayList<>(ours);
                 all.addAll(mine);
                 all.addAll(theirs);
-                candidates = all;
+                candidates = wide ? wideCandidates(g, me, sa, slot) : all;
                 if (TRACE) {
                     final StringBuilder sb = new StringBuilder();
                     for (String r : all) {
@@ -2372,14 +2407,119 @@ final class ForcedWinEngine {
                     }
                     ForcedWinSolver.receipt("FW_ENGINE   trigger " + sa.getHostCard().getName() + " candidates " + sb);
                 }
-                if (forced != null && LookaheadSearch.applyTarget(slot, forced, g) && sa.isTargetNumberValid()) {
+                final int fl = forced == null ? -1 : forced.indexOf("+F");
+                final String ref = fl < 0 ? forced : forced.substring(0, fl);
+                if (forced != null && LookaheadSearch.applyTarget(slot, ref, g) && sa.isTargetNumberValid()) {
                     forcedHost = sa.getHostCard();
                     forge.ai.ComputerUtil.playStack(sa, me, g);
+                    if (fl >= 0) {
+                        // solver-gaps-1104: float the target source's mana now, with the trigger on the stack
+                        final SpellAbility m = ChooseACard.floatSa(g, me, Integer.parseInt(ref.substring(1)),
+                                Integer.parseInt(forced.substring(fl + 2)));
+                        if (m == null || !forge.ai.ComputerUtil.handlePlayingSpellAbility(me, m, null)) {
+                            floatFailed = true;
+                        }
+                    }
                     continue;
                 }
                 rest.add(sa);
             }
             return rest;
+        }
+
+        /** solver-gaps-1104: the forced float of a "+F" ref could not be played (the move fails: no silent change). */
+        boolean floatFailed;
+
+        /**
+         * solver-gaps-1104: the trigger's target classes, mana valued. Cards equal by controller, name and tapped state
+         * are one class (the same outcome), represented by the first. Order: our tapped permanents with a non-mana tap
+         * ability (re-enabling an engine); for an untap effect our untapped mana sources with their mana floated first,
+         * one class per colour our cards need that the source makes (else its first colour); our tapped mana sources;
+         * the opponent's permanents; our others. At most {@link #cap}. Engine primitives only (mana abilities, the
+         * trigger's effect kind, tapped state, mana costs): no card is named.
+         */
+        List<String> wideCandidates(Game g, Player me, SpellAbility sa, SpellAbility slot) {
+            final boolean untap = untaps(sa);
+            int needed = 0;
+            for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command}) {
+                for (Card c : me.getCardsIn(z)) {
+                    for (forge.card.mana.ManaCostShard sh : c.getManaCost()) {
+                        for (int i = 0; i < 5; i++) {
+                            if (sh.isColor(ForcedWinModel.FORGE_COLOR[i])) {
+                                needed |= 1 << i;
+                            }
+                        }
+                    }
+                }
+            }
+            final List<String> engine = new ArrayList<>(), floatUntapped = new ArrayList<>(), tappedMana = new ArrayList<>(),
+                    theirs = new ArrayList<>(), others = new ArrayList<>();
+            final Set<String> classes = new HashSet<>();
+            for (Card c : g.getCardsIn(ZoneType.Battlefield)) {
+                if (!slot.canTarget(c)) {
+                    continue;
+                }
+                final String ref = "C" + c.getId();
+                final boolean mine = c.getController() == me;
+                final String cls = (mine ? "me|" : "op|") + c.getName() + "|" + c.isTapped() + "|" + c.isSick();
+                if (!classes.add(cls)) {
+                    continue;
+                }
+                final int makes = mine ? manaMask(c, me) : 0;
+                if (mine && c.isTapped() && hasTapAbility(c)) {
+                    engine.add(ref);
+                } else if (mine && !c.isTapped() && untap && makes != 0) {
+                    boolean any = false;
+                    for (int i = 0; i < 6; i++) {
+                        if ((makes & needed & (1 << i)) != 0) {
+                            floatUntapped.add(ref + "+F" + i);
+                            any = true;
+                        }
+                    }
+                    if (!any) {
+                        floatUntapped.add(ref + "+F" + Integer.numberOfTrailingZeros(makes));
+                    }
+                    others.add(ref);
+                } else if (mine && c.isTapped() && makes != 0) {
+                    tappedMana.add(ref);
+                } else if (mine) {
+                    others.add(ref);
+                } else {
+                    theirs.add(ref);
+                }
+            }
+            final List<String> all = new ArrayList<>(engine);
+            all.addAll(floatUntapped);
+            all.addAll(tappedMana);
+            all.addAll(theirs);
+            all.addAll(others);
+            return all.size() > cap ? new ArrayList<>(all.subList(0, cap)) : all;
+        }
+
+        /** Whether the trigger can untap its target (an untap, or a tap-or-untap choice). */
+        private static boolean untaps(SpellAbility sa) {
+            for (SpellAbility x = sa; x != null; x = x.getSubAbility()) {
+                if (x.getApi() == forge.game.ability.ApiType.Untap || x.getApi() == forge.game.ability.ApiType.TapOrUntap) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** The colours (bit i = ForcedWinModel colour i, 5 = colourless) a permanent's tap-only mana abilities make. */
+        private static int manaMask(Card c, Player me) {
+            int mask = 0;
+            for (SpellAbility ma : c.getManaAbilities()) {
+                if (ma.getPayCosts() == null || !ma.getPayCosts().hasTapCost() || ma.getPayCosts().getCostParts().size() != 1) {
+                    continue;
+                }
+                for (int col = 0; col < 6; col++) {
+                    if (ma.canProduce(ForcedWinModel.SHORT[col])) {
+                        mask |= 1 << col;
+                    }
+                }
+            }
+            return mask;
         }
 
         private static boolean hasTapAbility(Card c) {
@@ -2519,6 +2659,10 @@ final class ForcedWinEngine {
                 ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap); // labeller-v2 (a)
             }
             ai.lim = lim;
+            if (lim.triggerTargets) {
+                ai.triggers.wide = true; // solver-gaps-1104
+                ai.triggers.cap = lim.triggerVariants;
+            }
             if (lim.costChoice) {
                 // R3-4 (b): the cost cards of the move's abilities branch too (E2's CacHook.costCards point)
                 if (ai.rec == null) {
@@ -2554,6 +2698,10 @@ final class ForcedWinEngine {
             a.pickCandidates = ai.picks.candidates;
             a.rec = ai.rec;
             a.won = me.hasWon() || me.getOpponents().stream().anyMatch(Player::hasLost);
+            if (ai.triggers.floatFailed && !a.won) {
+                a.why = "failed"; // solver-gaps-1104: a forced float in response that could not be played
+                return a;
+            }
             if (a.won || !ai.rest || g.isGameOver()) {
                 a.why = ai.failed ? "failed" : g.isGameOver() ? "over" : ph.getTurn() > lastTurn ? "turn" : "steps" + steps;
                 return a;
@@ -2897,7 +3045,13 @@ final class ForcedWinEngine {
                 ForcedWinSolver.receipt("FW_ENGINE     moveai t" + ph.getTurn() + " " + ph.getPhase() + " stack=" + g.getStack().size()
                         + (g.getStack().isEmpty() ? "" : " top=" + g.getStack().peek().getActivatingPlayer()));
             }
-            if (g.getStack().isEmpty() && ph.isPlayerTurn(getPlayer())
+            if (move.toEnd) {
+                // solver-gaps-1104 (PASS_END): rest only at our priority in the opponent's end step after this turn
+                if (g.getStack().isEmpty() && !ph.isPlayerTurn(getPlayer()) && ph.is(PhaseType.END_OF_TURN)
+                        && ph.getTurn() > fromTurn) {
+                    rest = true;
+                }
+            } else if (g.getStack().isEmpty() && ph.isPlayerTurn(getPlayer())
                     && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))
                     && (!move.pass || ph.getTurn() > fromTurn && ph.is(PhaseType.MAIN1))) {
                 rest = true;

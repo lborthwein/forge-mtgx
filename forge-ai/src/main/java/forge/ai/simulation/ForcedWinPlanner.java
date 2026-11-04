@@ -42,6 +42,11 @@ public final class ForcedWinPlanner {
     static final class Step {
         final AbilKind kind;
         final boolean pass;
+        /**
+         * solver-gaps-1104 (enginePassToEnd only; false for every other step): a pass that rests at our priority in the
+         * opponent's end step of the next turn (an instant-speed window before our turn), not at our next main phase.
+         */
+        final boolean toEnd;
         final int hostId;
         final String hostName;
         final String desc;
@@ -87,6 +92,7 @@ public final class ForcedWinPlanner {
         Step(AbilKind kind, ACard host, Abil ab, int floatColor) {
             this.kind = kind;
             this.pass = false;
+            this.toEnd = false;
             this.hostId = host.id;
             this.hostName = host.name;
             this.desc = ab == null ? "" : ab.desc;
@@ -97,8 +103,13 @@ public final class ForcedWinPlanner {
         }
 
         private Step() {
+            this(false);
+        }
+
+        private Step(boolean toEnd) {
             this.kind = null;
             this.pass = true;
+            this.toEnd = toEnd;
             this.hostId = -1;
             this.hostName = "";
             this.desc = "";
@@ -109,6 +120,8 @@ public final class ForcedWinPlanner {
         }
 
         static final Step PASS = new Step();
+        /** solver-gaps-1104 (enginePassToEnd): pass to the opponent's end step of the next turn (see {@link #toEnd}). */
+        static final Step PASS_END = new Step(true);
 
         Step copy() {
             if (pass) {
@@ -145,6 +158,7 @@ public final class ForcedWinPlanner {
                 List<Eff> effects, int floatColor) {
             this.kind = kind;
             this.pass = false;
+            this.toEnd = false;
             this.hostId = hostId;
             this.hostName = hostName;
             this.desc = desc;
@@ -205,7 +219,7 @@ public final class ForcedWinPlanner {
         /** The step's identity for loop detection: kind, host, ability, cost, targets and forced answers. */
         String loopKey() {
             if (pass) {
-                return "PASS";
+                return toEnd ? "PASS_END" : "PASS";
             }
             if (kind == AbilKind.REPEAT) {
                 return "REPEAT" + times + body;
@@ -222,7 +236,7 @@ public final class ForcedWinPlanner {
         @Override
         public String toString() {
             if (pass) {
-                return "PASS";
+                return toEnd ? "PASS>END" : "PASS";
             }
             if (kind == AbilKind.ATTACK) {
                 return "ATTACK";

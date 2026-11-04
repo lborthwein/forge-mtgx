@@ -275,6 +275,23 @@ public final class ForcedWinSolver {
         public static final java.util.Map<String, Object> ENDSTEP_DEFAULTS = java.util.Map.of("engineEndStepOpen", false,
                 "engineEveryWindow", false, "enginePassBudget", false,
                 "loopMarginal", false, "loopEps", 0.005, "loopMarginalCap", 256);
+        /**
+         * solver-gaps-1104 (all false = off, the default, and then nothing changes; recorded only when on).
+         * enginePassFirst: the engine's turn-crossing pass tries the pass first at each node of our turn (it sat behind
+         * the branching cap). enginePassToEnd (read with engineAnyWindow): that pass also offers PASS_END, resting at our
+         * priority in the opponent's end step before our turn (a flash setup there, seen by the opponent only then).
+         * engineTriggerTargets: an engine move's targeting trigger of ours branches over every legal target class (cards
+         * equal by controller, name and tapped state are one class), our own mana sources ranked by the mana they make
+         * for our cards, and an untap of our untapped mana source floats its mana in response first (mana valued).
+         * oppMinLoopMemo: OppMin expands a response point once per loop state: a later point whose position equals an
+         * earlier one with the monotone counters out (ForcedWinEngine#coarseKey, the stack by name) and whose counters
+         * dominate it for us is a memo hit (answering earlier, before our loop gained, is no worse for the opponent).
+         */
+        public boolean enginePassFirst = false, enginePassToEnd = false, engineTriggerTargets = false, oppMinLoopMemo = false;
+        /** solver-gaps-1104: the trigger target classes one engine move branches over (engineTriggerTargets only). */
+        public int triggerVariants = 8;
+        public static final java.util.Map<String, Object> SOLVERGAPS_DEFAULTS = java.util.Map.of("enginePassFirst", false,
+                "enginePassToEnd", false, "engineTriggerTargets", false, "oppMinLoopMemo", false, "triggerVariants", 8);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -430,6 +447,11 @@ public final class ForcedWinSolver {
             c.loopMarginal = "true".equals(get.apply("loopMarginal")); // endstep-rows-1103
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
+            c.enginePassFirst = "true".equals(get.apply("enginePassFirst")); // solver-gaps-1104
+            c.enginePassToEnd = "true".equals(get.apply("enginePassToEnd")); // solver-gaps-1104
+            c.engineTriggerTargets = "true".equals(get.apply("engineTriggerTargets")); // solver-gaps-1104
+            c.oppMinLoopMemo = "true".equals(get.apply("oppMinLoopMemo")); // solver-gaps-1104
+            c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -530,7 +552,10 @@ public final class ForcedWinSolver {
                 + (engineEvalSteps > 0 ? " engineEvalSteps=" + engineEvalSteps : "")
                 + (!"off".equals(engineOrder) ? " engineOrder=" + engineOrder : "") + (engineX ? " engineX" : "")
                 + (engineCostChoice ? " engineCostChoice" : "") + (engineStack ? " engineStack" : "")
-                + (loopMacro3 ? " loopMacro3" : "") + (aiWork != 0 ? " aiWork=" + aiWork : "");
+                + (loopMacro3 ? " loopMacro3" : "") + (aiWork != 0 ? " aiWork=" + aiWork : "")
+                + (enginePassFirst ? " enginePassFirst" : "") + (enginePassToEnd ? " enginePassToEnd" : "") // solver-gaps-1104
+                + (engineTriggerTargets ? " engineTriggerTargets V=" + triggerVariants : "")
+                + (oppMinLoopMemo ? " oppMinLoopMemo" : "");
         }
     }
 
@@ -624,6 +649,8 @@ public final class ForcedWinSolver {
         public long playoutWallCuts, playoutStepCaps, playoutCallCaps;
         /** labeller-v2 (d): MIN play-outs (response branches) and worlds cut at oppNodes; reported only when non-zero. */
         public long oppMinNodes, oppMinCuts;
+        /** solver-gaps-1104 (oppMinLoopMemo): OppMin points skipped as a dominated loop repeat; only when non-zero. */
+        public long oppMinLoopMemo;
         /** Review #148: the shared MIN's cap events by reason (process-local diagnostics; never in a label or sha). */
         public final java.util.Map<String, Long> oppMinCapReasons = new java.util.TreeMap<>();
 
@@ -721,6 +748,7 @@ public final class ForcedWinSolver {
             playoutStepCaps += sign * o.playoutStepCaps;
             playoutCallCaps += sign * o.playoutCallCaps;
             oppMinNodes += sign * o.oppMinNodes;
+            oppMinLoopMemo += sign * o.oppMinLoopMemo;
             oppMinCuts += sign * o.oppMinCuts;
             cacApplies += sign * o.cacApplies;
             ladderRuns += sign * o.ladderRuns;
@@ -793,6 +821,9 @@ public final class ForcedWinSolver {
             o.addProperty("playout_step_caps", playoutStepCaps);
             o.addProperty("playout_call_caps", playoutCallCaps);
             o.addProperty("ms_bound", msBound());
+            if (oppMinLoopMemo != 0) {
+                o.addProperty("opp_min_loop_memo", oppMinLoopMemo); // solver-gaps-1104
+            }
             if (oppMinNodes != 0 || oppMinCuts != 0) {
                 o.addProperty("opp_min_nodes", oppMinNodes);
                 o.addProperty("opp_min_cuts", oppMinCuts);
@@ -2771,6 +2802,10 @@ public final class ForcedWinSolver {
         el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
         el.everyWindow = cfg.engineAnyWindow && cfg.engineEveryWindow; // endstep-rows-1103
         el.passBudget = cfg.enginePassBudget; // endstep-rows-1103
+        el.passFirst = cfg.enginePassFirst; // solver-gaps-1104
+        el.passToEnd = cfg.enginePassToEnd && cfg.engineAnyWindow; // solver-gaps-1104
+        el.triggerTargets = cfg.engineTriggerTargets; // solver-gaps-1104
+        el.triggerVariants = cfg.triggerVariants;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -3478,7 +3513,7 @@ public final class ForcedWinSolver {
         // architect-o ruling 10-30: the shared budgeted MIN (OppMin), one implementation with the R3 label search
         final OppMin.Cfg oc = new OppMin.Cfg(cfg.oppNodes, cfg.oppResponses, cfg.oppDepth);
         oc.budgetByDepth = cfg.oppBudgetByDepth; // covfix-a-1102 (oppMinRev 3)
-        final Outcome[] firstLost = new Outcome[1];
+        oc.loopMemo = cfg.oppMinLoopMemo; // solver-gaps-1104 = new Outcome[1];
         final Outcome[] firstOut = new Outcome[1];
         final OppMin.Out m = OppMin.min(oc, script -> {
             meter.oppMinNodes++;
@@ -3499,6 +3534,7 @@ public final class ForcedWinSolver {
             }
             return new OppMin.Leaf(o.won ? 1.0 : 0.0, o.why, o.points);
         });
+        meter.oppMinLoopMemo += m.loopMemoHits; // solver-gaps-1104 (0 when off)
         if (m.v == 0.0) {
             return firstLost[0];
         }
@@ -3580,6 +3616,7 @@ public final class ForcedWinSolver {
                     if (script != null) {
                         adv.driver = new OppMin.Driver(script, o, cm, -1); // labeller-v2 (d), the shared MIN
                         adv.driver.manaSearch = cfg.oppManaSearch; // covfix-a-1102
+                        adv.driver.loopMemo = cfg.oppMinLoopMemo; // solver-gaps-1104
                         out.points = adv.driver.points;
                     }
                     adv.bounded(wall).callLimited(callLimit);
@@ -4018,6 +4055,9 @@ public final class ForcedWinSolver {
             this.line = line;
         }
 
+        /** solver-gaps-1104 (PASS_END lines only; -1 = none): the turn whose opponent end step the line acts in. */
+        int endTurn = -1;
+
         /** labeller-v2: a play-out follower with the config's (b) and (e) switches. */
         static Follower of(Line line, Config cfg) {
             final Follower fo = new Follower(line);
@@ -4075,7 +4115,18 @@ public final class ForcedWinSolver {
                 // starts with PASS: it means "to our next turn", not "skip our next turn")
                 passTurn = ph.getTurn();
             }
-            final boolean inWindow = line.window != null && ph.getTurn() == line.windowTurn && ph.is(line.window);
+            if (cursor < line.steps.size() && line.steps.get(cursor).toEnd && passTurn >= 0 && ph.getTurn() > passTurn
+                    && !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN)) {
+                // solver-gaps-1104 (PASS_END): the opponent's end step after the pass: the line's next steps act here
+                cursor++;
+                passTurn = -1;
+                endTurn = ph.getTurn();
+                if (cursor < line.steps.size() && line.steps.get(cursor).pass) {
+                    passTurn = ph.getTurn();
+                }
+            }
+            final boolean inWindow = line.window != null && ph.getTurn() == line.windowTurn && ph.is(line.window)
+                    || endTurn >= 0 && ph.getTurn() == endTurn && ph.is(PhaseType.END_OF_TURN) && !ph.isPlayerTurn(me);
             if (!inWindow && (!ph.isPlayerTurn(me) || !(ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)))) {
                 n.waiting = !done;
                 if (done) {
@@ -4084,6 +4135,14 @@ public final class ForcedWinSolver {
                 return n;
             }
             while (cursor < line.steps.size() && line.steps.get(cursor).pass) {
+                if (line.steps.get(cursor).toEnd) {
+                    // solver-gaps-1104: PASS_END advances only at the opponent's end step (above)
+                    if (passTurn < 0) {
+                        passTurn = ph.getTurn();
+                    }
+                    n.waiting = true;
+                    return n;
+                }
                 if (passTurn < 0) {
                     passTurn = ph.getTurn();
                     n.waiting = true;

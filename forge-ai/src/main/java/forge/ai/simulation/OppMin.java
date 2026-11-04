@@ -75,6 +75,14 @@ public final class OppMin {
          * node budget still bounds the tree: over it is the oppNodes cap (fail closed).
          */
         public boolean budgetByDepth;
+        /**
+         * solver-gaps-1104 (oppMinLoopMemo; false = off, the default, and then nothing changes): a point is expanded once
+         * per loop state. A later point whose {@link Point#loopKey} (the position with the monotone counters out, the
+         * stack by name) equals an earlier expanded one's at the same budget left, and whose counters
+         * ({@link ForcedWinEngine#progress}) dominate that one's for us, is a memo hit: the same answer earlier, before
+         * our loop gained, is no worse for the opponent. A loop's points then cost one iteration's, not n.
+         */
+        public boolean loopMemo;
 
         public Cfg(final int nodes, final int perPoint, final int depth) {
             if (perPoint > CHARM_CAP) {
@@ -160,6 +168,9 @@ public final class OppMin {
          */
         java.util.Map<String, java.util.TreeSet<String>> gapCards = java.util.Collections.emptyMap();
         List<String> answerNames = java.util.Collections.emptyList();
+        /** solver-gaps-1104 (loopMemo only; null otherwise): the point's loop state and our counters there. */
+        String loopKey;
+        long[] pv;
 
         Point(final int size, final String state, final int impact, final int budgetHint) {
             this(size, state, impact, budgetHint, null);
@@ -196,6 +207,8 @@ public final class OppMin {
         /** The script of the min branch. */
         public String why;
         public int nodes, memoHits, maxResponses, budget;
+        /** solver-gaps-1104 (loopMemo): points skipped as a dominated repeat of a loop state. */
+        public int loopMemoHits;
         public Leaf firstLeaf;
         /** Every cap event of the tree by reason (review #148: the recall cost of failing closed). */
         public final java.util.TreeMap<String, Integer> caps = new java.util.TreeMap<>();
@@ -221,6 +234,7 @@ public final class OppMin {
         stack.push(Script.passAll());
         stack.push(Script.forgeRoot());
         final Set<String> memo = new HashSet<>();
+        final java.util.Map<String, List<long[]>> loopSeen = new java.util.HashMap<>(); // solver-gaps-1104 (loopMemo)
         double lo = Double.POSITIVE_INFINITY;
         while (!stack.isEmpty()) {
             final Script s = stack.pop();
@@ -284,6 +298,23 @@ public final class OppMin {
                     out.memoHits++;
                     continue;
                 }
+                if (cfg.loopMemo && p.loopKey != null && p.pv != null) {
+                    // solver-gaps-1104: an earlier point of the same loop state that this one's counters dominate
+                    final List<long[]> seen = loopSeen.computeIfAbsent(p.loopKey + "|" + left, k -> new ArrayList<>());
+                    boolean dominated = false;
+                    for (long[] e : seen) {
+                        if (ForcedWinEngine.dominates(p.pv, e)) {
+                            dominated = true;
+                            break;
+                        }
+                    }
+                    if (dominated) {
+                        out.memoHits++;
+                        out.loopMemoHits++;
+                        continue;
+                    }
+                    seen.add(p.pv);
+                }
                 for (int r = 0; r < p.size; r++) {
                     kids.add(s.with(j, r, b));
                     kidImpact.add(p.impact);
@@ -332,6 +363,8 @@ public final class OppMin {
          * continuing from there. Pure mana abilities with no trigger are the "no response" branch.
          */
         public boolean manaSearch;
+        /** solver-gaps-1104 (Cfg#loopMemo): record each point's loop state and counters. */
+        public boolean loopMemo;
         /** covfix-a-1102: a scripted mana-ability response could not be activated on the copy (fail closed: a cap). */
         public boolean manaSimFailed;
         /** Review #169 S1-2: the point key whose priority reopens as a new point after a mana activation, and a counter. */
@@ -343,6 +376,24 @@ public final class OppMin {
             this.opp = opp;
             this.victim = victim;
             this.onlyTurn = onlyTurn;
+        }
+
+        /** solver-gaps-1104 (loopMemo): the point's loop state (the coarse position, the stack by name) and counters. */
+        private Point loop(final Point p, final Game g) {
+            if (!loopMemo) return p;
+            try {
+                final StringBuilder sb = new StringBuilder(ForcedWinEngine.coarseKey(g, victim));
+                for (SpellAbilityStackInstance si : g.getStack()) {
+                    final SpellAbility sa = si.getSpellAbility();
+                    sb.append("|st:").append(sa == null ? "?" : (sa.getHostCard() == null ? "" : sa.getHostCard().getName())
+                            + "/" + sa.getDescription() + "/" + (sa.getActivatingPlayer() == victim ? "v" : "o"));
+                }
+                p.loopKey = sb.toString();
+                p.pv = ForcedWinEngine.progress(g, victim);
+            } catch (RuntimeException e) {
+                p.loopKey = null; // no loop state: the exact memo only
+            }
+            return p;
         }
 
         /** Whether this priority is a new response point (and records it if so). */
@@ -380,14 +431,14 @@ public final class OppMin {
             // review S1 (safety net, the base's behaviour): Forge AI's own answer at this point is a candidate too
             final List<SpellAbility> mine = own.get();
             if (script.forge) {
-                points.add(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs));
+                points.add(loop(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs), g));
                 return mine;
             }
             final SpellAbility fa = mine == null || mine.isEmpty() ? null : mine.get(0);
             if (fa != null && fa.getActivatingPlayer() == opp && !fa.isManaAbility() && !sameAsAny(fa, rs)) {
                 rs.add(fa);
             }
-            points.add(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs));
+            points.add(loop(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs), g));
             if (DEBUG && as.gap() != null) System.err.println("[oppmin] point " + idx + " gap " + as.gap());
             final int r = script.respAt(idx);
             if (r < 0 || r >= rs.size()) return null;
