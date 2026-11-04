@@ -1942,10 +1942,11 @@ public class GameCopier {
             }
             if (card.getCopiedPermanent() != null) {
                 // TODO would it be safe to simply reuse the prototype?
-                otherCard.setCopiedPermanent(new CardCopyService(card.getCopiedPermanent()).copyCard(false));
+                otherCard.setCopiedPermanent(copyPrototype(newGame, card.getCopiedPermanent()));
             }
             // TODO: Verify that the above relationships are preserved bi-directionally or not.
         }
+        ownTraitStates(newGame); // void-causes-1104: every copied trait's card state is a state of the copy
     }
 
     private static PaperCard hidden_info_card = new PaperCard(CardRules.fromScript(Lists.newArrayList("Name:hidden", "Types:Artifact", "Oracle:")), "", CardRarity.Common);
@@ -2145,6 +2146,138 @@ public class GameCopier {
         } else {
             zoneOwner.getZone(zone).add(newCard);
         }
+    }
+
+    /**
+     * void-causes-1104 (P-GEN hang, game 2989505186): a copied card's traits (triggers, statics, replacement effects,
+     * abilities) can keep the card state they were copied from: a copy token's enters trigger pointed at the ORIGINAL
+     * creature's state (a card of the game it was copied from). Registered in the copy's TriggerHandler, it held that
+     * game alive, and a search's copies of copies chained every ancestor: the live heap at the hang held 165 of 184
+     * search copies only through another game's TriggerHandler.activeTriggers -> TriggerChangesZone.cardState. Each such
+     * card state is now the copy's: the same state of the copy's card of that original card, else of the trait's own
+     * card (a card the copy does not hold).
+     */
+    private void ownTraitStates(Game newGame) {
+        for (Card nc : cardMap.values()) {
+            ownTraits(nc, newGame);
+            for (Card pc = nc.getCopiedPermanent(); pc != null && pc.getGame() == newGame; pc = pc.getCopiedPermanent()) {
+                ownTraits(pc, newGame); // a copy token's prototype (copyPrototype): its states' traits too
+                if (pc.getCopiedPermanent() == pc) {
+                    break;
+                }
+            }
+        }
+    }
+
+    private static java.lang.reflect.Field abilityForTriggerField;
+
+    /** A state's trigger-execute abilities (CardState.abilityForTrigger, private): empty when it cannot be read. */
+    @SuppressWarnings("unchecked")
+    private static java.util.Collection<SpellAbility> abilitiesForTrigger(forge.game.card.CardState st) {
+        try {
+            if (abilityForTriggerField == null) {
+                final java.lang.reflect.Field f = forge.game.card.CardState.class.getDeclaredField("abilityForTrigger");
+                f.setAccessible(true);
+                abilityForTriggerField = f;
+            }
+            final Object m = abilityForTriggerField.get(st);
+            return m instanceof Map ? ((Map<String, SpellAbility>) m).values() : java.util.Collections.emptyList();
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return java.util.Collections.emptyList();
+        }
+    }
+
+    /** Every trait of {@code owner} (each state's and the card's own; abilities with their sub-abilities) re-pointed. */
+    private void ownTraits(Card owner, Game newGame) {
+        final List<forge.game.CardTraitBase> traits = new ArrayList<>();
+        final List<SpellAbility> sas = new ArrayList<>();
+        for (forge.card.CardStateName sn : owner.getStates()) {
+            final forge.game.card.CardState st = owner.getState(sn);
+            if (st == null) {
+                continue;
+            }
+            for (Trigger t : st.getTriggers()) {
+                traits.add(t);
+                if (t.getOverridingAbility() != null) {
+                    sas.add(t.getOverridingAbility());
+                }
+            }
+            st.getStaticAbilities().forEach(traits::add);
+            st.getReplacementEffects().forEach(traits::add);
+            st.getSpellAbilities().forEach(sas::add);
+            sas.addAll(abilitiesForTrigger(st));
+        }
+        owner.getTriggers().forEach(traits::add);
+        owner.getStaticAbilities().forEach(traits::add);
+        owner.getReplacementEffects().forEach(traits::add);
+        owner.getSpellAbilities().forEach(sas::add);
+        final java.util.Set<SpellAbility> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (SpellAbility root : sas) {
+            for (SpellAbility a = root; a != null && seen.add(a); a = a.getSubAbility()) {
+                traits.add(a);
+            }
+        }
+        for (forge.game.CardTraitBase t : traits) {
+            final forge.game.card.CardState cs = t.getCardState();
+            if (cs == null || cs.getCard() == null || cs.getCard().getGame() == newGame) {
+                continue;
+            }
+            final Card src = cs.getCard();
+            Card mapped = src.getGame() == origGame ? cardMap.get(src) : null;
+            if (mapped == null) {
+                mapped = owner;
+            }
+            final forge.card.CardStateName sn = cs.getStateName();
+            t.setCardState(sn != null && mapped.hasState(sn) ? mapped.getState(sn) : mapped.getCurrentState());
+        }
+    }
+
+    /**
+     * void-causes-1104 (P-GEN hang, game 2989505186): the copy's own copy of a token's prototype (the card a copy token was
+     * copied from). It was made in the ORIGINAL game (CardCopyService's default target game, the original's owner), so
+     * every copied token held a card of the game it was copied from, and through it that whole game: a search's copies
+     * chained every ancestor copy alive (a creature-copy loop's 128 repetitions: 181 games, 4 GB, OutOfMemoryError /
+     * GC stall). Now it belongs to the copy: the copy's game and owner, and its own prototype and effect source mapped
+     * the same way (a source that is not in the copy is dropped, as the copier drops one off the battlefield).
+     */
+    private Card copyPrototype(Game newGame, Card proto) {
+        final Player owner = proto.getOwner() == null ? null : playerMap.get(proto.getOwner());
+        final Card out = new CardCopyService(proto, newGame).copyCard(false, owner != null ? owner : proto.getOwner());
+        if (proto.getCopiedPermanent() != null && proto.getCopiedPermanent() != proto) {
+            out.setCopiedPermanent(copyPrototype(newGame, proto.getCopiedPermanent()));
+        }
+        if (out.getEffectSource() != null && out.getEffectSource().getGame() != newGame) {
+            out.setEffectSource(cardMap.get(out.getEffectSource()));
+        }
+        // the ability that made the token (the copyStats path carries the original's object, whose host and activator
+        // are the original game's: the live heap at the hang held 164 copies through prototype.tokenSpawningAbility
+        // .activatingPlayer): the copy's ability of the copied host, by description, activated by the copied player
+        final SpellAbility tsa = out.getTokenSpawningAbility();
+        if (tsa != null && !ofGame(tsa, newGame)) {
+            out.setTokenSpawningAbility(mapSpawningAbility(tsa));
+        }
+        return out;
+    }
+
+    private static boolean ofGame(SpellAbility sa, Game g) {
+        return (sa.getHostCard() == null || sa.getHostCard().getGame() == g)
+                && (sa.getActivatingPlayer() == null || sa.getActivatingPlayer().getGame() == g);
+    }
+
+    /** void-causes-1104: a token-spawning ability of the original as the copy's (null when its host is not copied). */
+    private SpellAbility mapSpawningAbility(SpellAbility sa) {
+        final Card host = sa.getHostCard();
+        final Card h = host == null || host.getGame() != origGame ? null : cardMap.get(host);
+        final SpellAbility base = h == null ? null : findSAInCard(sa, h);
+        if (base == null) {
+            return null;
+        }
+        final SpellAbility m = base.copy(h, true);
+        final Player act = sa.getActivatingPlayer() == null ? null : playerMap.get(sa.getActivatingPlayer());
+        if (act != null) {
+            m.setActivatingPlayer(act);
+        }
+        return m;
     }
 
     /**
