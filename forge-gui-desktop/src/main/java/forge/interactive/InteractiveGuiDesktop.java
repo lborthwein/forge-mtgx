@@ -26,30 +26,56 @@ import java.util.Objects;
  * open an invisible Swing dialog in the server process.
  */
 final class InteractiveGuiDesktop extends GuiDesktop {
-    private volatile InteractiveGuiGame gameGui;
-    /** A table's seats (mtgx, 2026-09-27), in seat order; empty for a one-seat game. */
-    private final List<InteractiveGuiGame> tableSeats = new java.util.concurrent.CopyOnWriteArrayList<>();
+    /**
+     * The bound game's GUI and, at a table, its seats (mtgx, 2026-09-27; in seat order, empty for a one-seat game). Lane
+     * shared-engine-1103: per game in a multi-game host ({@link forge.util.ScopedSlot}), where one desktop serves every
+     * game and a choice goes to the GUI of the game whose thread asks; one process-wide binding otherwise, as before.
+     */
+    private final forge.util.ScopedSlot<InteractiveGuiGame> gameGui = new forge.util.ScopedSlot<>();
+    private final forge.util.ScopedSlot<List<InteractiveGuiGame>> tableSeatsSlot = new forge.util.ScopedSlot<>();
+
+    private List<InteractiveGuiGame> tableSeats() {
+        List<InteractiveGuiGame> seats = tableSeatsSlot.get();
+        if (seats == null) {
+            seats = new java.util.concurrent.CopyOnWriteArrayList<>();
+            tableSeatsSlot.set(seats);
+        }
+        return seats;
+    }
 
     void bind(final InteractiveGuiGame gui) {
-        if (gameGui != null && gameGui != gui) {
+        final InteractiveGuiGame bound = gameGui.get();
+        if (bound != null && bound != gui) {
             throw new IllegalStateException("interactive desktop may bind only one game GUI");
         }
-        gameGui = Objects.requireNonNull(gui);
+        gameGui.set(Objects.requireNonNull(gui));
     }
 
     /** A table: every seat's GUI. The global chooser goes to the seat the choice belongs to. */
     void bindTable(final List<InteractiveGuiGame> seats) {
-        if (gameGui != null || !tableSeats.isEmpty() || seats.isEmpty()) {
+        final List<InteractiveGuiGame> tableSeats = tableSeats();
+        if (gameGui.get() != null || !tableSeats.isEmpty() || seats.isEmpty()) {
             throw new IllegalStateException("interactive desktop may bind only one game");
         }
         tableSeats.addAll(seats);
     }
 
+    /** Lane shared-engine-1103: EDT work runs with the posting game's state in a multi-game host; unchanged otherwise. */
+    @Override
+    public void invokeInEdtLater(final Runnable proc) {
+        super.invokeInEdtLater(forge.util.GameContext.wrap(proc));
+    }
+
+    @Override
+    public void invokeInEdtAndWait(final Runnable proc) {
+        super.invokeInEdtAndWait(forge.util.GameContext.wrap(proc));
+    }
+
     private InteractiveGuiGame gui() {
-        if (!tableSeats.isEmpty()) {
+        if (!tableSeats().isEmpty()) {
             return tableGui();
         }
-        final InteractiveGuiGame value = gameGui;
+        final InteractiveGuiGame value = gameGui.get();
         if (value == null) {
             throw new IllegalStateException("global GUI choice requested before interactive game binding");
         }
@@ -63,6 +89,7 @@ final class InteractiveGuiDesktop extends GuiDesktop {
      */
     private InteractiveGuiGame tableGui() {
         final InteractiveGuiGame owner = InteractiveGuiGame.onCurrentThread();
+        final List<InteractiveGuiGame> tableSeats = tableSeats();
         if (owner != null && tableSeats.contains(owner)) {
             return owner;
         }

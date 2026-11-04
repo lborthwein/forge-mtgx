@@ -78,44 +78,49 @@ public final class InteractiveMain {
         if (prewarm) {
             prewarmModel();
         }
+        System.exit(runSession(input, protocolOut, prewarm));
+    }
 
+    /**
+     * Lane shared-engine-1103: one game from its config line to its terminal, as {@link #main} has always played it, and
+     * the exit status {@code main} gives the process. {@code main} calls it once per JVM; the multi-game host
+     * ({@link InteractiveHost}) calls it once per game on that game's own thread, in that game's
+     * {@link forge.util.GameContext}, with the model already initialized ({@code prewarm}: a null config ends the game
+     * quietly, as an unused spare's does).
+     */
+    static int runSession(final BufferedReader input, final PrintStream protocolOut, final boolean prewarm) {
         final String configLine;
         try {
             configLine = input.readLine();
             if (prewarm && configLine == null) {
                 // a warm spare the host never used (stdin closed): nothing to report
-                System.exit(0);
-                return;
+                return 0;
             }
         } catch (Exception e) {
             InteractiveProtocol.writeBootFatal(protocolOut, "unknown", "invalid_config",
                     "could not read config: " + e.getMessage());
-            System.exit(2);
-            return;
+            return 2;
         }
 
         final InteractiveProtocol.Config config;
         try {
             config = InteractiveProtocol.readConfig(configLine);
-            eventPool = InteractiveProtocol.readBeliefPool(configLine); // honest-belief-1020
-            beliefSeen = InteractiveProtocol.readBeliefSeen(configLine); // deck-guess-1021
-            puzzle = InteractivePuzzle.read(com.google.gson.JsonParser.parseString(configLine).getAsJsonObject());
+            EVENT_POOL.set(InteractiveProtocol.readBeliefPool(configLine)); // honest-belief-1020
+            BELIEF_SEEN.set(InteractiveProtocol.readBeliefSeen(configLine)); // deck-guess-1021
+            PUZZLE.set(InteractivePuzzle.read(com.google.gson.JsonParser.parseString(configLine).getAsJsonObject()));
             validateDeckFiles(config.decks());
         } catch (InteractiveProtocol.ProtocolException e) {
             InteractiveProtocol.writeBootFatal(protocolOut,
                     InteractiveProtocol.bestEffortSession(configLine), e.code(), e.getMessage());
-            System.exit(2);
-            return;
+            return 2;
         }
 
         if (config.isWatch()) {
             // lane forge-bot-tables-1011: an AI-vs-AI watch table; stdin is not read again
-            System.exit(InteractiveWatch.run(config, protocolOut) ? 0 : 1);
-            return;
+            return InteractiveWatch.run(config, protocolOut) ? 0 : 1;
         }
         if (config.isTable()) {
-            System.exit(runTable(config, input, protocolOut) ? 0 : 1);
-            return;
+            return runTable(config, input, protocolOut) ? 0 : 1;
         }
 
         // lane forge-continue-1011 (off unless -Dforge.interactive.continuation=rebuild): this game is a "Continue from
@@ -126,8 +131,7 @@ public final class InteractiveMain {
             rebuild = InteractiveContinuation.requested();
         } catch (InteractiveProtocol.ProtocolException e) {
             InteractiveProtocol.writeBootFatal(protocolOut, config.session(), e.code(), e.getMessage());
-            System.exit(2);
-            return;
+            return 2;
         }
         if (rebuild) {
             InteractiveContinuation.beginRebuild();
@@ -140,10 +144,12 @@ public final class InteractiveMain {
                     config.humanSeat(), config.seed(), rebuild ? InteractiveContinuation.helloExtras() : null);
         } catch (InteractiveProtocol.ProtocolException e) {
             channel.fatal(e.code(), e.getMessage(), null, "hello", null);
-            System.exit(2);
-            return;
+            return 2;
         }
 
+        // lane shared-engine-1103: this game's puzzle and AI tape (were statics; one game per call either way)
+        final InteractivePuzzle.Spec puzzle = PUZZLE.get();
+        forge.ai.AiTape tape = null;
         InteractiveGuiGame gui = null;
         boolean completedNormally = false;
         forge.bench.rl.RlLiveSeat policy = null;
@@ -165,7 +171,7 @@ public final class InteractiveMain {
             // the game's RNG: a taped game's is TrackedRandom, the same stream as new Random(seed) with a readable state
             final forge.ai.simulation.PlayoutKeys.TrackedRandom tapeRng = tapeMode == null ? null
                     : new forge.ai.simulation.PlayoutKeys.TrackedRandom(config.seed());
-            MyRandom.setRandom(tapeRng != null ? tapeRng : new Random(config.seed()));
+            seedGameRandom(tapeRng != null ? tapeRng : new Random(config.seed()));
             // lane puzzle-host-1021: a puzzle's position, checked against the card database (now up)
             final List<String> puzzleLines = puzzle == null ? null : InteractivePuzzle.lines(puzzle, config.humanSeat());
             if (puzzleLines != null) {
@@ -319,7 +325,7 @@ public final class InteractiveMain {
         // Forge initializes Swing/FModel threads that can outlive a completed match.
         // This executable owns exactly one game, so terminate only after the final wire
         // message has been flushed and the interactive GUI has been closed.
-        System.exit(completedNormally ? 0 : 1);
+        return completedNormally ? 0 : 1;
     }
 
     /**
@@ -354,7 +360,7 @@ public final class InteractiveMain {
             final InteractiveGuiDesktop desktop = guiDesktop();
             GuiBase.setInterface(desktop);
             initializeForge();
-            MyRandom.setRandom(new Random(config.seed()));
+            seedGameRandom(new Random(config.seed()));
 
             final List<RegisteredPlayer> registered = createTablePlayers(config);
             final GameRules rules = new GameRules(GameType.Constructed);
@@ -526,6 +532,19 @@ public final class InteractiveMain {
 
     static InteractiveGuiDesktop guiDesktop() {
         return prewarmedDesktop != null ? prewarmedDesktop : new InteractiveGuiDesktop();
+    }
+
+    /**
+     * The game's random stream. Lane shared-engine-1103: in a multi-game host it is the game thread's own
+     * ({@link MyRandom#setThreadRandom}, inherited by the game's threads and carried to pooled ones), never the
+     * process-wide one the other games would also draw from; otherwise the process-wide stream, as always.
+     */
+    static void seedGameRandom(final Random random) {
+        if (forge.util.GameContext.current() != null) {
+            MyRandom.setThreadRandom(random);
+        } else {
+            MyRandom.setRandom(random);
+        }
     }
 
     /** Exit status of a spare whose prewarm failed (review 108 S2): the host never adopts it and launches a cold JVM. */
@@ -713,9 +732,6 @@ public final class InteractiveMain {
         }
     }
 
-    /** The live game's tape (lane replay-record-1021), or null. */
-    private static volatile forge.ai.AiTape tape;
-
     /**
      * {@code -Dforge.interactive.aiTape=record}, {@code =forced:<file>}, {@code =resume:<file>} or {@code =restore:<file>}
      * (lane replay-record-1021): the AI seat's decision tape ({@link forge.ai.AiTape}). forced: a replay (the seat
@@ -799,6 +815,7 @@ public final class InteractiveMain {
                 }
                 final InteractiveProtocol.BeliefPool pool = settledPool(); // honest-belief-1020
                 lp.live().setBeliefPool(pool == null ? null : pool.names(), pool != null && pool.singleton());
+                final java.util.List<String> beliefSeen = BELIEF_SEEN.get();
                 lp.live().setBeliefSeen(beliefSeen); // deck-guess-1021
                 if (beliefSeen != null) {
                     System.err.println("[belief-seen] seat=" + i + " names=" + beliefSeen.size()); // count only, never names
@@ -816,13 +833,13 @@ public final class InteractiveMain {
     }
 
     /** deck-guess-1021: the opponent's cards from earlier games of this match (the config's beliefSeen), or null. */
-    static volatile java.util.List<String> beliefSeen;
+    static final forge.util.ScopedSlot<java.util.List<String>> BELIEF_SEEN = new forge.util.ScopedSlot<>();
 
     /** honest-belief-1020: this session's event card pool (the config's beliefPool), or null: the jar's live pool. */
-    static volatile InteractiveProtocol.BeliefPool eventPool;
+    static final forge.util.ScopedSlot<InteractiveProtocol.BeliefPool> EVENT_POOL = new forge.util.ScopedSlot<>();
 
     /** Lane puzzle-host-1021: this one-seat game's puzzle position (the config's puzzle), or null: a deck game. */
-    static volatile InteractivePuzzle.Spec puzzle;
+    static final forge.util.ScopedSlot<InteractivePuzzle.Spec> PUZZLE = new forge.util.ScopedSlot<>();
 
     /**
      * honest-belief-1020 (owner, 2026-10-20: "fix the decklist leak"): every look-ahead seat this server runs (the K8
@@ -849,12 +866,12 @@ public final class InteractiveMain {
         c.reuseShadowFresh = false;
     }
 
-    private static boolean poolSettled;
+    private static final forge.util.ScopedSlot<Boolean> POOL_SETTLED = new forge.util.ScopedSlot<>();
 
     /** Tests: a new session's pool, settled again on first use. */
     static synchronized void resetPool(final InteractiveProtocol.BeliefPool pool) {
-        eventPool = pool;
-        poolSettled = false;
+        EVENT_POOL.set(pool);
+        POOL_SETTLED.set(false);
     }
 
     /**
@@ -864,12 +881,12 @@ public final class InteractiveMain {
      * dropped with the reason, and the game uses the jar's live pool. Null = the jar's live pool.
      */
     static synchronized InteractiveProtocol.BeliefPool settledPool() {
-        if (poolSettled) {
-            return eventPool;
+        if (Boolean.TRUE.equals(POOL_SETTLED.get())) {
+            return EVENT_POOL.get();
         }
-        poolSettled = true;
+        POOL_SETTLED.set(true);
         final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
-        final InteractiveProtocol.BeliefPool pool = eventPool;
+        final InteractiveProtocol.BeliefPool pool = EVENT_POOL.get();
         String reason = null;
         if (pool != null) {
             int asked = 0;
@@ -886,7 +903,7 @@ public final class InteractiveMain {
                 if (cube.unresolved.size() * 4 > asked) {
                     reason = cube.unresolved.size() + " of " + asked + " names do not resolve";
                 } else {
-                    eventPool = new InteractiveProtocol.BeliefPool(cube.names, pool.singleton());
+                    EVENT_POOL.set(new InteractiveProtocol.BeliefPool(cube.names, pool.singleton()));
                     o.addProperty("source", "event");
                     o.addProperty("size", cube.names.size());
                     o.addProperty("sha256", cube.sha256);
@@ -896,8 +913,8 @@ public final class InteractiveMain {
                 reason = String.valueOf(e.getMessage());
             }
         }
-        if (eventPool == null || reason != null) {
-            eventPool = null;
+        if (EVENT_POOL.get() == null || reason != null) {
+            EVENT_POOL.set(null);
             o.addProperty("source", "jar");
             if (reason != null) {
                 o.addProperty("dropped", reason);
@@ -914,7 +931,7 @@ public final class InteractiveMain {
             o.addProperty("singleton", forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON);
         }
         System.err.println("[belief-pool] " + o);
-        return eventPool;
+        return EVENT_POOL.get();
     }
 
     static ParsedLookahead parseLookahead(final String spec) {

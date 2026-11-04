@@ -58,7 +58,12 @@ public class FileSection {
      * @return a HashMap
      */
     public static Map<String, String> parseToMap(final String line, final Pattern kvSeparator) {
-        Map<String, String> cached = parseToMapCache.get(line, kvSeparator);
+        // lane shared-engine-1103: guarded, so several games (and look-ahead threads) can fill the memo at once; the
+        // values are a pure function of the line, so who parses first never matters
+        Map<String, String> cached;
+        synchronized (parseToMapCache) {
+            cached = parseToMapCache.get(line, kvSeparator);
+        }
         if (cached != null) {
             return cached;
         }
@@ -71,7 +76,9 @@ public class FileSection {
             }
         }
         cached = Collections.unmodifiableMap(result);
-        parseToMapCache.put(line, kvSeparator, cached);
+        synchronized (parseToMapCache) {
+            parseToMapCache.put(line, kvSeparator, cached);
+        }
         return cached;
     }
 

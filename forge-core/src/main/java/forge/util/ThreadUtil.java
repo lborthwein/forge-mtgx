@@ -41,11 +41,12 @@ public class ThreadUtil {
     }
 
     public static void invokeInGameThread(Runnable toRun) {
-        getGameThreadPool().execute(toRun);
+        // lane shared-engine-1103: in a multi-game host the pooled game thread runs with the submitter's game state
+        getGameThreadPool().execute(GameContext.wrap(toRun));
     }
 
     public static ScheduledFuture<?> delay(int milliseconds, Runnable inputUpdater) {
-        return getScheduledPool().schedule(inputUpdater, milliseconds, TimeUnit.MILLISECONDS);
+        return getScheduledPool().schedule(GameContext.wrap(inputUpdater), milliseconds, TimeUnit.MILLISECONDS);
     }
 
     public static boolean isGameThread() {
@@ -63,7 +64,7 @@ public class ThreadUtil {
         Future<T> future = null;
         T result;
         try {
-            future = service.submit(task);
+            future = service.submit(GameContext.wrap(task));
             result = future.get(millis, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             result = null;
@@ -79,7 +80,7 @@ public class ThreadUtil {
             thread.setDaemon(true);
             return thread;
         });
-        Future<T> future = executor.submit(task);
+        Future<T> future = executor.submit(GameContext.wrap(task));
         T result;
         try {
             result = future.get(milliseconds, TimeUnit.MILLISECONDS); 
