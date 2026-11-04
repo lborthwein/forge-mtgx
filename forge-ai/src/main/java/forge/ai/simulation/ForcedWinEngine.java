@@ -1890,7 +1890,8 @@ final class ForcedWinEngine {
             } else {
                 out.add(Step.PASS);
             }
-            if (lim.passToEnd && lim.anyWindow && g.getPhaseHandler().isPlayerTurn(me)) {
+            if (lim.passToEnd && lim.anyWindow && g.getPhaseHandler().isPlayerTurn(me)
+                    && (g.getPhaseHandler().is(PhaseType.MAIN1) || g.getPhaseHandler().is(PhaseType.MAIN2))) {
                 // solver-gaps-1104: also pass to the opponent's end step (an instant-speed window before our turn)
                 out.add(lim.passFirst ? 1 : out.size(), Step.PASS_END);
             }

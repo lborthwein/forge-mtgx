@@ -55,9 +55,9 @@ public class SolverGapsTest extends SimulationTest {
         AssertJUnit.assertTrue(HonestGenerator.solverCfgJson(on).has("enginePassFirst"));
     }
 
-    /** D-1: our main phase, the setup and the payoff in hand among many other castable cards; the kill is next turn. */
+    /** D-1: our main phase, the setup and the payoff among seven cards (no cleanup discard); 8+ moves before the pass. */
     private static String dMinus1() {
-        return frame("Pestermite;Kiki-Jiki, Mirror Breaker;Lightning Bolt;Brainstorm;Opt;Ponder;Preordain;Duress;Mountain",
+        return frame("Pestermite;Kiki-Jiki, Mirror Breaker;Lightning Bolt;Brainstorm;Opt;Ponder;Preordain",
                 "Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain", 20, "", "Forest", "MAIN1", "human");
     }
 
