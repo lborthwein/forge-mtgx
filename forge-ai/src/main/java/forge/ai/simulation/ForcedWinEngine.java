@@ -1882,6 +1882,9 @@ final class ForcedWinEngine {
             // (c): an opponent with no library loses at their draw: passing is the first move, in the this-turn
             // phase too (a mill loop's kill is the pass; the engine still plays their turn up to the draw)
             out.add(0, Step.PASS);
+        } else if (!node.passed && lim.passTurn && node.path.size() > 0 && node.path.get(node.path.size() - 1).toEnd) {
+            // solver-gaps-1104: right after PASS_END, a plain PASS is the root's own PASS line again (nothing done in their
+            // end step): not offered; after a move there it is (below)
         } else if (!node.passed && lim.passTurn) {
             if (lim.passFirst) {
                 // solver-gaps-1104: the pass first in the turn-crossing pass (not behind the cap), at our turn's nodes and
