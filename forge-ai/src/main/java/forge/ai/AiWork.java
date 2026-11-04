@@ -116,6 +116,7 @@ public final class AiWork {
 
     /** {@code n} units of Forge AI work at {@code site}; throws {@link Exhausted} once the budget is spent. */
     public static void tick(final String site, final long n) {
+        forge.game.WorkMeter.tick(site); // void-causes-1104: hang watchdog unit, one per call (no meter open = no-op)
         final Budget b = CUR.get();
         if (b == null) {
             return;
@@ -147,16 +148,23 @@ public final class AiWork {
      */
     public static Runnable carried(final Runnable task) {
         final Budget b = CUR.get();
-        if (b == null) {
+        final forge.game.WorkMeter m = forge.game.WorkMeter.current(); // void-causes-1104: the hang meter goes too
+        if (b == null && m == null) {
             return task;
         }
         return () -> {
             final Budget prev = CUR.get();
-            CUR.set(b);
+            final forge.game.WorkMeter prevM = forge.game.WorkMeter.install(m);
+            if (b != null) {
+                CUR.set(b);
+            }
             try {
                 task.run();
             } finally {
-                restore(prev);
+                if (b != null) {
+                    restore(prev);
+                }
+                forge.game.WorkMeter.install(prevM);
             }
         };
     }

@@ -557,6 +557,171 @@ public class R3LabelSearchTest extends SimulationTest {
         return sb.toString();
     }
 
+    // ------------------------------------------------------------------------------------------------ label-parallel-1103
+
+    /**
+     * label-parallel-1103: label.threads > 1 gives the same rows as one thread, byte for byte (ms aside): a priority row
+     * with several candidates, oppMin's MIN branches, the oppMinIn-both cut, a row whose per-row cap binds inside the
+     * selection (its units are re-run in sequence at the merge) and a choice row, with the choice engine's decision log
+     * (its work counters) and counts.
+     */
+    @Test
+    public void threadsGiveTheSameRows() {
+        final String one = parallelRows(1);
+        AssertJUnit.assertTrue(one, one.contains("row_cap") && one.contains("cut_at") && one.contains("\"row\":\"choice\""));
+        for (int t : new int[] {2, 4, 8}) {
+            AssertJUnit.assertEquals("threads=" + t, one, parallelRows(t));
+        }
+        AssertJUnit.assertEquals("threads=4 again", one, parallelRows(4));
+    }
+
+    @Test
+    public void threadsKeyIsAHostKey() {
+        final JsonObject l = new JsonObject();
+        l.addProperty("redraw", "belief");
+        l.addProperty("sequentialAi", true);
+        l.addProperty("aiTimeoutSec", 600);
+        final JsonObject sc = new JsonObject();
+        sc.addProperty("hideOwnLibrary", "true");
+        sc.addProperty("budget", "counter");
+        l.add("solverCfg", sc);
+        l.add("lossCfg", sc.deepCopy());
+        final String sha0 = HonestLabel.Spec.parse(l).sha();
+        final JsonObject l2 = l.deepCopy();
+        l2.addProperty("threads", 8);
+        AssertJUnit.assertEquals("the proof spec's sha does not see label.threads", sha0, HonestLabel.Spec.parse(l2).sha());
+        final R3LabelSearch r3 = new R3LabelSearch(spec(base()), env(flat(0.5), null));
+        AssertJUnit.assertEquals(1, r3.threads());
+        AssertJUnit.assertTrue(ChooseACardTest.expectIae(() -> r3.setThreads(0)));
+        // the live game never moves with threads either
+        final Game g = boltBoard(20, 20, false, true);
+        final Player a = g.getPlayers().get(0);
+        final String fp = LookaheadSearch.fingerprint(g);
+        r3.setThreads(4);
+        r3.priorityRow(g, a, r3.candidates(g, a, null), 3L);
+        AssertJUnit.assertEquals(fp, LookaheadSearch.fingerprint(g));
+    }
+
+    /**
+     * label-parallel-1103 (many label games in one JVM): our R3 row (threads 4) is byte-identical when another game of
+     * the JVM, with its hidden cards re-randomised (both libraries shuffled, the opponent's hand changed), runs its own
+     * R3 row on another thread at the same time.
+     */
+    @Test
+    public void concurrentGamesShareNoHiddenState() throws Exception {
+        final JsonObject o = base();
+        o.addProperty("selectWorlds", 3);
+        o.addProperty("targetWorlds", 4);
+        o.addProperty("maxTurns", 6);
+        final java.util.function.Supplier<String> ours = () -> {
+            final Game g = boltBoard(3, 20, false, true);
+            final Player a = g.getPlayers().get(0);
+            final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(flat(0.5), null));
+            r3.setThreads(4);
+            return noMs(r3.priorityRow(g, a, r3.candidates(g, a,
+                    Collections.singletonList(firstSpell(a, "Lightning Bolt"))), 91L).toJson()).toString();
+        };
+        final String before = ours.get();
+        for (long seed = 1; seed <= 3; seed++) {
+            final Game og = boltBoard(3, 20, seed % 2 == 0, true);
+            final Player oa = og.getPlayers().get(0), ob = og.getPlayers().get(1);
+            final Random rng = new Random(seed);
+            for (Player p : og.getPlayers()) {
+                final List<Card> lib = new ArrayList<>(p.getCardsIn(ZoneType.Library));
+                Collections.shuffle(lib, rng);
+                p.getZone(ZoneType.Library).setCards(lib);
+            }
+            for (int i = 0; i < (int) seed; i++) addCardToZone(i % 2 == 0 ? "Counterspell" : "Shock", ob, ZoneType.Hand);
+            final String[] other = {null};
+            final Thread t = new Thread(() -> {
+                final R3LabelSearch r3o = new R3LabelSearch(spec(o), env(flat(0.5), null));
+                r3o.setThreads(4);
+                other[0] = r3o.priorityRow(og, oa, r3o.candidates(og, oa,
+                        Collections.singletonList(firstSpell(oa, "Lightning Bolt"))), 91L).toJson().toString();
+            }, "rlreplay-w-other");
+            t.start();
+            final String now = ours.get();
+            t.join();
+            AssertJUnit.assertNotNull(other[0]);
+            AssertJUnit.assertEquals("seed " + seed, before, now);
+        }
+    }
+
+    private String parallelRows(final int threads) {
+        final StringBuilder sb = new StringBuilder();
+        // a priority row: the determinism row's board, and the recorded Bolt (several candidates: Bolt, hold, pass)
+        final JsonObject o = base();
+        o.addProperty("selectWorlds", 3);
+        o.addProperty("targetWorlds", 5);
+        o.addProperty("maxTurns", 6);
+        for (boolean bolt : new boolean[] {false, true}) {
+            final Game g = boltBoard(bolt ? 3 : 6, 20, false, true);
+            final Player a = g.getPlayers().get(0);
+            final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(flat(0.5), null));
+            r3.setThreads(threads);
+            sb.append(noMs(r3.priorityRow(g, a, r3.candidates(g, a, bolt ? Collections.singletonList(firstSpell(a,
+                    "Lightning Bolt")) : null), 77L).toJson())).append('\n');
+        }
+        // oppMin's MIN (their Counterspell, then the bears) in the target worlds
+        final JsonObject m = base();
+        m.addProperty("selectWorlds", 2);
+        m.addProperty("targetWorlds", 3);
+        m.addProperty("oppMin", true);
+        final Game gm = boltBoard(3, 2, true, true);
+        final Player am = gm.getPlayers().get(0);
+        final R3LabelSearch.Spec sm = spec(m);
+        sm.testPassiveOpp = true;
+        final R3LabelSearch r3m = new R3LabelSearch(sm, env(flat(0.5), null));
+        r3m.setThreads(threads);
+        sb.append(noMs(r3m.priorityRow(gm, am, r3m.candidates(gm, am,
+                Collections.singletonList(firstSpell(am, "Lightning Bolt"))), 31L).toJson())).append('\n');
+        // oppMinIn both: the upper-bound cut
+        final JsonObject b = base();
+        b.addProperty("selectWorlds", 3);
+        b.addProperty("targetWorlds", 2);
+        b.addProperty("oppMin", true);
+        b.addProperty("oppMinIn", "both");
+        final Game gb = boltBoard(3, 20, false, false);
+        final Player ab = gb.getPlayers().get(0);
+        final R3LabelSearch r3b = new R3LabelSearch(spec(b), env(flat(0.5), null));
+        r3b.setThreads(threads);
+        sb.append(noMs(r3b.priorityRow(gb, ab, r3b.candidates(gb, ab,
+                Collections.singletonList(firstSpell(ab, "Lightning Bolt"))), 41L).toJson())).append('\n');
+        // a per-row cap that binds inside the selection: the later units see it (re-run in sequence at the merge)
+        for (int cap : new int[] {4, 7}) {
+            final JsonObject c = base();
+            c.addProperty("selectWorlds", 3);
+            c.addProperty("targetWorlds", 4);
+            c.addProperty("maxTurns", 6);
+            c.addProperty("rowMaxLines", cap);
+            final Game gc = boltBoard(3, 20, false, true);
+            final Player ac = gc.getPlayers().get(0);
+            final R3LabelSearch r3c = new R3LabelSearch(spec(c), env(flat(0.5), null));
+            r3c.setThreads(threads);
+            sb.append(noMs(r3c.priorityRow(gc, ac, r3c.candidates(gc, ac,
+                    Collections.singletonList(firstSpell(ac, "Lightning Bolt"))), 78L + cap).toJson())).append('\n');
+        }
+        // a choice row (Demonic Tutor's pick), with the choice engine's own log and counts
+        final Game d = doomsdayBoard();
+        final PlayerControllerAi pc = seat(d);
+        final ChooseACardTest.Stub stub = new ChooseACardTest.Stub((x, p) ->
+                ChooseACardTest.inZone(p, ZoneType.Hand, "Island") ? 0.8 : 0.4);
+        final JsonObject o2 = base();
+        o2.addProperty("leaf", "value");
+        o2.addProperty("horizon", 2);
+        final R3LabelSearch r3d = new R3LabelSearch(spec(o2), env(stub, null));
+        r3d.setThreads(threads);
+        final ChooseACard cac = new ChooseACard(ChooseACardTest.cfg("shadow"), stub, null);
+        cac.setRowSearch(r3d.rowSearch(row -> 13L, (row, res) -> sb.append(noMs(res.toJson())).append('\n')));
+        cac.install(pc);
+        castAndResolve(d, "Demonic Tutor");
+        for (JsonElement e : cac.log) {
+            sb.append(noMs(e.getAsJsonObject())).append('\n');
+        }
+        sb.append(cac.counts).append('\n');
+        return sb.toString();
+    }
+
     /** Ruling 10-30: under oppMinIn both a candidate whose upper bound cannot beat the best mean stops early. */
     @Test
     public void bothCutsCandidatesByTheirUpperBound() {
