@@ -791,6 +791,36 @@ public class InfoStateTest extends forge.ai.AITest {
         }
     }
 
+    /**
+     * label-parallel-1103 (many label games in one JVM): LeakCheck ACROSS games. Our label row is byte-identical when
+     * another game of the same JVM, with every hidden card of both its seats re-randomised, is labelled on another
+     * thread at the same time: concurrent games share the card database and rules data, never hidden state.
+     */
+    @Test
+    public void leakCheckAcrossGames() throws Exception {
+        final JsonObject on = KnownLibTest.spec(false, false);
+        on.addProperty("infoState", true);
+        final HonestLabel.Spec spec = HonestLabel.Spec.parse(on);
+        final Game g = game2("Lightning Bolt", "Mountain;Mountain", LIB8, "Giant Growth;Ponder", "Island");
+        final InfoStates s = track(g);
+        g.getAction().moveToLibrary(ChooseACardTest.find(me(g), ZoneType.Hand, "Lightning Bolt"), 0, null);
+        final String before = labelRow(g, s, spec);
+        for (long seed = 31; seed <= 33; seed++) {
+            final Game o = game2("Lightning Bolt", "Mountain;Mountain", LIB8, "Giant Growth;Ponder", "Island");
+            final InfoStates so = track(o);
+            o.getAction().moveToLibrary(ChooseACardTest.find(me(o), ZoneType.Hand, "Lightning Bolt"), 0, null);
+            rerandomise(o, so, me(o), seed);
+            rerandomise(o, so, opp(o), seed + 100);
+            final String[] other = {null};
+            final Thread t = new Thread(() -> other[0] = labelRow(o, so, spec), "rlreplay-w-leak");
+            t.start();
+            final String now = labelRow(g, s, spec);
+            t.join();
+            Assert.assertNotNull(other[0]);
+            Assert.assertEquals(now, before, "seed " + seed);
+        }
+    }
+
     static String labelRow(final Game g, final InfoStates s, final HonestLabel.Spec spec) {
         final HonestLabel.Seat seat = new HonestLabel.Seat(spec);
         final Set<Integer> known = s.known(me(g), me(g));

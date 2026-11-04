@@ -564,6 +564,29 @@ public final class ChooseACard implements CacHook {
                 p.g = null;
             }
         }
+
+        /** label-parallel-1103: a fresh deferral for one parallel unit's plays of this row ({@link #deferTo}). */
+        public Deferred deferred() {
+            return new Deferred(ChooseACard.this, d);
+        }
+
+        /** label-parallel-1103: apply a kept unit's deferred writes, in the order the unit made them. */
+        public void commit(final Deferred x) {
+            if (x == null) {
+                return;
+            }
+            d.applied += x.applied;
+            d.misses += x.misses;
+            d.terminals += x.terminals;
+            d.failures += x.failures;
+            d.steps += x.steps;
+            for (Map.Entry<String, Long> e : x.counts.entrySet()) {
+                counts.merge(e.getKey(), e.getValue(), Long::sum);
+            }
+            for (Runnable w : x.writes) {
+                w.run();
+            }
+        }
     }
 
     /** Install on the live seat's controller (OFF installs nothing). */
@@ -607,7 +630,77 @@ public final class ChooseACard implements CacHook {
     }
 
     private void count(final String k) {
+        final Deferred x = DEFERRED.get();
+        if (x != null && x.owner == this) {
+            x.counts.merge(k, 1L, Long::sum); // label-parallel-1103: a parallel R3 unit's count, applied at its merge
+            return;
+        }
         counts.merge(k, 1L, Long::sum);
+    }
+
+    // ------------------------------------------------------------------------------------------------ label-parallel-1103
+
+    /**
+     * label-parallel-1103 (R3 label.threads > 1 only): what one parallel unit of an R3 choice row would write into this
+     * engine's decision and answers while it plays (the work counters, the counts, an answer's key and description). They
+     * are kept here while the unit runs, so units share no mutable state, and {@link Row#commit} applies them in the
+     * sequential order; a unit the merge drops leaves nothing behind. Never used with one thread.
+     */
+    public static final class Deferred {
+        final ChooseACard owner;
+        final Decision d;
+        int applied, misses, terminals, failures;
+        long steps;
+        final Map<String, Long> counts = new TreeMap<>();
+        final List<Runnable> writes = new ArrayList<>();
+
+        Deferred(final ChooseACard owner, final Decision d) {
+            this.owner = owner;
+            this.d = d;
+        }
+    }
+
+    private static final ThreadLocal<Deferred> DEFERRED = new ThreadLocal<>();
+
+    /** Make {@code x} this thread's deferral (null = none); returns the one it replaces. */
+    public static Deferred deferTo(final Deferred x) {
+        final Deferred prev = DEFERRED.get();
+        if (x == null) {
+            DEFERRED.remove();
+        } else {
+            DEFERRED.set(x);
+        }
+        return prev;
+    }
+
+    /** This thread's deferral for this engine's {@code d}, or null (write at once, as always). */
+    private Deferred deferred(final Decision d) {
+        final Deferred x = DEFERRED.get();
+        return x != null && x.owner == this && x.d == d ? x : null;
+    }
+
+    /** This thread's deferral for this engine (any decision), or null. */
+    private Deferred deferredHere() {
+        final Deferred x = DEFERRED.get();
+        return x != null && x.owner == this ? x : null;
+    }
+
+    private void setKey(final Answer a, final String k) {
+        final Deferred x = deferredHere();
+        if (x == null) {
+            a.key = k;
+        } else {
+            x.writes.add(() -> a.key = k);
+        }
+    }
+
+    private void addDesc(final Answer a, final String s) {
+        final Deferred x = deferredHere();
+        if (x == null) {
+            a.desc.add(s);
+        } else {
+            x.writes.add(() -> a.desc.add(s));
+        }
     }
 
     /** A decision was made in the stack entry resolving now (its later asks follow the pin: the plan, or Forge AI). */
@@ -2644,8 +2737,9 @@ public final class ChooseACard implements CacHook {
         AiCache.openScope();
         forge.util.IdScope.open();
         String why = null;
+        final Deferred dx = deferred(d); // label-parallel-1103 (null: one thread, every write at once as before)
         try {
-            d.applied++;
+            if (dx == null) d.applied++; else dx.applied++;
             final Game g;
             final Player cm;
             SpellAbility trig = null;
@@ -2806,23 +2900,33 @@ public final class ChooseACard implements CacHook {
                 return sc.miss ? null : p; // the probe reads only the recorded answers
             }
             if (!sc.complete()) {
-                d.misses++;
+                if (dx == null) d.misses++; else dx.misses++;
                 why = "planMiss:" + sc.missWhy;
                 return null;
             }
             if (a.forge && ask.kind != Kind.LAND && ask.kind != Kind.MULLIGAN) {
                 // Forge's full answer, as recorded on its copy: its result key, to dedupe the enumerated answers
                 if (a.picks == null && !sc.recPicks.isEmpty()) {
-                    a.key = pickKey(g, sc.recPicks, sc.recOrder, ask.kind);
-                    a.desc.add("rec:" + namesById(g, sc.recPicks));
+                    setKey(a, pickKey(g, sc.recPicks, sc.recOrder, ask.kind));
+                    addDesc(a, "rec:" + namesById(g, sc.recPicks));
                 } else if (a.order != null || sc.recOrder != null) {
                     final List<Integer> o = sc.recOrder != null ? sc.recOrder : a.order;
-                    a.key = "order:" + namesById(g, o) + (sc.recShuffle != null && sc.recShuffle ? "|shuffle" : "");
-                    if (sc.recShuffle != null && sc.recShuffle) a.desc.add("rec:shuffle");
+                    setKey(a, "order:" + namesById(g, o) + (sc.recShuffle != null && sc.recShuffle ? "|shuffle" : ""));
+                    if (sc.recShuffle != null && sc.recShuffle) addDesc(a, "rec:shuffle");
                 }
             }
-            if (a.key == null) {
+            if (a.key == null && dx == null) {
                 a.key = keyOf(g, a, ask.kind);
+            } else if (a.key == null) {
+                // label-parallel-1103: keyOf reads the live game (under its lock while units copy it); set at the merge
+                // if no earlier write set it, as the sequential order would
+                final String k;
+                synchronized (live) {
+                    k = keyOf(g, a, ask.kind);
+                }
+                dx.writes.add(() -> {
+                    if (a.key == null) a.key = k;
+                });
             }
             leaf.armed = true;
             int steps = 0;
@@ -2837,11 +2941,11 @@ public final class ChooseACard implements CacHook {
                 ph.mainLoopStep();
                 steps++;
             }
-            d.steps += steps;
+            if (dx == null) d.steps += steps; else dx.steps += steps;
             p.g = g;
             p.me = cm;
             if (g.isGameOver() || !cm.isInGame()) {
-                d.terminals++;
+                if (dx == null) d.terminals++; else dx.terminals++;
                 p.terminal = cm.hasWon() ? 1.0 : cm.hasLost() || !cm.isInGame() ? 0.0 : 0.5;
                 for (Player o : cm.getOpponents()) {
                     if (o.hasLost() && !cm.hasLost()) p.terminal = 1.0;
@@ -2858,11 +2962,12 @@ public final class ChooseACard implements CacHook {
             }
             return p;
         } catch (RuntimeException | StackOverflowError ex) {
-            d.failures++;
+            if (dx == null) d.failures++; else dx.failures++;
             why = "error:" + ex;
-            if (d.failures <= 3) {
+            final int nf = d.failures + (dx == null ? 0 : dx.failures); // stderr only
+            if (nf <= 3) {
                 System.err.println("[cac] apply failed: " + ex);
-                if (d.failures == 1) ex.printStackTrace();
+                if (nf == 1) ex.printStackTrace();
             }
             return null;
         } finally {
@@ -2895,7 +3000,7 @@ public final class ChooseACard implements CacHook {
             }
             if (m == null) return "float";
             sc.playChosenSpellAbility(m);
-            a.key = castKey(g, cm);
+            setKey(a, castKey(g, cm));
             return null;
         }
         final List<SpellAbility> all = new ArrayList<>(host.getAllPossibleAbilities(cm, true));
@@ -2975,7 +3080,7 @@ public final class ChooseACard implements CacHook {
         for (SpellAbility x = cs; x != null; x = x.getSubAbility()) {
             if (x.usesTargeting()) for (forge.game.GameObject o : x.getTargets()) tk.add(targetKey(o));
         }
-        a.key = castKey(g, cm) + (tk.isEmpty() ? "" : "|tgt:" + tk);
+        setKey(a, castKey(g, cm) + (tk.isEmpty() ? "" : "|tgt:" + tk));
         return null;
     }
 

@@ -137,7 +137,7 @@ public final class HonestLabel {
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
-                "search", "reference", "referenceTurns", "r3", "r3Ranker"));
+                "search", "reference", "referenceTurns", "r3", "r3Ranker", "threads")); // threads: label-parallel-1103
 
         /** The spec, or IllegalArgumentException ("refused: ...") when it is not honest or not well formed. */
         public static Spec parse(final JsonObject o) {
