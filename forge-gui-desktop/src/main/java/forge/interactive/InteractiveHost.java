@@ -146,15 +146,18 @@ public final class InteractiveHost {
     static void serve(final SocketChannel connection, final int n, final int[] bootIds) {
         final FrameSink sink = new FrameSink(Channels.newOutputStream(connection));
         int status = 1;
+        GameContext context = null;
         try (connection) {
-            final GameContext context = GameContext.open("game-" + n);
+            context = GameContext.open("game-" + n);
             MyRandom.setThreadRandom(null);
             final Object gameIds = IdScope.scopeAt(bootIds);
             IdScope.install(gameIds);
             context.setGameIds(gameIds);
             forge.ai.AiCache.openScope();
-            final LineFramer err = new LineFramer(sink, 'E', 'e');
-            final LineFramer out = new LineFramer(sink, 'O', 'o');
+            final LineFramer err = new LineFramer(sink, 'E', 'e', false);
+            // lane shared-engine-1104: the protocol stream fails when the connection is gone, as a lone JVM's stdout
+            // does on a closed pipe, so the game's channel sees checkError() and stops (a watch game never reads stdin)
+            final LineFramer out = new LineFramer(sink, 'O', 'o', true);
             GAME_ERR.set(err);
             final PrintStream protocolOut = new PrintStream(out, true, StandardCharsets.UTF_8);
             final BufferedReader input = new BufferedReader(
@@ -174,6 +177,9 @@ public final class InteractiveHost {
         } catch (IOException ignored) {
             // the mtgx host closed the connection (a stopped game): nothing left to tell it
         } finally {
+            if (context != null) {
+                context.end(); // lane shared-engine-1104: what the game still holds (look-ahead pools), as a JVM exit
+            }
             GameContext.clearThread();
         }
     }
@@ -216,17 +222,20 @@ public final class InteractiveHost {
             this.raw = raw;
         }
 
-        synchronized void frame(final char kind, final byte[] line, final int len) {
+        /** False once the connection is gone: the frame is dropped, as a dead pipe drops a write. */
+        synchronized boolean frame(final char kind, final byte[] line, final int len) {
             if (broken) {
-                return;
+                return false;
             }
             try {
                 raw.write(kind);
                 raw.write(line, 0, len);
                 raw.write('\n');
                 raw.flush();
+                return true;
             } catch (IOException e) {
-                broken = true; // a closed connection: the game's writes are dropped, as a dead pipe's would be
+                broken = true;
+                return false;
             }
         }
 
@@ -242,32 +251,49 @@ public final class InteractiveHost {
         private final char whole;
         private final char part;
         private final ByteArrayOutputStream line = new ByteArrayOutputStream(256);
+        /**
+         * Lane shared-engine-1104: throw when the connection is gone (the game's protocol stream: its PrintStream then
+         * reports checkError(), as a lone JVM's stdout on a closed pipe does). Never for stderr: System.err is ONE
+         * routed PrintStream shared by every game, whose encoder must never be left mid-write by an exception.
+         */
+        private final boolean failWhenGone;
 
         LineFramer(final FrameSink sink, final char whole, final char part) {
+            this(sink, whole, part, false);
+        }
+
+        LineFramer(final FrameSink sink, final char whole, final char part, final boolean failWhenGone) {
             this.sink = sink;
             this.whole = whole;
             this.part = part;
+            this.failWhenGone = failWhenGone;
+        }
+
+        private void emit() throws IOException {
+            final boolean sent = sink.frame(whole, line.toByteArray(), line.size());
+            line.reset();
+            if (!sent && failWhenGone) {
+                throw new IOException("[forge.host] the game's connection is closed");
+            }
         }
 
         @Override
-        public synchronized void write(final int b) {
+        public synchronized void write(final int b) throws IOException {
             if (b == '\n') {
-                sink.frame(whole, line.toByteArray(), line.size());
-                line.reset();
+                emit();
             } else {
                 line.write(b);
             }
         }
 
         @Override
-        public synchronized void write(final byte[] b, final int off, final int len) {
+        public synchronized void write(final byte[] b, final int off, final int len) throws IOException {
             int start = off;
             for (int i = off; i < off + len; i++) {
                 if (b[i] == '\n') {
                     line.write(b, start, i - start);
-                    sink.frame(whole, line.toByteArray(), line.size());
-                    line.reset();
                     start = i + 1;
+                    emit();
                 }
             }
             line.write(b, start, off + len - start);

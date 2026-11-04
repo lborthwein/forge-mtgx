@@ -107,7 +107,7 @@ public class InteractiveHostTest {
     }
 
     @Test
-    public void framesCarryEachStreamByteForByte() {
+    public void framesCarryEachStreamByteForByte() throws Exception {
         final ByteArrayOutputStream wire = new ByteArrayOutputStream();
         final InteractiveHost.FrameSink sink = new InteractiveHost.FrameSink(wire);
         final InteractiveHost.LineFramer out = new InteractiveHost.LineFramer(sink, 'O', 'o');
@@ -126,5 +126,51 @@ public class InteractiveHostTest {
         assertEquals(new String(wire.toByteArray(), StandardCharsets.UTF_8),
                 "O{\"a\":\"é\"}\nEx\nO{\"b\":1}\ney\nX0\n");
         assertTrue(true);
+    }
+    /**
+     * Lane shared-engine-1104: a closed connection fails the game's protocol stream, as a lone JVM's stdout fails on a
+     * closed pipe (its channel's checkError() then stops the game: a watch game never reads stdin, so this is how a
+     * stopped watch game learns it), but never the shared stderr stream.
+     */
+    @Test
+    public void aClosedConnectionFailsTheProtocolStreamOnly() throws Exception {
+        final java.io.OutputStream closed = new java.io.OutputStream() {
+            @Override
+            public void write(final int b) throws java.io.IOException {
+                throw new java.io.IOException("closed");
+            }
+        };
+        final InteractiveHost.FrameSink sink = new InteractiveHost.FrameSink(closed);
+        final InteractiveHost.LineFramer err = new InteractiveHost.LineFramer(sink, 'E', 'e', false);
+        err.write("noise\n".getBytes(StandardCharsets.UTF_8));  // dropped, never thrown
+        final java.io.PrintStream protocol = new java.io.PrintStream(
+                new InteractiveHost.LineFramer(sink, 'O', 'o', true), true, StandardCharsets.UTF_8);
+        protocol.println("{\"type\":\"state\"}");
+        assertTrue(protocol.checkError(), "the protocol stream reports the closed connection");
+        sink.exit(1); // dropped quietly
+    }
+
+    /** Lane shared-engine-1104: a hosted game's end runs its end hooks once and drops its slots; off: no hook kept. */
+    @Test
+    public void aGameEndRunsItsHooksAndDropsItsState() throws Exception {
+        final java.util.concurrent.atomic.AtomicInteger ran = new java.util.concurrent.atomic.AtomicInteger();
+        GameContext.onGameEnd(ran::incrementAndGet); // off: nothing to register on
+        GameContext.enableHosting();
+        final ScopedSlot<String> slot = new ScopedSlot<>();
+        final AtomicReference<String> after = new AtomicReference<>("unset");
+        final Thread a = new Thread(null, () -> {
+            final GameContext ctx = GameContext.open("a");
+            slot.set("A");
+            GameContext.onGameEnd(ran::incrementAndGet);
+            GameContext.onGameEnd(() -> { throw new IllegalStateException("one failing hook"); });
+            GameContext.onGameEnd(ran::incrementAndGet);
+            ctx.end();
+            after.set(slot.get());
+            ctx.end(); // a second end runs nothing again
+        }, "test-host-end", 0, false);
+        a.start();
+        a.join(TimeUnit.SECONDS.toMillis(30));
+        assertEquals(ran.get(), 2, "both good hooks ran, once, past the failing one");
+        assertNull(after.get(), "the ended game's slots are gone");
     }
 }
