@@ -3513,7 +3513,8 @@ public final class ForcedWinSolver {
         // architect-o ruling 10-30: the shared budgeted MIN (OppMin), one implementation with the R3 label search
         final OppMin.Cfg oc = new OppMin.Cfg(cfg.oppNodes, cfg.oppResponses, cfg.oppDepth);
         oc.budgetByDepth = cfg.oppBudgetByDepth; // covfix-a-1102 (oppMinRev 3)
-        oc.loopMemo = cfg.oppMinLoopMemo; // solver-gaps-1104 = new Outcome[1];
+        oc.loopMemo = cfg.oppMinLoopMemo; // solver-gaps-1104
+        final Outcome[] firstLost = new Outcome[1];
         final Outcome[] firstOut = new Outcome[1];
         final OppMin.Out m = OppMin.min(oc, script -> {
             meter.oppMinNodes++;
