@@ -50,7 +50,11 @@ public class StaticAbilityNumLoyaltyAct {
                 }
                 if (stAb.hasParam("Additional")) {
                     if (stAb.hasParam("OnlySourceAbs")) {
-                        if (!stAb.getHostCard().getEffectSourceAbility().getRootAbility().getOriginalAbility().equals(sa)) {
+                        // void-causes-1104: an effect whose source ability is unknown (a copy or LKI that did not
+                        // carry it) grants no extra activation, never a crash
+                        final SpellAbility src = stAb.getHostCard().getEffectSourceAbility();
+                        final SpellAbility orig = src == null ? null : src.getRootAbility().getOriginalAbility();
+                        if (orig == null || !orig.equals(sa)) {
                             continue;
                         }
                     }
