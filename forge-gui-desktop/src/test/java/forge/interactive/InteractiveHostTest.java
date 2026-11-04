@@ -6,7 +6,6 @@ import forge.util.GameContext;
 import forge.util.IdScope;
 import forge.util.MyRandom;
 import forge.util.ScopedSlot;
-import forge.util.ThreadUtil;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
@@ -28,6 +27,14 @@ import static org.testng.Assert.assertTrue;
  * thread carry in ThreadUtil) and its wire framing. Off (a one-game process) everything is the old static behaviour.
  */
 public class InteractiveHostTest {
+    /**
+     * A one-thread pool like Forge's game pool (ThreadUtil.invokeInGameThread wraps exactly so), but the test's own:
+     * Forge's shared pools must not keep threads created under this test's game state (they would carry it into the
+     * next test class in this JVM; a real host never stops hosting).
+     */
+    private static final java.util.concurrent.ExecutorService POOL = java.util.concurrent.Executors.newSingleThreadExecutor(
+            r -> { final Thread t = new Thread(null, r, "test-pool", 0, false); t.setDaemon(true); return t; });
+
     @AfterMethod
     public void offAgain() {
         GameContext.stopHostingForTests();
@@ -65,11 +72,11 @@ public class InteractiveHostTest {
             slot.set("A");
             Trigger.resetIDs();                      // this game's own trigger counter only
             final CompletableFuture<Void> done = new CompletableFuture<>();
-            ThreadUtil.invokeInGameThread(() -> {    // a pooled thread carries game A's state
+            POOL.execute(GameContext.wrap(() -> {    // a pooled thread carries game A's state
                 seenA.set(slot.get());
                 poolRandomA.set(MyRandom.getRandom());
                 done.complete(null);
-            });
+            }));
             done.join();
             assertEquals(GlobalIds.capture(ids)[3], 50000);
         }, "test-host-a", 0, false);
@@ -80,11 +87,11 @@ public class InteractiveHostTest {
             ctx.setGameIds(ids);
             MyRandom.setThreadRandom(new Random(2));
             final CompletableFuture<Void> done = new CompletableFuture<>();
-            ThreadUtil.invokeInGameThread(() -> {
+            POOL.execute(GameContext.wrap(() -> {
                 seenB.set(slot.get());               // never A's value
                 triggerB.set(GlobalIds.capture(IdScope.capture())[3]);
                 done.complete(null);
-            });
+            }));
             done.join();
         }, "test-host-b", 0, false);
         a.start();
