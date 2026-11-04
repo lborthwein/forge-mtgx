@@ -149,6 +149,33 @@ public final class GameContext {
         return name;
     }
 
+    /** Lane shared-engine-1104: what this game holds until it ends (a lone JVM's exit frees it; a host must). */
+    private final List<Runnable> endHooks = new CopyOnWriteArrayList<>();
+
+    /**
+     * Hosting: run {@code hook} when the calling thread's game ends (e.g. stop a look-ahead search's worker pool, whose
+     * threads a lone JVM's exit stops). Off, or on a thread of no game: nothing (the process exit is the game's end).
+     */
+    public static void onGameEnd(final Runnable hook) {
+        final GameContext context = current();
+        if (context != null && hook != null) {
+            context.endHooks.add(hook);
+        }
+    }
+
+    /** The host, once its game is over: every {@link #onGameEnd} hook, in order; one failing never skips the rest. */
+    public void end() {
+        for (Runnable hook : endHooks) {
+            try {
+                hook.run();
+            } catch (Throwable t) {
+                System.err.println("[forge.host] game " + name + " end hook failed: " + t);
+            }
+        }
+        endHooks.clear();
+        slots.clear();
+    }
+
     /** This game's own id counters ({@link IdScope#capture} form), the ones a lone JVM's process-wide counters are. */
     private volatile Object gameIds;
 

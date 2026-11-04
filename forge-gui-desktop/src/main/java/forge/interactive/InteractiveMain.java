@@ -727,7 +727,9 @@ public final class InteractiveMain {
                     continue;
                 }
                 c.seed = seed * 31 + i;
-                lp.bind(game, new forge.ai.simulation.LookaheadSearch(c));
+                final forge.ai.simulation.LookaheadSearch search = new forge.ai.simulation.LookaheadSearch(c);
+                forge.util.GameContext.onGameEnd(search::shutdown); // lane shared-engine-1104: hosted only
+                lp.bind(game, search);
             }
         }
     }

@@ -16,7 +16,9 @@ public class ThreadUtil {
         }
 
         public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, prefix + "-" + countr++);
+            // lane shared-engine-1104: in a multi-game host a pooled thread inherits nothing from the game that happened
+            // to create it (every task carries its own game's state, GameContext.wrap); otherwise exactly as before
+            Thread t = new Thread(null, r, prefix + "-" + countr++, 0, !GameContext.hosting());
             t.setDaemon(true); //set daemon to true for succesfully exiting the game while disposing assets
             return t;
         }

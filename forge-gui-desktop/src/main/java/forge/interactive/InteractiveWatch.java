@@ -319,7 +319,9 @@ final class InteractiveWatch {
                     continue;
                 }
                 pl.config.seed = seed * 31 + i;
-                lp.bind(game, new forge.ai.simulation.LookaheadSearch(pl.config));
+                final forge.ai.simulation.LookaheadSearch search = new forge.ai.simulation.LookaheadSearch(pl.config);
+                forge.util.GameContext.onGameEnd(search::shutdown); // lane shared-engine-1104: hosted only
+                lp.bind(game, search);
             }
         }
     }
