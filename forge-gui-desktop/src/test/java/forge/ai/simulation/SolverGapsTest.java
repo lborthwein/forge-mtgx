@@ -37,8 +37,11 @@ public class SolverGapsTest extends SimulationTest {
                 + "\nhumangraveyard=\nhumanexile=\nhumanlibrary=" + ForcedWinSolverTest.OURLIB + "\n";
     }
 
-    static final String BASE = "cycles=true,engineAnyWindow=true,engineEndStepOpen=true,engineEveryWindow=true,"
-            + "enginePassBudget=true";
+    /** The R3 smoke's label solverCfg f2 (forge-mtgx #177), the keys under test added per scenario. */
+    static final String BASE = "budget=counter,budgetMs=4000,cycles=true,engineCards=75000,engineMs=2000,enginePathCards=20000,"
+            + "engineSteps=3000,evalReserveMs=1000,evalSteps=4000,wallGraceMs=1000,labellerV2=true,engineAnyWindow=true,"
+            + "engineEndStepOpen=true,enginePassBudget=true,engineStack=true,loopMarginal=true,engineEveryWindow=true,"
+            + "engineNodes=500";
 
     @Test
     public void offKeysAreUnrecorded() {
@@ -94,7 +97,7 @@ public class SolverGapsTest extends SimulationTest {
         final List<ForcedWinSolver.Proposal> on = propose(ForcedWinSolverTest.game("Default", "Default", f),
                 BASE + ",engineTriggerTargets=true", "c-on");
         final List<ForcedWinSolver.Proposal> onPay = propose(ForcedWinSolverTest.game("Default", "Default", f),
-                BASE + ",engineTriggerTargets=true,payRecord=true", "c-on-pay");
+                BASE + ",engineTriggerTargets=true", "c-on-pay");
         AssertJUnit.assertTrue("off: no line (the known gap)", off.isEmpty());
         AssertJUnit.assertFalse("on: the untap-a-land line", on.isEmpty() && onPay.isEmpty());
         final ForcedWinSolver.Proposal p = on.isEmpty() ? onPay.get(0) : on.get(0);
@@ -107,7 +110,7 @@ public class SolverGapsTest extends SimulationTest {
         // point; off, OppMin's tree grows with the iterations
         final String f = frame("Splinter Twin", "Pestermite;Volcanic Island;Volcanic Island;Mountain;Mountain", 20,
                 "Brainstorm;Opt;Consider", "Island;Island;Island", "MAIN1", "human");
-        final String keys = BASE + ",labellerV2=true";
+        final String keys = BASE;
         final List<ForcedWinSolver.Proposal> off = propose(ForcedWinSolverTest.game("Default", "Default", f), keys, "twin-off");
         final List<ForcedWinSolver.Proposal> on = propose(ForcedWinSolverTest.game("Default", "Default", f),
                 keys + ",oppMinLoopMemo=true", "twin-on");
@@ -123,7 +126,7 @@ public class SolverGapsTest extends SimulationTest {
         // seen while they decide (Forge AI casts its creature and is tapped low on our turn).
         final String f = frame("Pestermite;Kiki-Jiki, Mirror Breaker", "Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain",
                 20, "Counterspell;Grizzly Bears", "Island|Tapped;Island|Tapped;Forest|Tapped", "MAIN1", "human");
-        final String k = BASE + ",labellerV2=true,enginePassToEnd=true";
+        final String k = BASE + ",enginePassToEnd=true";
         final List<ForcedWinSolver.Proposal> plain = propose(ForcedWinSolverTest.game("Default", "Default", f), k, "b-plain");
         final List<ForcedWinSolver.Proposal> rev = propose(ForcedWinSolverTest.game("Default", "Default", f),
                 k + ",oppMinRevealPoints=true", "b-reveal");
