@@ -4,7 +4,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import com.google.common.collect.Maps;
 import com.google.common.collect.Multiset;
 
 import forge.card.CardType;
@@ -136,7 +135,8 @@ public class TrackableTypes {
     public static final TrackableType<Object> ObjectType = new TrackableType<Object>(null);
 
     //make this quicker than having to define a new class for every single enum
-    private static Map<Class<? extends Enum<?>>, TrackableType<?>> enumTypes = Maps.newHashMap();
+    // lane shared-engine-1103: concurrent, so two games never make two types for one enum
+    private static Map<Class<? extends Enum<?>>, TrackableType<?>> enumTypes = new java.util.concurrent.ConcurrentHashMap<>();
 
     @SuppressWarnings("unchecked")
     public static <E extends Enum<E>> TrackableType<E> EnumType(final Class<E> enumType) {

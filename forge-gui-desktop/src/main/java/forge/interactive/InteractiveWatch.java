@@ -27,7 +27,6 @@ import forge.game.player.RegisteredPlayer;
 import forge.game.spellability.SpellAbility;
 import forge.gui.GuiBase;
 import forge.player.GamePlayerUtil;
-import forge.util.MyRandom;
 
 import java.io.PrintStream;
 import java.nio.file.Path;
@@ -114,7 +113,7 @@ final class InteractiveWatch {
         try {
             // lane replay-record-1021: both seats' decision tapes (record, or a forced / resumed replay of them)
             final String tapeMode = InteractiveMain.aiTapeMode();
-            tapeRng = tapeMode == null ? null : new forge.ai.simulation.PlayoutKeys.TrackedRandom(config.seed());
+            TAPE_RNG.set(tapeMode == null ? null : new forge.ai.simulation.PlayoutKeys.TrackedRandom(config.seed()));
             // policy seats connect before the game's random stream is seeded, as a human game's policy seat does
             for (int seat = 0; seat < 2; seat++) {
                 if ("policy".equals(config.seatAi().get(seat)) && !"forced".equals(tapeMode)) {
@@ -129,7 +128,7 @@ final class InteractiveWatch {
 
             if (tapeMode != null) {
                 for (Player p : game.getRegisteredPlayers()) {
-                    tapes.add(InteractiveMain.installTape(tapeMode, game, p, tapeRng, true));
+                    tapes().add(InteractiveMain.installTape(tapeMode, game, p, TAPE_RNG.get(), true));
                 }
             }
             watcher = new Watcher(game, channels);
@@ -144,7 +143,7 @@ final class InteractiveWatch {
             final Watcher finalWatcher = watcher;
             game.getAction().invoke(() -> {
                 try {
-                    for (forge.ai.AiTape t : tapes) {
+                    for (forge.ai.AiTape t : tapes()) {
                         t.bindGameThread(Thread.currentThread());
                     }
                     match.startGame(game);
@@ -200,10 +199,22 @@ final class InteractiveWatch {
      * {@code policy}, null when it has none or its service did not answer), as a human game's AI seat is bound.
      */
     /** Lane replay-record-1021: a taped watch game's RNG (the same stream as new Random(seed)), and its seats' tapes. */
-    private static forge.ai.simulation.PlayoutKeys.TrackedRandom tapeRng;
-    private static final List<forge.ai.AiTape> tapes = new ArrayList<>();
+    // lane shared-engine-1103: per game in a multi-game host (forge.util.ScopedSlot); a plain static otherwise
+    private static final forge.util.ScopedSlot<forge.ai.simulation.PlayoutKeys.TrackedRandom> TAPE_RNG =
+            new forge.util.ScopedSlot<>();
+    private static final forge.util.ScopedSlot<List<forge.ai.AiTape>> TAPES = new forge.util.ScopedSlot<>();
+
+    private static List<forge.ai.AiTape> tapes() {
+        List<forge.ai.AiTape> t = TAPES.get();
+        if (t == null) {
+            t = new ArrayList<>();
+            TAPES.set(t);
+        }
+        return t;
+    }
 
     private static void finishTapes() {
+        final List<forge.ai.AiTape> tapes = tapes();
         for (forge.ai.AiTape t : tapes) {
             t.finish();
             t.uninstall();
@@ -213,7 +224,7 @@ final class InteractiveWatch {
 
     static Prepared prepare(final InteractiveProtocol.Config config, final RlLiveSeat[] policy)
             throws InteractiveProtocol.ProtocolException {
-        MyRandom.setRandom(tapeRng != null ? tapeRng : new Random(config.seed()));
+        InteractiveMain.seedGameRandom(TAPE_RNG.get() != null ? TAPE_RNG.get() : new Random(config.seed()));
         final List<RegisteredPlayer> registered = createPlayers(config, policy);
         final GameRules rules = new GameRules(GameType.Constructed);
         rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
@@ -308,7 +319,9 @@ final class InteractiveWatch {
                     continue;
                 }
                 pl.config.seed = seed * 31 + i;
-                lp.bind(game, new forge.ai.simulation.LookaheadSearch(pl.config));
+                final forge.ai.simulation.LookaheadSearch search = new forge.ai.simulation.LookaheadSearch(pl.config);
+                forge.util.GameContext.onGameEnd(search::shutdown); // lane shared-engine-1104: hosted only
+                lp.bind(game, search);
             }
         }
     }
