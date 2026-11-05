@@ -205,6 +205,15 @@ public final class RlActorBench {
         int exileScanTurns = 0;
         String exileScanOut = null;
         /**
+         * outcome-arm-1104 (null = off, the default: every path unchanged): the frame-dump replay mode
+         * ({@link forge.bench.rl.RlFrameDump}): every decision's v(o) frame of both seats, no label search.
+         * {@code frameDump} = {"out": DIR, "band": [lo, hi] (turns before the end; hi <= 0 = every turn; default [0, 0]),
+         * "choices": true (default; also the forced choice asks)}. Replay mode only; not with a label spec or a scan.
+         */
+        String frameDumpOut = null;
+        int frameDumpLo = 0, frameDumpHi = 0;
+        boolean frameDumpChoices = true;
+        /**
          * bvw-step1-build-1024 (the seat/dec_idx swap, 2026-10-25; null = no check): step-0 label index files whose
          * positions (turns before the end in [0, referenceTurns)) a labelled or scanned replay must reproduce exactly,
          * or the game writes no rows ({@code label.reference} / {@code exileScan.reference}, {@code referenceTurns}).
@@ -418,6 +427,37 @@ public final class RlActorBench {
             }
             c.exileScanTurns = x.get("turns").getAsInt();
             c.exileScanOut = x.get("out").getAsString();
+        }
+        if (o.has("frameDump") && !o.get("frameDump").isJsonNull()) {
+            // outcome-arm-1104: the frame-dump replay mode (no label search)
+            final JsonObject x = o.getAsJsonObject("frameDump");
+            for (String k : x.keySet()) {
+                if (!"out".equals(k) && !"band".equals(k) && !"choices".equals(k)) {
+                    throw new IllegalArgumentException("frameDump: unknown key " + k + " (out, band, choices)");
+                }
+            }
+            if (!x.has("out")) {
+                throw new IllegalArgumentException("frameDump needs out");
+            }
+            if (c.labelSpec != null || c.exileScanOut != null) {
+                throw new IllegalArgumentException("refused: frameDump is a read-only replay, not with a label spec or a scan");
+            }
+            if (!"replay".equals(c.mode)) {
+                throw new IllegalArgumentException("refused: frameDump is a replay mode key, not " + c.mode);
+            }
+            c.frameDumpOut = x.get("out").getAsString();
+            if (x.has("band")) {
+                final com.google.gson.JsonArray b = x.getAsJsonArray("band");
+                c.frameDumpLo = b.get(0).getAsInt();
+                c.frameDumpHi = b.get(1).getAsInt();
+                if (c.frameDumpLo < 0 || (c.frameDumpHi > 0 && c.frameDumpHi <= c.frameDumpLo)) {
+                    throw new IllegalArgumentException("frameDump.band [lo, hi]: 0 <= lo, hi > lo or hi <= 0, not "
+                            + b);
+                }
+            }
+            if (x.has("choices")) {
+                c.frameDumpChoices = x.get("choices").getAsBoolean();
+            }
         }
         if (o.has("watchdog")) {
             c.watchdog = ReplayStallWatchdog.Thresholds.parse(o.get("watchdog")); // lki-fix-port-1027
@@ -1801,6 +1841,12 @@ public final class RlActorBench {
             scanSink = new forge.bench.rl.RlExileScan.Sink(Paths.get(cfg.exileScanOut));
             System.err.println("[bvw-exile-scan] scanning replays: T=" + cfg.exileScanTurns + " -> " + scanSink.scanFile());
         }
+        if (cfg.frameDumpOut != null) {
+            // outcome-arm-1104: the frame-dump replay mode
+            frameSink = new forge.bench.rl.RlFrameDump.Sink(Paths.get(cfg.frameDumpOut));
+            System.err.println("[frame-dump] band [" + cfg.frameDumpLo + ", " + cfg.frameDumpHi + ") choices "
+                    + cfg.frameDumpChoices + " -> " + frameSink.framesFile());
+        }
         // bvw-decision-log-1027: logs an earlier "record" replay wrote (forced for their digest-equal games), and this
         // replay's own sink when it records
         final Map<String, List<JsonObject>> cache = new HashMap<>();
@@ -1988,6 +2034,9 @@ public final class RlActorBench {
         sum.addProperty("threads", threads);
         sum.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
         sum.addProperty("label", cfg.labelSpec != null);
+        if (cfg.frameDumpOut != null) {
+            sum.addProperty("frame_dump", true); // outcome-arm-1104 (absent otherwise: summaries unchanged)
+        }
         sum.add("watchdog", cfg.watchdog.toJson()); // lki-fix-port-1027
         sum.addProperty("watchdog_armed", wd != null); // review S3-8: false when disabled or under another collector
         sum.add("decision_log_coverage", coverage); // review #124 S2-4
@@ -2085,6 +2134,7 @@ public final class RlActorBench {
                 final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
                 final int tobs = g.get("obs_schema").getAsInt();
                 final forge.bench.rl.RlExileScan[] scans = new forge.bench.rl.RlExileScan[1];
+                final forge.bench.rl.RlFrameDump[] dumps = new forge.bench.rl.RlFrameDump[1];
                 final GameHook hook0 = cfg.labelSpec != null ? (game, seat, know) -> {
                     labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelBandLo, cfg.labelTurns,
                             cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs, cfg.labelR3 != null);
@@ -2109,6 +2159,11 @@ public final class RlActorBench {
                                 trajectoryRef.provenance());
                     }
                     game.addPriorityDecisionListener(scans[0]);
+                } : cfg.frameDumpOut != null ? (game, seat, know) -> {
+                    // outcome-arm-1104: the frame-dump replay mode (no label search)
+                    dumps[0] = new forge.bench.rl.RlFrameDump(cfg.frameDumpLo, cfg.frameDumpHi, cfg.frameDumpChoices, t,
+                            jarSha, game, know, feat.index(), tobs);
+                    game.addPriorityDecisionListener(dumps[0]);
                 } : null;
                 // review #124 S2-3: a record replay's checks (the trajectory against step 0 when no labeller or scan
                 // runs it; a later step's state_sha rows), read-only
@@ -2216,6 +2271,20 @@ public final class RlActorBench {
                                 scans[0].finish(scanSink, eq, row);
                             } catch (IOException e) {
                                 row.addProperty("error", "exile scan sink: " + e);
+                                row.addProperty("equal", false);
+                            }
+                        }
+                    }
+                    if (cfg.frameDumpOut != null) {
+                        // outcome-arm-1104: the game's frames only when its replay is digest-equal
+                        if (dumps[0] == null) {
+                            row.addProperty("error", "frame dump: never attached");
+                            row.addProperty("equal", false);
+                        } else {
+                            try {
+                                dumps[0].finish(frameSink, eq, row);
+                            } catch (IOException e) {
+                                row.addProperty("error", "frame dump sink: " + e);
                                 row.addProperty("equal", false);
                             }
                         }
@@ -2475,6 +2544,8 @@ public final class RlActorBench {
     static forge.bench.rl.RlReplayLabeller.Sink labelSink = null;
     /** bvw-step1-build-1024: the exile scan's per-JVM files (exileScan replays only). */
     static forge.bench.rl.RlExileScan.Sink scanSink = null;
+    /** outcome-arm-1104: the frame-dump replay's sink (null = off). */
+    static forge.bench.rl.RlFrameDump.Sink frameSink = null;
     /** bvw-step1-build-1024: the step-0 reference positions (null = no trajectory check). */
     static forge.bench.rl.TrajectoryRef trajectoryRef = null;
 
