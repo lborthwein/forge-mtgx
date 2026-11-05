@@ -150,9 +150,30 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     public static volatile boolean FIXED_SETTLE = "fixed".equals(System.getProperty("forge.bench.rl.knowledgeSettle"));
     private final boolean fixedSettle;
 
+    /**
+     * knowledge-searched-top-1105 (research; -Dforge.bench.rl.knowledgeSearchedTop=true, default off = every path
+     * unchanged): a card the seat searched for and put at a set place in a library ("search your library for a card,
+     * then shuffle and put that card on top") stays known to it, and to every seat it was revealed to during that
+     * resolution. Off, Forge's order (shuffle, then the move within the library) forgets it: the shuffle clears the
+     * library and the move counts as one in a random order. The searcher is read from the resolving ability (the rule
+     * holds the same in live play, forced replays and copies, where no controller call is made): a hidden-origin
+     * ChangeZone from the activator's own library to a library position, with no Defined, Chooser, DefinedPlayer,
+     * targets or random order. Read at construction; tests set {@link #SEARCHED_TOP}.
+     */
+    public static volatile boolean SEARCHED_TOP = "true".equals(System.getProperty("forge.bench.rl.knowledgeSearchedTop"));
+    private final boolean searchedTop;
+    /** knowledge-searched-top-1105: per card id, the seats it was revealed to during the current resolution. */
+    private final Map<Integer, Set<Integer>> revealedInResolution = new HashMap<>();
+
     public RlKnowledge(final Game game) {
         this.game = game;
         this.fixedSettle = FIXED_SETTLE;
+        this.searchedTop = SEARCHED_TOP;
+    }
+
+    /** knowledge-searched-top-1105: whether this tracker keeps searched-to-a-place cards (see {@link #SEARCHED_TOP}). */
+    public boolean searchedTop() {
+        return searchedTop;
     }
 
     /** knowledge-settle-1104: whether this tracker settles on the fixed schedule (see {@link #FIXED_SETTLE}). */
@@ -203,6 +224,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         }
         k.tail.addAll(tail);
         k.arranged.addAll(arranged);
+        for (Map.Entry<Integer, Set<Integer>> e : revealedInResolution.entrySet()) {
+            k.revealedInResolution.put(e.getKey(), new HashSet<>(e.getValue()));
+        }
         for (Pending p : pending) {
             Player owner = null;
             if (p.handOwner != null) {
@@ -381,6 +405,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             learn(s, c, "reveal:" + zone);
             see(s, c);
             seeId(s, c);
+            if (searchedTop && s >= 0 && s <= 1 && c != null && game.getStack().isResolving()) {
+                revealedInResolution.computeIfAbsent(c.getId(), x -> new HashSet<>()).add(s);
+            }
         }
     }
 
@@ -455,6 +482,12 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             }
             final boolean fromSeen = (fz != null && isPublic(fz)) || (fz == ZoneType.Hand && fp == me);
             if (withinLibrary) {
+                if (!arrangedMove && searchedTop && (s == searcherSeat(c, fp)
+                        || revealedInResolution.getOrDefault(c.getId(), Collections.emptySet()).contains(s))) {
+                    // knowledge-searched-top-1105: searched for (or shown) and put at a set place by the effect
+                    learn(s, c, "searched or revealed, put at a set library place");
+                    continue;
+                }
                 if (!arrangedMove) {
                     // put back in an order nobody chose or saw (Forge's "in a random order"): the card is still among
                     // those cards, but its position is unknown; obs-v1 has no segment, so it is forgotten
@@ -474,6 +507,46 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         }
     }
 
+    /**
+     * knowledge-searched-top-1105: the seat that searched its own library for {@code c} and is putting it at a set place
+     * (the resolving ability's one hidden-origin library-to-library ChangeZone with a LibraryPosition, of the activator's
+     * own library, no Defined / ChooseFromDefined / Chooser / DefinedPlayer / targets / RandomOrder), or -1.
+     */
+    private int searcherSeat(final Card c, final Player libraryOwner) {
+        if (!game.getStack().isResolving()) {
+            return -1;
+        }
+        forge.game.spellability.SpellAbility root;
+        try {
+            root = game.getStack().peekAbility();
+        } catch (RuntimeException e) {
+            return -1;
+        }
+        if (root instanceof forge.game.trigger.WrappedAbility) {
+            root = ((forge.game.trigger.WrappedAbility) root).getWrappedAbility();
+        }
+        forge.game.spellability.SpellAbility hit = null;
+        for (forge.game.spellability.SpellAbility x = root; x != null; x = x.getSubAbility()) {
+            if (x.getApi() == forge.game.ability.ApiType.ChangeZone && x.isHidden() && x.hasParam("Origin")
+                    && x.getParam("Origin").contains("Library") && "Library".equals(x.getParam("Destination"))
+                    && x.hasParam("LibraryPosition")) {
+                if (hit != null) {
+                    return -1; // two library searches in one chain: which card is whose is not read here
+                }
+                hit = x;
+            }
+        }
+        if (hit == null || hit.hasParam("Defined") || hit.hasParam("ChooseFromDefined") || hit.hasParam("Chooser")
+                || hit.hasParam("DefinedPlayer") || hit.usesTargeting() || hit.hasParam("RandomOrder")) {
+            return -1;
+        }
+        final Player act = hit.getActivatingPlayer();
+        if (act == null || act != libraryOwner || c.getOwner() != act) {
+            return -1;
+        }
+        return seatOf(act);
+    }
+
     /** Zones where Forge may turn a card face down right after moving it there (foretell, "exile it face down"). */
     private static boolean mayTurnFaceDown(final ZoneType z) {
         return z == ZoneType.Exile || z == ZoneType.Battlefield || z == ZoneType.Stack || z == ZoneType.Command;
@@ -482,6 +555,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     @Subscribe
     public void resolved(final GameEventSpellResolved ev) {
         arranged.clear();
+        revealedInResolution.clear();
         settle();
     }
 
