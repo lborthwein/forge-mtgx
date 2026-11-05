@@ -214,6 +214,11 @@ public final class RlActorBench {
         int frameDumpLo = 0, frameDumpHi = 0;
         boolean frameDumpChoices = true;
         /**
+         * dump-menus-1105 (false = off, the default: every output unchanged): {@code frameDump.menus} = true also writes
+         * every forced menu ask's options to menus-&lt;pid&gt;.mxm.gz ({@link forge.bench.rl.RlFrameDump}'s Menus).
+         */
+        boolean frameDumpMenus = false;
+        /**
          * bvw-step1-build-1024 (the seat/dec_idx swap, 2026-10-25; null = no check): step-0 label index files whose
          * positions (turns before the end in [0, referenceTurns)) a labelled or scanned replay must reproduce exactly,
          * or the game writes no rows ({@code label.reference} / {@code exileScan.reference}, {@code referenceTurns}).
@@ -432,8 +437,8 @@ public final class RlActorBench {
             // outcome-arm-1104: the frame-dump replay mode (no label search)
             final JsonObject x = o.getAsJsonObject("frameDump");
             for (String k : x.keySet()) {
-                if (!"out".equals(k) && !"band".equals(k) && !"choices".equals(k)) {
-                    throw new IllegalArgumentException("frameDump: unknown key " + k + " (out, band, choices)");
+                if (!"out".equals(k) && !"band".equals(k) && !"choices".equals(k) && !"menus".equals(k)) {
+                    throw new IllegalArgumentException("frameDump: unknown key " + k + " (out, band, choices, menus)");
                 }
             }
             if (!x.has("out")) {
@@ -457,6 +462,9 @@ public final class RlActorBench {
             }
             if (x.has("choices")) {
                 c.frameDumpChoices = x.get("choices").getAsBoolean();
+            }
+            if (x.has("menus")) {
+                c.frameDumpMenus = x.get("menus").getAsBoolean(); // dump-menus-1105
             }
         }
         if (o.has("watchdog")) {
@@ -1846,6 +1854,9 @@ public final class RlActorBench {
             frameSink = new forge.bench.rl.RlFrameDump.Sink(Paths.get(cfg.frameDumpOut));
             System.err.println("[frame-dump] band [" + cfg.frameDumpLo + ", " + cfg.frameDumpHi + ") choices "
                     + cfg.frameDumpChoices + " -> " + frameSink.framesFile());
+            if (cfg.frameDumpMenus) {
+                System.err.println("[frame-dump] menus -> " + frameSink.menusFile()); // dump-menus-1105
+            }
         }
         // bvw-decision-log-1027: logs an earlier "record" replay wrote (forced for their digest-equal games), and this
         // replay's own sink when it records
@@ -2036,6 +2047,9 @@ public final class RlActorBench {
         sum.addProperty("label", cfg.labelSpec != null);
         if (cfg.frameDumpOut != null) {
             sum.addProperty("frame_dump", true); // outcome-arm-1104 (absent otherwise: summaries unchanged)
+            if (cfg.frameDumpMenus) {
+                sum.addProperty("frame_dump_menus", true); // dump-menus-1105 (absent when off)
+            }
         }
         sum.add("watchdog", cfg.watchdog.toJson()); // lki-fix-port-1027
         sum.addProperty("watchdog_armed", wd != null); // review S3-8: false when disabled or under another collector
@@ -2161,8 +2175,8 @@ public final class RlActorBench {
                     game.addPriorityDecisionListener(scans[0]);
                 } : cfg.frameDumpOut != null ? (game, seat, know) -> {
                     // outcome-arm-1104: the frame-dump replay mode (no label search)
-                    dumps[0] = new forge.bench.rl.RlFrameDump(cfg.frameDumpLo, cfg.frameDumpHi, cfg.frameDumpChoices, t,
-                            jarSha, game, know, feat.index(), tobs);
+                    dumps[0] = new forge.bench.rl.RlFrameDump(cfg.frameDumpLo, cfg.frameDumpHi, cfg.frameDumpChoices,
+                            cfg.frameDumpMenus, t, jarSha, game, know, feat.index(), tobs);
                     game.addPriorityDecisionListener(dumps[0]);
                 } : null;
                 // review #124 S2-3: a record replay's checks (the trajectory against step 0 when no labeller or scan

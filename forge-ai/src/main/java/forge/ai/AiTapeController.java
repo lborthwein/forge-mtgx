@@ -114,6 +114,34 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
 
     public static final java.util.Map<Game, Probe> PROBES = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /**
+     * dump-menus-1105 (research only; empty = every existing path unchanged): a reader of a FORCED replay game's menus.
+     * It is shown each forced choice of a taped seat whose arguments the call passes (the choose-a-card asks, targets,
+     * modes, optional triggers; and {@link AiTape}'s forced target configs), after the record's answer was decoded and
+     * before the engine applies it. It never answers and never moves the forced-choice ordinal {@link Probe}s see.
+     */
+    public interface MenuProbe {
+        /**
+         * @param method the controller method (or {@code cfg:<where>} for an SA's forced targets)
+         * @param args the call's arguments (the cfg form: {@code {sa}})
+         * @param entry the record's entry (its answer {@code a}, its sync {@code post})
+         * @param forcedOrd the {@link Probe} ordinal of this choice (its choice frame's choice_ord), or -1
+         * @param value the decoded answer (null for a cfg)
+         */
+        void seen(Player p, String method, Object[] args, JsonObject entry, int forcedOrd, Object value);
+    }
+
+    public static final java.util.Map<Game, MenuProbe> MENU_PROBES = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** dump-menus-1105: a forced choice's menu to its game's menu probe, if any (callers check MENU_PROBES first). */
+    static void menuSeen(final Game g, final Player p, final String m, final Object[] args, final JsonObject e,
+            final int forcedOrd, final Object v) {
+        final MenuProbe mp = MENU_PROBES.get(g);
+        if (mp != null) {
+            mp.seen(p, m, args, e, forcedOrd, v);
+        }
+    }
+
     /** This seat's forced choices so far (r1-assembly-bank-1029; counted only while a probe watches the game). */
     private int forcedOrdinal = 0;
 
@@ -129,21 +157,21 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
             final Function<T, JsonElement> enc, final Function<JsonElement, T> dec) {
         final Probe pr = PROBES.isEmpty() ? null : PROBES.get(g());
         if (pr == null) {
-            return choice(m, witness, live, enc, dec);
+            return choice(m, args, -1, witness, live, enc, dec);
         }
         if (tape.isDetached()) {
             final Object s = pr.scripted(this, m, args);
             return s != Probe.NONE ? (T) s : live.get();
         }
         if (!tape.controllerHere() || tape.recordsNow("m", m)) {
-            return choice(m, witness, live, enc, dec);
+            return choice(m, args, -1, witness, live, enc, dec);
         }
         final int ord = forcedOrdinal++;
         final Object d = pr.divert(this, m, args, ord);
         if (d != Probe.NONE) {
             return (T) d;
         }
-        final T v = choice(m, witness, live, enc, dec);
+        final T v = choice(m, args, ord, witness, live, enc, dec);
         pr.seen(this, m, args, ord, v);
         return v;
     }
@@ -177,7 +205,18 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     /** A choice: recorded with its answer, or (forced) answered from the record without asking the inner controller. */
     private <T> T choice(final String m, final Supplier<T> live, final Function<T, JsonElement> enc,
             final Function<JsonElement, T> dec) {
-        return choice(m, null, live, enc, dec);
+        return choice(m, null, -1, null, live, enc, dec);
+    }
+
+    private <T> T choice(final String m, final Runnable witness, final Supplier<T> live, final Function<T, JsonElement> enc,
+            final Function<JsonElement, T> dec) {
+        return choice(m, null, -1, witness, live, enc, dec);
+    }
+
+    /** dump-menus-1105: a choice whose arguments a {@link MenuProbe} may read (args null: none). */
+    private <T> T menuChoice(final String m, final Object[] args, final Supplier<T> live, final Function<T, JsonElement> enc,
+            final Function<JsonElement, T> dec) {
+        return choice(m, args, -1, null, live, enc, dec);
     }
 
     /**
@@ -186,8 +225,8 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
      * review's knowledge hook, Forge AI's card memory). A forced replay runs it where the record's decision was, so the
      * seat's observers see what they saw live; the decision itself is still the record's.
      */
-    private <T> T choice(final String m, final Runnable witness, final Supplier<T> live, final Function<T, JsonElement> enc,
-            final Function<JsonElement, T> dec) {
+    private <T> T choice(final String m, final Object[] args, final int forcedOrd, final Runnable witness,
+            final Supplier<T> live, final Function<T, JsonElement> enc, final Function<JsonElement, T> dec) {
         tape.refuseAfterDivergence();
         if (!tape.controllerHere()) {
             return live.get();
@@ -232,6 +271,9 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
             throw tape.diverge(m + ": " + x.getMessage());
         }
         tape.done(e);
+        if (args != null && !MENU_PROBES.isEmpty()) {
+            menuSeen(g(), getPlayer(), m, args, e, forcedOrd, v); // dump-menus-1105 (reads only)
+        }
         return v;
     }
 
@@ -313,14 +355,30 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
 
     /** A choice of one of {@code options}, recorded by position (the options are copied first: some AI code reorders them). */
     private <T> T oneOf(final String m, final List<T> options, final Supplier<T> live) {
+        return oneOf(m, options, null, live);
+    }
+
+    /** As above; {@code args} (dump-menus-1105): what a {@link MenuProbe} reads ({@code args[0]}: the options copy). */
+    private <T> T oneOf(final String m, final List<T> options, final Object[] args, final Supplier<T> live) {
         final List<T> snap = options == null ? new ArrayList<>() : new ArrayList<>(options);
-        return choice(m, live, v -> AiTapeCodec.index(snap, v), e -> AiTapeCodec.pickOne(snap, e));
+        if (args != null) {
+            args[0] = snap;
+        }
+        return choice(m, args, -1, null, live, v -> AiTapeCodec.index(snap, v), e -> AiTapeCodec.pickOne(snap, e));
     }
 
     /** A choice of several of {@code options} in order, recorded by position (the options copied first). */
     private <T> List<T> manyOf(final String m, final List<T> options, final Supplier<List<T>> live) {
+        return manyOf(m, options, null, live);
+    }
+
+    /** As above; {@code args} (dump-menus-1105): what a {@link MenuProbe} reads ({@code args[0]}: the options copy). */
+    private <T> List<T> manyOf(final String m, final List<T> options, final Object[] args, final Supplier<List<T>> live) {
         final List<T> snap = options == null ? new ArrayList<>() : new ArrayList<>(options);
-        return choice(m, live, v -> AiTapeCodec.indices(snap, v), e -> AiTapeCodec.pick(snap, e));
+        if (args != null) {
+            args[0] = snap;
+        }
+        return choice(m, args, -1, null, live, v -> AiTapeCodec.indices(snap, v), e -> AiTapeCodec.pick(snap, e));
     }
 
     private static JsonElement bool(final Boolean b) {
@@ -636,7 +694,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
 
     @Override
     public boolean chooseTargetsFor(final SpellAbility currentAbility) {
-        return choice("chooseTargetsFor", () -> inner.chooseTargetsFor(currentAbility), r -> {
+        return menuChoice("chooseTargetsFor", new Object[] {currentAbility}, () -> inner.chooseTargetsFor(currentAbility), r -> {
             final JsonObject o = new JsonObject();
             o.addProperty("r", r);
             o.add("cfg", AiTapeCodec.config(g(), getPlayer(), currentAbility));
@@ -667,7 +725,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     @Override
     public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(final SpellAbility saSrc,
             final List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) {
-        return oneOf("chooseTarget", allTargets, () -> inner.chooseTarget(saSrc, allTargets));
+        return oneOf("chooseTarget", allTargets, new Object[] {null, saSrc}, () -> inner.chooseTarget(saSrc, allTargets));
     }
 
     @Override
@@ -734,7 +792,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     @Override
     public <T extends GameEntity> T chooseSingleEntityForEffect(final FCollectionView<T> optionList, final DelayedReveal delayedReveal,
             final SpellAbility sa, final String title, final boolean isOptional, final Player targetedPlayer, final Map<String, Object> params) {
-        return choice("chooseSingleEntityForEffect", revealOf(delayedReveal),
+        return choice("chooseSingleEntityForEffect", new Object[] {listOf(optionList), sa, isOptional}, -1, revealOf(delayedReveal),
                 () -> inner.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, targetedPlayer, params),
                 this::one, e -> amongOne(listOf(optionList), e));
     }
@@ -743,7 +801,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(final FCollectionView<T> optionList, final int min, final int max,
             final DelayedReveal delayedReveal, final SpellAbility sa, final String title, final Player targetedPlayer,
             final Map<String, Object> params) {
-        return choice("chooseEntitiesForEffect", revealOf(delayedReveal),
+        return choice("chooseEntitiesForEffect", new Object[] {listOf(optionList), sa, min, max}, -1, revealOf(delayedReveal),
                 () -> inner.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title, targetedPlayer, params),
                 this::cards, e -> among(listOf(optionList), e));
     }
@@ -751,13 +809,13 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     @Override
     public List<SpellAbility> chooseSpellAbilitiesForEffect(final List<SpellAbility> spells, final SpellAbility sa, final String title,
             final int num, final Map<String, Object> params) {
-        return manyOf("chooseSpellAbilitiesForEffect", spells, () -> inner.chooseSpellAbilitiesForEffect(spells, sa, title, num, params));
+        return manyOf("chooseSpellAbilitiesForEffect", spells, new Object[] {null, sa, num}, () -> inner.chooseSpellAbilitiesForEffect(spells, sa, title, num, params));
     }
 
     @Override
     public SpellAbility chooseSingleSpellForEffect(final List<SpellAbility> spells, final SpellAbility sa, final String title,
             final Map<String, Object> params) {
-        return oneOf("chooseSingleSpellForEffect", spells, () -> inner.chooseSingleSpellForEffect(spells, sa, title, params));
+        return oneOf("chooseSingleSpellForEffect", spells, new Object[] {null, sa}, () -> inner.chooseSingleSpellForEffect(spells, sa, title, params));
     }
 
     @Override
@@ -950,7 +1008,8 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
 
     @Override
     public boolean confirmTrigger(final WrappedAbility wrapper) {
-        return choice("confirmTrigger", () -> inner.confirmTrigger(wrapper), AiTapeController::bool, AiTapeController::bool);
+        return menuChoice("confirmTrigger", new Object[] {wrapper}, () -> inner.confirmTrigger(wrapper), AiTapeController::bool,
+                AiTapeController::bool);
     }
 
     @Override
@@ -1016,7 +1075,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     public List<AbilitySub> chooseModeForAbility(final SpellAbility sa, final List<AbilitySub> possible, final int min, final int num,
             final boolean allowRepeat) {
         final List<AbilitySub> offered = possible == null ? new ArrayList<>() : new ArrayList<>(possible);
-        return choice("chooseModeForAbility", () -> inner.chooseModeForAbility(sa, possible, min, num, allowRepeat), v -> {
+        return menuChoice("chooseModeForAbility", new Object[] {offered, sa, min, num}, () -> inner.chooseModeForAbility(sa, possible, min, num, allowRepeat), v -> {
             if (v == null) {
                 return JsonNull.INSTANCE;
             }

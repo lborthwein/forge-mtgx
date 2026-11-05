@@ -164,6 +164,104 @@ public class RlFrameDumpTest {
                 + ar.size() + " band rows byte-equal in the whole-game dump " + same + "/" + dr.size());
     }
 
+    /** dump-menus-1105: every MXL1 record of a dump's menus files ({header, payload}). */
+    static List<Object[]> menuRecords(final Path dir) throws Exception {
+        final List<Object[]> recs = new java.util.ArrayList<>();
+        try (java.util.stream.Stream<Path> s = Files.list(dir)) {
+            for (Path p : (Iterable<Path>) s.filter(x -> x.getFileName().toString().endsWith(".mxm.gz")).sorted()::iterator) {
+                final java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                try (java.io.InputStream in = new java.util.zip.GZIPInputStream(Files.newInputStream(p))) {
+                    in.transferTo(bo);
+                }
+                final java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(bo.toByteArray()).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                while (b.hasRemaining()) {
+                    final byte[] magic = new byte[4];
+                    b.get(magic);
+                    Assert.assertEquals(new String(magic, java.nio.charset.StandardCharsets.US_ASCII), "MXL1");
+                    final byte[] h = new byte[b.getInt()];
+                    b.get(h);
+                    final byte[] pl = new byte[b.getInt()];
+                    b.get(pl);
+                    recs.add(new Object[] {JsonParser.parseString(new String(h, java.nio.charset.StandardCharsets.UTF_8))
+                            .getAsJsonObject(), pl});
+                }
+            }
+        }
+        return recs;
+    }
+
+    /**
+     * dump-menus-1105: {@code frameDump.menus} on the fixture's whole games. The frames are the menus-off dump's, record
+     * for record and byte for byte; a games row only gains the menu counts; the menus go to their own file, and every
+     * menu's chosen options are among its options, with the chosen single pick's answer equal to the record's.
+     */
+    @Test(timeOut = 1800000)
+    public void menusAddTheirOwnRecordsAndChangeNoFrame() throws Exception {
+        final Path off = Files.createTempDirectory(RlLabelReplayTest.out, "fm-off-");
+        Assert.assertEquals(RlActorBench.replay(dumpCfg(off, 0, 0), RlLabelReplayTest.index, "test"), 0);
+        final Path on = Files.createTempDirectory(RlLabelReplayTest.out, "fm-on-");
+        final RlActorBench.Cfg c = dumpCfg(on, 0, 0);
+        c.frameDumpMenus = true;
+        Assert.assertEquals(RlActorBench.replay(c, RlLabelReplayTest.index, "test"), 0);
+        final List<Object[]> fOff = RlLabelReplayTest.records(off);
+        final List<Object[]> fOn = RlLabelReplayTest.records(on);
+        Assert.assertEquals(fOn.size(), fOff.size());
+        for (int i = 0; i < fOff.size(); i++) {
+            Assert.assertEquals(fOn.get(i)[0], fOff.get(i)[0], "frame header " + i);
+            Assert.assertTrue(Arrays.equals((byte[]) fOn.get(i)[1], (byte[]) fOff.get(i)[1]), "frame payload " + i);
+        }
+        final java.util.Set<String> menuKeys = new java.util.TreeSet<>(Arrays.asList("menus", "menus_void",
+                "menu_options", "menus_ge10", "menus_skipped", "menu_by_method", "menu_ms"));
+        final java.util.Set<String> timing = new java.util.TreeSet<>(Arrays.asList("frame_ms", "cpu_ms"));
+        final List<JsonObject> gOff = RlLabelReplayTest.jsonl(off, "games-");
+        final List<JsonObject> gOn = RlLabelReplayTest.jsonl(on, "games-");
+        Assert.assertEquals(gOn.size(), gOff.size());
+        int menus = 0;
+        for (int i = 0; i < gOff.size(); i++) {
+            final JsonObject a = gOn.get(i).deepCopy();
+            final JsonObject b = gOff.get(i).deepCopy();
+            Assert.assertTrue(a.get("equal").getAsBoolean(), a.toString());
+            Assert.assertEquals(a.get("menus_skipped").getAsInt(), 0, a.toString());
+            menus += a.get("menus").getAsInt();
+            for (String k : menuKeys) {
+                Assert.assertTrue(a.has(k), k);
+                a.remove(k);
+                Assert.assertFalse(b.has(k), k);
+            }
+            for (String k : timing) {
+                a.remove(k);
+                b.remove(k);
+            }
+            Assert.assertEquals(a, b, "games row " + i);
+        }
+        final List<Object[]> ms = menuRecords(on);
+        Assert.assertEquals(ms.size(), menus);
+        Assert.assertTrue(menus > 0, "the fixture's games pose menus");
+        Assert.assertTrue(menuRecords(off).isEmpty());
+        final Map<String, Integer> byFamily = new TreeMap<>();
+        int answered = 0, wide = 0;
+        for (Object[] r : ms) {
+            final JsonObject h = (JsonObject) r[0];
+            Assert.assertEquals(h.get("kind").getAsString(), "menu");
+            Assert.assertEquals(h.get("schema").getAsString(), forge.bench.rl.RlFrameDump.MENU_SCHEMA);
+            Assert.assertTrue(((byte[]) r[1]).length > 0);
+            byFamily.merge(h.get("family").getAsString(), 1, Integer::sum);
+            final com.google.gson.JsonArray opts = h.getAsJsonArray("options");
+            final com.google.gson.JsonArray ch = h.getAsJsonArray("chosen");
+            for (com.google.gson.JsonElement x : ch) {
+                Assert.assertTrue(x.getAsInt() >= 0 && x.getAsInt() < opts.size(), h.toString());
+            }
+            wide += h.get("n_options").getAsInt() >= 10 ? 1 : 0;
+            if (ch.size() == 1 && opts.get(ch.get(0).getAsInt()).getAsJsonObject().has("a")) {
+                Assert.assertEquals(opts.get(ch.get(0).getAsInt()).getAsJsonObject().get("a"), h.get("chosen_a"),
+                        "the chosen option's answer is the record's: " + h);
+                answered++;
+            }
+        }
+        System.err.println("[frame-dump test] menus " + menus + " by family " + byFamily + "; chosen answer checked "
+                + answered + "; >= 10 options " + wide);
+    }
+
     /**
      * knowledge-settle-1104: with the tracker on the fixed settle schedule a frame no longer depends on which positions
      * were observed. The step-0 labeller (T = 3), the banded dump and the whole-game dump give byte-identical frames at
