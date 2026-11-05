@@ -464,6 +464,33 @@ public class R3LabelSearchTest extends SimulationTest {
         AssertJUnit.assertTrue(n.work.oppCuts >= 1);
     }
 
+    /**
+     * opp-belief-1104 (r3 oppBelief): the opponent's reply from its own worlds. The Bolt on the stack is public, so in
+     * every one of its worlds its Counterspell answers it: the same 0 as the MIN, with the pick logged per world.
+     */
+    @Test
+    public void oppBeliefPicksItsReplyFromItsOwnWorlds() {
+        final JsonObject o = base();
+        o.addProperty("selectWorlds", 1);
+        o.addProperty("targetWorlds", 2);
+        o.addProperty("oppMin", true);
+        o.addProperty("oppBelief", 2);
+        final Game g = boltBoard(3, 2, true, true);
+        final Player a = g.getPlayers().get(0);
+        final R3LabelSearch.Spec sp = spec(o);
+        sp.testPassiveOpp = true;
+        final R3LabelSearch r3 = new R3LabelSearch(sp, env(flat(0.5), null));
+        final List<R3LabelSearch.PCand> cands = new ArrayList<>(r3.candidates(g, a,
+                Collections.singletonList(firstSpell(a, "Lightning Bolt"))));
+        final R3LabelSearch.Result res = r3.priorityRow(g, a, cands.subList(0, 1), 31L);
+        final JsonObject j = res.toJson();
+        System.err.println("[r3-test] oppBelief row " + j);
+        AssertJUnit.assertEquals(j.toString(), 0.0, res.target, 1e-9);
+        final JsonObject w0 = j.getAsJsonArray("target_worlds").get(0).getAsJsonObject();
+        AssertJUnit.assertTrue(j.toString(), w0.has("belief_pick") && w0.get("belief_pick").getAsString().contains("Counterspell"));
+        AssertJUnit.assertTrue(sp.identity().has("oppBelief"));
+    }
+
     // ------------------------------------------------------------------------------------------------ log, determinism
 
     @Test

@@ -163,4 +163,41 @@ public class RlFrameDumpTest {
         System.err.println("[frame-dump test] label rows " + lr.size() + " band rows " + dr.size() + " all rows "
                 + ar.size() + " band rows byte-equal in the whole-game dump " + same + "/" + dr.size());
     }
+
+    /**
+     * knowledge-settle-1104: with the tracker on the fixed settle schedule a frame no longer depends on which positions
+     * were observed. The step-0 labeller (T = 3), the banded dump and the whole-game dump give byte-identical frames at
+     * every shared position, and the rows say knowledge_settle fixed. Off (the other test), the schedule shows.
+     */
+    @Test(timeOut = 1800000)
+    public void onTheFixedSettleScheduleFramesDoNotDependOnTheQuerySchedule() throws Exception {
+        final boolean was = forge.bench.rl.RlKnowledge.FIXED_SETTLE;
+        forge.bench.rl.RlKnowledge.FIXED_SETTLE = true;
+        try {
+            final Path lab = Files.createTempDirectory(RlLabelReplayTest.out, "fs-labels-");
+            Assert.assertEquals(RlActorBench.replay(RlLabelReplayTest.replayCfg(lab, 3), RlLabelReplayTest.index, "test"),
+                    0);
+            final Map<String, Object[]> lr = byKey(RlLabelReplayTest.records(lab));
+            final Path band = Files.createTempDirectory(RlLabelReplayTest.out, "fs-band-");
+            Assert.assertEquals(RlActorBench.replay(dumpCfg(band, 0, 3), RlLabelReplayTest.index, "test"), 0);
+            final Map<String, Object[]> dr = byKey(RlLabelReplayTest.records(band));
+            final Path all = Files.createTempDirectory(RlLabelReplayTest.out, "fs-all-");
+            Assert.assertEquals(RlActorBench.replay(dumpCfg(all, 0, 0), RlLabelReplayTest.index, "test"), 0);
+            final Map<String, Object[]> ar = byKey(RlLabelReplayTest.records(all));
+            Assert.assertFalse(lr.isEmpty());
+            for (Map.Entry<String, Object[]> e : lr.entrySet()) {
+                Assert.assertTrue(Arrays.equals((byte[]) dr.get(e.getKey())[1], (byte[]) e.getValue()[1]),
+                        "label vs band at " + e.getKey());
+            }
+            for (Map.Entry<String, Object[]> e : dr.entrySet()) {
+                Assert.assertEquals(((JsonObject) e.getValue()[0]).get("knowledge_settle").getAsString(), "fixed");
+                Assert.assertTrue(Arrays.equals((byte[]) ar.get(e.getKey())[1], (byte[]) e.getValue()[1]),
+                        "band vs whole game at " + e.getKey());
+            }
+            System.err.println("[frame-dump test] fixed settle: label rows " + lr.size() + " band rows " + dr.size()
+                    + " all rows " + ar.size() + ", every shared position byte-equal");
+        } finally {
+            forge.bench.rl.RlKnowledge.FIXED_SETTLE = was;
+        }
+    }
 }

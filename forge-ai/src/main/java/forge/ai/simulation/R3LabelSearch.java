@@ -188,6 +188,11 @@ public final class R3LabelSearch {
          * the proof spec's; a win or loss there is the leaf's answer, anything else runs the full proof.
          */
         public int proofPrePct = 0;
+        /**
+         * opp-belief-1104 (ARCH-APPENDIX-1104 A2; 0 = off, the default, not in the identity): each oppMin world's reply
+         * comes from K worlds of the opponent's own belief ({@link OppMin#beliefMin}); oppBeliefCands caps its candidates.
+         */
+        public int oppBelief = 0, oppBeliefCands = 6;
         /** The block as given (sorted), for the identity. */
         JsonObject json = new JsonObject();
 
@@ -206,7 +211,8 @@ public final class R3LabelSearch {
                 "targetWorlds", "stratify", "topAnswers", "cac", "inline", "leaf", "maxTurns", "maxSteps", "horizon",
                 "proofLeaf", "profile", "solverSpec", "drawDepth", "seqCap", "samples", "oppMin", "oppMinIn",
                 "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed", "knownLib", "infoState",
-                "instantCands", "proofCache", "probeWorlds", "probeCands", "probeTarget", "selPrune", "tgtStop", "proofPrePct"));
+                "instantCands", "proofCache", "probeWorlds", "probeCands", "probeTarget", "selPrune", "tgtStop", "proofPrePct",
+                "oppBelief", "oppBeliefCands"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -279,6 +285,9 @@ public final class R3LabelSearch {
                     || s.proofPrePct < 0 || s.proofPrePct >= 100 || (s.probeWorlds > 0 && s.probeWorlds > s.selectWorlds)) {
                 throw new IllegalArgumentException("r3: label-speed keys out of range");
             }
+            if (o.has("oppBelief")) s.oppBelief = o.get("oppBelief").getAsInt(); // opp-belief-1104
+            if (o.has("oppBeliefCands")) s.oppBeliefCands = o.get("oppBeliefCands").getAsInt();
+            if (s.oppBelief < 0 || s.oppBeliefCands < 2) throw new IllegalArgumentException("r3: oppBelief >= 0, oppBeliefCands >= 2");
             if (!"rollout".equals(s.leaf) && !"value".equals(s.leaf)) {
                 throw new IllegalArgumentException("r3.leaf is \"rollout\" or \"value\", not " + s.leaf);
             }
@@ -350,6 +359,10 @@ public final class R3LabelSearch {
             if (selPrune > 0) o.addProperty("selPrune", selPrune);
             if (tgtStop > 0) o.addProperty("tgtStop", tgtStop);
             if (proofPrePct > 0) o.addProperty("proofPrePct", proofPrePct);
+            if (oppBelief > 0) {
+                o.addProperty("oppBelief", oppBelief); // opp-belief-1104: only when on
+                o.addProperty("oppBeliefCands", oppBeliefCands);
+            }
             return sorted(o);
         }
 
@@ -608,6 +621,8 @@ public final class R3LabelSearch {
         final List<Integer> sizes = new ArrayList<>();
         /** The shared MIN's response points this line met (root turn). */
         List<OppMin.Point> points;
+        /** opp-belief-1104: the opponent's responses made (OppMin.Driver#realized). */
+        Map<String, String> realized;
 
         boolean resolved() {
             return !Double.isNaN(v);
@@ -629,6 +644,8 @@ public final class R3LabelSearch {
         int memoHits, budget;
         /** Review #148: the MIN's cap events by reason. */
         final Map<String, Integer> caps = new TreeMap<>();
+        /** opp-belief-1104 (oppBelief only): the pick and each candidate's Q. */
+        String beliefPick, beliefQ;
 
         JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -643,6 +660,8 @@ public final class R3LabelSearch {
                 o.add("caps", c);
             }
             if (minWhy != null) o.addProperty("min", minWhy);
+            if (beliefPick != null) o.addProperty("belief_pick", beliefPick); // opp-belief-1104 (only when on)
+            if (beliefQ != null) o.addProperty("belief_q", beliefQ);
             if (draw != null) o.addProperty("draw", draw);
             if (!Double.isNaN(weight)) o.add("w", num(weight));
             return o;
@@ -1094,6 +1113,7 @@ public final class R3LabelSearch {
                     if (first.pass) {
                         return null;
                     }
+                    if (!first.pass) OppBeliefWorlds.materialize(g, me, first.hostId); // opp-belief-1104 (no-op otherwise)
                     final SpellAbility sa = first.locate(g, me);
                     if (sa == null) {
                         out.end = "failed:first_not_in_copy";
@@ -1321,6 +1341,7 @@ public final class R3LabelSearch {
         if (script != null && !me.getOpponents().isEmpty()) {
             st.driver = new OppMin.Driver(script, me.getOpponents().get(0), me, rootTurn);
             out.points = st.driver.points;
+            out.realized = st.driver.realized; // opp-belief-1104
         }
         work.lines++;
         ChooseACard inline = null;
@@ -1666,18 +1687,44 @@ public final class R3LabelSearch {
      * One world of a candidate: the MIN over its oppMin branches when {@code min} (each branch the same world, the same
      * seeds), else the plain line. {@code play} runs one branch (its script) and returns its line.
      */
-    WorldOut world(final boolean min, final Work work, final java.util.function.Function<OppMin.Script, LineOut> play) {
+    WorldOut world(final boolean min, final Work work,
+            final java.util.function.BiFunction<Integer, OppMin.Script, LineOut> play) {
         final WorldOut wo = new WorldOut();
         if (!min) {
-            final LineOut l = play.apply(null);
+            final LineOut l = play.apply(0, null);
             wo.v = l.v;
             wo.end = l.end;
+            return wo;
+        }
+        if (spec.oppBelief > 0) {
+            // opp-belief-1104: the opponent's reply from its own belief worlds (u >= 1), valued in this one (u = 0)
+            final OppMin.Out m = OppMin.beliefMin(new OppMin.Cfg(spec.oppNodes, spec.oppResponses, spec.oppDepth),
+                    spec.oppBelief, spec.oppBeliefCands, (u, script) -> {
+                        work.oppNodes++;
+                        final LineOut l = play.apply(u, script);
+                        if (u > 0 && "failed:first_not_in_copy".equals(l.end)) {
+                            // in this world of theirs we do not hold the candidate's card: no line to answer (not won)
+                            return new OppMin.Leaf(0.0, "belief:not_held", l.points).realized(l.realized);
+                        }
+                        return new OppMin.Leaf(l.v, l.end, l.points).realized(l.realized);
+                    });
+            if (m.cap != null && !(m.v == 0.0)) work.oppCuts++;
+            wo.branches = m.nodes + m.beliefNodes;
+            wo.v = m.v;
+            wo.end = m.end == null ? "failed:none" : m.end;
+            wo.minWhy = m.why;
+            wo.memoHits = m.memoHits;
+            wo.budget = m.budget;
+            wo.beliefPick = m.beliefPick;
+            wo.beliefQ = m.beliefQ;
+            wo.caps.putAll(m.caps);
+            for (Map.Entry<String, Integer> e : m.caps.entrySet()) work.capReasons.merge(e.getKey(), e.getValue(), Integer::sum);
             return wo;
         }
         // architect-o ruling 10-30: the shared budgeted MIN, one implementation with the solver's proof check
         final OppMin.Out m = OppMin.min(new OppMin.Cfg(spec.oppNodes, spec.oppResponses, spec.oppDepth), script -> {
             work.oppNodes++;
-            final LineOut l = play.apply(script);
+            final LineOut l = play.apply(0, script);
             return new OppMin.Leaf(l.v, l.end, l.points);
         });
         if (m.cap != null && !(m.v == 0.0)) work.oppCuts++;
@@ -2092,8 +2139,8 @@ public final class R3LabelSearch {
                 final long ws = LookaheadSearch.mix(seed0, 0x53454C0000L + w); // common across candidates
                 R3Prof.ctx("sel", i, w);
                 final PCand c = cands.get(i);
-                return world(minSel, wk, script -> priorityLine(live, liveMe, c, new World(false, ws, -1, 0, null,
-                        null, knownMe, knownOpp), ws, script, wk));
+                return world(minSel, wk, (u, script) -> priorityLine(live, liveMe, c, new World(false, ws, -1, 0, null,
+                        null, knownMe, knownOpp), ws, script, wk, u));
             };
             final long ts = LookaheadSearch.mix(seed0, 0x5452554557L);
             // the stratified target world w of candidate pc
@@ -2101,7 +2148,7 @@ public final class R3LabelSearch {
                 final long ws = LookaheadSearch.mix(ts, 0x5457000000L + w);
                 R3Prof.ctx("tgt", cands.indexOf(pc), w);
                 final World wt = new World(true, ws, w, W, null, null, knownMe, knownOpp);
-                final WorldOut wo = world(spec.oppMin, wk, script -> priorityLine(live, liveMe, pc, wt, ws, script, wk));
+                final WorldOut wo = world(spec.oppMin, wk, (u, script) -> priorityLine(live, liveMe, pc, wt, ws, script, wk, u));
                 wo.draw = wt.firstDraw;
                 wo.weight = 1.0 / W;
                 return wo;
@@ -2189,8 +2236,8 @@ public final class R3LabelSearch {
                     final long ws = LookaheadSearch.mix(ts, 0x5345510000L + s);
                     R3Prof.ctx("draw", res.pick, s);
                     final World wd = new World(true, ws, -1, 0, dr.seqs.get(s), dr, knownMe, knownOpp);
-                    final WorldOut wo = world(spec.oppMin, wk, script -> priorityLine(live, liveMe, pc, wd, ws,
-                            script, wk));
+                    final WorldOut wo = world(spec.oppMin, wk, (u, script) -> priorityLine(live, liveMe, pc, wd, ws,
+                            script, wk, u));
                     wo.draw = String.valueOf(dr.seqs.get(s));
                     wo.weight = dr.weights.get(s);
                     return wo;
@@ -2223,7 +2270,7 @@ public final class R3LabelSearch {
 
     /** One priority line: an isolated copy of the live priority, its world, the candidate first, played to the leaf. */
     private LineOut priorityLine(final Game live, final Player liveMe, final PCand c, final World wm, final long ws,
-            final OppMin.Script script, final Work work) {
+            final OppMin.Script script, final Work work, final int oppWorld) {
         return isolated(LookaheadSearch.mix(ws, 1), () -> {
             R3Prof.lineStart();
             LineOut lo = null;
@@ -2248,6 +2295,7 @@ public final class R3LabelSearch {
                 me = (Player) copier.find(liveMe);
                 work.copies++;
                 wm.make(live, liveMe, g, me);
+                oppView(live, liveMe, me, ws, oppWorld);
             }
             } finally {
                 R3Prof.exit();
@@ -2259,6 +2307,17 @@ public final class R3LabelSearch {
                 R3Prof.lineEnd(new R3Prof.LineEndInfo(lo == null ? -1 : lo.steps, lo == null ? "?" : lo.end));
             }
         });
+    }
+
+    /**
+     * opp-belief-1104 (oppWorld u >= 1): the opponent's belief world u of this copy: our cards it cannot see re-dealt
+     * from the canonical pool ({@link OppBeliefWorlds}); its knowledge of our library from InfoStates with infoState on.
+     */
+    private void oppView(final Game live, final Player liveMe, final Player me, final long ws, final int oppWorld) {
+        if (oppWorld <= 0 || liveMe.getOpponents().isEmpty()) return;
+        final Player liveOpp = liveMe.getOpponents().get(0);
+        final Set<Integer> known = spec.infoState ? env.known(liveOpp, liveMe) : null;
+        OppBeliefWorlds.redeal(live, liveOpp, me, known, new Random(OppBeliefWorlds.seed(ws, oppWorld)));
     }
 
     /** Argmax of the resolved means; ties to the lower index; a departure must be strictly better (margin 0). */
@@ -2500,8 +2559,8 @@ public final class R3LabelSearch {
                 final long ws = LookaheadSearch.mix(seed0, 0x53454C0000L + w);
                 R3Prof.ctx("sel", j, w);
                 final int i = played.get(j);
-                return world(minSel, wk, script -> choiceLine(row, i, new World(false, ws, -1, 0, null, null,
-                        knownMe, knownOpp), ws, rootTurn, script, wk));
+                return world(minSel, wk, (u, script) -> choiceLine(row, i, new World(false, ws, -1, 0, null, null,
+                        knownMe, knownOpp), ws, rootTurn, script, wk, u));
             });
             for (CandOut co : res.cands) co.close();
             final int pj = argmax(res.cands);
@@ -2521,7 +2580,7 @@ public final class R3LabelSearch {
                 final long ws = LookaheadSearch.mix(ts, 0x5457000000L + w);
                 R3Prof.ctx("tgt", pj, w);
                 final World wt = new World(true, ws, w, W, null, null, knownMe, knownOpp);
-                final WorldOut wo = world(spec.oppMin, wk, script -> choiceLine(row, pi, wt, ws, rootTurn, script, wk));
+                final WorldOut wo = world(spec.oppMin, wk, (u, script) -> choiceLine(row, pi, wt, ws, rootTurn, script, wk, u));
                 wo.draw = wt.firstDraw;
                 wo.weight = 1.0 / W;
                 return wo;
@@ -2546,12 +2605,20 @@ public final class R3LabelSearch {
     }
 
     private LineOut choiceLine(final ChooseACard.Row row, final int i, final World wm, final long ws, final int rootTurn,
-            final OppMin.Script script, final Work work) {
+            final OppMin.Script script, final Work work, final int oppWorld) {
         work.copies++;
         R3Prof.lineStart();
         LineOut l = null;
         try {
-            l = row.play(i, wm, ws, (g, me) -> line(g, me, rootTurn, null, script, wm, work, ws));
+            l = row.play(i, wm, ws, (g, me) -> {
+                if (oppWorld > 0) {
+                    final Game live = row.live();
+                    synchronized (live) {
+                        oppView(live, (Player) live.getPlayer(me.getId()), me, ws, oppWorld);
+                    }
+                }
+                return line(g, me, rootTurn, null, script, wm, work, ws);
+            });
             if (l == null) {
                 final LineOut o = new LineOut();
                 o.end = "failed:apply";
