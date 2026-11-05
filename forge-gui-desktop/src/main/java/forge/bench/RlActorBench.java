@@ -98,7 +98,9 @@ import forge.util.MyRandom;
  * capActions (40), gameTimeoutSec (300), maxDecisions (3000), jarSha, aiTimeoutSec (5), readTimeoutSec (120),
  * tapeRotate (1000), maxGames (0 = until stop), replay {tapes, lines [[fileIdx, line]], out}, k8 (the spec of a
  * {@code lookahead:K8} opponent seat, lane gen-check-1007), loopGuard (0 = off; the live seat's "Cancel Search?" loop
- * guard on the RL seats, lane exploit-panel-1015)}. Opponent controllers besides {@code forge}:
+ * guard on the RL seats, lane exploit-panel-1015), hangWork (0 = off; a HOST key, lane void-causes-1104:
+ * a game whose thread spends this many engine work units, {@link forge.game.WorkMeter}, with no priority decision in the
+ * live game is ended and voided "hang"; and a game that ignores its wall timeout for 60 s ends the JVM)}. Opponent controllers besides {@code forge}:
  * {@code forge:<Profile>} (Forge AI under a shipped {@code res/ai} profile; train and eval) and {@code lookahead:K8}
  * (Forge AI Default plus the look-ahead with the {@code k8} spec; eval only).
  * Exit codes: 0 done; 2 config / HELLO refused / deck guard; 3 a thread died on a transport or protocol error;
@@ -122,6 +124,8 @@ public final class RlActorBench {
         int capActions = 40;
         int gameTimeoutSec = 300;
         int maxDecisions = 3000;
+        /** void-causes-1104: the hang watchdog's budget in engine work units (host key; 0 = off, the default). */
+        long hangWork = 0;
         String jarSha = null;
         int aiTimeoutSec = 5;
         int readTimeoutSec = 120;
@@ -177,6 +181,7 @@ public final class RlActorBench {
         if (o.has("tapesDir")) c.tapesDir = o.get("tapesDir").getAsString();
         if (o.has("capActions")) c.capActions = o.get("capActions").getAsInt();
         if (o.has("gameTimeoutSec")) c.gameTimeoutSec = o.get("gameTimeoutSec").getAsInt();
+        if (o.has("hangWork")) c.hangWork = Math.max(0L, o.get("hangWork").getAsLong());
         if (o.has("maxDecisions")) c.maxDecisions = o.get("maxDecisions").getAsInt();
         if (o.has("loopGuard")) {
             c.loopGuard = o.get("loopGuard").getAsInt();
@@ -626,6 +631,8 @@ public final class RlActorBench {
         RlSimBench.Digest dg = null;
         LookaheadBench.Digest dgLb = null;
         String crash = null;
+        JsonObject crashRec = null; // void-causes-1104: the crash's whole stack (null = no crash)
+        forge.game.WorkMeter meter = null; // void-causes-1104: the hang watchdog's meter (null = off)
         RlSearch search = null;
         RlSearch searchAlt = null; // choice-search-1105
         try {
@@ -705,16 +712,32 @@ public final class RlActorBench {
             game.subscribeToEvents(dgLb);
             RUNNING.put(Thread.currentThread(), new Object[] {game,
                     System.currentTimeMillis() + cfg.gameTimeoutSec * 1000L, uid});
+            meter = forge.game.WorkMeter.open(cfg.hangWork); // void-causes-1104: null unless hangWork is set
+            if (meter != null) {
+                final forge.game.WorkMeter m = meter;
+                game.addPriorityDecisionListener(new forge.game.PriorityDecisionListener() {
+                    @Override
+                    public void beforeDecision(final forge.game.player.Player p) {
+                    }
+
+                    @Override
+                    public void afterDecision(final forge.game.player.Player p,
+                            final List<forge.game.spellability.SpellAbility> chosen) {
+                        m.progress(); // the live game's progress: a priority decision taken
+                    }
+                });
+            }
             match.startGame(game, null);
         } catch (Throwable e) {
             crash = e.toString();
-            System.err.println("[rlactor] game " + Long.toUnsignedString(uid) + " crashed: " + e);
-            final JsonArray fr = RlSimBench.forgeFrames(e);
-            for (JsonElement f : fr) {
-                System.err.println("[rlactor]   " + f.getAsString());
-            }
+            // void-causes-1104: the whole stack (every frame, causes, suppressed) to stderr in one write and to the
+            // game's GAME_END record ("crash"); measurement only
+            crashRec = CrashStack.print("[rlactor]   ", "[rlactor] game " + Long.toUnsignedString(uid) + " crashed: " + e, e);
         } finally {
             RUNNING.remove(Thread.currentThread());
+            if (meter != null) {
+                forge.game.WorkMeter.close();
+            }
             if (game != null && !game.isGameOver()) {
                 game.setGameOver(GameEndReason.Draw);
             }
@@ -745,6 +768,8 @@ public final class RlActorBench {
         String voidReason = null;
         if (TIMED_OUT.remove(uid) != null) {
             voidReason = "timeout";
+        } else if (meter != null && meter.tripped()) {
+            voidReason = "hang"; // void-causes-1104: no live progress within hangWork engine work units
         } else if (seat.voidReason != null) {
             voidReason = seat.voidReason;
         } else if (crash != null || game == null) {
@@ -818,6 +843,12 @@ public final class RlActorBench {
             end.addProperty("void", voidReason);
         }
         end.addProperty("reason", reason);
+        if (crashRec != null) {
+            end.add("crash", crashRec); // void-causes-1104: a crashed game's anomaly record (only on a crash)
+        }
+        if (meter != null) {
+            end.add("hang_meter", meterJson(meter)); // void-causes-1104: only with hangWork set (budget calibration)
+        }
         end.addProperty("turns", turns);
         end.add("decisions", RlWire.intArray(seat.decisions(0), seat.decisions(1)));
         final JsonArray ov = new JsonArray();
@@ -1264,12 +1295,69 @@ public final class RlActorBench {
                 cl.gameEnd(p.end);
             }
         } catch (Exception e) {
-            System.err.println("[rlactor] w" + thread + " stopped: " + e);
+            CrashStack.print("[rlactor]   ", "[rlactor] w" + thread + " stopped: " + e, e); // void-causes-1104
             EXIT.compareAndSet(0, 3);
         } finally {
             if (cl != null) {
                 cl.close();
             }
+        }
+    }
+
+    /** void-causes-1104: a WorkMeter summary as JSON. */
+    static JsonObject meterJson(final forge.game.WorkMeter m) {
+        final JsonObject o = new JsonObject();
+        for (Map.Entry<String, Object> e : m.summary().entrySet()) {
+            if (e.getValue() instanceof Number) {
+                o.addProperty(e.getKey(), (Number) e.getValue());
+            } else {
+                o.addProperty(e.getKey(), String.valueOf(e.getValue()));
+            }
+        }
+        return o;
+    }
+
+    /**
+     * void-causes-1104 (hangWork set): a game ignored its wall timeout for 60 s. Its thread's stack goes to stderr and to
+     * {@code hung-<pid>.json} in {@code dir} (the game's anomaly record), then the JVM is halted after {@code graceSec}
+     * whatever else blocks (a hung game thread can hold a lock the summary needs, or keep the heap full).
+     */
+    static void hungExit(final Thread t, final long uid, final Path dir, final int graceSec) {
+        final Thread halt = new Thread(() -> {
+            try {
+                Thread.sleep(graceSec * 1000L);
+            } catch (InterruptedException e) {
+                // halt now
+            }
+            System.err.println("[rlactor] hung game " + Long.toUnsignedString(uid) + ": halting the JVM (exit 3)");
+            System.err.flush();
+            Runtime.getRuntime().halt(3);
+        }, "rlactor-hung-halt");
+        halt.setDaemon(true);
+        halt.start();
+        try {
+            final JsonObject rec = new JsonObject();
+            rec.addProperty("type", "hung");
+            rec.addProperty("game_uid", Long.toUnsignedString(uid));
+            rec.addProperty("thread", t.getName());
+            final JsonArray fr = new JsonArray();
+            final StringBuilder b = new StringBuilder("[rlactor] hung game " + Long.toUnsignedString(uid) + " thread "
+                    + t.getName() + ":\n");
+            for (StackTraceElement f : t.getStackTrace()) {
+                fr.add(f.toString());
+                b.append("[rlactor]   at ").append(f).append('\n');
+            }
+            rec.add("frames", fr);
+            System.err.print(b);
+            System.err.flush();
+            if (dir != null) {
+                Files.createDirectories(dir);
+                Files.write(dir.resolve("hung-" + ProcessHandle.current().pid() + ".json"),
+                        (RlWire.canonicalString(rec) + "\n").getBytes(StandardCharsets.UTF_8),
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+        } catch (Throwable e) {
+            System.err.println("[rlactor] hung record failed: " + e);
         }
     }
 
@@ -1293,6 +1381,10 @@ public final class RlActorBench {
                     if (now - since > 60_000L) {
                         System.err.println("[rlactor] game " + Long.toUnsignedString((Long) r[2])
                                 + " ignored its timeout for 60 s: hung");
+                        if (cfg.hangWork > 0) {
+                            hungExit(e.getKey(), (Long) r[2], Paths.get(cfg.tapesDir != null ? cfg.tapesDir
+                                    : "tapes/" + cfg.actorId), 30); // void-causes-1104: the JVM exits, always
+                        }
                         return 1;
                     }
                 } else {
@@ -1438,6 +1530,12 @@ public final class RlActorBench {
                     row.addProperty("equal", false);
                 } else {
                     row.add("digest_replay", p.end.get("digest"));
+                    if (p.end.has("crash")) {
+                        row.add("crash", p.end.get("crash")); // void-causes-1104: the replayed game's whole stack
+                    }
+                    if (p.end.has("hang_meter")) {
+                        row.add("hang_meter", p.end.get("hang_meter")); // void-causes-1104: only with hangWork set
+                    }
                     // k8-determinism-1008: the LookaheadBench digest (the tape's, when it has one) and a K8 seat's
                     // search counts, so a replay audits against LookaheadBench rows and the live run's counts
                     if (t.has("digest_lb")) {
