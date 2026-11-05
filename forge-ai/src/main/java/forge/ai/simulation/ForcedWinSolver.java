@@ -185,6 +185,24 @@ public final class ForcedWinSolver {
          * the seat's other responses stay its own.
          */
         public boolean hold = false;
+        /**
+         * deck-belief-1105 (N11 v1; off by default, and then nothing changes): the verification worlds deal the
+         * opponent's hidden hand and library from {@link DeckBelief} (a deck of the colours it has shown, the hand
+         * weighted by what it declined to do) through {@link LookaheadSearch#solverRedraw}; the belief worlds then keep
+         * that hand ({@link #hideOrSample} re-deals nothing).
+         */
+        public boolean deckBelief = false;
+        /** deck-belief-1105: belief worlds when the opponent has a hidden hand card and an untapped mana source (0 = worlds). */
+        public int deckWorlds = 0;
+        public double deckDecline = 0.35;
+        public double deckLandShare = 0.425;
+
+        public DeckBelief.Params deckParams() {
+            final DeckBelief.Params p = new DeckBelief.Params();
+            p.decline = deckDecline;
+            p.landShare = deckLandShare;
+            return p;
+        }
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -225,6 +243,10 @@ public final class ForcedWinSolver {
             c.defendMs = intOr(get.apply("defendMs"), (int) c.defendMs);
             c.sharedReader = "true".equals(get.apply("sharedReader"));
             c.hold = "true".equals(get.apply("hold"));
+            c.deckBelief = "true".equals(get.apply("deckBelief")); // deck-belief-1105
+            c.deckWorlds = intOr(get.apply("deckWorlds"), c.deckWorlds);
+            c.deckDecline = dblOr(get.apply("deckDecline"), c.deckDecline);
+            c.deckLandShare = dblOr(get.apply("deckLandShare"), c.deckLandShare);
             return c;
         }
 
@@ -287,6 +309,43 @@ public final class ForcedWinSolver {
      * belief ({@link LookaheadSearch#opponentRedraw}).
      */
     public Redraw redraw;
+
+    /**
+     * deck-belief-1105: the belief worlds' opponent hand as {@link #redraw} dealt it ({@link Config#deckBelief} with a
+     * redraw set): {@link #hideOrSample} then re-deals nothing in worlds above 0. World 0 still hides the hand.
+     */
+    private boolean keepDealtHand() {
+        return cfg.deckBelief && redraw != null;
+    }
+
+    /**
+     * deck-belief-1105: the belief worlds of one evaluation: {@link Config#deckWorlds} when the opponent holds a hidden
+     * hand card and controls an untapped mana source (where an answer could matter), else {@link Config#worlds}.
+     */
+    int beliefWorlds(Game live) {
+        if (!cfg.deckBelief || cfg.deckWorlds <= cfg.worlds) {
+            return cfg.worlds;
+        }
+        final forge.game.player.PlayerView myView = me.getView();
+        for (Player o : me.getOpponents()) {
+            boolean hidden = false;
+            for (Card c : o.getCardsIn(ZoneType.Hand)) {
+                if (!c.getView().canBeShownTo(myView)) {
+                    hidden = true;
+                    break;
+                }
+            }
+            if (!hidden) {
+                continue;
+            }
+            for (Card c : o.getCardsIn(ZoneType.Battlefield)) {
+                if (!c.isTapped() && !c.getManaAbilities().isEmpty()) {
+                    return cfg.deckWorlds;
+                }
+            }
+        }
+        return cfg.worlds;
+    }
 
     /** honest-belief-1020: re-draws the opponents' hidden cards of copy {@code g} (called inside {@code synchronized (live)}). */
     @FunctionalInterface
@@ -1487,7 +1546,7 @@ public final class ForcedWinSolver {
                     v.knownTop = line.knownTop;
                     loopVariants++;
                     ev = evaluate(live, v, mix(cfg.seed, index * 1000L + 999), deadline); // the found line's worlds
-                    if (ev.pUnopposed >= 1.0 && ev.worldsRun < cfg.worlds && System.nanoTime() > deadline) {
+                    if (ev.pUnopposed >= 1.0 && ev.worldsRun < beliefWorlds(live) && System.nanoTime() > deadline) {
                         loopVariantCuts++; // cut by the deadline: unresolved
                         curve.append(n).append(":cut ");
                         if (n > rep.times) {
@@ -1629,6 +1688,9 @@ public final class ForcedWinSolver {
                     redraw.apply(live, me, g, cm, rng); // honest-belief-1020
                 }
                 for (Player o : cm.getOpponents()) {
+                    if (world != 0 && keepDealtHand()) {
+                        continue; // deck-belief-1105: the redraw dealt this world's hand
+                    }
                     hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
                 }
                 if (cfg.infoState) {
@@ -1775,7 +1837,8 @@ public final class ForcedWinSolver {
         int n = 0;
         final Map<String, Integer> fails = new HashMap<>();
         final Set<String> prot = new HashSet<>();
-        for (int w = 1; w <= cfg.worlds; w++) {
+        final int nWorlds = beliefWorlds(live); // deck-belief-1105 (cfg.worlds when off)
+        for (int w = 1; w <= nWorlds; w++) {
             if (System.nanoTime() > deadline && n > 0) {
                 break;
             }
@@ -1880,6 +1943,9 @@ public final class ForcedWinSolver {
                         redraw.apply(live, me, g, cm, rng); // honest-belief-1020
                     }
                     for (Player o : cm.getOpponents()) {
+                        if (world != 0 && keepDealtHand()) {
+                            continue; // deck-belief-1105: the redraw dealt this world's hand
+                        }
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
                         hideOrSample(live, me, liveOpp, o, world == 0, rng);
                     }

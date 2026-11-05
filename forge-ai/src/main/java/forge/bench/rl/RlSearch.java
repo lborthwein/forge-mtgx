@@ -492,7 +492,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             SolverDriver d = null;
             if (cfg.forcedWin != null) {
                 d = new SolverDriver(p, SolverDriver.config(cfg.forcedWin));
-                d.solver().redraw = ls.opponentRedraw(); // honest-belief-1020 (null when belief is off)
+                d.solver().redraw = ls.solverRedraw(d.solver().config()); // honest-belief-1020; deck-belief-1105 deckBelief
                 solverDrivers.put(p.getId(), d);
                 b.planHook = d;
             }
