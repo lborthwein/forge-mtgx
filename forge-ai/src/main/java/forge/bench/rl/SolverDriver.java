@@ -146,6 +146,14 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
         return ph.getTurn() == actTurn && ph.getPhase() == actPhase;
     }
 
+    /** choice-search-1105: line-consistent choices (plans.lineChoices=forge); false = the seat's (the default). */
+    boolean lineChoices = false;
+
+    @Override
+    public boolean forgeChoices() {
+        return lineChoices && solver.lineActive();
+    }
+
     @Override
     public boolean attack(final Player attacker, final Combat combat) {
         final boolean a = probe(() -> solver.answerAttack(attacker, combat));

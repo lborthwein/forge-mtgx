@@ -197,6 +197,16 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         default boolean forgeCosts() {
             return false;
         }
+
+        /**
+         * choice-search-1105 (false by default, and then nothing changes): true while a solver line is being followed
+         * and the spec asks for line-consistent choices. Every choice ask of the seat other than priority, attack and
+         * block (targets, cards, modes, numbers, entities, confirms, discards, orders...) is then Forge AI's, the same
+         * answerer the line was found and verified with in the engine's copies, instead of the seat's policy.
+         */
+        default boolean forgeChoices() {
+            return false;
+        }
     }
 
     /** {@link PlanHook#priority}'s "no opinion" (compared by identity). */
@@ -450,6 +460,14 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
 
     /** As above; {@code menuObjects} reach an in-process answerer only (see BenchSession.LocalAnswerer). */
     private JsonObject ask(final String method, final String kind, final JsonObject body, final Object menuObjects) {
+        if (planHook != null && !"priority".equals(kind) && !"attackers".equals(kind)
+                && !"blockers".equals(kind) && !"mulligan".equals(kind) && !"startingPlayer".equals(kind)
+                && planHook.forgeChoices()) {
+            // choice-search-1105: the solver line's own answerer (Forge AI) decides, as in the copies that verified it
+            counters.instrument("lineChoices.forge." + kind);
+            pendingEcho = null;
+            return null;
+        }
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
         final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), method, kind, body, menuObjects)
                 : session.getChannel().ask(kind, body);

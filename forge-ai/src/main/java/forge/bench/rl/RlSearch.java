@@ -652,6 +652,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the S-b solver's follower config (copies follow lines with it). */
+    /** choice-search-1105: plans.lineChoices=forge (line-consistent choice answers). */
+    boolean lineChoicesForge() {
+        for (PlanSearch ps1 : planSearches.values()) {
+            return ps1.lineChoicesForge();
+        }
+        return cfg.plans != null && "forge".equals(PlanSearch.Spec.parse(cfg.plans).lineChoices);
+    }
+
     forge.ai.simulation.ForcedWinSolver.Config followConfig() {
         for (PlanSearch ps1 : planSearches.values()) {
             return ps1.followCfg;
@@ -2297,7 +2305,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 (cfg.copyFidelity == 1 || cfg.copyFidelity == 2 && ls.fidelityPass()) && !first.pass && !planned);
         if (first.plan instanceof PlanSearch.LinePlan) {
             // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
-            pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first);
+            pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first,
+                    lineChoicesForge());
         }
         pc.forcedBlocks = first.block;
         return new LookaheadSearch.PlayoutSeat() {
