@@ -135,12 +135,12 @@ public class DeckBeliefTest extends SimulationTest {
         e.openColors = MagicColor.BLUE;
         e.noLandLastTurn = true;
         AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Counterspell"), e, p)); // instant
-        AssertJUnit.assertEquals(p.decline, DeckBelief.handWeight(paper("Divination"), e, p)); // castable sorcery, held
-        AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Air Elemental"), e, p)); // could not afford it
+        AssertJUnit.assertEquals(p.decline, DeckBelief.handWeight(paper("Ponder"), e, p)); // castable sorcery, held
+        AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Divination"), e, p)); // could not afford it (3 > 2 open)
         AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Hill Giant"), e, p)); // off-colour for the open mana
         AssertJUnit.assertEquals(p.decline, DeckBelief.handWeight(paper("Island"), e, p)); // no land drop last turn
         e.offTurn = false; // on its own turn nothing is declined yet
-        AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Divination"), e, p));
+        AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Ponder"), e, p));
     }
 
     @Test
