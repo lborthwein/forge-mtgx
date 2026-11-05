@@ -131,9 +131,19 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
         if (pr == null) {
             return choice(m, witness, live, enc, dec);
         }
+        // N8 (lane n8-tower-1030): a probe's answer replaces the decision, not the look. The seat still saw the cards
+        // it arranges (scry, surveil, an ordered move), so its observers (RlKnowledge: the u_lib_known tokens and their
+        // lib_pos) get the witness first, exactly as a recorded or live answer does; without it the post-option frames of
+        // every scripted order / scry option were identical (no known-position tokens) and every value function tied.
         if (tape.isDetached()) {
             final Object s = pr.scripted(this, m, args);
-            return s != Probe.NONE ? (T) s : live.get();
+            if (s != Probe.NONE) {
+                if (witness != null) {
+                    witness.run();
+                }
+                return (T) s;
+            }
+            return live.get();
         }
         if (!tape.controllerHere() || tape.recordsNow("m", m)) {
             return choice(m, witness, live, enc, dec);
@@ -141,6 +151,9 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
         final int ord = forcedOrdinal++;
         final Object d = pr.divert(this, m, args, ord);
         if (d != Probe.NONE) {
+            if (witness != null) {
+                witness.run();
+            }
             return (T) d;
         }
         final T v = choice(m, witness, live, enc, dec);
