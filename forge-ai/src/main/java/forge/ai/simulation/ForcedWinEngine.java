@@ -164,6 +164,12 @@ final class ForcedWinEngine {
 
     static final class Limits {
         int nodes = 250;
+        /**
+         * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
+         * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
+         * whole game gets no same-turn engine nodes after its first searches.
+         */
+        boolean perSearchNodes;
         int depth = 64;
         int branching = 8;
         int targetVariants = 3;
@@ -525,6 +531,9 @@ final class ForcedWinEngine {
             lim.passTurn = false;
             final int nodeCap = lim.nodes;
             lim.nodes = twoTurns ? nodeCap / 2 : nodeCap;
+            if (lim.perSearchNodes) {
+                lim.nodes += st.nodes; // choice-search-1105 (CAP-2): this pass's share from here, not from the solver's birth
+            }
             List<Step> win = e.dfs(root, 0);
             if (win == null && twoTurns && System.nanoTime() < deadline) {
                 lim.passTurn = true;
