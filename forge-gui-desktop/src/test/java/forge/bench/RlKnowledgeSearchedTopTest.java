@@ -23,8 +23,8 @@ import forge.game.zone.ZoneType;
 
 /**
  * Lane knowledge-searched-top-1105 (research key {@link RlKnowledge#SEARCHED_TOP}, off by default): a card a seat searched
- * for and put on top of its own library stays known to that seat (zone 17), and to the other seat when the tutor revealed
- * it (zone 18); nothing else changes. Fixtures: the four top tutors on both seats, Brainstorm as the control (already known
+ * for and put on top of its own library stays known to that seat (zone 17); the other seat's zone 18 is unchanged (a
+ * revealing tutor shows the placed card, already known to it with the key off); nothing else changes. Fixtures: the four top tutors on both seats, Brainstorm as the control (already known
  * with the key off, unchanged with it on). Leak tests: (i) every token the key adds is the searched card, at its real
  * place, for a seat that saw it; (ii) re-randomising every library card the tracker does not know leaves every frame
  * unchanged; (iii) mutants that must teach nothing: the opponent's unrevealed tutor, a search whose card is shuffled
@@ -108,7 +108,8 @@ public class RlKnowledgeSearchedTopTest extends AITest {
             final List<int[]> theirs = z(f, opp, RlSchema.Z_O_LIB_KNOWN);
             if (!on) {
                 Assert.assertEquals(mine.size(), 0, name + " off: Forge's shuffle-then-move forgets the card");
-                Assert.assertEquals(theirs.size(), 0, name + " off");
+                // a revealing tutor shows the card after it is placed: the other seat knows it with the key off too
+                Assert.assertEquals(theirs.size(), reveals ? 1 : 0, name + " off");
                 continue;
             }
             // (i) the one token the key adds is the searched card, at the top, for the searcher
