@@ -57,7 +57,7 @@ import forge.item.PaperCard;
  * ROWS.json = {"rows": [{"id", "frame": path | "frame_text": text, "seat": 0|1, "rl": path | object (optional),
  * "game_uid", "dec_idx" (optional: the payload header; default 0)}]}. --states: RlFrameStates rows (frame and sidecar
  * inline). --bare ignores every sidecar (an empty tracker, empty decklists): what a bare frame gives.
- * Out: DIR/obs.mxl (mtgx-rl-labelsink/1 value records, tools/ml/rl/labels.py read_sink), DIR/index.jsonl (one row per
+ * Out: DIR/obs.mxl.gz (one gzip member of mtgx-rl-labelsink/1 value records, tools/ml/rl/labels.py read_sink), DIR/index.jsonl (one row per
  * frame: id, ok or error, payload_sha256, C, truncated, ms), DIR/summary.json. cwd = the forge-gui dir (res/).
  */
 public final class FrameObsRun {
@@ -211,7 +211,7 @@ public final class FrameObsRun {
         int ok = 0, err = 0, refEq = 0, refNe = 0;
         double ms = 0;
         final long t0 = System.nanoTime();
-        try (OutputStream mxl = new FileOutputStream(Paths.get(a.out, "obs.mxl").toFile());
+        try (OutputStream mxl = new java.util.zip.GZIPOutputStream(new FileOutputStream(Paths.get(a.out, "obs.mxl.gz").toFile()), 1 << 16);
                 OutputStream idx = new FileOutputStream(Paths.get(a.out, "index.jsonl").toFile())) {
             for (JsonObject r : rows) {
                 final JsonObject o = new JsonObject();
