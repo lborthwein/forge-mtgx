@@ -23,10 +23,26 @@ import com.google.gson.JsonParser;
  */
 public class RlFrameDumpTest {
 
+    /** Whether this class built RlLabelReplayTest's fixture (then it clears it after, so that class builds its own). */
+    private static boolean built = false;
+
     @BeforeClass
     public static void setUp() throws Exception {
         if (RlLabelReplayTest.tapes.isEmpty()) {
             RlLabelReplayTest.setUp();
+            built = true;
+        }
+    }
+
+    /**
+     * RlLabelReplayTest.setUp appends to its static tape list: a run of both classes in one JVM would otherwise replay
+     * every fixture game twice there. Clear what this class built.
+     */
+    @org.testng.annotations.AfterClass(alwaysRun = true)
+    public static void tearDown() {
+        if (built) {
+            RlLabelReplayTest.tapes.clear();
+            built = false;
         }
     }
 
