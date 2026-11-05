@@ -55,6 +55,26 @@ public class TriggerHandler {
         game = gameState;
     }
 
+    /** mtgx (gamecopier-fidelity-1030): the pending delayed triggers in order, read-only (a game copier carries them). */
+    public final List<Trigger> getDelayedTriggersView() {
+        return Collections.unmodifiableList(delayedTriggers);
+    }
+
+    /** mtgx (gamecopier-fidelity-1030): whether {@code trig} is registered as a this-turn delayed trigger (identity). */
+    public final boolean isThisTurnDelayedTrigger(final Trigger trig) {
+        for (Trigger t : thisTurnDelayedTriggers) {
+            if (t == trig) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** mtgx (gamecopier-fidelity-1030): the delayed triggers waiting for a player's next turn, read-only. */
+    public final ListMultimap<Player, Trigger> getPlayerDefinedDelayedTriggersView() {
+        return Multimaps.unmodifiableListMultimap(playerDefinedDelayedTriggers);
+    }
+
     public final void registerDelayedTrigger(final Trigger trig) {
         delayedTriggers.add(trig);
     }

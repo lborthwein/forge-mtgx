@@ -905,6 +905,43 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
         return extraTurns.peek().getPlayer();
     }
 
+    /** mtgx (gamecopier-fidelity-1030): any extra turn or extra phase pending (a game copier must carry it). */
+    public final boolean hasExtraTurnsOrPhases() {
+        return !extraTurns.isEmpty() || !extraPhases.isEmpty();
+    }
+
+    /** mtgx (gamecopier-fidelity-1030): the pending extra turns, bottom (the restored normal turn) first, read-only. */
+    public final List<ExtraTurn> getExtraTurnsView() {
+        return java.util.Collections.unmodifiableList(extraTurns);
+    }
+
+    /** mtgx (gamecopier-fidelity-1030): the pending extra phases by the phase they follow, read-only. */
+    public final Map<PhaseType, List<ExtraPhase>> getExtraPhasesView() {
+        final Map<PhaseType, List<ExtraPhase>> r = Maps.newEnumMap(PhaseType.class);
+        for (Map.Entry<PhaseType, Stack<ExtraPhase>> e : extraPhases.entrySet()) {
+            r.put(e.getKey(), java.util.Collections.unmodifiableList(e.getValue()));
+        }
+        return r;
+    }
+
+    /**
+     * mtgx (gamecopier-fidelity-1030): a game copier's copy takes the original's pending extra turns and phases (already
+     * mapped into this game, in the same order), and each player's extra-turn count.
+     */
+    public final void dangerouslySetExtra(final List<ExtraTurn> turns, final Map<PhaseType, List<ExtraPhase>> phases) {
+        extraTurns.clear();
+        extraTurns.addAll(turns);
+        extraPhases.clear();
+        for (Map.Entry<PhaseType, List<ExtraPhase>> e : phases.entrySet()) {
+            final Stack<ExtraPhase> st = new Stack<>();
+            st.addAll(e.getValue());
+            extraPhases.put(e.getKey(), st);
+        }
+        for (final Player p : game.getPlayers()) {
+            p.setExtraTurnCount(getExtraTurnForPlayer(p));
+        }
+    }
+
     public final ExtraTurn addExtraTurn(final Player player) {
         Player previous = null;
         // use a stack to handle extra turns, make sure the bottom of the stack restores original turn order
