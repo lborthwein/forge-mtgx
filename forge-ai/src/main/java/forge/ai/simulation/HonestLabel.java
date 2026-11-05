@@ -602,6 +602,40 @@ public final class HonestLabel {
             return label(live, liveMe, key, null);
         }
 
+        /** The keys {@link #scaled} scales: the solver's and the loss check's work-unit budgets (counts). */
+        static final String[] BUDGET_KEYS = {"evalSteps", "engineNodes", "engineSteps", "engineCards", "enginePathCards"};
+
+        /**
+         * label-speed-1104 (r3.proofPrePct; off by default): this seat with every work-unit budget of its solver and loss
+         * configs at {@code pct} % (at least 1), the rest of the spec unchanged. The R3 proof pre-check runs it first.
+         */
+        public Seat scaled(final int pct) {
+            if (pct <= 0 || pct >= 100) {
+                throw new IllegalArgumentException("proofPrePct in 1..99, not " + pct);
+            }
+            final JsonObject o = spec.toJson();
+            o.remove("oppMinVersion"); // derived from the cfgs, never a parse key
+            for (String cfg : new String[] {"solverCfg", "lossCfg"}) {
+                final JsonObject c = o.getAsJsonObject(cfg);
+                for (String k : BUDGET_KEYS) {
+                    if (c.has(k)) {
+                        final long v = Long.parseLong(c.get(k).getAsString());
+                        c.addProperty(k, String.valueOf(Math.max(1L, v * pct / 100)));
+                    }
+                }
+            }
+            final Spec s2 = Spec.parse(o);
+            s2.sequentialAi = spec.sequentialAi;
+            s2.aiTimeoutSec = spec.aiTimeoutSec;
+            s2.libLabels = spec.libLabels;
+            s2.libExactCap = spec.libExactCap;
+            s2.knownLib = spec.knownLib;
+            s2.meterReasons = spec.meterReasons;
+            s2.oppMinRev = spec.oppMinRev;
+            s2.infoState = spec.infoState;
+            return new Seat(s2);
+        }
+
         /**
          * r2-choose-a-card-1029 (N5b, opt-in): as {@link #label(Game, Player, long)}, keeping {@code knownOwn} (our
          * library card ids whose positions the seat knows: a put-back, a pile, a scry) at their positions in every root
