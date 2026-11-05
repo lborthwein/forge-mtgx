@@ -108,12 +108,33 @@ public final class OppMin {
         final int[] pts, resp;
         /** The budget of this subtree (-1: read it from the play-out's first non-empty point). */
         final int budget;
+        /**
+         * opp-belief-1104 (null = a script by indices, as before): an information-set policy, point signature to answer
+         * signature ({@link #pointSig}, {@link #answerSig}); a point it does not name is passed.
+         */
+        final Map<String, String> policy;
 
         Script(final boolean forge, final int[] pts, final int[] resp, final int budget) {
+            this(forge, pts, resp, budget, null);
+        }
+
+        private Script(final boolean forge, final int[] pts, final int[] resp, final int budget,
+                final Map<String, String> policy) {
             this.forge = forge;
             this.pts = pts;
             this.resp = resp;
             this.budget = budget;
+            this.policy = policy;
+        }
+
+        /** opp-belief-1104: the policy {@code p} (empty = pass everywhere). */
+        public static Script policy(final Map<String, String> p) {
+            return new Script(false, new int[0], new int[0], 0, Collections.unmodifiableMap(new java.util.LinkedHashMap<>(p)));
+        }
+
+        /** opp-belief-1104: the policy's key ("forge", or its signature map). */
+        public String policyKey() {
+            return forge ? "forge" : policy != null ? policy.toString() : toString();
         }
 
         static Script forgeRoot() {
@@ -145,6 +166,7 @@ public final class OppMin {
         @Override
         public String toString() {
             if (forge) return "forge";
+            if (policy != null) return "policy" + policy;
             final StringBuilder sb = new StringBuilder("[");
             for (int i = 0; i < pts.length; i++) {
                 if (i > 0) sb.append(',');
@@ -190,11 +212,18 @@ public final class OppMin {
         public final double v;
         public final String end;
         public final List<Point> points;
+        /** opp-belief-1104: the responses this branch made, point signature to answer signature (null: not recorded). */
+        public Map<String, String> realized;
 
         public Leaf(final double v, final String end, final List<Point> points) {
             this.v = v;
             this.end = end;
             this.points = points == null ? Collections.<Point>emptyList() : points;
+        }
+
+        public Leaf realized(final Map<String, String> r) {
+            this.realized = r;
+            return this;
         }
     }
 
@@ -210,6 +239,14 @@ public final class OppMin {
         /** solver-gaps-1104 (loopMemo): points skipped as a dominated repeat of a loop state. */
         public int loopMemoHits;
         public Leaf firstLeaf;
+        /** opp-belief-1104: the min branch's script and realized responses; every explored branch by policy key. */
+        public Script minScript;
+        public Map<String, String> minRealized;
+        public final java.util.LinkedHashMap<String, Double> explored = new java.util.LinkedHashMap<>();
+        /** opp-belief-1104 (beliefMin only): the pick's policy key, each candidate's Q, the candidates' play-outs. */
+        public String beliefPick;
+        public String beliefQ;
+        public int beliefNodes, beliefCands;
         /** Every cap event of the tree by reason (review #148: the recall cost of failing closed). */
         public final java.util.TreeMap<String, Integer> caps = new java.util.TreeMap<>();
         /** coverage-fix-1102 (diagnostics only): the answer cards behind each cap reason (gaps, truncated, budget). */
@@ -249,10 +286,15 @@ public final class OppMin {
                 out.cap("branch:" + l.end);
                 continue;
             }
+            if (l.realized != null) {
+                out.explored.putIfAbsent(s.forge ? "forge" : l.realized.toString(), l.v); // opp-belief-1104
+            }
             if (l.v < lo) {
                 lo = l.v;
                 out.end = l.end;
                 out.why = s.toString();
+                out.minScript = s;
+                out.minRealized = l.realized;
             }
             if (lo <= 0.0) {
                 break; // the floor: no branch goes lower
@@ -341,6 +383,111 @@ public final class OppMin {
         return out;
     }
 
+    // ------------------------------------------------------------------------------------------------ belief (A2)
+
+    /**
+     * opp-belief-1104 (ARCH-APPENDIX-1104 A2, L3; used only with oppBelief K >= 1): the opponent's reply from its OWN
+     * belief worlds, one reply per information set. {@code play(u, script)} plays one branch in world u: u = 0 is our
+     * world (the one valued), u = 1..K the opponent's worlds (built from ours with our cards it cannot see re-dealt from
+     * a canonical pool, so they never depend on where those cards really are).
+     * <ol>
+     * <li>Candidates, in order: Forge AI's own play everywhere, pass everywhere, then the min branch of {@link #min}'s
+     * ordinary tree in each u (as a policy of public signatures), deduplicated, at most {@code maxCands}.</li>
+     * <li>Q(pi) = the mean of our result over the u where pi resolved (values found by the trees reused).</li>
+     * <li>pi* = argmin Q; ties to the candidate order (Forge AI's natural play first).</li>
+     * <li>pi* is played once in world 0: its result is the value. Fail closed: pi* capped there, or a win there while a
+     * tree of some u was capped (a better reply may be missing), is unresolved (cap {@code belief:<reason>}).</li>
+     * </ol>
+     */
+    public static Out beliefMin(final Cfg cfg, final int k, final int maxCands,
+            final java.util.function.BiFunction<Integer, Script, Leaf> play) {
+        final Out out = new Out();
+        final java.util.LinkedHashMap<String, Script> cands = new java.util.LinkedHashMap<>();
+        cands.put("forge", Script.forgeRoot());
+        cands.put("{}", Script.policy(Collections.emptyMap()));
+        final java.util.Map<String, double[]> vals = new java.util.HashMap<>();
+        final java.util.Map<String, boolean[]> seen = new java.util.HashMap<>(); // played (resolved or not)
+        String uCap = null;
+        for (int u = 1; u <= k; u++) {
+            final int uu = u;
+            final Out m = min(cfg, s -> play.apply(uu, s));
+            out.nodes += m.nodes;
+            out.memoHits += m.memoHits;
+            out.loopMemoHits += m.loopMemoHits;
+            out.maxResponses = Math.max(out.maxResponses, m.maxResponses);
+            out.budget = Math.max(out.budget, m.budget);
+            for (Map.Entry<String, Integer> e : m.caps.entrySet()) out.caps.merge("u:" + e.getKey(), e.getValue(), Integer::sum);
+            if (Double.isNaN(m.v) && uCap == null) uCap = m.cap == null ? "none" : m.cap;
+            for (Map.Entry<String, Double> e : m.explored.entrySet()) {
+                vals.computeIfAbsent(e.getKey(), x -> nanRow(k))[u] = e.getValue();
+                seen.computeIfAbsent(e.getKey(), x -> new boolean[k + 1])[u] = true;
+            }
+            if (m.minScript != null && m.minRealized != null && cands.size() < Math.max(2, maxCands)) {
+                final String key = m.minScript.forge ? "forge" : m.minRealized.toString();
+                if (!cands.containsKey(key)) cands.put(key, Script.policy(m.minRealized));
+            }
+        }
+        // every candidate in every u it has not met yet
+        String pick = null;
+        double best = Double.POSITIVE_INFINITY;
+        final StringBuilder q = new StringBuilder();
+        for (Map.Entry<String, Script> c : cands.entrySet()) {
+            final double[] row = vals.computeIfAbsent(c.getKey(), x -> nanRow(k));
+            final boolean[] met = seen.computeIfAbsent(c.getKey(), x -> new boolean[k + 1]);
+            double sum = 0;
+            int n = 0;
+            for (int u = 1; u <= k; u++) {
+                if (!met[u]) {
+                    met[u] = true;
+                    out.beliefNodes++;
+                    final Leaf l = play.apply(u, c.getValue());
+                    row[u] = l.v;
+                }
+                if (!Double.isNaN(row[u])) {
+                    sum += row[u];
+                    n++;
+                }
+            }
+            final double qv = n == 0 ? Double.POSITIVE_INFINITY : sum / n;
+            q.append(q.length() == 0 ? "" : " ").append(c.getKey()).append('=').append(n == 0 ? "na" : String.format("%.3f", qv));
+            if (qv < best) {
+                best = qv;
+                pick = c.getKey();
+            }
+        }
+        if (pick == null) pick = "forge";
+        out.beliefCands = cands.size();
+        out.beliefPick = pick;
+        out.beliefQ = q.toString();
+        final Script ps = cands.get(pick);
+        out.beliefNodes++;
+        final Leaf l = play.apply(0, ps);
+        out.firstLeaf = l;
+        out.minScript = ps;
+        out.minRealized = l.realized;
+        out.why = ps.toString();
+        out.end = l.end;
+        if (Double.isNaN(l.v)) {
+            out.cap("belief:branch:" + l.end);
+            out.v = Double.NaN;
+            out.end = "min-cap:" + out.cap;
+        } else if (l.v > 0.0 && uCap != null) {
+            out.cap("belief:" + uCap);
+            out.v = Double.NaN;
+            out.end = "min-cap:" + out.cap;
+        } else {
+            out.v = l.v;
+            out.cap = null;
+        }
+        return out;
+    }
+
+    private static double[] nanRow(final int k) {
+        final double[] r = new double[k + 1];
+        Arrays.fill(r, Double.NaN);
+        return r;
+    }
+
     // ------------------------------------------------------------------------------------------------ the adversary
 
     /**
@@ -376,10 +523,20 @@ public final class OppMin {
          */
         public boolean reveal;
 
+        /**
+         * opp-belief-1104 (oppHoldPoints, false = off): the opponent's own main-phase priority with an empty stack is a
+         * point even when none of our permanents is new (its hold decision: Forge AI's play, pass, or an answer aimed at
+         * us or a permanent of ours that entered since its previous turn). Read with {@link #reveal}.
+         */
+        public boolean hold;
+        /** opp-belief-1104: the responses made, point signature to answer signature (every script mode). */
+        public final java.util.LinkedHashMap<String, String> realized = new java.util.LinkedHashMap<>();
+        private final java.util.Map<String, Integer> sigCount = new java.util.HashMap<>();
+
         /** The point key at this priority: {@link OppMin#pointKey}, else (reveal only) {@link #revealKey}. */
         private String key(final Game g) {
             final String pk = pointKey(g, victim);
-            return pk != null || !reveal ? pk : revealKey(g, opp, victim);
+            return pk != null || !reveal ? pk : revealKey(g, opp, victim, hold);
         }
         /** covfix-a-1102: a scripted mana-ability response could not be activated on the copy (fail closed: a cap). */
         public boolean manaSimFailed;
@@ -434,6 +591,7 @@ public final class OppMin {
             }
             final SpellAbility top = g.getStack().isEmpty() ? null : g.getStack().peek().getSpellAbility();
             final int idx = points.size();
+            OppBeliefWorlds.freeze(g); // opp-belief-1104: its first decision (a no-op outside an opponent world)
             if (DEBUG) {
                 final StringBuilder b = new StringBuilder();
                 for (Card c : opp.getCardsIn(ZoneType.Battlefield)) b.append(c.getName()).append(c.isTapped() ? "/T" : "/U")
@@ -457,9 +615,24 @@ public final class OppMin {
             }
             points.add(loop(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs), g));
             if (DEBUG && as.gap() != null) System.err.println("[oppmin] point " + idx + " gap " + as.gap());
-            final int r = script.respAt(idx);
+            // opp-belief-1104: the point's public signature (n-th occurrence in this play-out)
+            final String sig0 = pointSig(g, victim, pk);
+            final int occ = sigCount.merge(sig0, 1, Integer::sum);
+            final String psig = sig0 + "#" + occ;
+            int r = -1;
+            if (script.policy != null) {
+                final String want = script.policy.get(psig);
+                if (want != null) {
+                    for (int i = 0; i < rs.size() && r < 0; i++) {
+                        if (want.equals(answerSig(rs.get(i), victim))) r = i;
+                    }
+                }
+            } else {
+                r = script.respAt(idx);
+            }
             if (r < 0 || r >= rs.size()) return null;
             final SpellAbility sa = rs.get(r);
+            realized.put(psig, answerSig(sa, victim));
             if (DEBUG) System.err.println("[oppmin] point " + idx + " answer " + answerKey(sa) + " of " + rs.size());
             final Card host = sa.getHostCard();
             if (host != null && host.isInZone(ZoneType.Battlefield) && sa.getApi() == ApiType.Animate
@@ -494,10 +667,15 @@ public final class OppMin {
      * while {@link #revealed} is not empty; null otherwise. Keyed by turn, phase and the revealed cards.
      */
     public static String revealKey(final Game g, final Player opp, final Player victim) {
+        return revealKey(g, opp, victim, false);
+    }
+
+    /** opp-belief-1104: as above; {@code hold}: also with nothing revealed (the opponent's hold decision). */
+    public static String revealKey(final Game g, final Player opp, final Player victim, final boolean hold) {
         final PhaseHandler ph = g.getPhaseHandler();
         if (!g.getStack().isEmpty() || !ph.isPlayerTurn(opp) || !(ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))) return null;
         final List<Card> r = revealed(g, victim);
-        if (r.isEmpty()) return null;
+        if (r.isEmpty() && !hold) return null;
         final StringBuilder sb = new StringBuilder("rev:").append(ph.getTurn()).append(':').append(ph.getPhase());
         for (Card c : r) sb.append(':').append(c.getId());
         return sb.toString();
@@ -560,6 +738,61 @@ public final class OppMin {
         if (o instanceof Card c) return "c" + c.getId();
         if (o instanceof Player p) return "p" + p.getId();
         if (o instanceof SpellAbility s) return "s" + (s.getHostCard() == null ? -1 : s.getHostCard().getId()) + "x"
+                + Integer.toHexString(String.valueOf(s.getDescription()).hashCode());
+        return String.valueOf(o);
+    }
+
+    /**
+     * opp-belief-1104: a point's PUBLIC signature, the same in every world that looks the same to the opponent: the
+     * point kind, turn and phase, the stack by (source name, text, side, targets), the attackers by name, the revealed
+     * cards by name at a reveal or hold point. No card ids.
+     */
+    static String pointSig(final Game g, final Player victim, final String pk) {
+        final StringBuilder sb = new StringBuilder();
+        final int colon = pk.indexOf(':');
+        sb.append(colon < 0 ? pk : pk.substring(0, colon)).append(':').append(g.getPhaseHandler().getTurn()).append(':')
+                .append(g.getPhaseHandler().getPhase());
+        if (pk.contains("|mana")) sb.append(":mana");
+        for (SpellAbilityStackInstance si : g.getStack()) {
+            final SpellAbility sa = si.getSpellAbility();
+            sb.append("|st:").append(sa == null ? "?" : answerSig(sa, victim));
+        }
+        final forge.game.combat.Combat cb = g.getCombat();
+        if (cb != null && pk.startsWith("atk")) {
+            final List<String> a = new ArrayList<>();
+            for (Card c : cb.getAttackers()) a.add(c.getName());
+            Collections.sort(a);
+            sb.append("|atk:").append(a);
+        }
+        if (pk.startsWith("rev")) {
+            final List<String> a = new ArrayList<>();
+            for (Card c : revealed(g, victim)) a.add(c.getName());
+            Collections.sort(a);
+            sb.append("|rev:").append(a);
+        }
+        return sb.toString();
+    }
+
+    /** opp-belief-1104: an ability's public signature: source name, text, side, targets by name and side, modes. */
+    static String answerSig(final SpellAbility sa, final Player victim) {
+        final StringBuilder sb = new StringBuilder();
+        final Card h = sa.getHostCard();
+        sb.append(h == null ? "?" : h.getName()).append('|').append(sa.getDescription()).append('|')
+                .append(sa.getActivatingPlayer() == victim ? "v" : "o");
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting() && s.getTargets() != null) {
+                for (GameObject o : s.getTargets()) sb.append('|').append(targetSig(o, victim));
+            }
+        }
+        if (sa.hasSVar(MODES)) sb.append("|m:").append(sa.getSVar(MODES));
+        return sb.toString();
+    }
+
+    static String targetSig(final Object o, final Player victim) {
+        if (o instanceof Card c) return c.getName() + "@" + (c.getController() == victim ? "v" : "o")
+                + (c.getZone() == null ? "" : c.getZone().getZoneType().name().substring(0, 2));
+        if (o instanceof Player p) return p == victim ? "pv" : "po";
+        if (o instanceof SpellAbility s) return "s" + (s.getHostCard() == null ? "?" : s.getHostCard().getName()) + "x"
                 + Integer.toHexString(String.valueOf(s.getDescription()).hashCode());
         return String.valueOf(o);
     }

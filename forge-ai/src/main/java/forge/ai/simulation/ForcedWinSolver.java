@@ -301,6 +301,17 @@ public final class ForcedWinSolver {
         public int enginePassScale = 0;
         /** solver-gaps-1104 (0 = off): ForcedWinEngine.Limits#altLines, the engine's winning lines verified per search. */
         public int engineAltLines = 0;
+        /**
+         * opp-belief-1104 (ARCH-APPENDIX-1104 A2; 0 = off, the default, unrecorded, and then nothing changes; read with
+         * oppMin): the opponent's reply in each of our worlds comes from K worlds of its OWN belief
+         * ({@link OppBeliefWorlds}), one reply per information set ({@link OppMin#beliefMin}), valued in ours.
+         * oppBeliefCands: the candidate replies at most. oppHoldPoints (needs oppBelief): its own main-phase priority is
+         * a hold decision point even with nothing of ours new ({@link OppMin.Driver#hold}).
+         */
+        public int oppBelief = 0, oppBeliefCands = 6;
+        public boolean oppHoldPoints = false;
+        public static final java.util.Map<String, Object> OPPBELIEF_DEFAULTS = java.util.Map.of("oppBelief", 0,
+                "oppBeliefCands", 6, "oppHoldPoints", false);
         public static final java.util.Map<String, Object> SOLVERGAPS_DEFAULTS = java.util.Map.of("enginePassFirst", false,
                 "enginePassToEnd", false, "engineTriggerTargets", false, "oppMinLoopMemo", false, "triggerVariants", 8,
                 "oppMinRevealPoints", false, "enginePassScale", 0, "engineAltLines", 0);
@@ -467,6 +478,12 @@ public final class ForcedWinSolver {
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.enginePassScale = intOr(get.apply("enginePassScale"), c.enginePassScale); // solver-gaps-1104
             c.engineAltLines = intOr(get.apply("engineAltLines"), c.engineAltLines); // solver-gaps-1104
+            c.oppBelief = intOr(get.apply("oppBelief"), c.oppBelief); // opp-belief-1104
+            c.oppBeliefCands = intOr(get.apply("oppBeliefCands"), c.oppBeliefCands); // opp-belief-1104
+            c.oppHoldPoints = "true".equals(get.apply("oppHoldPoints")); // opp-belief-1104
+            if (c.oppBelief < 0 || c.oppBeliefCands < 2 || (c.oppHoldPoints && c.oppBelief == 0)) {
+                throw new IllegalArgumentException("oppBelief >= 0, oppBeliefCands >= 2, oppHoldPoints needs oppBelief");
+            }
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -572,7 +589,9 @@ public final class ForcedWinSolver {
                 + (engineTriggerTargets ? " engineTriggerTargets V=" + triggerVariants : "")
                 + (oppMinLoopMemo ? " oppMinLoopMemo" : "") + (oppMinRevealPoints ? " oppMinRevealPoints" : "")
                 + (enginePassScale > 0 ? " enginePassScale=" + enginePassScale : "")
-                + (engineAltLines > 0 ? " engineAltLines=" + engineAltLines : "");
+                + (engineAltLines > 0 ? " engineAltLines=" + engineAltLines : "")
+                + (oppBelief > 0 ? " oppBelief=" + oppBelief + " C=" + oppBeliefCands : "") // opp-belief-1104
+                + (oppHoldPoints ? " oppHoldPoints" : "");
         }
     }
 
@@ -668,6 +687,8 @@ public final class ForcedWinSolver {
         public long oppMinNodes, oppMinCuts;
         /** solver-gaps-1104 (oppMinLoopMemo): OppMin points skipped as a dominated loop repeat; only when non-zero. */
         public long oppMinLoopMemo;
+        /** opp-belief-1104 (oppBelief only; non-zero only then): belief MINs, their tree and candidate play-outs, non-Forge picks. */
+        public long oppBeliefMins, oppBeliefNodes, oppBeliefNonForge;
         /** solver-gaps-1104 (engineAltLines): alternate engine lines verified, and taken; only when non-zero. */
         public long altLines, altTaken;
         /** Review #148: the shared MIN's cap events by reason (process-local diagnostics; never in a label or sha). */
@@ -768,6 +789,9 @@ public final class ForcedWinSolver {
             playoutCallCaps += sign * o.playoutCallCaps;
             oppMinNodes += sign * o.oppMinNodes;
             oppMinLoopMemo += sign * o.oppMinLoopMemo;
+            oppBeliefMins += sign * o.oppBeliefMins;
+            oppBeliefNodes += sign * o.oppBeliefNodes;
+            oppBeliefNonForge += sign * o.oppBeliefNonForge;
             altLines += sign * o.altLines;
             altTaken += sign * o.altTaken;
             oppMinCuts += sign * o.oppMinCuts;
@@ -845,6 +869,11 @@ public final class ForcedWinSolver {
             if (altLines != 0) {
                 o.addProperty("alt_lines", altLines); // solver-gaps-1104
                 o.addProperty("alt_taken", altTaken);
+            }
+            if (oppBeliefMins != 0) {
+                o.addProperty("opp_belief_mins", oppBeliefMins); // opp-belief-1104
+                o.addProperty("opp_belief_nodes", oppBeliefNodes);
+                o.addProperty("opp_belief_non_forge", oppBeliefNonForge);
             }
             if (oppMinLoopMemo != 0) {
                 o.addProperty("opp_min_loop_memo", oppMinLoopMemo); // solver-gaps-1104
@@ -3545,6 +3574,8 @@ public final class ForcedWinSolver {
         List<OppMin.Point> points;
         /** covfix-a-1102: a scripted mana-ability response could not be activated on this copy. */
         boolean manaSimFailed;
+        /** opp-belief-1104: the responses the opponent made (OppMin.Driver#realized). */
+        java.util.Map<String, String> realized;
     }
 
     /**
@@ -3568,6 +3599,9 @@ public final class ForcedWinSolver {
         final OppMin.Cfg oc = new OppMin.Cfg(cfg.oppNodes, cfg.oppResponses, cfg.oppDepth);
         oc.budgetByDepth = cfg.oppBudgetByDepth; // covfix-a-1102 (oppMinRev 3)
         oc.loopMemo = cfg.oppMinLoopMemo; // solver-gaps-1104
+        if (cfg.oppBelief > 0) {
+            return beliefWorld(oc, live, line, ws, world, wall);
+        }
         final Outcome[] firstLost = new Outcome[1];
         final Outcome[] firstOut = new Outcome[1];
         final OppMin.Out m = OppMin.min(oc, script -> {
@@ -3602,6 +3636,50 @@ public final class ForcedWinSolver {
         return firstOut[0];
     }
 
+    /**
+     * opp-belief-1104 (oppBelief): the world's value against the opponent's reply from its own K belief worlds
+     * ({@link OppMin#beliefMin}): opponent world u is this world with our cards it cannot see re-dealt
+     * ({@link OppBeliefWorlds}); u = 0 is this world.
+     */
+    Outcome beliefWorld(OppMin.Cfg oc, Game live, Line line, long ws, int world, long wall) {
+        final Outcome[] at0 = new Outcome[1];
+        final OppMin.Out m = OppMin.beliefMin(oc, cfg.oppBelief, cfg.oppBeliefCands, (u, script) -> {
+            meter.oppMinNodes++;
+            meter.oppBeliefNodes++;
+            // the opponent's worlds are its imagination, not ours: their hidden-library reads and cuts do not mark our
+            // evaluation as library-dependent or cut (our world's play-out, u = 0, still does)
+            final boolean d0 = libDep, uc0 = libUncov, c0 = libCut;
+            final int r0 = libReads;
+            final Outcome o = playout(live, line, ws, world, -1, wall, script, u);
+            if (u > 0) {
+                libDep = d0;
+                libUncov = uc0;
+                libCut = c0;
+                libReads = r0;
+            }
+            if (u == 0) at0[0] = o;
+            final java.util.Map<String, String> r = o.realized;
+            if (o.manaSimFailed) return new OppMin.Leaf(Double.NaN, "mana-sim", o.points).realized(r);
+            return new OppMin.Leaf(o.won ? 1.0 : 0.0, o.why, o.points).realized(r);
+        });
+        meter.oppBeliefMins++;
+        if (!"forge".equals(m.beliefPick)) meter.oppBeliefNonForge++;
+        meter.oppMinLoopMemo += m.loopMemoHits;
+        if (beliefPicks != null) beliefPicks.add("w" + world + " " + line.steps + " -> " + m.beliefPick);
+        if (OppMin.DEBUG) System.err.println("[oppbelief] world " + world + " pick " + m.beliefPick + " Q " + m.beliefQ + " v " + m.v);
+        if (Double.isNaN(m.v)) {
+            meter.noteMinCaps(m.caps);
+            meter.noteMinCut(m.cap, m.capCards);
+            return minCut(m.cap == null ? "oppBelief" : m.cap);
+        }
+        final Outcome o = at0[0];
+        if (o != null && !o.won) o.why = "belief" + m.why + ":" + o.why;
+        return o;
+    }
+
+    /** opp-belief-1104 (tests, null = off): the belief pick of every world, in order. */
+    java.util.List<String> beliefPicks;
+
     private Outcome minCut(String why) {
         libCut = true; // review #161 S2-2 (read only by libExact / libResample)
         meter.oppMinCuts++;
@@ -3611,6 +3689,11 @@ public final class ForcedWinSolver {
     }
 
     Outcome playout(Game live, Line line, long seed, int world, int counterAt, long wall, OppMin.Script script) {
+        return playout(live, line, seed, world, counterAt, wall, script, 0);
+    }
+
+    /** opp-belief-1104: {@code oppWorld} u >= 1 = the opponent's belief world u of this world (0 = this world). */
+    Outcome playout(Game live, Line line, long seed, int world, int counterAt, long wall, OppMin.Script script, int oppWorld) {
         final Outcome out = new Outcome();
         HiddenWatch hw = null;
         final Random prev = MyRandom.getThreadRandom();
@@ -3649,6 +3732,14 @@ public final class ForcedWinSolver {
                 } else if (libArrange != null) {
                     libArrange.apply(cm, rng);
                 }
+                if (oppWorld > 0) {
+                    // opp-belief-1104: the opponent's world: our cards it cannot see re-dealt from the canonical pool
+                    for (Player o : cm.getOpponents()) {
+                        final Player liveOpp = (Player) live.getPlayer(o.getId());
+                        final Set<Integer> known = infoStates != null ? infoStates.known(liveOpp, me) : null;
+                        OppBeliefWorlds.redeal(live, liveOpp, cm, known, new Random(OppBeliefWorlds.seed(seed, oppWorld)));
+                    }
+                }
             }
             if (cfg.libWatch) {
                 hw = new HiddenWatch(cm, line.knownTop, pinnedIn(cm), libArrange == null ? null : libArrange.cover);
@@ -3672,8 +3763,10 @@ public final class ForcedWinSolver {
                         adv.driver = new OppMin.Driver(script, o, cm, -1); // labeller-v2 (d), the shared MIN
                         adv.driver.manaSearch = cfg.oppManaSearch; // covfix-a-1102
                         adv.driver.loopMemo = cfg.oppMinLoopMemo; // solver-gaps-1104
-                        adv.driver.reveal = cfg.oppMinRevealPoints; // solver-gaps-1104
+                        adv.driver.reveal = cfg.oppMinRevealPoints || cfg.oppHoldPoints; // solver-gaps-1104
+                        adv.driver.hold = cfg.oppHoldPoints; // opp-belief-1104
                         out.points = adv.driver.points;
+                        out.realized = adv.driver.realized; // opp-belief-1104
                     }
                     adv.bounded(wall).callLimited(callLimit);
                     o.dangerouslySetController(adv);
@@ -4281,6 +4374,7 @@ public final class ForcedWinSolver {
 
         /** The live/copy ability for a step, prepared (targets, mana colour), or null when it cannot be played now. */
         static SpellAbility locate(Game g, Player me, Step st) {
+            OppBeliefWorlds.materialize(g, me, st.hostId); // opp-belief-1104: no-op outside an opponent world
             final SpellAbility sa = locateAt(g, me, st, st.hostId);
             if (sa != null || !st.byName) {
                 return sa;
