@@ -3646,7 +3646,17 @@ public final class ForcedWinSolver {
         final OppMin.Out m = OppMin.beliefMin(oc, cfg.oppBelief, cfg.oppBeliefCands, (u, script) -> {
             meter.oppMinNodes++;
             meter.oppBeliefNodes++;
+            // the opponent's worlds are its imagination, not ours: their hidden-library reads and cuts do not mark our
+            // evaluation as library-dependent or cut (our world's play-out, u = 0, still does)
+            final boolean d0 = libDep, uc0 = libUncov, c0 = libCut;
+            final int r0 = libReads;
             final Outcome o = playout(live, line, ws, world, -1, wall, script, u);
+            if (u > 0) {
+                libDep = d0;
+                libUncov = uc0;
+                libCut = c0;
+                libReads = r0;
+            }
             if (u == 0) at0[0] = o;
             final java.util.Map<String, String> r = o.realized;
             if (o.manaSimFailed) return new OppMin.Leaf(Double.NaN, "mana-sim", o.points).realized(r);
