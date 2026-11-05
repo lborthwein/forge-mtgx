@@ -196,6 +196,12 @@ public final class ForcedWinSolver {
         public int deckWorlds = 0;
         public double deckDecline = 0.35;
         public double deckLandShare = 0.425;
+        /**
+         * deck-belief-1105 (0 = off, the default): once the line being verified has lost a belief world (it cannot be
+         * proven), no further world or candidate starts past this many ms after the decision's start, so the plan
+         * search keeps the rest of the decision's budget for its own candidates. A proven line is never cut by it.
+         */
+        public int unprovenMs = 0;
 
         public DeckBelief.Params deckParams() {
             final DeckBelief.Params p = new DeckBelief.Params();
@@ -247,6 +253,7 @@ public final class ForcedWinSolver {
             c.deckWorlds = intOr(get.apply("deckWorlds"), c.deckWorlds);
             c.deckDecline = dblOr(get.apply("deckDecline"), c.deckDecline);
             c.deckLandShare = dblOr(get.apply("deckLandShare"), c.deckLandShare);
+            c.unprovenMs = intOr(get.apply("unprovenMs"), c.unprovenMs);
             return c;
         }
 
@@ -666,6 +673,7 @@ public final class ForcedWinSolver {
         final int index = decisionIndex++;
         final long t0 = System.nanoTime();
         decisionWall = t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
+        decisionStart = t0;
         final Position pos = readPosition(live, knownTop(live));
         if (pos == null) {
             noLineKey = key;
@@ -1590,6 +1598,18 @@ public final class ForcedWinSolver {
     public int wallCuts;
     /** solver-gaps-1015: the current offense decision's hard wall (System.nanoTime()): its budget plus the grace. */
     private long decisionWall;
+    /** deck-belief-1105: the current offense decision's start (for {@link Config#unprovenMs}). */
+    private long decisionStart;
+    public int unprovenStops;
+
+    /** deck-belief-1105: stop starting work on an unprovable line past {@link Config#unprovenMs} (off: never). */
+    private boolean unprovenStop(boolean unproven) {
+        if (cfg.unprovenMs <= 0 || !unproven || System.nanoTime() <= decisionStart + cfg.unprovenMs * 1_000_000L) {
+            return false;
+        }
+        unprovenStops++;
+        return true;
+    }
     /** Payment search: decisions where only the searched payment found width lines. */
     public int paySearchFound;
 
@@ -1793,6 +1813,9 @@ public final class ForcedWinSolver {
             if (System.nanoTime() > deadline && best != null) {
                 break;
             }
+            if (best != null && unprovenStop(!(best.pUnopposed >= 1.0 && best.pBelief >= 1.0))) {
+                break; // deck-belief-1105
+            }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
             receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e);
             if (evalSink != null) {
@@ -1841,6 +1864,9 @@ public final class ForcedWinSolver {
         for (int w = 1; w <= nWorlds; w++) {
             if (System.nanoTime() > deadline && n > 0) {
                 break;
+            }
+            if (n > 0 && sum < n && unprovenStop(true)) {
+                break; // deck-belief-1105: unprovable already; leave the budget to the plan search
             }
             final long ws = mix(seed, w);
             Outcome worst = playout(live, line, ws, w, -1, wall);

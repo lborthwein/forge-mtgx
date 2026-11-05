@@ -221,4 +221,54 @@ public class DeckBeliefTest extends SimulationTest {
         ls.shutdown();
         forge.util.IdScope.close();
     }
+    @Test
+    public void searchWorldsUseTheDeckPosteriorOnlyWithBeliefDeck() throws Exception {
+        String cube = cubeFile();
+        Game game = board(false);
+        Player a = game.getPlayers().get(0);
+        forge.util.IdScope.open();
+        LookaheadSearch.Config on = cfg(cube);
+        on.beliefDeck = true;
+        LookaheadSearch lsOn = new LookaheadSearch(on);
+        LookaheadSearch lsOff = new LookaheadSearch(cfg(cube));
+        LookaheadSearch lsRef = new LookaheadSearch(cfg(cube));
+        final byte shown = (byte) (MagicColor.BLUE | MagicColor.GREEN);
+        int onAns = 0, offAns = 0;
+        for (long s = 0; s < 100; s++) {
+            GameCopier c1 = new GameCopier(game, true);
+            Game g1 = c1.makeCopy();
+            lsOn.redraw(game, a, g1, (Player) c1.find(a), new Random(s));
+            byte union = shown;
+            for (Card x : ((Player) c1.find(game.getPlayers().get(1))).getCardsIn(ZoneType.Hand)) {
+                union |= paper(x.getName()).getRules().getColorIdentity().getColor();
+                onAns += BLUE_ANSWERS.contains(x.getName()) ? 1 : 0;
+            }
+            AssertJUnit.assertTrue(Integer.bitCount(union & 0x1f) <= 3);
+            // off: exactly the uniform search redraw
+            List<String> h0 = new ArrayList<>(), h1 = new ArrayList<>();
+            GameCopier c2 = new GameCopier(game, true);
+            Game g2 = c2.makeCopy();
+            lsOff.redraw(game, a, g2, (Player) c2.find(a), new Random(s));
+            for (Card x : ((Player) c2.find(game.getPlayers().get(1))).getCardsIn(ZoneType.Hand)) {
+                h0.add(x.getName());
+                offAns += BLUE_ANSWERS.contains(x.getName()) ? 1 : 0;
+            }
+            GameCopier c3 = new GameCopier(game, true);
+            Game g3 = c3.makeCopy();
+            lsRef.redraw(game, a, g3, (Player) c3.find(a), new Random(s));
+            for (Card x : ((Player) c3.find(game.getPlayers().get(1))).getCardsIn(ZoneType.Hand)) {
+                h1.add(x.getName());
+            }
+            AssertJUnit.assertEquals(h1, h0);
+        }
+        System.out.println("deck-belief-1105 search worlds, answers in 100 hands: beliefDeck " + onAns + " uniform " + offAns);
+        AssertJUnit.assertTrue(onAns > offAns);
+        ForcedWinSolver.Config u = ForcedWinSolver.Config.fromProps(k -> "unprovenMs".equals(k) ? "5000" : null);
+        AssertJUnit.assertEquals(5000, u.unprovenMs);
+        AssertJUnit.assertEquals(0, ForcedWinSolver.Config.fromProps(k -> null).unprovenMs);
+        lsOn.shutdown();
+        lsOff.shutdown();
+        lsRef.shutdown();
+        forge.util.IdScope.close();
+    }
 }

@@ -348,6 +348,12 @@ public final class LookaheadSearch {
          * server sets it per game.
          */
         public java.util.List<String> beliefSeen = null;
+        /**
+         * deck-belief-1105 (off by default, and then nothing changes): with a belief on, every world deals the
+         * opponents' hidden cards from {@link DeckBelief} (a deck of the colours they have shown, the hand weighted by
+         * what they declined to do) instead of the uniform or decision belief. Spec key {@code beliefDeck}.
+         */
+        public boolean beliefDeck = false;
 
         /** A belief is computed at searched decisions (acting or shadow). */
         public boolean beliefOn() {
@@ -501,6 +507,9 @@ public final class LookaheadSearch {
                 }
                 if (!beliefSingleton) {
                     o.addProperty("beliefSingleton", false);
+                }
+                if (beliefDeck) {
+                    o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
                 }
             }
             if (rankerOn()) {
@@ -7281,7 +7290,11 @@ public final class LookaheadSearch {
      * belief off or in shadow mode, {@link #resample} as before.
      */
     void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
-        if (beliefCube != null && !cfg.beliefShadow) {
+        if (beliefCube != null && !cfg.beliefShadow && cfg.beliefDeck) {
+            // deck-belief-1105: the opponents' hidden cards from the deck posterior, then our own library as before
+            redrawOpponentsDeck(live, liveMe, g, me, rng, DECK_PARAMS);
+            ownLibrary(live, liveMe, me, rng);
+        } else if (beliefCube != null && !cfg.beliefShadow) {
             resampleBelief(live, liveMe, g, me, rng, decisionBelief);
         } else if (cfg.infoState) {
             resample(live, liveMe, g, me, rng, InfoStates.find(live)); // review #172 S2: find only
@@ -7318,6 +7331,9 @@ public final class LookaheadSearch {
      * library are dealt by {@link DeckBelief#deal} from the same pool: a deck of colours consistent with what the
      * opponent has shown, its hand weighted by what it declined to do. Null when no belief is on.
      */
+    /** deck-belief-1105: the search worlds' deck-belief parameters (the model defaults). */
+    private static final DeckBelief.Params DECK_PARAMS = new DeckBelief.Params();
+
     public ForcedWinSolver.Redraw opponentRedrawDeck(final DeckBelief.Params p) {
         if (beliefCube == null || cfg.beliefShadow) {
             return null;
