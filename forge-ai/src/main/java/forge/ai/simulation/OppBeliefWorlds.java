@@ -23,6 +23,12 @@ import forge.game.zone.ZoneType;
  * whatever the real places of our hidden cards are: u depends only on what the opponent knows and the seed (the leak
  * test). The opponent is assumed to know our deck list (the cards, not their places); a deck-model belief is a
  * follow-up.
+ *
+ * <p><b>Conditioning at the reveal</b> ({@link #materialize}). u is drawn at the root, before we act. When our seat in u
+ * plays a card of the pool that u dealt elsewhere (our library), the card is swapped into our hand for the first pooled
+ * card there, at that moment: the world is conditioned on what the opponent observes when it observes it. Before the
+ * card is played, u's hand holds it only as often as the opponent's belief says; once it is played, every u agrees
+ * with what the opponent saw.
  */
 public final class OppBeliefWorlds {
 
@@ -56,6 +62,11 @@ public final class OppBeliefWorlds {
         }
         if (pool.isEmpty()) return;
         pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+        final Set<Integer> ids = new java.util.HashSet<>();
+        for (Card c : pool) ids.add(c.getId());
+        synchronized (POOLED) {
+            POOLED.put(me.getGame(), ids);
+        }
         Collections.shuffle(pool, rng);
         int p = 0;
         final List<Card> nh = new ArrayList<>(hand.size());
@@ -69,6 +80,36 @@ public final class OppBeliefWorlds {
     private static boolean shown(final Game live, final Card c, final PlayerView ov) {
         final Card lc = live.findById(c.getId());
         return lc != null && lc.getView().canBeShownTo(ov);
+    }
+
+    /** The pooled card ids of each opponent world (its copy game), for {@link #materialize}. */
+    private static final java.util.Map<Game, Set<Integer>> POOLED = new java.util.WeakHashMap<>();
+
+    /**
+     * In an opponent world (a copy that {@link #redeal} re-dealt; a no-op in any other game): our card {@code hostId},
+     * pooled and now in our library, is swapped into our hand for the first pooled card there (hand order).
+     */
+    public static void materialize(final Game g, final Player me, final int hostId) {
+        final Set<Integer> ids;
+        synchronized (POOLED) {
+            ids = POOLED.get(g);
+        }
+        if (ids == null || !ids.contains(hostId)) return;
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        int at = -1;
+        for (int i = 0; i < lib.size() && at < 0; i++) if (lib.get(i).getId() == hostId) at = i;
+        if (at < 0) return;
+        final List<Card> hand = new ArrayList<>(me.getCardsIn(ZoneType.Hand));
+        for (int i = 0; i < hand.size(); i++) {
+            if (ids.contains(hand.get(i).getId())) {
+                final Card out = hand.get(i);
+                hand.set(i, lib.get(at));
+                lib.set(at, out);
+                me.getZone(ZoneType.Hand).setCards(hand);
+                me.getZone(ZoneType.Library).setCards(lib);
+                return;
+            }
+        }
     }
 
     /** The seed of opponent world {@code u} of our world seed {@code ws}. */

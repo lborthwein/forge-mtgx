@@ -406,6 +406,7 @@ public final class OppMin {
         cands.put("forge", Script.forgeRoot());
         cands.put("{}", Script.policy(Collections.emptyMap()));
         final java.util.Map<String, double[]> vals = new java.util.HashMap<>();
+        final java.util.Map<String, boolean[]> seen = new java.util.HashMap<>(); // played (resolved or not)
         String uCap = null;
         for (int u = 1; u <= k; u++) {
             final int uu = u;
@@ -419,6 +420,7 @@ public final class OppMin {
             if (Double.isNaN(m.v) && uCap == null) uCap = m.cap == null ? "none" : m.cap;
             for (Map.Entry<String, Double> e : m.explored.entrySet()) {
                 vals.computeIfAbsent(e.getKey(), x -> nanRow(k))[u] = e.getValue();
+                seen.computeIfAbsent(e.getKey(), x -> new boolean[k + 1])[u] = true;
             }
             if (m.minScript != null && m.minRealized != null && cands.size() < Math.max(2, maxCands)) {
                 final String key = m.minScript.forge ? "forge" : m.minRealized.toString();
@@ -431,12 +433,12 @@ public final class OppMin {
         final StringBuilder q = new StringBuilder();
         for (Map.Entry<String, Script> c : cands.entrySet()) {
             final double[] row = vals.computeIfAbsent(c.getKey(), x -> nanRow(k));
-            final boolean[] ran = new boolean[k + 1];
+            final boolean[] met = seen.computeIfAbsent(c.getKey(), x -> new boolean[k + 1]);
             double sum = 0;
             int n = 0;
             for (int u = 1; u <= k; u++) {
-                if (Double.isNaN(row[u]) && !ran[u]) {
-                    ran[u] = true;
+                if (!met[u]) {
+                    met[u] = true;
                     out.beliefNodes++;
                     final Leaf l = play.apply(u, c.getValue());
                     row[u] = l.v;

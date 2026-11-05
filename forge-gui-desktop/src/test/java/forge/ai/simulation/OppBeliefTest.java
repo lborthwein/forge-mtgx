@@ -21,7 +21,7 @@ import forge.game.zone.ZoneType;
  */
 public class OppBeliefTest extends SimulationTest {
 
-    static final String ON = SolverGapsTest.BASE + ",enginePassFirst=true,enginePassToEnd=true,oppMinRevealPoints=true";
+    static final String ON = SolverGapsTest.BASE + ",enginePassFirst=true,enginePassToEnd=true,oppMinRevealPoints=true,worlds=16";
 
     static ForcedWinSolver solver(final Game g, final String keys) {
         final java.util.Map<String, String> m = new java.util.HashMap<>();
@@ -46,14 +46,28 @@ public class OppBeliefTest extends SimulationTest {
         AssertJUnit.assertTrue(R3LabelSearch.Spec.parse(r3).identity().has("oppBelief"));
     }
 
-    /** The B frame (solver-gaps-1104): they tapped out last turn and hold a counter and a creature (shown to us). */
-    static String bFrame(final String extraHand, final String lib) {
+    /**
+     * Their library: two cards they cannot cast (no land to draw: three lands on their turn, so the creature leaves them
+     * below counter mana). Our worlds draw their hidden two-card hand from hand + library: half hold the counter.
+     */
+    static final String THEIRLIB = "Emrakul, the Aeons Torn;Emrakul, the Aeons Torn";
+
+    /**
+     * The B frame (solver-gaps-1104): they tapped out last turn and hold a counter and a creature, hidden from us.
+     * {@code shown}: the main-phase setup already cast (the enabler on our battlefield, three of our lands tapped).
+     */
+    static String bFrame(final String extraHand, final String lib, final boolean shownSetup) {
         return "[state]\nturn=8\nactiveplayer=human\nactivephase=MAIN1\nhumanlife=20\nailife=20"
-                + "\nhumanlandsplayed=1\nailandsplayed=0\naihand=Counterspell;Grizzly Bears\nailibrary=" + ForcedWinSolverTest.LIB20
+                + "\nhumanlandsplayed=1\nailandsplayed=0\naihand=Counterspell;Grizzly Bears\nailibrary=" + THEIRLIB
                 + "\naigraveyard=\naiexile=\naibattlefield=Island|Tapped;Island|Tapped;Forest|Tapped"
-                + "\nhumanhand=Pestermite;Kiki-Jiki, Mirror Breaker" + extraHand
-                + "\nhumanbattlefield=Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain"
+                + "\nhumanhand=" + (shownSetup ? "" : "Pestermite;") + "Kiki-Jiki, Mirror Breaker" + extraHand
+                + "\nhumanbattlefield=" + (shownSetup ? "Pestermite|SummonSick;Volcanic Island|Tapped;Mountain|Tapped;Mountain|Tapped;"
+                        + "Volcanic Island;Mountain" : "Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain")
                 + "\nhumangraveyard=\nhumanexile=\nhumanlibrary=" + lib + "\n";
+    }
+
+    static String bFrame(final String extraHand, final String lib) {
+        return bFrame(extraHand, lib, false);
     }
 
     /** Swap our hand card {@code a} with our library card {@code b} (both hidden from the opponent). */
@@ -100,8 +114,8 @@ public class OppBeliefTest extends SimulationTest {
     @Test
     public void opponentPicksDoNotChangeWhenOnlyOurHiddenCardsChange() {
         final String keys = ON + ",oppBelief=3,oppHoldPoints=true";
-        final Game g = SolverGapsTest.shown(ForcedWinSolverTest.game("Default", "Default",
-                bFrame(";Emrakul, the Aeons Torn", "Ulamog, the Infinite Gyre;" + ForcedWinSolverTest.OURLIB)));
+        final Game g = ForcedWinSolverTest.game("Default", "Default",
+                bFrame(";Emrakul, the Aeons Torn", "Ulamog, the Infinite Gyre;" + ForcedWinSolverTest.OURLIB));
         final ForcedWinSolver a = solver(g, keys);
         a.beliefPicks = new ArrayList<>();
         final List<ForcedWinSolver.Proposal> pa = a.propose(g);
@@ -121,16 +135,14 @@ public class OppBeliefTest extends SimulationTest {
         for (int i = 0; i < n; i++) AssertJUnit.assertEquals("pick " + i, a.beliefPicks.get(i), b.beliefPicks.get(i));
     }
 
-    static double best(final List<ForcedWinSolver.Proposal> ps, final boolean endStep) {
+    static double best(final List<ForcedWinSolver.Proposal> ps) {
         double p = -1;
-        for (ForcedWinSolver.Proposal x : ps) {
-            if (x.text.contains("PASS>END") == endStep) p = Math.max(p, x.pBelief);
-        }
+        for (ForcedWinSolver.Proposal x : ps) p = Math.max(p, x.pBelief);
         return p;
     }
 
-    static List<ForcedWinSolver.Proposal> run(final String keys, final String tag) {
-        final Game g = SolverGapsTest.shown(ForcedWinSolverTest.game("Default", "Default", bFrame("", ForcedWinSolverTest.OURLIB)));
+    static List<ForcedWinSolver.Proposal> run(final String keys, final boolean shownSetup, final String tag) {
+        final Game g = ForcedWinSolverTest.game("Default", "Default", bFrame("", ForcedWinSolverTest.OURLIB, shownSetup));
         final ForcedWinSolver s = solver(g, keys);
         s.beliefPicks = new ArrayList<>();
         final List<ForcedWinSolver.Proposal> p = s.propose(g);
@@ -142,14 +154,15 @@ public class OppBeliefTest extends SimulationTest {
 
     @Test
     public void endStepFlashBeatsAMainPhaseSetupUnderBelief() {
-        // both timings verified (engineAltLines); their own main phase is a hold point: Forge AI casts the creature
-        // (tapping below counter mana), or they hold the counter. Determinized, they always hold (they see our hand).
-        final List<ForcedWinSolver.Proposal> det = run(ON + ",engineAltLines=3", "det");
-        final List<ForcedWinSolver.Proposal> bel = run(ON + ",engineAltLines=3,oppBelief=4,oppHoldPoints=true", "belief");
-        final double end = best(bel, true), main = best(bel, false);
-        System.err.println("[opp-belief-test] det end=" + best(det, true) + " main=" + best(det, false)
-                + " | belief end=" + end + " main=" + main);
-        AssertJUnit.assertTrue("belief: an end-step line", end > 0);
-        AssertJUnit.assertTrue("belief: end step beats main phase (" + end + " vs " + main + ")", end > main);
+        // (a) the enabler still in hand (the end-step line available) against (b) the enabler cast in our main phase
+        // (on our battlefield, seen on their turn). Their own main phase is a hold point: Forge AI casts the creature
+        // (below counter mana), or they hold the counter. Our worlds: half of them give them the counter.
+        final String det = ON + ",evalSteps=40000";
+        final String bel = ON + ",evalSteps=40000,oppBelief=4,oppHoldPoints=true";
+        final double dA = best(run(det, false, "det-a")), dB = best(run(det, true, "det-b"));
+        final double bA = best(run(bel, false, "belief-a")), bB = best(run(bel, true, "belief-b"));
+        System.err.println("[opp-belief-test] det a(end)=" + dA + " b(main)=" + dB + " | belief a(end)=" + bA + " b(main)=" + bB);
+        AssertJUnit.assertTrue("belief: a line with the enabler in hand", bA > 0);
+        AssertJUnit.assertTrue("belief: holding the enabler beats showing it (" + bA + " vs " + bB + ")", bA > bB);
     }
 }

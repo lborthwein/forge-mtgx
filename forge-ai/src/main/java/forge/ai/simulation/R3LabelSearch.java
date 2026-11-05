@@ -918,6 +918,7 @@ public final class R3LabelSearch {
                     if (first.pass) {
                         return null;
                     }
+                    if (!first.pass) OppBeliefWorlds.materialize(g, me, first.hostId); // opp-belief-1104 (no-op otherwise)
                     final SpellAbility sa = first.locate(g, me);
                     if (sa == null) {
                         out.end = "failed:first_not_in_copy";
@@ -1482,6 +1483,10 @@ public final class R3LabelSearch {
                     spec.oppBelief, spec.oppBeliefCands, (u, script) -> {
                         work.oppNodes++;
                         final LineOut l = play.apply(u, script);
+                        if (u > 0 && "failed:first_not_in_copy".equals(l.end)) {
+                            // in this world of theirs we do not hold the candidate's card: no line to answer (not won)
+                            return new OppMin.Leaf(0.0, "belief:not_held", l.points).realized(l.realized);
+                        }
                         return new OppMin.Leaf(l.v, l.end, l.points).realized(l.realized);
                     });
             if (m.cap != null && !(m.v == 0.0)) work.oppCuts++;

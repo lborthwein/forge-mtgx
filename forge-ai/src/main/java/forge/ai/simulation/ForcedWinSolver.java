@@ -4364,6 +4364,7 @@ public final class ForcedWinSolver {
 
         /** The live/copy ability for a step, prepared (targets, mana colour), or null when it cannot be played now. */
         static SpellAbility locate(Game g, Player me, Step st) {
+            OppBeliefWorlds.materialize(g, me, st.hostId); // opp-belief-1104: no-op outside an opponent world
             final SpellAbility sa = locateAt(g, me, st, st.hostId);
             if (sa != null || !st.byName) {
                 return sa;
