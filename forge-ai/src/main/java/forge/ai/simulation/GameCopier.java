@@ -305,6 +305,7 @@ public class GameCopier {
     }
 
     public Game makeCopy() {
+        forge.game.WorkMeter.tick("makeCopy"); // void-causes-1104: hang watchdog unit (no meter open = no-op)
         return makeCopy(null, null);
     }
     public Game makeCopy(PhaseType advanceToPhase, Player aiPlayer) {

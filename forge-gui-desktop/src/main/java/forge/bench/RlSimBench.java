@@ -1013,6 +1013,8 @@ public final class RlSimBench {
             abort = "crash";
             row.addProperty("error", e.toString());
             row.add("stack", forgeFrames(e));
+            // void-causes-1104: the whole stack (every frame, causes, suppressed) to stderr and to the row
+            row.add("crash", CrashStack.print("[rlsim]   ", "[rlsim] game " + i + " crashed: " + e, e));
         } finally {
             RUNNING.remove(Thread.currentThread());
             if (game != null && !game.isGameOver()) {
