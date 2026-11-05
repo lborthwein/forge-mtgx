@@ -90,8 +90,9 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
         public boolean framesOnly = false;
         /**
          * cf-labeller-1105 (false = off, the default: rows unchanged): label mode also writes the capture's Forge state
-         * text ({@code frame_text}, GameState) and each seat's known library positions ({@code lib_known_idx}), the
-         * post-pick frame a play-out stage on another jar installs.
+         * text ({@code frame_text}, GameState) and, per library, the positions a play-out keeps in place
+         * ({@code lib_known_idx}: known to the owner, or a card the job picked): the post-pick frame a play-out stage on
+         * another jar installs.
          */
         public boolean frameText = false;
         public String out;
@@ -917,17 +918,39 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
                 final Object[] ft = PlayerControllerBridge.isolated(game, () -> IdScope.detached(() -> {
                     final forge.game.GameState gs = new forge.game.GameState();
                     gs.initFromGame(game);
+                    // the cards the job's answers picked: the asking seat knows where they went (a pick put on top of
+                    // a library is known there even when the seat-knowledge tracker has no sighting of it)
+                    final java.util.Set<Integer> picked = new java.util.HashSet<>();
+                    for (JsonElement e : job.getAsJsonArray("script")) {
+                        final JsonObject x = e.getAsJsonObject();
+                        if (x.has("t") && "id".equals(x.get("t").getAsString())) {
+                            picked.add(x.get("id").getAsInt());
+                        } else if (x.has("t") && "ids".equals(x.get("t").getAsString())) {
+                            for (JsonElement i : x.getAsJsonArray("ids")) {
+                                picked.add(i.getAsInt());
+                            }
+                        }
+                    }
                     final JsonObject kn = new JsonObject();
+                    final JsonArray kp = new JsonArray();
                     for (int s = 0; s < game.getRegisteredPlayers().size(); s++) {
                         final List<Card> lib = new ArrayList<>(game.getRegisteredPlayers().get(s).getCardsIn(ZoneType.Library));
                         final JsonArray ks = new JsonArray();
                         for (int i = 0; i < lib.size(); i++) {
-                            if (know != null && know.knows(s, lib.get(i))) {
+                            final boolean pick = picked.contains(lib.get(i).getId());
+                            if ((know != null && know.knows(s, lib.get(i))) || pick) {
                                 ks.add(i);
+                            }
+                            if (pick) {
+                                final JsonArray x = new JsonArray();
+                                x.add(s);
+                                x.add(i);
+                                kp.add(x);
                             }
                         }
                         kn.add(String.valueOf(s), ks);
                     }
+                    kn.add("picked_in_library", kp);
                     return new Object[] {gs.toString(), kn};
                 }));
                 row.addProperty("frame_text", (String) ft[0]);
