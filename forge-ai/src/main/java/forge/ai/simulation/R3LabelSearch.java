@@ -152,6 +152,42 @@ public final class R3LabelSearch {
          * instant set up at their end step (valued by its line through our next turn) is a row the walk can learn from.
          */
         public boolean instantCands = false;
+        /**
+         * label-speed-1104 (b, L3; off by default; in the identity only when on): the per-row proof cache. A proof leaf's
+         * answer is a function of the line's game (copied by the proof), its seed (the world's line seed and the turn) and
+         * the row: two lines of one row at the same exact state ({@link PlayoutKeys#stateKey} without the line's random
+         * stream, which the proof never reads: it runs in its own seeded scope) with the same seed get the same answer,
+         * so the second one is read from the cache. Every hit still counts as a proof (row caps unchanged).
+         */
+        public boolean proofCache = false;
+        /**
+         * label-speed-1104 (d, L4; off = 0; in the identity only when on): the decided-row pre-check. Candidate 0 and the
+         * next {@code probeCands} candidates (the candidate order) play the first {@code probeWorlds} selection worlds, and
+         * candidate 0 plays {@code probeTarget} spread target worlds. When every probe line is resolved to the same
+         * decided value (0 or 1: a game end or a proof, nothing capped or failed), the row is emitted from the probe
+         * (pick 0, target = that value) and the rest is skipped; otherwise the full search runs and reuses the probe's
+         * worlds. Priority rows whose pick is not a costed draw only.
+         */
+        public int probeWorlds = 0, probeCands = 1, probeTarget = 4;
+        /**
+         * label-speed-1104 (a, L4; off = 0; in the identity only when on): selection tie-pruning. After the first
+         * {@code selPrune} selection worlds of every candidate, a candidate is dropped (cut_at) when its world values equal
+         * the leader's (the argmax so far; ties go to the lower index, so it can only lose to it) or when its best case
+         * (the remaining worlds at 1) is below the leader's worst case (at 0): the second cut is exact.
+         */
+        public int selPrune = 0;
+        /**
+         * label-speed-1104 (a, L4; off = 0; in the identity only when on): target early stop. The stratified target
+         * worlds run in a spread order; when the first {@code tgtStop} are resolved and all equal, the rest are skipped
+         * (the target is their mean). Costed-draw targets are unchanged.
+         */
+        public int tgtStop = 0;
+        /**
+         * label-speed-1104 (e, A3; off = 0; in the identity only when on; CHANGES label values: a measured arm): the proof
+         * pre-check. Each proof leaf first runs with every solver and loss work-unit budget at {@code proofPrePct} % of
+         * the proof spec's; a win or loss there is the leaf's answer, anything else runs the full proof.
+         */
+        public int proofPrePct = 0;
         /** The block as given (sorted), for the identity. */
         JsonObject json = new JsonObject();
 
@@ -170,7 +206,7 @@ public final class R3LabelSearch {
                 "targetWorlds", "stratify", "topAnswers", "cac", "inline", "leaf", "maxTurns", "maxSteps", "horizon",
                 "proofLeaf", "profile", "solverSpec", "drawDepth", "seqCap", "samples", "oppMin", "oppMinIn",
                 "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed", "knownLib", "infoState",
-                "instantCands"));
+                "instantCands", "proofCache", "probeWorlds", "probeCands", "probeTarget", "selPrune", "tgtStop", "proofPrePct"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -232,6 +268,17 @@ public final class R3LabelSearch {
             if (o.has("knownLib")) s.knownLib = o.get("knownLib").getAsBoolean();
             if (o.has("infoState")) s.infoState = o.get("infoState").getAsBoolean();
             if (o.has("instantCands")) s.instantCands = o.get("instantCands").getAsBoolean(); // endstep-rows-1103
+            if (o.has("proofCache")) s.proofCache = o.get("proofCache").getAsBoolean(); // label-speed-1104
+            if (o.has("probeWorlds")) s.probeWorlds = o.get("probeWorlds").getAsInt();
+            if (o.has("probeCands")) s.probeCands = o.get("probeCands").getAsInt();
+            if (o.has("probeTarget")) s.probeTarget = o.get("probeTarget").getAsInt();
+            if (o.has("selPrune")) s.selPrune = o.get("selPrune").getAsInt();
+            if (o.has("tgtStop")) s.tgtStop = o.get("tgtStop").getAsInt();
+            if (o.has("proofPrePct")) s.proofPrePct = o.get("proofPrePct").getAsInt();
+            if (s.probeWorlds < 0 || s.probeCands < 0 || s.probeTarget < 1 || s.selPrune < 0 || s.tgtStop < 0
+                    || s.proofPrePct < 0 || s.proofPrePct >= 100 || (s.probeWorlds > 0 && s.probeWorlds > s.selectWorlds)) {
+                throw new IllegalArgumentException("r3: label-speed keys out of range");
+            }
             if (!"rollout".equals(s.leaf) && !"value".equals(s.leaf)) {
                 throw new IllegalArgumentException("r3.leaf is \"rollout\" or \"value\", not " + s.leaf);
             }
@@ -293,6 +340,16 @@ public final class R3LabelSearch {
             if (instantCands) {
                 o.addProperty("instantCands", true); // endstep-rows-1103: only when on
             }
+            // label-speed-1104: each only when on, so every other spec's sha is unchanged
+            if (proofCache) o.addProperty("proofCache", true);
+            if (probeWorlds > 0) {
+                o.addProperty("probeWorlds", probeWorlds);
+                o.addProperty("probeCands", probeCands);
+                o.addProperty("probeTarget", probeTarget);
+            }
+            if (selPrune > 0) o.addProperty("selPrune", selPrune);
+            if (tgtStop > 0) o.addProperty("tgtStop", tgtStop);
+            if (proofPrePct > 0) o.addProperty("proofPrePct", proofPrePct);
             return sorted(o);
         }
 
@@ -828,6 +885,129 @@ public final class R3LabelSearch {
         return u == 0 ? spec.targetWorlds : Math.min(u, spec.targetWorlds);
     }
 
+    // ------------------------------------------------------------------------------------------------ label-speed-1104
+
+    /** (b) the row's proof answers by (line seed, turn, exact state without the random stream); cleared per row. */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> proofMemo = new java.util.concurrent.ConcurrentHashMap<>();
+    /** (e) the scaled proof seat, built once. */
+    private HonestLabel.Seat preSeat;
+
+    private synchronized HonestLabel.Seat preSeat() {
+        if (preSeat == null) preSeat = env.proof().scaled(spec.proofPrePct);
+        return preSeat;
+    }
+
+    /** The cache key of a proof leaf: its seeds' source and the exact state the proof copies. */
+    static String proofKey(final Game g, final long seed, final int turn) {
+        // PlayoutKeys' exact key (ids, timestamps, zones in order, every card's state, mana pools, combat, the stack, the
+        // seats' AI memories) plus the turn's history it leaves out: the storm list, last turn's casts, per-game casts
+        // and the per-turn counters cards read
+        final StringBuilder sb = new StringBuilder(PlayoutKeys.stateKey(g, false));
+        sb.append(" storm[");
+        for (SpellAbility sa : g.getStack().getSpellsCastThisTurn()) {
+            sb.append(sa.getHostCard() == null ? "-" : sa.getHostCard().getId()).append('@')
+                    .append(sa.getActivatingPlayer() == null ? "-" : sa.getActivatingPlayer().getId()).append(',');
+        }
+        sb.append("] last[");
+        for (Card c : g.getStack().getSpellsCastLastTurn()) sb.append(c.getId()).append(',');
+        sb.append(']');
+        sb.append(" mon").append(g.getMonarch() == null ? "-" : g.getMonarch().getId());
+        sb.append(" ini").append(g.getHasInitiative() == null ? "-" : g.getHasInitiative().getId());
+        for (Player p : g.getPlayers()) {
+            sb.append(" P").append(p.getId()).append(" game=").append(p.getSpellsCastThisGame())
+                    .append(" lastT=").append(p.getSpellsCastLastTurn()).append(" scry=").append(p.getScryThisTurn())
+                    .append(" surv=").append(p.getSurveilThisTurn()).append(" exp=").append(p.getExpentThisTurn())
+                    .append(" crime=").append(p.getCommittedCrimeThisTurn()).append(" dice=").append(p.getDiceRollsThisTurn())
+                    .append(" lpl=").append(p.getLandsPlayedLastTurn());
+        }
+        return Long.toHexString(seed) + ":" + turn + ":" + sha256(sb.toString());
+    }
+
+    /**
+     * The proof leaf's label ("win", "loss" or anything else = undecided) of {@code me} on {@code g} at {@code turn} of a
+     * line seeded {@code seed}. Off keys: exactly the one proof call it always was.
+     */
+    String proofLabel(final Game g, final Player me, final long seed, final int turn) {
+        String key = null;
+        if (spec.proofCache) {
+            key = proofKey(g, seed, turn);
+            final String hit = proofMemo.get(key);
+            if (hit != null) {
+                R3Prof.count("proof_hit");
+                return hit;
+            }
+            R3Prof.count("proof_miss");
+        }
+        String label = null;
+        if (spec.proofPrePct > 0) {
+            final HonestLabel.Seat pre = preSeat();
+            final HonestLabel.Result r0 = isolated(LookaheadSearch.mix(seed, 0x50524FL + turn),
+                    () -> pre.label(g, me, LookaheadSearch.mix(seed, 0x50524F0000L + turn)));
+            if ("win".equals(r0.label) || "loss".equals(r0.label)) {
+                label = r0.label;
+                R3Prof.count("pre_decided");
+            } else {
+                R3Prof.count("pre_undecided");
+            }
+        }
+        if (label == null) {
+            final HonestLabel.Result r = isolated(LookaheadSearch.mix(seed, 0x50524FL + turn),
+                    () -> env.proof().label(g, me, LookaheadSearch.mix(seed, 0x50524F0000L + turn)));
+            label = String.valueOf(r.label);
+        }
+        if (key != null) proofMemo.putIfAbsent(key, label);
+        return label;
+    }
+
+    /** A spread order of {@code 0..W-1} (base-2 radical inverse): every prefix covers the strata evenly. */
+    static int[] spread(final int W) {
+        final int[] o = new int[W];
+        final boolean[] seen = new boolean[W];
+        int n = 0;
+        for (long i = 0; n < W; i++) {
+            double x = 0, f = 0.5;
+            for (long j = i; j != 0; j >>= 1, f /= 2) {
+                if ((j & 1) != 0) x += f;
+            }
+            final int w = (int) Math.floor(x * W);
+            if (!seen[w]) {
+                seen[w] = true;
+                o[n++] = w;
+            }
+        }
+        return o;
+    }
+
+    /** A decided value: a game end or proof at exactly 0 or 1 (NaN = not decided). */
+    static double decided(final WorldOut o) {
+        if (o == null || Double.isNaN(o.v) || o.end == null) return Double.NaN;
+        if (!("terminal".equals(o.end) || o.end.startsWith("proof:"))) return Double.NaN;
+        return o.v == 0.0 || o.v == 1.0 ? o.v : Double.NaN;
+    }
+
+    /**
+     * The target worlds 0..W-1 of the pick ({@code fn(w)}), added to {@code res} in run order. With tgtStop (a): a spread
+     * order, stopping after the first tgtStop when they are resolved and all equal.
+     */
+    void targetUnits(final int W, final Result res, final ChooseACard.Row choice, final UnitFn fn) {
+        final int k0 = spec.tgtStop;
+        if (k0 <= 0 || k0 >= W) {
+            runUnits(W, res.work, choice, fn, (w, wo) -> res.targetWorlds.add(wo));
+            return;
+        }
+        final int[] order = spread(W);
+        runUnits(k0, res.work, choice, (k, wk) -> fn.run(order[k], wk), (k, wo) -> res.targetWorlds.add(wo));
+        boolean same = res.targetWorlds.size() == k0;
+        for (WorldOut o : res.targetWorlds) {
+            same &= !Double.isNaN(o.v) && o.v == res.targetWorlds.get(0).v;
+        }
+        if (same) {
+            res.extra.addProperty("tgt_stop", k0);
+            return;
+        }
+        runUnits(W - k0, res.work, choice, (k, wk) -> fn.run(order[k0 + k], wk), (k, wo) -> res.targetWorlds.add(wo));
+    }
+
     // ------------------------------------------------------------------------------------------------ lines
 
     /** The shared state of one line (both seats' controllers read it). */
@@ -862,24 +1042,38 @@ public final class R3LabelSearch {
         }
 
         /** Every seat's priority decision in the line: the leaf checks, our first action, the opponent's MIN script. */
-        List<SpellAbility> choose(final PlayerControllerAi c, final java.util.function.Supplier<List<SpellAbility>> own) {
+        List<SpellAbility> choose(final PlayerControllerAi c, final java.util.function.Supplier<List<SpellAbility>> own0) {
             if (stop) {
                 return null;
             }
             final PhaseHandler ph = g.getPhaseHandler();
             final Player p = c.getPlayer();
+            final java.util.function.Supplier<List<SpellAbility>> own = !R3Prof.ON ? own0 : () -> {
+                R3Prof.enter(p == me ? R3Prof.POL_ME : R3Prof.POL_OPP);
+                try {
+                    return own0.get();
+                } finally {
+                    R3Prof.exit();
+                }
+            };
             // the leaf: a proof check at the first empty-stack main / end priority of each later turn
             if ("rollout".equals(spec.leaf) && spec.proofLeaf && env.proof() != null && ph.getTurn() > lastProofTurn
                     && g.getStack().isEmpty() && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)
                     || ph.is(PhaseType.END_OF_TURN))) {
                 lastProofTurn = ph.getTurn();
-                final HonestLabel.Result r = isolated(LookaheadSearch.mix(seed, 0x50524FL + ph.getTurn()),
-                        () -> env.proof().label(g, me, LookaheadSearch.mix(seed, 0x50524F0000L + ph.getTurn())));
+                R3Prof.digest(g, "p" + ph.getTurn());
+                R3Prof.enter(R3Prof.PROOF);
+                final String label;
+                try {
+                    label = proofLabel(g, me, seed, ph.getTurn());
+                } finally {
+                    R3Prof.exit();
+                }
                 work.proofs++;
-                if ("win".equals(r.label) || "loss".equals(r.label)) {
-                    out.v = "win".equals(r.label) ? 1.0 : 0.0;
-                    out.end = "proof:" + r.label;
-                    if ("win".equals(r.label)) work.proofWins++;
+                if ("win".equals(label) || "loss".equals(label)) {
+                    out.v = "win".equals(label) ? 1.0 : 0.0;
+                    out.end = "proof:" + label;
+                    if ("win".equals(label)) work.proofWins++;
                     else work.proofLosses++;
                     stop = true;
                     return null;
@@ -914,7 +1108,12 @@ public final class R3LabelSearch {
             }
             if (driver != null && p != me) {
                 // the shared MIN (OppMin): the opponent's scripted response at our root-turn points
-                return driver.choose(g, () -> spec.testPassiveOpp && OppMin.pointKey(g, me) != null ? null : own.get());
+                R3Prof.enter(R3Prof.POL_OPP);
+                try {
+                    return driver.choose(g, () -> spec.testPassiveOpp && OppMin.pointKey(g, me) != null ? null : own.get());
+                } finally {
+                    R3Prof.exit();
+                }
             }
             if (spec.testPassiveOpp && p != me && !g.getStack().isEmpty() && g.getStack().peekAbility() != null
                     && g.getStack().peekAbility().getActivatingPlayer() == me) {
@@ -987,6 +1186,16 @@ public final class R3LabelSearch {
         }
 
         @Override
+        public List<SpellAbility> nativeChooseSpellAbilityToPlay() {
+            R3Prof.enter(R3Prof.NATIVE);
+            try {
+                return super.nativeChooseSpellAbilityToPlay();
+            } finally {
+                R3Prof.exit();
+            }
+        }
+
+        @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             return st.choose(this, super::chooseSpellAbilityToPlay);
         }
@@ -1017,66 +1226,75 @@ public final class R3LabelSearch {
             this.turn = turn;
         }
 
+        static <T> T cac(final java.util.function.Supplier<T> f) {
+            R3Prof.enter(R3Prof.CAC);
+            try {
+                return f.get();
+            } finally {
+                R3Prof.exit();
+            }
+        }
+
         boolean on() {
             return g.getPhaseHandler().getTurn() == turn;
         }
 
         @Override
         public void beforeAsk(final PlayerControllerAi pc) {
-            if (on()) c.beforeAsk(pc);
+            if (on()) { R3Prof.enter(R3Prof.CAC); try { c.beforeAsk(pc); } finally { R3Prof.exit(); } }
         }
 
         @Override
         public Card pick(final PlayerControllerAi pc, final ZoneType d, final List<ZoneType> o, final SpellAbility sa,
                 final CardCollection f, final boolean opt, final Player dec, final Card def) {
-            return on() ? c.pick(pc, d, o, sa, f, opt, dec, def) : def;
+            return on() ? cac(() -> c.pick(pc, d, o, sa, f, opt, dec, def)) : def;
         }
 
         @Override
         public CardCollectionView order(final PlayerControllerAi pc, final CardCollectionView cards, final ZoneType d,
                 final SpellAbility sa, final CardCollectionView def) {
-            return on() ? c.order(pc, cards, d, sa, def) : def;
+            return on() ? cac(() -> c.order(pc, cards, d, sa, def)) : def;
         }
 
         @Override
         public boolean confirm(final PlayerControllerAi pc, final SpellAbility sa, final PlayerActionConfirmMode m,
                 final String msg, final boolean def) {
-            return on() ? c.confirm(pc, sa, m, msg, def) : def;
+            return on() ? cac(() -> c.confirm(pc, sa, m, msg, def)) : def;
         }
 
         @Override
         public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> scry(final PlayerControllerAi pc,
                 final CardCollection t, final org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> def) {
-            return on() ? c.scry(pc, t, def) : def;
+            return on() ? cac(() -> c.scry(pc, t, def)) : def;
         }
 
         @Override
         public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> surveil(final PlayerControllerAi pc,
                 final CardCollection t, final org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> def) {
-            return on() ? c.surveil(pc, t, def) : def;
+            return on() ? cac(() -> c.surveil(pc, t, def)) : def;
         }
 
         @Override
         public CardCollection discard(final PlayerControllerAi pc, final Player p, final SpellAbility sa,
                 final CardCollection v, final int min, final int max, final CardCollection def) {
-            return on() ? c.discard(pc, p, sa, v, min, max, def) : def;
+            return on() ? cac(() -> c.discard(pc, p, sa, v, min, max, def)) : def;
         }
 
         @Override
         public List<SpellAbility> priority(final PlayerControllerAi pc, final List<SpellAbility> def) {
-            return on() ? c.priority(pc, def) : def;
+            return on() ? cac(() -> c.priority(pc, def)) : def;
         }
 
         @Override
         public List<Card> dig(final PlayerControllerAi pc, final List<Card> o, final int min, final int max,
                 final SpellAbility sa, final List<Card> def) {
-            return on() ? c.dig(pc, o, min, max, sa, def) : def;
+            return on() ? cac(() -> c.dig(pc, o, min, max, sa, def)) : def;
         }
 
         @Override
         public CardCollectionView returnCost(final PlayerControllerAi pc, final SpellAbility sa, final String t,
                 final int n, final CardCollectionView def) {
-            return on() ? c.returnCost(pc, sa, t, n, def) : def;
+            return on() ? cac(() -> c.returnCost(pc, sa, t, n, def)) : def;
         }
     }
 
@@ -1850,6 +2068,7 @@ public final class R3LabelSearch {
         final long t0 = System.nanoTime();
         final Result res = new Result();
         res.row = "priority";
+        R3Prof.rowStart();
         try {
             final int rootTurn = live.getPhaseHandler().getTurn();
             if (!live.getStack().isEmpty() && GameCopier.stackUnsupported(live) != null) {
@@ -1868,12 +2087,83 @@ public final class R3LabelSearch {
                 co.spends = c.spends;
                 res.cands.add(co);
             }
-            selection(res.cands, minSel, res.work, null, (i, w, wk) -> {
+            proofMemo.clear();
+            final SelFn sel0 = (i, w, wk) -> {
                 final long ws = LookaheadSearch.mix(seed0, 0x53454C0000L + w); // common across candidates
+                R3Prof.ctx("sel", i, w);
                 final PCand c = cands.get(i);
                 return world(minSel, wk, script -> priorityLine(live, liveMe, c, new World(false, ws, -1, 0, null,
                         null, knownMe, knownOpp), ws, script, wk));
-            });
+            };
+            final long ts = LookaheadSearch.mix(seed0, 0x5452554557L);
+            // the stratified target world w of candidate pc
+            final java.util.function.BiFunction<PCand, Integer, UnitFn> tgt0 = (pc, W) -> (w, wk) -> {
+                final long ws = LookaheadSearch.mix(ts, 0x5457000000L + w);
+                R3Prof.ctx("tgt", cands.indexOf(pc), w);
+                final World wt = new World(true, ws, w, W, null, null, knownMe, knownOpp);
+                final WorldOut wo = world(spec.oppMin, wk, script -> priorityLine(live, liveMe, pc, wt, ws, script, wk));
+                wo.draw = wt.firstDraw;
+                wo.weight = 1.0 / W;
+                return wo;
+            };
+            // (d) label-speed-1104: the decided-row pre-check (off: probeWorlds 0)
+            final WorldOut[][] selMemo = new WorldOut[cands.size()][spec.selectWorlds];
+            WorldOut[] tgtMemo0 = null;
+            if (spec.probeWorlds > 0 && !minSel && !cands.isEmpty() && !cands.get(0).draws) {
+                final int P = Math.min(cands.size(), 1 + spec.probeCands);
+                final int PW = spec.probeWorlds;
+                runUnits(PW * P, res.work, null, (u, wk) -> sel0.run(u % P, u / P, wk), (u, o) -> {
+                    selMemo[u % P][u / P] = o;
+                    return true;
+                });
+                final int W = targetCount(liveMe, knownMe);
+                final int[] order = spread(W);
+                final int PT = Math.min(W, spec.probeTarget);
+                final WorldOut[] tm = new WorldOut[W];
+                final UnitFn tp = tgt0.apply(cands.get(0), W);
+                runUnits(PT, res.work, null, (k, wk) -> tp.run(order[k], wk), (k, o) -> {
+                    tm[order[k]] = o;
+                    return true;
+                });
+                tgtMemo0 = tm;
+                double d = Double.NaN;
+                boolean settled = true;
+                for (int i = 0; i < P && settled; i++) {
+                    for (int w = 0; w < PW && settled; w++) {
+                        final double x = decided(selMemo[i][w]);
+                        settled = !Double.isNaN(x) && (Double.isNaN(d) || x == d);
+                        d = x;
+                    }
+                }
+                for (int k = 0; k < PT && settled; k++) {
+                    final double x = decided(tm[order[k]]);
+                    settled = !Double.isNaN(x) && x == d;
+                }
+                if (settled) {
+                    for (int i = 0; i < P; i++) {
+                        for (int w = 0; w < PW; w++) res.cands.get(i).worlds.add(selMemo[i][w]);
+                    }
+                    for (CandOut co : res.cands) co.close();
+                    res.pick = 0;
+                    res.departed = false;
+                    res.extra.addProperty("pick_src", cands.get(0).src);
+                    res.extra.addProperty("probe", "settled");
+                    res.targetKind = spec.stratify ? "stratified" : "true";
+                    for (int k = 0; k < PT; k++) res.targetWorlds.add(tm[order[k]]);
+                    closeTarget(res);
+                    final String rowCap = res.work.over(spec);
+                    if (rowCap != null) {
+                        res.extra.addProperty("row_cap", rowCap);
+                        res.target = Double.NaN;
+                        res.why = "row_cap";
+                    }
+                    return res;
+                }
+                res.extra.addProperty("probe", "open");
+            }
+            final WorldOut[] tgtMemo = tgtMemo0;
+            selection(res.cands, minSel, res.work, null,
+                    (i, w, wk) -> selMemo[i][w] != null ? selMemo[i][w] : sel0.run(i, w, wk));
             for (CandOut co : res.cands) co.close();
             res.pick = argmax(res.cands);
             res.departed = res.pick > 0;
@@ -1883,7 +2173,6 @@ public final class R3LabelSearch {
             }
             final PCand pc = cands.get(res.pick);
             res.extra.addProperty("pick_src", pc.src);
-            final long ts = LookaheadSearch.mix(seed0, 0x5452554557L);
             if (pc.draws) {
                 // a costed draw: the expectation over our next draws (exact name sequences, weight = probability)
                 final DrawExpectation.Draws dr = DrawExpectation.draws(liveMe, knownMe, spec.drawDepth, spec.seqCap,
@@ -1898,6 +2187,7 @@ public final class R3LabelSearch {
                 res.extra.add("draws", de);
                 runUnits(dr.seqs.size(), res.work, null, (s, wk) -> {
                     final long ws = LookaheadSearch.mix(ts, 0x5345510000L + s);
+                    R3Prof.ctx("draw", res.pick, s);
                     final World wd = new World(true, ws, -1, 0, dr.seqs.get(s), dr, knownMe, knownOpp);
                     final WorldOut wo = world(spec.oppMin, wk, script -> priorityLine(live, liveMe, pc, wd, ws,
                             script, wk));
@@ -1908,15 +2198,9 @@ public final class R3LabelSearch {
             } else {
                 final int W = targetCount(liveMe, knownMe);
                 res.targetKind = spec.stratify ? "stratified" : "true";
-                runUnits(W, res.work, null, (w, wk) -> {
-                    final long ws = LookaheadSearch.mix(ts, 0x5457000000L + w);
-                    final World wt = new World(true, ws, w, W, null, null, knownMe, knownOpp);
-                    final WorldOut wo = world(spec.oppMin, wk, script -> priorityLine(live, liveMe, pc, wt, ws,
-                            script, wk));
-                    wo.draw = wt.firstDraw;
-                    wo.weight = 1.0 / W;
-                    return wo;
-                }, (w, wo) -> res.targetWorlds.add(wo));
+                final UnitFn tf = tgt0.apply(pc, W);
+                final boolean reuse = tgtMemo != null && res.pick == 0;
+                targetUnits(W, res, null, (w, wk) -> reuse && tgtMemo[w] != null ? tgtMemo[w] : tf.run(w, wk));
             }
             closeTarget(res);
             final String rowCap = res.work.over(spec);
@@ -1932,6 +2216,7 @@ public final class R3LabelSearch {
         } finally {
             drainInline(res.work, res.extra);
             res.ms = (System.nanoTime() - t0) / 1e6;
+            R3Prof.rowEnd(res.row, res.ms, key);
         }
         return res;
     }
@@ -1940,8 +2225,13 @@ public final class R3LabelSearch {
     private LineOut priorityLine(final Game live, final Player liveMe, final PCand c, final World wm, final long ws,
             final OppMin.Script script, final Work work) {
         return isolated(LookaheadSearch.mix(ws, 1), () -> {
+            R3Prof.lineStart();
+            LineOut lo = null;
+            try {
             final Game g;
             final Player me;
+            R3Prof.enter(R3Prof.COPY);
+            try {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1);
@@ -1949,6 +2239,7 @@ public final class R3LabelSearch {
                     if (GameCopier.stackUnsupported(live) != null) {
                         final LineOut o = new LineOut();
                         o.end = "failed:stack_unsupported";
+                        lo = o;
                         return o;
                     }
                     copier.setCopyStack(true);
@@ -1958,8 +2249,15 @@ public final class R3LabelSearch {
                 work.copies++;
                 wm.make(live, liveMe, g, me);
             }
+            } finally {
+                R3Prof.exit();
+            }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(ws, 3)));
-            return line(g, me, live.getPhaseHandler().getTurn(), c, script, wm, work, ws);
+            lo = line(g, me, live.getPhaseHandler().getTurn(), c, script, wm, work, ws);
+            return lo;
+            } finally {
+                R3Prof.lineEnd(new R3Prof.LineEndInfo(lo == null ? -1 : lo.steps, lo == null ? "?" : lo.end));
+            }
         });
     }
 
@@ -1978,6 +2276,10 @@ public final class R3LabelSearch {
     void selection(final List<CandOut> cands, final boolean cut, final Work row, final ChooseACard.Row choice,
             final SelFn w) {
         final int W = spec.selectWorlds;
+        if (!cut && spec.selPrune > 0 && spec.selPrune < W && cands.size() > 1) {
+            selectionPruned(cands, row, choice, w, W, spec.selPrune);
+            return;
+        }
         if (!cut) {
             // world-major, candidate-minor (the sequential order; label-parallel-1103: one unit each)
             final int C = cands.size();
@@ -2012,6 +2314,49 @@ public final class R3LabelSearch {
                 if (Double.isNaN(best[0]) || m > best[0]) best[0] = m;
             }
         }
+    }
+
+    /**
+     * (a) label-speed-1104: the first {@code k0} worlds of every candidate; then a candidate tied with the leader on all
+     * of them (and after it in the order), or whose best case is below the leader's worst case, is cut at k0; the rest
+     * run the remaining worlds. World-major in each stage, as the plain loop.
+     */
+    void selectionPruned(final List<CandOut> cands, final Work row, final ChooseACard.Row choice, final SelFn w,
+            final int W, final int k0) {
+        final int C = cands.size();
+        runUnits(k0 * C, row, choice, (u, wk) -> w.run(u % C, u / C, wk), (u, o) -> cands.get(u % C).worlds.add(o));
+        final double[] sum = new double[C];
+        final int[] res = new int[C];
+        int lead = -1;
+        for (int i = 0; i < C; i++) {
+            for (WorldOut o : cands.get(i).worlds) {
+                if (!Double.isNaN(o.v)) {
+                    sum[i] += o.v;
+                    res[i]++;
+                }
+            }
+            if (res[i] > 0 && (lead < 0 || sum[i] / res[i] > sum[lead] / res[lead])) lead = i;
+        }
+        final List<Integer> alive = new ArrayList<>();
+        final int left = W - k0;
+        for (int i = 0; i < C; i++) {
+            boolean drop = false;
+            if (lead >= 0 && i != lead) {
+                boolean tie = i > lead;
+                for (int k = 0; k < k0 && tie; k++) {
+                    tie = Double.compare(cands.get(i).worlds.get(k).v, cands.get(lead).worlds.get(k).v) == 0;
+                }
+                final double ub = Math.max(res[i] == 0 ? Double.NEGATIVE_INFINITY : sum[i] / res[i],
+                        (sum[i] + left) / (res[i] + left));
+                final double lb = Math.min(sum[lead] / res[lead], sum[lead] / (res[lead] + left));
+                drop = tie || ub < lb;
+            }
+            if (drop) cands.get(i).cutAt = k0;
+            else alive.add(i);
+        }
+        final int A = alive.size();
+        runUnits(left * A, row, choice, (u, wk) -> w.run(alive.get(u % A), k0 + u / A, wk),
+                (u, o) -> cands.get(alive.get(u % A)).worlds.add(o));
     }
 
     static int argmax(final List<CandOut> cands) {
@@ -2061,6 +2406,7 @@ public final class R3LabelSearch {
         final Result res = new Result();
         res.row = "choice";
         res.kind = row.kind();
+        R3Prof.rowStart();
         try {
             final Game live = row.live();
             final Player liveMe = row.me();
@@ -2071,6 +2417,7 @@ public final class R3LabelSearch {
             final Set<Integer> knownOpp = liveOpp == null ? new HashSet<>()
                     : spec.infoState ? env.known(liveMe, liveOpp) : env.known(liveOpp);
             final long seed0 = LookaheadSearch.mix(spec.seed, key);
+            proofMemo.clear();
             // Forge's answer and the m best (ranking score, ties to the lower index), dropped answers excluded
             final List<Integer> idx = new ArrayList<>();
             for (int i = 1; i < row.size(); i++) {
@@ -2151,6 +2498,7 @@ public final class R3LabelSearch {
             }
             selection(res.cands, minSel, res.work, row, (j, w, wk) -> {
                 final long ws = LookaheadSearch.mix(seed0, 0x53454C0000L + w);
+                R3Prof.ctx("sel", j, w);
                 final int i = played.get(j);
                 return world(minSel, wk, script -> choiceLine(row, i, new World(false, ws, -1, 0, null, null,
                         knownMe, knownOpp), ws, rootTurn, script, wk));
@@ -2169,14 +2517,15 @@ public final class R3LabelSearch {
             final long ts = LookaheadSearch.mix(seed0, 0x5452554557L);
             final int W = targetCount(liveMe, knownMe);
             res.targetKind = spec.stratify ? "stratified" : "true";
-            runUnits(W, res.work, row, (w, wk) -> {
+            targetUnits(W, res, row, (w, wk) -> {
                 final long ws = LookaheadSearch.mix(ts, 0x5457000000L + w);
+                R3Prof.ctx("tgt", pj, w);
                 final World wt = new World(true, ws, w, W, null, null, knownMe, knownOpp);
                 final WorldOut wo = world(spec.oppMin, wk, script -> choiceLine(row, pi, wt, ws, rootTurn, script, wk));
                 wo.draw = wt.firstDraw;
                 wo.weight = 1.0 / W;
                 return wo;
-            }, (w, wo) -> res.targetWorlds.add(wo));
+            });
             closeTarget(res);
             final String rowCap = res.work.over(spec);
             if (rowCap != null) {
@@ -2191,6 +2540,7 @@ public final class R3LabelSearch {
         } finally {
             drainInline(res.work, res.extra);
             res.ms = (System.nanoTime() - t0) / 1e6;
+            R3Prof.rowEnd(res.row, res.ms, key);
         }
         return res;
     }
@@ -2198,13 +2548,19 @@ public final class R3LabelSearch {
     private LineOut choiceLine(final ChooseACard.Row row, final int i, final World wm, final long ws, final int rootTurn,
             final OppMin.Script script, final Work work) {
         work.copies++;
-        final LineOut l = row.play(i, wm, ws, (g, me) -> line(g, me, rootTurn, null, script, wm, work, ws));
-        if (l == null) {
-            final LineOut o = new LineOut();
-            o.end = "failed:apply";
-            return o;
+        R3Prof.lineStart();
+        LineOut l = null;
+        try {
+            l = row.play(i, wm, ws, (g, me) -> line(g, me, rootTurn, null, script, wm, work, ws));
+            if (l == null) {
+                final LineOut o = new LineOut();
+                o.end = "failed:apply";
+                return o;
+            }
+            return l;
+        } finally {
+            R3Prof.lineEnd(new R3Prof.LineEndInfo(l == null ? -1 : l.steps, l == null ? "failed:apply" : l.end));
         }
-        return l;
     }
 
     /** A {@link ChooseACard.RowSearch} that runs {@link #choiceRow} and hands each result to {@code sink}. */
