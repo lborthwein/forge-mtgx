@@ -252,6 +252,49 @@ public final class RlFrameObs {
             pl.add(x);
         }
         o.add("players", pl);
+        // each player zone in Forge's order: (name, turn it entered the zone). GameState text keeps neither the order
+        // an install produces for every zone (tokens, attachments) nor turnInZone (entered_this_turn, zone age)
+        final JsonObject zs = new JsonObject();
+        for (int i = 0; i < ps.size(); i++) {
+            for (ZoneType z : REF_ZONES) {
+                final JsonArray a = new JsonArray();
+                for (Card c : ps.get(i).getCardsIn(z, false)) {
+                    final JsonArray y = new JsonArray();
+                    y.add(c.getName());
+                    y.add(c.getTurnInZone());
+                    a.add(y);
+                }
+                if (a.size() > 0) {
+                    zs.add("p" + i + ":" + z.name(), a);
+                }
+            }
+        }
+        o.add("zones", zs);
+        // look permissions GameState text drops (a revealed library card, an opponent's hand card shown, a face-down
+        // exiled card its exiler may look at): [ref, seat, "shown" | "face_down"]
+        final JsonArray vis = new JsonArray();
+        for (int i = 0; i < ps.size(); i++) {
+            for (ZoneType z : new ZoneType[] {ZoneType.Library, ZoneType.Hand, ZoneType.Exile}) {
+                for (Card c : ps.get(i).getCardsIn(z, false)) {
+                    for (int v = 0; v < ps.size(); v++) {
+                        final forge.game.player.PlayerView pv = ps.get(v).getView();
+                        final boolean exFd = z == ZoneType.Exile && c.isFaceDown();
+                        if (z == ZoneType.Exile && !exFd || z == ZoneType.Hand && v == i) {
+                            continue;
+                        }
+                        final boolean shown = exFd ? c.getView().canFaceDownBeShownTo(pv) : c.getView().canBeShownTo(pv);
+                        if (shown) {
+                            final JsonArray y = new JsonArray();
+                            y.add(refOf(refs, c.getId()));
+                            y.add(v);
+                            y.add(exFd ? "face_down" : "shown");
+                            vis.add(y);
+                        }
+                    }
+                }
+            }
+        }
+        o.add("visible", vis);
         if (decks != null) {
             final JsonArray da = new JsonArray();
             for (List<Object[]> d : decks) {
@@ -300,8 +343,11 @@ public final class RlFrameObs {
         if (!SIDECAR_SCHEMA.equals(sc.get("schema").getAsString())) {
             throw new IllegalArgumentException("sidecar schema " + sc.get("schema"));
         }
-        final Map<String, Integer> ids = idsByRef(game);
         final List<Player> ps = game.getRegisteredPlayers();
+        if (sc.has("zones")) {
+            zones(ps, sc.getAsJsonObject("zones"));
+        }
+        final Map<String, Integer> ids = idsByRef(game);
         final int st = sc.get("starting").getAsInt();
         if (st >= 0) {
             game.setStartingPlayer(ps.get(st));
@@ -357,10 +403,74 @@ public final class RlFrameObs {
                 p.receiveDamage(Pair.of(y.get(0).getAsInt(), y.get(1).getAsBoolean()));
             }
         }
+        if (sc.has("visible")) {
+            for (JsonElement e : sc.getAsJsonArray("visible")) {
+                final JsonArray y = e.getAsJsonArray();
+                final Integer id = ids.get(y.get(0).getAsString());
+                final Card c = id == null ? null : game.findById(id);
+                if (c == null) {
+                    continue;
+                }
+                final Player v = ps.get(y.get(1).getAsInt());
+                if ("face_down".equals(y.get(2).getAsString())) {
+                    if (!c.getView().canFaceDownBeShownTo(v.getView())) {
+                        c.addMayLookFaceDownExile(v);
+                    }
+                } else if (!c.getView().canBeShownTo(v.getView())) {
+                    c.addMayLookAt(game.getNextTimestamp(), java.util.Collections.singletonList(v));
+                }
+            }
+        }
         if (!sc.has("knowledge")) {
             return null;
         }
         return RlKnowledge.restore(game, sc.getAsJsonObject("knowledge"), ref -> idOf(ids, ref));
+    }
+
+    /**
+     * Each zone put in the sidecar's order (cards matched by name, first unmatched first; a zone whose names do not
+     * match is left as installed) and each matched card's turnInZone set.
+     */
+    static void zones(final List<Player> ps, final JsonObject zs) {
+        for (int i = 0; i < ps.size(); i++) {
+            for (ZoneType z : REF_ZONES) {
+                final JsonArray want = zs.has("p" + i + ":" + z.name()) ? zs.getAsJsonArray("p" + i + ":" + z.name())
+                        : new JsonArray();
+                final forge.game.zone.PlayerZone zone = ps.get(i).getZone(z);
+                if (zone == null) {
+                    continue;
+                }
+                final List<Card> have = new ArrayList<>(ps.get(i).getCardsIn(z, false));
+                if (have.size() != want.size()) {
+                    continue;
+                }
+                final List<Card> pool = new ArrayList<>(have), order = new ArrayList<>();
+                for (JsonElement e : want) {
+                    final String n = e.getAsJsonArray().get(0).getAsString();
+                    Card hit = null;
+                    for (Card c : pool) {
+                        if (n.equals(c.getName())) {
+                            hit = c;
+                            break;
+                        }
+                    }
+                    if (hit == null) {
+                        break;
+                    }
+                    pool.remove(hit);
+                    order.add(hit);
+                }
+                if (order.size() != have.size()) {
+                    continue;
+                }
+                if (!order.equals(have)) {
+                    zone.setCards(order);
+                }
+                for (int k = 0; k < order.size(); k++) {
+                    order.get(k).setTurnInZone(want.get(k).getAsJsonArray().get(1).getAsInt());
+                }
+            }
+        }
     }
 
     private static void setInt(final Object o, final String field, final int v) {
