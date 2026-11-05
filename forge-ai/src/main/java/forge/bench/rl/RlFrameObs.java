@@ -108,14 +108,44 @@ public final class RlFrameObs {
     }
 
     /**
-     * A forked state's frame: {@code copy} (a GameCopier copy or any game whose card and player ids are the live game's)
-     * featurized for its registered player {@code seat} over {@code live.forkFor(copy)}: the live tracker's state carried
-     * over (not attached; {@code live} is only read).
+     * A forked state's frame. Reuses the research copy+featurize path of ChooseACard (forge-mtgx #143) and the
+     * look-ahead's leaves: the copy is {@link #forkCopy} (ChooseACard's GameCopier settings), the tracker is
+     * {@code live.forkFor(copy)} exactly as {@link RlSearch#onCopy} makes it (not attached here; {@link #forkKnowledge}
+     * attaches for a play-out), and the frame is {@link RlSearch#captureLeaf}'s observe + {@link RlSearch#leafFrame}
+     * with {@code decIdx} set (captureLeaf leaves it 0), under the bench isolation. {@code copy} is any game whose card
+     * and player ids are the live game's; {@code seat} its registered player index.
      */
     public static Frame featurizeForked(final Game copy, final int seat, final RlKnowledge live, final CardIndex index,
             final int obs, final long uid, final int decIdx) {
         final RlKnowledge k = live == null ? null : live.forkFor(copy);
         return valueFrame(copy, copy.getRegisteredPlayers().get(seat), k, index, obs, uid, decIdx);
+    }
+
+    /**
+     * ChooseACard's copy of a live game for valuing an answer (GameCopier with plain AI players, copy fidelity 1, the
+     * solver's pending-copy mode), under the live game's monitor. Returns {copy, the copy's {@code me}}.
+     */
+    public static Object[] forkCopy(final Game live, final Player me) {
+        synchronized (live) {
+            final forge.ai.simulation.GameCopier copier = new forge.ai.simulation.GameCopier(live, true);
+            copier.setCopyFidelity(1);
+            copier.setCopyPending(forge.ai.simulation.GameCopier.SOLVER_COPY_PENDING);
+            final Game g = copier.makeCopy();
+            return new Object[] {g, copier.find(me)};
+        }
+    }
+
+    /** RlSearch.onCopy's tracker for a copy: the live one carried over and attached (a play-out follows it). */
+    public static RlKnowledge forkKnowledge(final RlKnowledge live, final Game copy, final int obs) {
+        final RlKnowledge k;
+        if (live == null) {
+            k = new RlKnowledge(copy);
+            k.v2 = obs == 2;
+        } else {
+            k = live.forkFor(copy);
+        }
+        k.attach();
+        return k;
     }
 
     // ------------------------------------------------------------------------------------------------ card refs

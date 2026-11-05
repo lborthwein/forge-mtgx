@@ -139,7 +139,7 @@ public class RlFrameStatesTest {
                 diff.add(k + " " + s.get("phase").getAsString());
             }
             if (forks < 20) {
-                final Game cp = new forge.ai.simulation.GameCopier(g).makeCopy();
+                final Game cp = (Game) RlFrameObs.forkCopy(g, g.getRegisteredPlayers().get(seat))[0];
                 final RlFrameObs.Frame ff = RlFrameObs.featurizeForked(cp, seat, kn, RlLabelReplayTest.index,
                         s.get("obs").getAsInt(), uid, s.get("dec_idx").getAsInt());
                 forks++;
