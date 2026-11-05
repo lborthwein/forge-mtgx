@@ -88,6 +88,12 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
         public long seed = 1029L;
         /** Label mode only: capture the post-option frame and zones, play no worlds (no value; frame recapture). */
         public boolean framesOnly = false;
+        /**
+         * cf-labeller-1105 (false = off, the default: rows unchanged): label mode also writes the capture's Forge state
+         * text ({@code frame_text}, GameState) and each seat's known library positions ({@code lib_known_idx}), the
+         * post-pick frame a play-out stage on another jar installs.
+         */
+        public boolean frameText = false;
         public String out;
         public final JsonObject json;
 
@@ -107,6 +113,10 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
             if (o.has("profile")) profile = o.get("profile").getAsString();
             if (o.has("seed")) seed = o.get("seed").getAsLong();
             if (o.has("framesOnly")) framesOnly = o.get("framesOnly").getAsBoolean();
+            if (o.has("frameText")) frameText = o.get("frameText").getAsBoolean();
+            if (frameText && !"label".equals(mode)) {
+                throw new IllegalArgumentException("bank.frameText is a label-mode option");
+            }
             if (framesOnly && !"label".equals(mode)) {
                 throw new IllegalArgumentException("bank.framesOnly is a label-mode option");
             }
@@ -207,7 +217,8 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
                 w = i;
             }
         }
-        this.winner = w;
+        // cf-labeller-1105: a job may name its asking seat (absent: the tape's winner, as before)
+        this.winner = job != null && job.has("seat") ? job.get("seat").getAsInt() : w;
         if (job != null) {
             for (JsonElement e : job.getAsJsonArray("script")) {
                 script.add(e.getAsJsonObject());
@@ -313,6 +324,16 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
             return NONE;
         }
         divertInfo.addProperty("turn", game.getPhaseHandler().getTurn());
+        if (job.has("pre_state_sha")) {
+            // cf-labeller-1105: the fork's state at the ask, against the original replay's (the menu record's state_sha)
+            final String sha = PlayerControllerBridge.isolated(game, () -> IdScope.detached(() -> TrajectoryRef.stateSha(game)));
+            divertInfo.addProperty("pre_state_sha", sha);
+            divertInfo.addProperty("pre_state_ok", sha.equals(job.get("pre_state_sha").getAsString()));
+            if (!sha.equals(job.get("pre_state_sha").getAsString())) {
+                error = "pre-ask state " + sha + " is not the job's " + job.get("pre_state_sha").getAsString();
+                return NONE;
+            }
+        }
         divertInfo.addProperty("phase", String.valueOf(game.getPhaseHandler().getPhase()));
         if ("rec".equals(first.get("t").getAsString())) {
             pendingRecDetach = true; // the record's own answer: taken from the tape, then the tapes detach (seen)
@@ -408,6 +429,24 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
 
     // ------------------------------------------------------------------ answers
 
+    /** cf-labeller-1105: the option with Forge id {@code id} (the menu record's option {@code id}). */
+    private static Card byId(final Collection<Card> opts, final int id) {
+        for (Card c : opts) {
+            if (c.getId() == id) {
+                return c;
+            }
+        }
+        throw new IllegalArgumentException("no option with id " + id);
+    }
+
+    private static List<Card> byIds(final Collection<Card> opts, final JsonArray ids) {
+        final List<Card> out = new ArrayList<>();
+        for (JsonElement e : ids) {
+            out.add(byId(opts, e.getAsInt()));
+        }
+        return out;
+    }
+
     private static Card byName(final Collection<Card> opts, final String name, final List<Card> used) {
         Card best = null;
         for (Card c : opts) {
@@ -444,8 +483,14 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
         final String t = a.get("t").getAsString();
         switch (method) {
             case "chooseSingleCardForZoneChange":
+                if ("id".equals(t)) {
+                    return byId(list(args[3]), a.get("id").getAsInt()); // cf-labeller-1105
+                }
                 return "none".equals(t) ? null : byName(list(args[3]), a.get("name").getAsString(), null);
             case "chooseCardsForZoneChange":
+                if ("ids".equals(t)) {
+                    return byIds(list(args[3]), a.getAsJsonArray("ids")); // cf-labeller-1105
+                }
                 return byNames(list(args[3]), a.getAsJsonArray("names"));
             case "orderMoveToZoneList":
                 return new CardCollection(byNames(list(args[0]), a.getAsJsonArray("names")));
@@ -465,6 +510,9 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
             case "tuckCardsViaMulligan":
                 return new CardCollection(byNames(list(args[0]), a.getAsJsonArray("names")));
             case "chooseCardsForEffect":
+                if ("ids".equals(t)) {
+                    return new CardCollection(byIds(list(args[0]), a.getAsJsonArray("ids"))); // cf-labeller-1105
+                }
                 return new CardCollection(byNames(list(args[0]), a.getAsJsonArray("names")));
             case "mulliganKeepHand":
             case "confirmAction":
@@ -862,6 +910,31 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
             row.addProperty("state_sha", (String) fr[2]);
         } catch (RuntimeException e) {
             row.addProperty("error", "frame: " + e);
+        }
+        if (spec.frameText && !row.has("error")) {
+            // cf-labeller-1105: the post-pick frame for a play-out stage on another jar (frame text + known positions)
+            try {
+                final Object[] ft = PlayerControllerBridge.isolated(game, () -> IdScope.detached(() -> {
+                    final forge.game.GameState gs = new forge.game.GameState();
+                    gs.initFromGame(game);
+                    final JsonObject kn = new JsonObject();
+                    for (int s = 0; s < game.getRegisteredPlayers().size(); s++) {
+                        final List<Card> lib = new ArrayList<>(game.getRegisteredPlayers().get(s).getCardsIn(ZoneType.Library));
+                        final JsonArray ks = new JsonArray();
+                        for (int i = 0; i < lib.size(); i++) {
+                            if (know != null && know.knows(s, lib.get(i))) {
+                                ks.add(i);
+                            }
+                        }
+                        kn.add(String.valueOf(s), ks);
+                    }
+                    return new Object[] {gs.toString(), kn};
+                }));
+                row.addProperty("frame_text", (String) ft[0]);
+                row.add("lib_known_idx", (JsonObject) ft[1]);
+            } catch (RuntimeException e) {
+                row.addProperty("error", "frame text: " + e);
+            }
         }
         // the horizon: through the end of P's own turn ownIdx(decision) + min(d + extra, cap)
         final int dTurn = job.get("turn").getAsInt();
