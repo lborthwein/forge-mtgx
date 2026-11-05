@@ -689,6 +689,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return driver.forgeCosts();
     }
 
+    /** choice-search-1105: the live line's choice asks are its verifier's (plans.lineChoices=forge), as the driver says. */
+    @Override
+    public boolean forgeChoices() {
+        return driver.forgeChoices();
+    }
+
     // ------------------------------------------------------------------ the decision (from RlSearch.decide)
 
     /** Our library's known top (pile memory) for this seat's worlds. */
