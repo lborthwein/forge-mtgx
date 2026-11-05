@@ -96,7 +96,7 @@ public class RlFrameDumpMenusTest extends AITest {
         lands.add(addCardToZone("Swamp", p, ZoneType.Library));
         lands.add(addCardToZone("Island", p, ZoneType.Library));
         addCardToZone("Lightning Bolt", p, ZoneType.Library); // not in the fetch list: not an option
-        final SpellAbility sa = fetchland.getSpellAbilities().get(0);
+        final SpellAbility sa = fetchland.getSpellAbilities().iterator().next();
         final Object[] args = {ZoneType.Battlefield, List.of(ZoneType.Library), sa, lands, true, p};
         final RlFrameDump.MenuAsk k = RlFrameDump.ask(game, p, "chooseSingleCardForZoneChange", args, lands.get(1));
         Assert.assertEquals(k.options(), 3);
