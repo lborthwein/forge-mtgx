@@ -3587,6 +3587,15 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         leavePlayCommandList.add(c);
     }
 
+    /**
+     * mtgx (gamecopier-fidelity-1030): this card's pending command lists for a game copier, in a fixed order: leaves play,
+     * untap, change controller, unattach, face up, face down, phase out (live lists).
+     */
+    public final List<List<GameCommand>> getCommandListsForCopy() {
+        return Arrays.asList(leavePlayCommandList, untapCommandList, changeControllerCommandList, unattachCommandList,
+                faceupCommandList, facedownCommandList, phaseOutCommandList);
+    }
+
     public void addStaticCommandList(Object[] objects) {
         staticCommandList.add(objects);
     }
@@ -3718,6 +3727,26 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         tempControllers.clear();
         controller = player;
         controllerTimestamp = tstamp;
+        view.updateController(this);
+    }
+
+    /** mtgx (gamecopier-fidelity-1030): whether a control-changing effect (Threaten) has a temporary controller here. */
+    public final boolean hasTempControllers() {
+        return !tempControllers.isEmpty();
+    }
+
+    /**
+     * mtgx (gamecopier-fidelity-1030): this card (a game copier's copy of {@code src}) takes src's controller record with
+     * its timestamps: the base controller and each temporary controller, players mapped by {@code m}, so a carried
+     * "lose control" command (removeTempController(timestamp)) ends the change in the copy as in the original.
+     */
+    public final void copyControllersFrom(final Card src, final java.util.function.Function<Player, Player> m) {
+        tempControllers.clear();
+        controller = src.controller == null ? null : m.apply(src.controller);
+        controllerTimestamp = src.controllerTimestamp;
+        for (Entry<Long, Player> e : src.tempControllers.entrySet()) {
+            tempControllers.put(e.getKey(), m.apply(e.getValue()));
+        }
         view.updateController(this);
     }
 

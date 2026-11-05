@@ -505,6 +505,8 @@ final class ForcedWinEngine {
             final Node root = new Node();
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
+                copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 root.g = copier.makeCopy();
                 root.me = (Player) copier.find(liveMe);
@@ -1153,6 +1155,8 @@ final class ForcedWinEngine {
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
+            copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
+                copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);
