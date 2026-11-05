@@ -591,6 +591,7 @@ public final class OppMin {
             }
             final SpellAbility top = g.getStack().isEmpty() ? null : g.getStack().peek().getSpellAbility();
             final int idx = points.size();
+            OppBeliefWorlds.freeze(g); // opp-belief-1104: its first decision (a no-op outside an opponent world)
             if (DEBUG) {
                 final StringBuilder b = new StringBuilder();
                 for (Card c : opp.getCardsIn(ZoneType.Battlefield)) b.append(c.getName()).append(c.isTapped() ? "/T" : "/U")

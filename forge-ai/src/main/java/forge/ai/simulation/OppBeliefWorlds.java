@@ -24,11 +24,12 @@ import forge.game.zone.ZoneType;
  * test). The opponent is assumed to know our deck list (the cards, not their places); a deck-model belief is a
  * follow-up.
  *
- * <p><b>Conditioning at the reveal</b> ({@link #materialize}). u is drawn at the root, before we act. When our seat in u
- * plays a card of the pool that u dealt elsewhere (our library), the card is swapped into our hand for the first pooled
- * card there, at that moment: the world is conditioned on what the opponent observes when it observes it. Before the
- * card is played, u's hand holds it only as often as the opponent's belief says; once it is played, every u agrees
- * with what the opponent saw.
+ * <p><b>Conditioning at the reveal</b> ({@link #materialize}). u is drawn at the root, before we act. Until the
+ * opponent's first decision point in u's play-out, when our seat plays a card of the pool that u dealt elsewhere (our
+ * library), the card is swapped into our hand for the first pooled card there: u is conditioned on what the opponent
+ * has observed when it first decides. From that point on ({@link #freeze}) nothing is swapped: a card of ours u does not
+ * hold is not played there, so the opponent's reply, a plan made at its first decision, is weighed by its belief about
+ * what we still hold, never by our later plays.
  */
 public final class OppBeliefWorlds {
 
@@ -92,7 +93,7 @@ public final class OppBeliefWorlds {
     public static void materialize(final Game g, final Player me, final int hostId) {
         final Set<Integer> ids;
         synchronized (POOLED) {
-            ids = POOLED.get(g);
+            ids = FROZEN.containsKey(g) ? null : POOLED.get(g);
         }
         if (ids == null || !ids.contains(hostId)) return;
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
@@ -109,6 +110,15 @@ public final class OppBeliefWorlds {
                 me.getZone(ZoneType.Library).setCards(lib);
                 return;
             }
+        }
+    }
+
+    private static final java.util.Map<Game, Boolean> FROZEN = new java.util.WeakHashMap<>();
+
+    /** The opponent's first decision point in this game's play-out: no more {@link #materialize} (no-op elsewhere). */
+    public static void freeze(final Game g) {
+        synchronized (POOLED) {
+            if (POOLED.containsKey(g)) FROZEN.put(g, Boolean.TRUE);
         }
     }
 
