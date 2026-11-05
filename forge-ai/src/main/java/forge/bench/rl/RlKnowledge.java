@@ -138,13 +138,51 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     private final Set<Integer> arranged = new HashSet<>();
     public Log log;
 
+    /**
+     * knowledge-settle-1104 (research; -Dforge.bench.rl.knowledgeSettle=fixed, default off = every path unchanged): the
+     * settle schedule of the pending sightings. Off, a query ({@link #knows}, {@link #seenOpponentIds}, ...) settles them
+     * against the card's visibility at that moment, so what a frame shows depends on when earlier frames were taken
+     * (lane outcome-arm-1104). Fixed: queries never settle; the tracker settles at fixed game points only, every spell
+     * resolution (as before) and every priority decision of either seat (a {@link forge.game.PriorityDecisionListener}
+     * added by {@link #attach}, ahead of any listener added after it). Then the state at any moment is a function of the
+     * game alone, whoever queries it and whenever. Read at construction; tests set {@link #FIXED_SETTLE}.
+     */
+    public static volatile boolean FIXED_SETTLE = "fixed".equals(System.getProperty("forge.bench.rl.knowledgeSettle"));
+    private final boolean fixedSettle;
+
     public RlKnowledge(final Game game) {
         this.game = game;
+        this.fixedSettle = FIXED_SETTLE;
+    }
+
+    /** knowledge-settle-1104: whether this tracker settles on the fixed schedule (see {@link #FIXED_SETTLE}). */
+    public boolean fixedSettle() {
+        return fixedSettle;
     }
 
     /** Subscribe to the game's events (call once, after the game is created). */
     public void attach() {
         game.subscribeToEvents(this);
+        if (fixedSettle) {
+            // knowledge-settle-1104: settle at every priority decision, before anyone observes it
+            game.addPriorityDecisionListener(new forge.game.PriorityDecisionListener() {
+                @Override
+                public void beforeDecision(final Player p) {
+                    settle();
+                }
+
+                @Override
+                public void afterDecision(final Player p, final List<forge.game.spellability.SpellAbility> chosen) {
+                }
+            });
+        }
+    }
+
+    /** A query's settle: the old schedule (settle now) unless this tracker settles on the fixed one. */
+    private void querySettle() {
+        if (!fixedSettle) {
+            settle();
+        }
     }
 
     /**
@@ -293,13 +331,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
 
     /** Does seat {@code s} know this hidden card's identity (zone 16 / 17 / 18)? */
     public boolean knows(final int s, final Card c) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 && c != null && known[s].containsKey(c.getId());
     }
 
     /** The opponent cards seat {@code s} has seen this game, by name, first seen first. */
     public List<String> seenOpponentNames(final int s) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 ? Collections.unmodifiableList(new ArrayList<>(seenOpp[s])) : Collections.emptyList();
     }
 
@@ -313,20 +351,20 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
      * {name, full name} as seen. The o_seen zone holds those not shown in the frame by other tokens.
      */
     public Map<Integer, String[]> seenOpponentIds(final int s) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 ? Collections.unmodifiableMap(new java.util.LinkedHashMap<>(seenIds[s]))
                 : Collections.emptyMap();
     }
 
     /** The last {@link #TAIL} stack events, newest first. */
     public List<StackEvent> tail() {
-        settle();
+        querySettle();
         return new ArrayList<>(tail);
     }
 
     /** Number of known hidden cards (diagnostics). */
     public int knownCount(final int s) {
-        settle();
+        querySettle();
         return known[s].size();
     }
 
