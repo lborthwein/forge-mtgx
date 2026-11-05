@@ -143,6 +143,11 @@ public final class ForcedWinSolver {
          * construction: the variants are at most log2(cap) + 1 evaluations under the decision's deadline.
          */
         public boolean loopMarginal = false;
+        /**
+         * choice-search-1105 (off by default): the engine search, otherwise run once per turn, runs again at a later main
+         * phase decision of the turn when a nonland permanent of ours entered since its last run (a setup piece resolved).
+         */
+        public boolean engineRerun = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -209,6 +214,7 @@ public final class ForcedWinSolver {
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
             c.loopMarginal = "true".equals(get.apply("loopMarginal")); // choice-search-1105
+            c.engineRerun = "true".equals(get.apply("engineRerun")); // choice-search-1105
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1334,10 +1340,33 @@ public final class ForcedWinSolver {
      * The engine search, once per turn in main phase 1, only when something the width model cannot express is on our
      * side (an ability that targets a card or has a cost outside the model) or our board threatens lethal.
      */
+    /** choice-search-1105 (engineRerun): our nonland permanents at the turn's last engine run, and the reruns. */
+    private java.util.Set<Integer> engineBoard;
+    public int engineReruns;
+
+    private java.util.Set<Integer> ourNonlandIds() {
+        final java.util.Set<Integer> out = new java.util.HashSet<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isLand()) {
+                out.add(c.getId());
+            }
+        }
+        return out;
+    }
+
     private Line engineFallback(Game live, Position pos, int index, long t0) {
-        if (!cfg.engine || engineTurn == pos.turn || !live.getPhaseHandler().is(PhaseType.MAIN1)) {
+        if (!cfg.engine || !live.getPhaseHandler().is(PhaseType.MAIN1)) {
             return null;
         }
+        final java.util.Set<Integer> board = cfg.engineRerun ? ourNonlandIds() : null;
+        if (engineTurn == pos.turn) {
+            // choice-search-1105 (engineRerun): once per turn, unless a nonland permanent of ours entered since that run
+            if (board == null || engineBoard == null || engineBoard.containsAll(board)) {
+                return null;
+            }
+            engineReruns++;
+        }
+        engineBoard = board;
         boolean unmodeled = false;
         for (ACard a : pos.hand) {
             unmodeled |= a.unmodeled;
@@ -2844,6 +2873,7 @@ public final class ForcedWinSolver {
                 + likelyRuns + " likelyTaken=" + likelyTaken + " replans="
                 + replans + " plannerMs=" + plannerNanos / 1_000_000 + " engineMs=" + engineNanos / 1_000_000
                 + " copies=" + copies + " " + reader.probeStats.summary()
+                + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)
                 + (loopMarginals + loopVariantCuts == 0 ? "" : " loopMarginals=" + loopMarginals + " loopVariants="
                         + loopVariants + " loopVariantCuts=" + loopVariantCuts); // choice-search-1105 (only when used)
     }
