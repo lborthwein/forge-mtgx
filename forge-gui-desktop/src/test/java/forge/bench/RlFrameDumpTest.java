@@ -193,7 +193,8 @@ public class RlFrameDumpTest {
     /**
      * dump-menus-1105: {@code frameDump.menus} on the fixture's whole games. The frames are the menus-off dump's, record
      * for record and byte for byte; a games row only gains the menu counts; the menus go to their own file, and every
-     * menu's chosen options are among its options, with the chosen single pick's answer equal to the record's.
+     * menu's chosen options are among its options, with the chosen single pick's answer equal to the record's. (These
+     * policy tapes have no decision log, so no forced choice and no menu: the identity part is what this checks.)
      */
     @Test(timeOut = 1800000)
     public void menusAddTheirOwnRecordsAndChangeNoFrame() throws Exception {
@@ -236,7 +237,8 @@ public class RlFrameDumpTest {
         }
         final List<Object[]> ms = menuRecords(on);
         Assert.assertEquals(ms.size(), menus);
-        Assert.assertTrue(menus > 0, "the fixture's games pose menus");
+        // the fixture replays policy tapes without a decision log: no AiTape forced choice, so no menu here (the menu
+        // reader is RlFrameDumpMenusTest's; the forced-choice wiring is the r1 quick proof's, on decision-log tapes)
         Assert.assertTrue(menuRecords(off).isEmpty());
         final Map<String, Integer> byFamily = new TreeMap<>();
         int answered = 0, wide = 0;
