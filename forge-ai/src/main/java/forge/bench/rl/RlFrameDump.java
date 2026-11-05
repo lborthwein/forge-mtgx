@@ -42,7 +42,9 @@ import forge.util.IdScope;
  * turned face down) when it is next queried, against the card's visibility at that moment. So a frame depends on which
  * earlier positions were observed: a dump over band [lo, hi) reproduces a labeller of the same band position for
  * position, while a whole-game dump (hi &lt;= 0) settles at every decision and its band frames can show more known
- * cards than the banded dump's. Each dump is deterministic for its own band.
+ * cards than the banded dump's. Each dump is deterministic for its own band. With the research key
+ * -Dforge.bench.rl.knowledgeSettle=fixed ({@link RlKnowledge#FIXED_SETTLE}) the tracker settles at fixed game points
+ * only, and a frame no longer depends on the schedule (rows then carry {@code knowledge_settle: "fixed"}).
  *
  * <p>Outputs ({@link Sink}, one of each per JVM): {@code frames-<pid>.mxl.gz} (one gzip member per game) and {@code
  * games-<pid>.jsonl} (one row per replayed game, with its row counts and frame time).
@@ -93,6 +95,8 @@ public final class RlFrameDump implements PriorityDecisionListener {
     private final String jarSha;
     private final Game game;
     private final RlFeaturizer feat;
+    /** knowledge-settle-1104: the seat-knowledge tracker settles on the fixed schedule (recorded in rows only then). */
+    private final boolean fixedSettle;
     private final List<byte[]> records = new ArrayList<>();
     private int decisions = 0, priorityRows = 0, choiceRows = 0;
     private double frameMs = 0;
@@ -118,6 +122,7 @@ public final class RlFrameDump implements PriorityDecisionListener {
         this.jarSha = jarSha;
         this.game = game;
         this.feat = game == null ? null : new RlFeaturizer(index);
+        this.fixedSettle = knowledge != null && knowledge.fixedSettle();
         if (feat != null) {
             feat.setVersion(obs);
             feat.reset();
@@ -250,6 +255,9 @@ public final class RlFrameDump implements PriorityDecisionListener {
         h.add("target", com.google.gson.JsonNull.INSTANCE);
         h.addProperty("target_source", "none");
         h.addProperty("jar_sha", jarSha);
+        if (fixedSettle) {
+            h.addProperty("knowledge_settle", "fixed"); // knowledge-settle-1104 (absent = the query schedule)
+        }
         h.add("controllers", tape.get("controllers"));
         final JsonArray dp = new JsonArray(), ds = new JsonArray();
         for (com.google.gson.JsonElement d : tape.getAsJsonArray("decks")) {
@@ -310,6 +318,9 @@ public final class RlFrameDump implements PriorityDecisionListener {
         band.add(bandHi);
         gr.add("band", band);
         gr.addProperty("choices", choices);
+        if (fixedSettle) {
+            gr.addProperty("knowledge_settle", "fixed"); // knowledge-settle-1104
+        }
         gr.addProperty("jar_sha", jarSha);
         if (sink != null) {
             sink.write(member, gr);
