@@ -454,6 +454,17 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         final Player tp = to == null ? null : playerOf(to.player());
         final boolean withinLibrary = fz == ZoneType.Library && tz == ZoneType.Library && fp == tp;
         final boolean arrangedMove = withinLibrary && arranged.remove(c.getId());
+        if (searchedTop && CENSUS_FILE != null && withinLibrary) {
+            // knowledge-searched-top-1105 census: what the rule does with this move (arranged moves are known anyway)
+            if (arrangedMove) {
+                census("arranged");
+            } else {
+                searcherSeat(c, fp);
+                final String w = CENSUS_WHY.get();
+                final boolean rev = !revealedInResolution.getOrDefault(c.getId(), Collections.emptySet()).isEmpty();
+                census("learn".equals(w) ? "learn" : rev ? "learn_revealed_only:" + w : w);
+            }
+        }
         clock++;
         for (int s = 0; s < 2; s++) {
             final Player me = seatPlayer(s);
@@ -513,38 +524,106 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
      * own library, no Defined / ChooseFromDefined / Chooser / DefinedPlayer / targets / RandomOrder), or -1.
      */
     private int searcherSeat(final Card c, final Player libraryOwner) {
+        final String[] why = new String[1];
+        final int s = searcherSeat(c, libraryOwner, why);
+        CENSUS_WHY.set(why[0]);
+        return s;
+    }
+
+    /** As above; {@code why[0]}: "learn", "not_resolving", "random" (no searched placement) or "unmatched:&lt;shape&gt;". */
+    private int searcherSeat(final Card c, final Player libraryOwner, final String[] why) {
         if (!game.getStack().isResolving()) {
+            why[0] = "not_resolving";
             return -1;
         }
         forge.game.spellability.SpellAbility root;
         try {
             root = game.getStack().peekAbility();
         } catch (RuntimeException e) {
+            why[0] = "not_resolving";
             return -1;
         }
         if (root instanceof forge.game.trigger.WrappedAbility) {
             root = ((forge.game.trigger.WrappedAbility) root).getWrappedAbility();
         }
         forge.game.spellability.SpellAbility hit = null;
+        int hits = 0;
+        final java.util.TreeSet<String> shape = new java.util.TreeSet<>();
         for (forge.game.spellability.SpellAbility x = root; x != null; x = x.getSubAbility()) {
-            if (x.getApi() == forge.game.ability.ApiType.ChangeZone && x.isHidden() && x.hasParam("Origin")
-                    && x.getParam("Origin").contains("Library") && "Library".equals(x.getParam("Destination"))
-                    && x.hasParam("LibraryPosition")) {
-                if (hit != null) {
-                    return -1; // two library searches in one chain: which card is whose is not read here
+            if (x.getApi() == forge.game.ability.ApiType.ChangeZone && x.hasParam("Origin")
+                    && x.getParam("Origin").contains("Library") && "Library".equals(x.getParam("Destination"))) {
+                shape.addAll(x.getMapParams().keySet());
+                if (x.isHidden() && x.hasParam("LibraryPosition")) {
+                    hit = x;
+                    hits++;
                 }
-                hit = x;
             }
         }
-        if (hit == null || hit.hasParam("Defined") || hit.hasParam("ChooseFromDefined") || hit.hasParam("Chooser")
-                || hit.hasParam("DefinedPlayer") || hit.usesTargeting() || hit.hasParam("RandomOrder")) {
+        shape.removeAll(java.util.Arrays.asList("SpellDescription", "StackDescription", "AILogic", "SubAbility",
+                "PrecostDesc", "CostDesc", "AITgts", "AIPreference"));
+        if (hit == null) {
+            if (shape.isEmpty()) {
+                final java.util.TreeSet<String> apis = new java.util.TreeSet<>();
+                for (forge.game.spellability.SpellAbility x = root; x != null; x = x.getSubAbility()) {
+                    apis.add(String.valueOf(x.getApi()));
+                }
+                why[0] = "other_api:" + String.join(",", apis); // no library-to-library ChangeZone: Dig, Shuffle, ...
+            } else {
+                why[0] = "unmatched:" + String.join(",", shape);
+            }
             return -1;
+        }
+        String reject = null;
+        if (hits > 1) {
+            reject = "two_searches";
+        } else if (hit.hasParam("RandomOrder")) {
+            why[0] = "random";
+            return -1;
+        } else if (hit.hasParam("Defined") || hit.hasParam("ChooseFromDefined") || hit.hasParam("Chooser")
+                || hit.hasParam("DefinedPlayer") || hit.usesTargeting()) {
+            reject = "param";
         }
         final Player act = hit.getActivatingPlayer();
-        if (act == null || act != libraryOwner || c.getOwner() != act) {
+        if (reject == null && (act == null || act != libraryOwner || c.getOwner() != act)) {
+            reject = "not_own_library";
+        }
+        if (reject != null) {
+            why[0] = "unmatched:" + reject + ":" + String.join(",", shape);
             return -1;
         }
+        why[0] = "learn";
         return seatOf(act);
+    }
+
+    /**
+     * knowledge-searched-top-1105 coverage census (diagnostics; only with -Dforge.bench.rl.searchedTopCensus=FILE and the
+     * key on): every within-library move of a card, by what the rule did with it (per seat-independent move). Written
+     * as JSON at JVM exit.
+     */
+    static final String CENSUS_FILE = System.getProperty("forge.bench.rl.searchedTopCensus");
+    static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> CENSUS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final ThreadLocal<String> CENSUS_WHY = new ThreadLocal<>();
+    static {
+        if (CENSUS_FILE != null) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+                for (Map.Entry<String, java.util.concurrent.atomic.AtomicLong> e : new java.util.TreeMap<>(CENSUS)
+                        .entrySet()) {
+                    o.addProperty(e.getKey(), e.getValue().get());
+                }
+                try {
+                    java.nio.file.Files.write(java.nio.file.Paths.get(CENSUS_FILE + "-" + ProcessHandle.current().pid()
+                            + ".json"), o.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } catch (java.io.IOException ex) {
+                    System.err.println("[searched-top census] " + ex);
+                }
+            }));
+        }
+    }
+
+    private static void census(final String k) {
+        CENSUS.computeIfAbsent(k, x -> new java.util.concurrent.atomic.AtomicLong()).incrementAndGet();
     }
 
     /** Zones where Forge may turn a card face down right after moving it there (foretell, "exile it face down"). */
