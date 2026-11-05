@@ -149,9 +149,27 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
     /** choice-search-1105: line-consistent choices (plans.lineChoices=forge); false = the seat's (the default). */
     boolean lineChoices = false;
 
+    /** Live safety: line-consistent answers per turn at most; past it the seat answers (its loop guard sees them). */
+    static final int LINE_CHOICES_PER_TURN = 400;
+    private int lcTurn = -1, lcCount;
+    int lineChoiceAnswers, lineChoiceCapHits;
+
     @Override
     public boolean forgeChoices() {
-        return lineChoices && solver.lineActive();
+        if (!lineChoices || !solver.lineActive()) {
+            return false;
+        }
+        final int t = me.getGame().getPhaseHandler().getTurn();
+        if (t != lcTurn) {
+            lcTurn = t;
+            lcCount = 0;
+        }
+        if (++lcCount > LINE_CHOICES_PER_TURN) {
+            lineChoiceCapHits++;
+            return false;
+        }
+        lineChoiceAnswers++;
+        return true;
     }
 
     @Override
@@ -251,6 +269,10 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
         o.addProperty("defense_counters", solver.counters);
         o.addProperty("defense_holds", solver.holds);
         o.addProperty("discard_choices", solver.discardChoices);
+        if (lineChoices) {
+            o.addProperty("line_choices", lineChoiceAnswers); // choice-search-1105 (only when on)
+            o.addProperty("line_choice_cap_hits", lineChoiceCapHits);
+        }
         final JsonObject a = new JsonObject();
         answers.forEach(a::addProperty);
         o.add("answers", a);

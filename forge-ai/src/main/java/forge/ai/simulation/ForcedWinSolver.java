@@ -136,6 +136,16 @@ public final class ForcedWinSolver {
         /** search-bones-1015 (c), off by default: the engine search's cycle table and REPEAT moves. */
         public boolean cycles = false;
         /**
+         * choice-search-1105 (N10 loop stop, off by default; the live port of endstep-rows-1103's rule): an engine line's
+         * first REPEAT count is chosen by marginal P(win). Variants n = 1, 2, 4, ... (to loopMarginalCap, and the found
+         * count) are verified as lines in the found line's worlds; the smallest n whose P(belief) is within loopEps of the
+         * best is played. A variant the deadline cuts is unresolved (excluded) and stops the schedule. Finite by
+         * construction: the variants are at most log2(cap) + 1 evaluations under the decision's deadline.
+         */
+        public boolean loopMarginal = false;
+        public double loopEps = 0.005;
+        public int loopMarginalCap = 64;
+        /**
          * search-bones-1015, off by default: the engine search's root copy shuffles our library below the known top
          * (pile memory), as the verification worlds do; without it the engine plays on our real library order, hidden
          * information (a line that needs the top card was found on the real order and taken when the worlds agreed).
@@ -198,6 +208,9 @@ public final class ForcedWinSolver {
             c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
+            c.loopMarginal = "true".equals(get.apply("loopMarginal")); // choice-search-1105
+            c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
+            c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
@@ -1372,9 +1385,13 @@ public final class ForcedWinSolver {
         }
         engineFound++;
         evaluated++;
-        final Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999),
-                Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
+        final long evalDeadline = Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2);
+        Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999), evalDeadline);
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
+        if (cfg.loopMarginal && e.pUnopposed >= 1.0) {
+            e = loopMarginal(live, e, index, evalDeadline); // choice-search-1105: N10 loop count
+        }
+        final Line taken = e.line;
         if (evalSink != null) {
             evalSink.add(e);
         }
@@ -1387,7 +1404,95 @@ public final class ForcedWinSolver {
             return null;
         }
         receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms=" + (System.nanoTime() - t0) / 1_000_000);
-        return line;
+        return taken;
+    }
+
+    // ------------------------------------------------------------------ choice-search-1105: N10 loop count
+
+    /** choice-search-1105 (loopMarginal): lines whose loop count was chosen, variants evaluated, unresolved variants. */
+    public int loopMarginals, loopVariants, loopVariantCuts;
+    /** The last curve, "n:p ..." and the n taken (diagnostics). */
+    public String lastLoopCurve;
+
+    private Eval loopMarginal(Game live, Eval found, int index, long deadline) {
+        final Line line = found.line;
+        int at = -1;
+        for (int i = 0; i < line.steps.size(); i++) {
+            if (line.steps.get(i).kind == ForcedWinModel.AbilKind.REPEAT && line.steps.get(i).body != null) {
+                at = i;
+                break;
+            }
+        }
+        if (at < 0) {
+            return found;
+        }
+        final ForcedWinPlanner.Step rep = line.steps.get(at);
+        final List<Integer> sched = new ArrayList<>();
+        for (int n = 1; n <= cfg.loopMarginalCap; n *= 2) {
+            sched.add(n);
+        }
+        if (!sched.contains(rep.times)) {
+            sched.add(rep.times);
+            java.util.Collections.sort(sched);
+        }
+        final List<Eval> resolved = new ArrayList<>();
+        final StringBuilder curve = new StringBuilder();
+        try {
+            for (final int n : sched) {
+                final Eval ev;
+                if (n == rep.times) {
+                    ev = found;
+                } else {
+                    if (System.nanoTime() > deadline) {
+                        loopVariantCuts++;
+                        curve.append(n).append(":cut ");
+                        if (n > rep.times) {
+                            break;
+                        }
+                        continue;
+                    }
+                    final List<ForcedWinPlanner.Step> steps = new ArrayList<>(line.steps);
+                    steps.set(at, ForcedWinPlanner.Step.repeat(rep.body, n));
+                    final Line v = new Line(steps, line.pileNames, line.winTurn, line.lifeLeft, line.manaLeft,
+                            line.protection, line.protectionNames, line.how);
+                    v.knownTop = line.knownTop;
+                    loopVariants++;
+                    ev = evaluate(live, v, mix(cfg.seed, index * 1000L + 999), deadline); // the found line's worlds
+                    if (ev.pUnopposed >= 1.0 && ev.worldsRun < cfg.worlds && System.nanoTime() > deadline) {
+                        loopVariantCuts++; // cut by the deadline: unresolved
+                        curve.append(n).append(":cut ");
+                        if (n > rep.times) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                final double p = ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0;
+                curve.append(n).append(':').append(String.format(java.util.Locale.ROOT, "%.3f", p)).append(' ');
+                resolved.add(ev);
+            }
+        } catch (RuntimeException ex) {
+            receipt("FORCED_WIN loop-marginal error " + ex);
+            return found;
+        }
+        double best = 0;
+        for (Eval ev : resolved) {
+            best = Math.max(best, ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0);
+        }
+        Eval pick = found;
+        if (best > 0) {
+            for (Eval ev : resolved) { // in n order: the smallest n within loopEps of the best
+                final double p = ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0;
+                if (p >= best - cfg.loopEps) {
+                    pick = ev;
+                    break;
+                }
+            }
+        }
+        loopMarginals++;
+        lastLoopCurve = curve.toString().trim() + " -> " + pick.line.steps.get(at).times;
+        receipt("FORCED_WIN loop-marginal" + tag() + " " + lastLoopCurve);
+        return pick;
     }
 
     // ------------------------------------------------------------------ Part B: likely-win lines (solver-gaps-1015)
@@ -2738,7 +2843,9 @@ public final class ForcedWinSolver {
         return "decisions=" + decisions + " gated=" + gated + " evaluated=" + evaluated + " taken=" + taken + " likelyRuns="
                 + likelyRuns + " likelyTaken=" + likelyTaken + " replans="
                 + replans + " plannerMs=" + plannerNanos / 1_000_000 + " engineMs=" + engineNanos / 1_000_000
-                + " copies=" + copies + " " + reader.probeStats.summary();
+                + " copies=" + copies + " " + reader.probeStats.summary()
+                + (loopMarginals + loopVariantCuts == 0 ? "" : " loopMarginals=" + loopMarginals + " loopVariants="
+                        + loopVariants + " loopVariantCuts=" + loopVariantCuts); // choice-search-1105 (only when used)
     }
 
     /** Effects of a line's steps (for reports). */
