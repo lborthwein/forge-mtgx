@@ -113,6 +113,13 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
             if (o.has("maxPriorityWait")) maxPriorityWait = o.get("maxPriorityWait").getAsInt();
             if (o.has("profile")) profile = o.get("profile").getAsString();
             if (o.has("seed")) seed = o.get("seed").getAsLong();
+            if (o.has("costedHosts")) {
+                final java.util.Set<String> c = new java.util.TreeSet<>();
+                for (JsonElement e : o.getAsJsonArray("costedHosts")) {
+                    c.add(e.getAsString());
+                }
+                COSTED = java.util.Collections.unmodifiableSet(c);
+            }
             if (o.has("framesOnly")) framesOnly = o.get("framesOnly").getAsBoolean();
             if (o.has("frameText")) frameText = o.get("frameText").getAsBoolean();
             if (frameText && !"label".equals(mode)) {
@@ -545,10 +552,11 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
 
     // ------------------------------------------------------------------ priority classes
 
-    static final java.util.Set<String> COSTED = new java.util.TreeSet<>(java.util.Arrays.asList("The One Ring",
-            "Necropotence", "Ad Nauseam", "Griselbrand", "Sylvan Library", "Bolas's Citadel", "Peer into the Abyss",
-            "Night's Whisper", "Sign in Blood", "Dark Confidant", "Phyrexian Arena", "Greed", "Erebos, Bleak-Hearted",
-            "Yawgmoth, Thran Physician", "Bitterblossom", "Toxic Deluge"));
+    /**
+     * Scan-mode reporting only: host cards whose plays are "costed-draw" though no pay-life draw ability shows it; the
+     * bank config's {@code costedHosts} (none by default; the R1 bank's list lives in its lane's scan config).
+     */
+    static volatile java.util.Set<String> COSTED = java.util.Collections.emptySet();
 
     /** The assembly class of a priority play, or null. */
     static String classOf(final SpellAbility sa) {
