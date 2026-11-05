@@ -113,9 +113,9 @@ public class OppBeliefTest extends SimulationTest {
 
     @Test
     public void opponentPicksDoNotChangeWhenOnlyOurHiddenCardsChange() {
-        final String keys = ON + ",oppBelief=3,oppHoldPoints=true";
+        final String keys = ON + ",evalSteps=40000,oppBelief=4,oppHoldPoints=true";
         final Game g = ForcedWinSolverTest.game("Default", "Default",
-                bFrame(";Emrakul, the Aeons Torn", "Ulamog, the Infinite Gyre;" + ForcedWinSolverTest.OURLIB));
+                bFrame(";Emrakul, the Aeons Torn", "Ulamog, the Infinite Gyre;" + ForcedWinSolverTest.OURLIB, true));
         final ForcedWinSolver a = solver(g, keys);
         a.beliefPicks = new ArrayList<>();
         final List<ForcedWinSolver.Proposal> pa = a.propose(g);
@@ -133,6 +133,10 @@ public class OppBeliefTest extends SimulationTest {
         final int n = Math.min(a.beliefPicks.size(), b.beliefPicks.size());
         AssertJUnit.assertTrue(n > 0);
         for (int i = 0; i < n; i++) AssertJUnit.assertEquals("pick " + i, a.beliefPicks.get(i), b.beliefPicks.get(i));
+        // not only Forge AI's own play: some world's pick is a reply chosen from its worlds
+        boolean replied = false;
+        for (String x : a.beliefPicks) replied |= !x.endsWith("-> forge");
+        AssertJUnit.assertTrue("a non-Forge pick among " + n, replied);
     }
 
     static double best(final List<ForcedWinSolver.Proposal> ps) {
