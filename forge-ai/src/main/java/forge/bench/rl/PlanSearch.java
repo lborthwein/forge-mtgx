@@ -92,10 +92,22 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         public boolean defend = false;
         /** strong-opp-1020: the defender's solver config (string values; act=false is forced). */
         public JsonObject defendCfg = new JsonObject();
+        /**
+         * choice-search-1105: who answers the seat's choice asks while a solver line is followed, live and in the
+         * play-out copies: "seat" (the default: the policy, as before) or "forge" (Forge AI, the answerer the line was
+         * verified with). Recorded in the spec only when not the default.
+         */
+        public String lineChoices = "seat";
+        /**
+         * choice-search-1105 (false = off, the default): a new plan point also comes at our next empty-stack main-phase
+         * priority after a nonland permanent of ours entered the battlefield since the last plan point (a setup piece just
+         * resolved: the board the solver sees has changed). Engine primitives only: zone, controller, card type.
+         */
+        public boolean replanOnEntry = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg"));
+                "defendCfg", "lineChoices", "replanOnEntry"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -119,6 +131,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("oppCfg")) s.oppCfg = o.getAsJsonObject("oppCfg");
             if (o.has("defend")) s.defend = o.get("defend").getAsBoolean();
             if (o.has("defendCfg")) s.defendCfg = o.getAsJsonObject("defendCfg");
+            if (o.has("lineChoices")) s.lineChoices = o.get("lineChoices").getAsString();
+            if (o.has("replanOnEntry")) s.replanOnEntry = o.get("replanOnEntry").getAsBoolean();
+            if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
+                throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
+            }
             if (s.samples < 0 || s.temperature <= 0 || s.maxSteps < 1 || s.maxLines < 0 || s.minProvenWorlds < 1) {
                 throw new IllegalArgumentException("plans: samples >= 0, temperature > 0, maxSteps >= 1, maxLines >= 0, "
                         + "minProvenWorlds >= 1");
@@ -433,12 +450,18 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     final List<Double> pointMs = new ArrayList<>();
     final List<Double> solverMs = new ArrayList<>();
 
+    /** choice-search-1105: plans.lineChoices=forge. */
+    boolean lineChoicesForge() {
+        return "forge".equals(spec.lineChoices);
+    }
+
     PlanSearch(final Spec spec, final RlSearch rs, final Player me, final RlSeat seat, final SolverDriver unused) {
         this.spec = spec;
         this.rs = rs;
         this.me = me;
         final ForcedWinSolver.Config sc = spec.solverConfig();
         this.driver = new SolverDriver(me, sc);
+        this.driver.lineChoices = "forge".equals(spec.lineChoices);
         // honest-belief-1020: the solver's verification worlds and engine root draw the opponent's hidden cards from the
         // search's belief pool (null = belief off: as before)
         this.driver.solver().redraw = rs.ls().opponentRedraw();
@@ -666,6 +689,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return driver.forgeCosts();
     }
 
+    /** choice-search-1105: the live line's choice asks are its verifier's (plans.lineChoices=forge), as the driver says. */
+    @Override
+    public boolean forgeChoices() {
+        return driver.forgeChoices();
+    }
+
     // ------------------------------------------------------------------ the decision (from RlSearch.decide)
 
     /** Our library's known top (pile memory) for this seat's worlds. */
@@ -706,13 +735,32 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             return false;
         }
         final String phase = String.valueOf(ph.getPhase());
+        final java.util.Set<Integer> mine = spec.replanOnEntry ? ourNonlandIds(g) : null;
         if (ph.getTurn() == lastPointTurn && phase.equals(lastPointPhase) && !pointAgain) {
-            return false;
+            if (mine == null || !ourMain || lastPointIds == null || lastPointIds.containsAll(mine)) {
+                return false;
+            }
+            entryReplans++; // choice-search-1105: a permanent of ours entered since the last plan point
         }
         lastPointTurn = ph.getTurn();
         lastPointPhase = phase;
         pointAgain = false;
+        lastPointIds = mine;
         return true;
+    }
+
+    /** choice-search-1105 (replanOnEntry): our nonland permanents' ids at the last plan point, and the replans counted. */
+    private java.util.Set<Integer> lastPointIds;
+    int entryReplans;
+
+    private java.util.Set<Integer> ourNonlandIds(final Game g) {
+        final java.util.Set<Integer> out = new java.util.HashSet<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isLand()) {
+                out.add(c.getId());
+            }
+        }
+        return out;
     }
 
     /** What the plan stage decided before (or instead of) S-c's play-outs. */
@@ -857,7 +905,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** The plan's follower inside a play-out copy: a solver line on the copy seat's bridged controller. */
     static PlayerControllerBridge.PlanHook copyLineHook(final Player copyMe, final ForcedWinSolver.Config cfg,
             final LinePlan lp, final LookaheadSearch.FirstAction fa) {
+        return copyLineHook(copyMe, cfg, lp, fa, false);
+    }
+
+    /** As above; {@code lineChoices}: the line's choice asks are Forge AI's (choice-search-1105, plans.lineChoices). */
+    static PlayerControllerBridge.PlanHook copyLineHook(final Player copyMe, final ForcedWinSolver.Config cfg,
+            final LinePlan lp, final LookaheadSearch.FirstAction fa, final boolean lineChoices) {
         final SolverDriver d = new SolverDriver(copyMe, cfg, false);
+        d.lineChoices = lineChoices;
         d.solver().adopt(lp.line);
         return new PlayerControllerBridge.PlanHook() {
             @Override
@@ -917,6 +972,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             @Override
             public boolean forgeCosts() {
                 return d.forgeCosts();
+            }
+
+            @Override
+            public boolean forgeChoices() {
+                return d.forgeChoices();
             }
         };
     }
@@ -983,6 +1043,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("liveSteps", liveSteps);
         o.addProperty("liveBreaks", liveBreaks);
         o.addProperty("liveDone", liveDone);
+        if (spec.replanOnEntry) {
+            o.addProperty("entryReplans", entryReplans); // choice-search-1105 (only when on)
+        }
         o.addProperty("lineHookActs", lineHookActs);
         o.add("provenTurns", ints(provenTurns));
         o.add("lineTurns", ints(lineTurns));

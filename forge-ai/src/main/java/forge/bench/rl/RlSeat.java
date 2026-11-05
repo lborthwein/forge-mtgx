@@ -178,6 +178,20 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
      * seat (the default; nothing changes).
      */
     public int searchSeat = -1;
+    /**
+     * choice-search-1105 (null by default, and then nothing changes): a second look-ahead for one seat ({@link #altSeat}),
+     * a paired arm with its own spec in the same game; {@link #search} then runs for the other seat.
+     */
+    public PrioritySearch searchAlt;
+    public int altSeat = -1;
+
+    /** The look-ahead that runs for {@code seat}: the alt seat's own, else the seat's (null = none). */
+    private PrioritySearch searchFor(final int seat) {
+        if (searchAlt != null && altSeat >= 0) {
+            return seat == altSeat ? searchAlt : search;
+        }
+        return search != null && (searchSeat < 0 || seat == searchSeat) ? search : null;
+    }
 
     /**
      * S-t (lane cm-choice-search-1009; null by default, and then nothing changes): the seat's current choice window, a
@@ -592,7 +606,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             endGame("server_error");
             return null;
         }
-        if (search != null && (searchSeat < 0 || seat == searchSeat) && family == RlSchema.F_PRIORITY
+        final PrioritySearch search = searchFor(seat); // choice-search-1105: the seat's own look-ahead (alt arm or the game's)
+        if (search != null && family == RlSchema.F_PRIORITY
                 && d.status == RlWire.ST_OK && objs instanceof List) {
             // S1: the look-ahead over the policy's own priority decision (the policy's choice is its default)
             @SuppressWarnings("unchecked")
@@ -629,7 +644,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 window.open(g.getPhaseHandler().getTurn());
             }
         }
-        if (search != null && (searchSeat < 0 || seat == searchSeat) && family == RlSchema.F_BLOCK
+        if (search != null && family == RlSchema.F_BLOCK
                 && d.status == RlWire.ST_OK) {
             // block-search-1019: the look-ahead over block assignments (the policy's own declaration is its default; a
             // no-op unless the spec turns block search on)

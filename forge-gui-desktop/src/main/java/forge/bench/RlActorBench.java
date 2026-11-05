@@ -147,6 +147,11 @@ public final class RlActorBench {
          */
         RlSearch.Config search = null;
         /**
+         * choice-search-1105 (null = off, the default): a second search spec for the GAME's {@code search_seat} (a paired
+         * arm in the same game, e.g. R4 NEW vs BASE); {@link #search} then runs for the other seat.
+         */
+        RlSearch.Config searchAlt = null;
+        /**
          * gen-check-1007 (null = none): the spec of a {@code lookahead:K8} opponent seat: keys of LookaheadBench's
          * "lookahead" block ({@link #K8_KEYS}) plus the seat's own Forge AI options aiFixes0928 and fairNaming. A GAME's
          * (or a replayed tape's) own "k8" object takes precedence; the tape records the spec it played.
@@ -194,6 +199,21 @@ public final class RlActorBench {
         }
         if (o.has("search") && o.get("search").isJsonObject()) {
             c.search = RlSearch.Config.parse(o.getAsJsonObject("search"));
+            if (o.has("searchAlt") && o.get("searchAlt").isJsonObject()) {
+                // choice-search-1105: the alt spec over the game's spec (the harness keys it omits, server, policySha,
+                // the logs, come from the game's spec); its decision log is the game's with an "-alt" suffix
+                final JsonObject alt = o.getAsJsonObject("search").deepCopy();
+                for (Map.Entry<String, JsonElement> e : o.getAsJsonObject("searchAlt").entrySet()) {
+                    alt.add(e.getKey(), e.getValue());
+                }
+                for (String k : new String[] {"decisionLog", "labelSink"}) {
+                    if (alt.has(k) && alt.get(k).isJsonPrimitive() && !o.getAsJsonObject("searchAlt").has(k)) {
+                        final String v = alt.get(k).getAsString();
+                        alt.addProperty(k, v.endsWith(".jsonl") ? v.substring(0, v.length() - 6) + "-alt.jsonl" : v + "-alt");
+                    }
+                }
+                c.searchAlt = RlSearch.Config.parse(alt);
+            }
             if (c.search.obs != 0 && c.search.obs != c.obsSchema) {
                 throw new IllegalArgumentException("search.obs " + c.search.obs + " != obsSchema " + c.obsSchema);
             }
@@ -401,6 +421,7 @@ public final class RlActorBench {
         RlSeat seat;
         RlKnowledge knowledge; // the game's seat-knowledge tracker (tests)
         RlSearch search;       // S1: the game's look-ahead (null when off)
+        RlSearch searchAlt;    // choice-search-1105: the alt seat's look-ahead (null when off)
         forge.ai.LobbyPlayerAi[] lobbies; // gen-check-1007: each seat's lobby player (tests)
     }
 
@@ -606,6 +627,7 @@ public final class RlActorBench {
         LookaheadBench.Digest dgLb = null;
         String crash = null;
         RlSearch search = null;
+        RlSearch searchAlt = null; // choice-search-1105
         try {
             game = match.createGame();
             if (seeding != null) {
@@ -656,12 +678,24 @@ public final class RlActorBench {
                 seat.searchSeat = searchSeat;
                 seat.search = search;
                 out.search = search;
+                if (cfg.searchAlt != null && searchSeat >= 0) {
+                    // choice-search-1105: search_seat plays the alt spec; the game's spec runs for the other seat
+                    search.searchSeat = 1 - searchSeat;
+                    searchAlt = new RlSearch(cfg.searchAlt, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
+                    searchAlt.searchSeat = searchSeat;
+                    seat.searchAlt = searchAlt;
+                    seat.altSeat = searchSeat;
+                    out.searchAlt = searchAlt;
+                }
                 // search-bones-1015: the plan hooks of the RL seats (no-op unless the spec sets forcedWin or plans)
                 final boolean[] rlSeats = new boolean[ctl.length];
                 for (int s = 0; s < ctl.length; s++) {
                     rlSeats[s] = RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL;
                 }
                 search.attach(game, rlSeats, seat);
+                if (searchAlt != null) {
+                    searchAlt.attach(game, rlSeats, seat);
+                }
             }
             dg = new RlSimBench.Digest(game);
             game.subscribeToEvents(dg);
@@ -687,6 +721,10 @@ public final class RlActorBench {
             if (search != null) {
                 search.flushLog();
                 search.close();
+            }
+            if (searchAlt != null) {
+                searchAlt.flushLog();
+                searchAlt.close();
             }
         }
         JsonObject k8Stats = null;
@@ -806,6 +844,10 @@ public final class RlActorBench {
             // S1: the look-ahead's worker threads' CPU is not in cpu_ms (the game thread's)
             end.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
             end.add("search", search.summary());
+            if (searchAlt != null) {
+                end.add("search_alt", searchAlt.summary()); // choice-search-1105 (only when on)
+                end.addProperty("search_alt_seat", seat.altSeat);
+            }
         }
         if (k8Stats != null) {
             end.add("opp_search", k8Stats); // gen-check-1007: the K8 seat's look-ahead stats and config
@@ -863,6 +905,10 @@ public final class RlActorBench {
         if (search != null) {
             t.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
             t.add("search", end.get("search"));
+            if (end.has("search_alt")) {
+                t.add("search_alt", end.get("search_alt")); // choice-search-1105
+                t.add("search_alt_seat", end.get("search_alt_seat"));
+            }
         }
         if (k8Seat >= 0) {
             // gen-check-1007: the K8 seat's spec (a replay plays the tape's spec) and its search stats
