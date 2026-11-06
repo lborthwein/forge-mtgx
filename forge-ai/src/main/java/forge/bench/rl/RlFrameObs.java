@@ -149,7 +149,7 @@ public final class RlFrameObs {
                     forkStackChoices(live, g, copier);
                 }
             } catch (RuntimeException e) {
-                approx = "fidelity: " + e;
+                approx = why != null ? why : "fidelity: " + e;
             }
             return new Object[] {g, copier.find(me), approx};
         }
@@ -210,11 +210,14 @@ public final class RlFrameObs {
         for (forge.game.keyword.KeywordInterface k : n.getKeywords()) {
             has.add(k.getOriginal());
         }
+        final List<String> add = new ArrayList<>();
         for (forge.game.keyword.KeywordInterface k : c.getKeywords()) {
             if (!has.contains(k.getOriginal())) {
-                n.addIntrinsicKeyword(k.getOriginal());
+                add.add(k.getOriginal());
             }
         }
+        n.addIntrinsicKeywords(add, false); // no traits: Dungeon: builds its room triggers from SVars this card lacks
+        n.updateKeywordsCache();
     }
 
     /**

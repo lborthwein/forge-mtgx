@@ -117,7 +117,11 @@ public class RlFrameStatesTest {
         final List<String> liveDiff = new ArrayList<>();
         for (Object[] x : live) {
             final boolean eq = Arrays.equals((byte[]) x[1], (byte[]) x[2]);
-            if (x[3] != null) {
+            // only GameCopier's own refusal is excused: a fidelity step that threw stays in the assertion and prints
+            if (x[3] != null && String.valueOf(x[3]).startsWith("fidelity")) {
+                System.err.println("[frame-states test] fork fidelity failed " + x[0] + ": " + x[3]);
+            }
+            if (x[3] != null && !String.valueOf(x[3]).startsWith("fidelity")) {
                 unsup++;
                 unsupEq += eq ? 1 : 0;
                 why.merge(String.valueOf(x[3]).split(":")[0], 1, Integer::sum);
