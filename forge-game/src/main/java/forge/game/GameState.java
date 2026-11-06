@@ -23,6 +23,8 @@ import forge.game.combat.Combat;
 import forge.game.combat.CombatUtil;
 import forge.game.event.GameEventAttackersDeclared;
 import forge.game.event.GameEventCombatChanged;
+import forge.game.keyword.Keyword;
+import forge.game.keyword.KeywordInterface;
 import forge.game.mana.ManaPool;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
@@ -89,6 +91,7 @@ public class GameState {
     private final Map<Card, CardCollection> cardToChosenCards = new HashMap<>();
     private final Map<Card, String> cardToChosenType = new HashMap<>();
     private final Map<Card, String> cardToChosenType2 = new HashMap<>();
+    private final Map<Card, Player> cardToChosenPlayer = new HashMap<>();
     private final Map<Card, List<String>> cardToRememberedId = new HashMap<>();
     private final Map<Card, List<String>> cardToImprintedId = new HashMap<>();
     private final Map<Card, List<String>> cardToMergedCards = new HashMap<>();
@@ -131,6 +134,66 @@ public class GameState {
     private final int TARGET_AI = -3;
 
     public GameState() {
+    }
+
+    /**
+     * install-fidelity-1105, research key, OFF by default (-Dforge.gamestate.installAsIs=true): install the record's
+     * battlefield as permanents that are already there. Off, every install and every dump is byte-for-byte today's.
+     * On:
+     * <ul>
+     * <li>each battlefield card takes the zone-less move (no replacement effect, no "as enters" choice, no entry
+     * cost, no ETB trigger), with an entry timestamp and a Room's door state;</li>
+     * <li>a recorded aura attachment that the aura's printed Enchant no longer allows (an effect changed what it may
+     * enchant, which the record does not carry) is kept: the aura gets "enchant the permanent it is attached to",
+     * so the end-of-install state-based check does not put it into the graveyard;</li>
+     * <li>the dump writes {@code ChosenPlayer};</li>
+     * <li>the install round-trip check runs ({@link #INSTALL_CHECK_KEY} defaults to {@code warn}).</li>
+     * </ul>
+     */
+    public static final String INSTALL_AS_IS_KEY = "forge.gamestate.installAsIs";
+    /**
+     * install-fidelity-1105: the install round-trip assertion, {@code off} | {@code warn} | {@code throw}
+     * (-Dforge.gamestate.installCheck; default {@code warn} when {@link #INSTALL_AS_IS_KEY} is on, else {@code off}).
+     * After an install, Forge's own dump of the game ({@link #initFromGame}) is compared with the parsed record by
+     * {@link #installDiff}: every seat's zones (the library in order), life, player counters, and per card its
+     * tapped state, face, counters and attachment. {@code warn} prints each diff to stderr; {@code throw} also fails
+     * the install. The last diff is kept ({@link #getInstallDiff}).
+     */
+    public static final String INSTALL_CHECK_KEY = "forge.gamestate.installCheck";
+
+    private Boolean installAsIsOverride = null;
+    private boolean asIsNow = false;
+    private List<String> lastInstallDiff = null;
+
+    /** Override the {@link #INSTALL_AS_IS_KEY} system property for this state (null = the property). */
+    public GameState setInstallAsIs(final Boolean on) {
+        installAsIsOverride = on;
+        return this;
+    }
+
+    public boolean installAsIs() {
+        return installAsIsOverride != null ? installAsIsOverride : Boolean.getBoolean(INSTALL_AS_IS_KEY);
+    }
+
+    private String installCheckOverride = null;
+
+    /** Override the {@link #INSTALL_CHECK_KEY} system property for this state (off | warn | throw; null = the property). */
+    public GameState setInstallCheck(final String mode) {
+        installCheckOverride = mode;
+        return this;
+    }
+
+    private String installCheckMode() {
+        final String v = installCheckOverride != null ? installCheckOverride : System.getProperty(INSTALL_CHECK_KEY);
+        if (v == null || v.isEmpty()) {
+            return installAsIs() ? "warn" : "off";
+        }
+        return v.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /** The diff of the last install's round-trip check (empty = equal), or null when the check did not run. */
+    public List<String> getInstallDiff() {
+        return lastInstallDiff;
     }
 
     @Override
@@ -561,6 +624,11 @@ public class GameState {
             if (c.hasChosenType2()) {
                 newText.append("|ChosenType2:").append(c.getChosenType2());
             }
+            // "as this enters, choose a player": the as-is battlefield install runs no entry replacement, so the
+            // choice has to be in the record (written under the install-as-is key only: off, the dump is unchanged)
+            if (installAsIs() && c.hasChosenPlayer()) {
+                newText.append("|ChosenPlayer:").append(getPlayerString(c.getChosenPlayer()));
+            }
             if (!c.getNamedCard().isEmpty()) {
                 newText.append("|NamedCard:").append(c.getNamedCard());
             }
@@ -815,6 +883,7 @@ public class GameState {
         cardToChosenCards.clear();
         cardToChosenType.clear();
         cardToChosenType2.clear();
+        cardToChosenPlayer.clear();
         cardToMergedCards.clear();
         cardToScript.clear();
         cardAttackMap.clear();
@@ -823,6 +892,9 @@ public class GameState {
         Player newPlayerTurn = game.getPlayers().get(playerTurn);
         PhaseType newPhase = tChangePhase.equalsIgnoreCase("none") ? null : PhaseType.smartValueOf(tChangePhase);
         PhaseType advPhase = tAdvancePhase.equalsIgnoreCase("none") ? null : PhaseType.smartValueOf(tAdvancePhase);
+
+        asIsNow = installAsIs();
+        lastInstallDiff = null;
 
         // Set stack to resolving so things won't trigger/effects be checked right away
         game.getStack().setResolving(true);
@@ -841,6 +913,9 @@ public class GameState {
         // frame just installed.
         applyDesignations(game);
         handleCardAttachments();
+        if (asIsNow) {
+            keepRecordedAttachments(game);
+        }
         handleChosenEntities();
         handleRememberedEntities();
         handleMergedCards();
@@ -892,6 +967,201 @@ public class GameState {
                 game.getPlayers().get(i).setLife(life, null);
             }
         }
+
+        final String check = installCheckMode();
+        if (!"off".equals(check)) {
+            final GameState back = new GameState();
+            back.setInstallAsIs(asIsNow);
+            back.initFromGame(game);
+            lastInstallDiff = installDiff(toString(), back.toString());
+            if (!lastInstallDiff.isEmpty()) {
+                System.err.println("[install-diff] " + String.join(" ; ", lastInstallDiff));
+                if ("throw".equals(check)) {
+                    throw new IllegalStateException("GameState install changed the position: "
+                            + String.join(" ; ", lastInstallDiff));
+                }
+            }
+        }
+    }
+
+    /**
+     * install-fidelity-1105 (as-is install only): a recorded aura attachment the aura's current Enchant does not
+     * allow is kept. The record is a position that passed its state-based checks, so the attachment was legal there;
+     * what made it legal is an effect on the aura (one that changed what it may enchant as it returned the card) that
+     * GameState does not record. The aura's Enchant keywords are replaced with "enchant the permanent it is attached
+     * to", by a timestamped keyword change on the aura, which ends with the aura object when it leaves the
+     * battlefield. An attachment that is still illegal after that (protection, a "can't be attached" static) is left
+     * to the state-based check, and the round-trip check reports it.
+     */
+    private void keepRecordedAttachments(final Game game) {
+        game.getAction().checkStaticAbilities(false);
+        for (Entry<Card, Integer> entry : cardToAttachId.entrySet()) {
+            final Card aura = entry.getKey();
+            final Card host = idToCard.get(entry.getValue());
+            if (host == null || !aura.isAura() || !aura.isInPlay() || !host.isInPlay()
+                    || aura.getEntityAttachedTo() != host || host.canBeAttached(aura, null, true)) {
+                continue;
+            }
+            final List<String> remove = new ArrayList<>();
+            for (KeywordInterface ki : aura.getKeywords(Keyword.ENCHANT)) {
+                remove.add(ki.getOriginal());
+            }
+            aura.addChangedCardKeywords(Collections.singletonList("Enchant:Card.AttachedBy:permanent it's attached to"),
+                    remove, false, game.getNextTimestamp(), null);
+        }
+    }
+
+    static final String[] DIFF_ZONES = {"hand", "library", "graveyard", "battlefield", "exile"};
+
+    /**
+     * install-fidelity-1105: the install round-trip diff of two GameState texts (a record and Forge's dump of what it
+     * installed). Per seat ({@code pN}; {@code human}/{@code ai} read as p0/p1): life, player counters, and the hand,
+     * library (in order), graveyard, battlefield and exile as multisets of card descriptors: name, Tapped, FaceDown,
+     * Transformed, Flipped, PhasedOut, Counters (sorted) and AttachedTo / EnchantingPlayer (the attached-to card
+     * by name, since ids differ between the two texts). Also turn, active player and phase. Empty = equal.
+     */
+    public static List<String> installDiff(final String record, final String dump) {
+        final Map<String, List<String>> a = diffView(record), b = diffView(dump);
+        final TreeSet<String> keys = new TreeSet<>(a.keySet());
+        keys.addAll(b.keySet());
+        final List<String> out = new ArrayList<>();
+        for (String k : keys) {
+            final List<String> x = a.getOrDefault(k, Collections.emptyList());
+            final List<String> y = b.getOrDefault(k, Collections.emptyList());
+            if (x.equals(y)) {
+                continue;
+            }
+            if (k.endsWith("library") && x.size() > 6) {
+                out.add(k + ": record " + x.size() + " cards, installed " + y.size() + " (or order differs)");
+                continue;
+            }
+            final List<String> onlyA = new ArrayList<>(x), onlyB = new ArrayList<>(y);
+            for (String v : y) {
+                onlyA.remove(v);
+            }
+            for (String v : x) {
+                onlyB.remove(v);
+            }
+            out.add(k + ": record " + (onlyA.isEmpty() && onlyB.isEmpty() ? x : onlyA)
+                    + " installed " + (onlyA.isEmpty() && onlyB.isEmpty() ? y : onlyB));
+        }
+        return out;
+    }
+
+    private static String diffPlayerKey(String k) {
+        if (k.startsWith("human")) {
+            return "p0" + k.substring(5);
+        }
+        if (k.startsWith("ai")) {
+            return "p1" + k.substring(2);
+        }
+        return k;
+    }
+
+    private static Map<String, List<String>> diffView(final String text) {
+        final Map<String, String> lines = new LinkedHashMap<>();
+        for (String raw : text.split("\\R")) {
+            final String line = raw.trim();
+            final int eq = line.indexOf('=');
+            if (eq < 1 || line.startsWith("#") || line.startsWith("[")) {
+                continue;
+            }
+            lines.put(diffPlayerKey(line.substring(0, eq).trim().toLowerCase(Locale.ROOT)), line.substring(eq + 1));
+        }
+        // ids -> names, over every zone of every seat (an attachment may cross seats)
+        final Map<String, String> idName = new HashMap<>();
+        for (Entry<String, String> e : lines.entrySet()) {
+            if (!isDiffZoneKey(e.getKey())) {
+                continue;
+            }
+            for (String c : e.getValue().split(";")) {
+                final String[] parts = c.trim().split("\\|");
+                for (String part : parts) {
+                    if (part.startsWith("Id:")) {
+                        idName.put(part.substring(3).trim(), parts[0].trim());
+                    }
+                }
+            }
+        }
+        final Map<String, List<String>> out = new TreeMap<>();
+        for (Entry<String, String> e : lines.entrySet()) {
+            final String k = e.getKey();
+            final String v = e.getValue().trim();
+            if (k.equals("turn") || k.equals("activephase")) {
+                out.put(k, Collections.singletonList(v.toUpperCase(Locale.ROOT)));
+            } else if (k.equals("activeplayer")) {
+                out.put(k, Collections.singletonList(diffPlayerKey(v.toLowerCase(Locale.ROOT))));
+            } else if (k.matches("p\\d+life")) {
+                if (!v.equals("-1")) { // -1: the record leaves life unset
+                    out.put(k, Collections.singletonList(v));
+                }
+            } else if (k.matches("p\\d+counters")) {
+                out.put(k, Collections.singletonList(sortedList(v)));
+            } else if (isDiffZoneKey(k)) {
+                final List<String> cards = new ArrayList<>();
+                if (!v.isEmpty()) {
+                    for (String c : v.split(";")) {
+                        if (!c.trim().isEmpty()) {
+                            cards.add(cardDescriptor(c.trim(), idName));
+                        }
+                    }
+                }
+                if (!k.endsWith("library")) {
+                    Collections.sort(cards); // order matters in the library only
+                }
+                out.put(k, cards);
+            }
+        }
+        return out;
+    }
+
+    private static boolean isDiffZoneKey(final String k) {
+        if (k.length() < 3 || k.charAt(0) != 'p' || !Character.isDigit(k.charAt(1))) {
+            return false;
+        }
+        final String z = k.replaceFirst("^p\\d+", "");
+        for (String dz : DIFF_ZONES) {
+            if (dz.equals(z)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String sortedList(final String csv) {
+        final List<String> xs = new ArrayList<>();
+        for (String x : csv.split(",")) {
+            if (!x.trim().isEmpty()) {
+                xs.add(x.trim());
+            }
+        }
+        Collections.sort(xs);
+        return String.join(",", xs);
+    }
+
+    private static String cardDescriptor(final String card, final Map<String, String> idName) {
+        final String[] parts = card.split("\\|");
+        final StringBuilder sb = new StringBuilder(parts[0].trim());
+        final List<String> flags = new ArrayList<>();
+        for (int i = 1; i < parts.length; i++) {
+            final String f = parts[i].trim();
+            if (f.equals("Tapped") || f.equals("FaceDown") || f.equals("Transformed") || f.equals("Flipped")
+                    || f.startsWith("PhasedOut")) {
+                flags.add(f);
+            } else if (f.startsWith("Counters:")) {
+                flags.add("Counters:" + sortedList(f.substring(9)));
+            } else if (f.startsWith("AttachedTo:") || f.startsWith("Attaching:")) {
+                final String id = f.substring(f.indexOf(':') + 1).trim();
+                flags.add("AttachedTo:" + idName.getOrDefault(id, "?" + id));
+            } else if (f.startsWith("EnchantingPlayer:")) {
+                flags.add("EnchantingPlayer:" + diffPlayerKey(f.substring(17).trim().toLowerCase(Locale.ROOT)));
+            }
+        }
+        Collections.sort(flags);
+        for (String f : flags) {
+            sb.append('|').append(f);
+        }
+        return sb.toString();
     }
 
     /**
@@ -1310,6 +1580,11 @@ public class GameState {
             c.setChosenType2(entry.getValue());
         }
 
+        // Chosen player
+        for (Entry<Card, Player> entry : cardToChosenPlayer.entrySet()) {
+            entry.getKey().setChosenPlayer(entry.getValue());
+        }
+
         // Named card
         for (Entry<Card, List<String>> entry : cardToNamedCard.entrySet()) {
             Card c = entry.getKey();
@@ -1456,7 +1731,25 @@ public class GameState {
                         c.setEntityAttachedTo(new CardCopyService(c).copyCard(true));
                     }
 
-                    if (cardsWithoutETBTrigs.contains(c)) {
+                    if (asIsNow) {
+                        // install-fidelity-1105 (-Dforge.gamestate.installAsIs=true; the live line's 33a9b68cb6a):
+                        // the record is a permanent that is already on the battlefield. It goes there from no zone,
+                        // the move |NoETBTrigs always made (GameAction.changeZone's zone-less path), which runs no
+                        // replacement effect and no ETB trigger. The move from the hand replays the card's entry:
+                        // an "as enters, pay life" land loses the position life, a "discard or go to the graveyard"
+                        // entry cost discards a card or bins the permanent, and an installed "nontoken creatures
+                        // entering are exiled" permanent exiles the creatures installed after it. The two things
+                        // the hand move gave the card are kept: its timestamp (CR 613.7d) and a Room's door state.
+                        // Choices made as a card enters come only from the record (ChosenColor, ChosenType,
+                        // ChosenType2, ChosenPlayer, NamedCard, ChosenCards). Known gaps, which the record cannot
+                        // carry: an "as this enters, you get an emblem" card installs without its emblem, and a
+                        // clone's copy state is lost (the 0/0 dies at the end-of-install state-based check).
+                        c.setGameTimestamp(p.getGame().getNextTimestamp());
+                        if (c.isSplitCard() && c.getCastSA() == null) {
+                            c.updateRooms();
+                        }
+                        p.getGame().getAction().moveToPlay(c, null, null);
+                    } else if (cardsWithoutETBTrigs.contains(c)) {
                         p.getGame().getAction().moveTo(ZoneType.Battlefield, c, null, null);
                     } else {
                         p.getZone(ZoneType.Hand).add(c);
@@ -1709,6 +2002,8 @@ public class GameState {
                     cardToChosenType.put(c, info.substring(info.indexOf(':') + 1));
                 } else if (info.startsWith("ChosenType2:")) {
                     cardToChosenType2.put(c, info.substring(info.indexOf(':') + 1));
+                } else if (info.startsWith("ChosenPlayer:")) {
+                    cardToChosenPlayer.put(c, parsePlayerString(player.getGame(), info.substring(info.indexOf(':') + 1)));
                 } else if (info.startsWith("ChosenCards:")) {
                     CardCollection chosen = new CardCollection();
                     String[] idlist = info.substring(info.indexOf(':') + 1).split(",");
