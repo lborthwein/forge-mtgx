@@ -219,6 +219,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int beliefBasics = 8;
         /** honest-belief-1020: the pool is a singleton cube (our deck and the cards we saw leave it). */
         public boolean beliefSingleton = true;
+        /**
+         * deck-belief-1105 (off by default and then absent from the JSON): the search's worlds deal the opponent's hidden
+         * cards from {@link forge.ai.simulation.DeckBelief} ({@link LookaheadSearch.Config#beliefDeck}); needs a belief.
+         */
+        public boolean beliefDeck = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -230,7 +235,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -287,6 +292,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
+            if (o.has("beliefDeck")) c.beliefDeck = o.get("beliefDeck").getAsBoolean(); // deck-belief-1105
             c.check();
             return c;
         }
@@ -425,6 +431,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 o.addProperty("beliefBasics", beliefBasics);
                 o.addProperty("beliefSingleton", beliefSingleton);
+                if (beliefDeck) {
+                    o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -492,7 +501,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             SolverDriver d = null;
             if (cfg.forcedWin != null) {
                 d = new SolverDriver(p, SolverDriver.config(cfg.forcedWin));
-                d.solver().redraw = ls.opponentRedraw(); // honest-belief-1020 (null when belief is off)
+                d.solver().redraw = ls.solverRedraw(d.solver().config()); // honest-belief-1020; deck-belief-1105 deckBelief
                 solverDrivers.put(p.getId(), d);
                 b.planHook = d;
             }
@@ -633,6 +642,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefSingleton = cfg.beliefSingleton;
             lc.beliefPool = cfg.beliefPool;
             lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
+            lc.beliefDeck = cfg.beliefDeck; // deck-belief-1105 (off by default)
         }
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)

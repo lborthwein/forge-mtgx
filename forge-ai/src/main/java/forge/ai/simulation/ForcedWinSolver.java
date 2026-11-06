@@ -187,6 +187,37 @@ public final class ForcedWinSolver {
          * the seat's other responses stay its own.
          */
         public boolean hold = false;
+        /**
+         * deck-belief-1105 (N11 v1; off by default, and then nothing changes): the verification worlds deal the
+         * opponent's hidden hand and library from {@link DeckBelief} (a deck of the colours it has shown, the hand
+         * weighted by what it declined to do) through {@link LookaheadSearch#solverRedraw}; the belief worlds then keep
+         * that hand ({@link #hideOrSample} re-deals nothing).
+         */
+        public boolean deckBelief = false;
+        /** deck-belief-1105: belief worlds when the opponent has a hidden hand card and an untapped mana source (0 = worlds). */
+        public int deckWorlds = 0;
+        public double deckDecline = 0.35;
+        public double deckLandShare = 0.425;
+        /**
+         * deck-belief-1105 (0 = off, the default): once the line being verified has lost a belief world (it cannot be
+         * proven), no further world or candidate starts past this many ms after the decision's start, so the plan
+         * search keeps the rest of the decision's budget for its own candidates. A proven line is never cut by it.
+         */
+        public int unprovenMs = 0;
+        /**
+         * deck-belief-1105 (0 = off, the default): the solver's whole budget while it holds no proven line, ms from the
+         * decision's start. The engine search stops there (its in-flight move is cut 500 ms later), and an unprovable
+         * line's verification starts no world or candidate past it ({@link #unprovenMs} = this when unset). A line
+         * still winning every world keeps verifying to the usual deadline. The plan search keeps the rest.
+         */
+        public int capMs = 0;
+
+        public DeckBelief.Params deckParams() {
+            final DeckBelief.Params p = new DeckBelief.Params();
+            p.decline = deckDecline;
+            p.landShare = deckLandShare;
+            return p;
+        }
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -228,6 +259,12 @@ public final class ForcedWinSolver {
             c.defendMs = intOr(get.apply("defendMs"), (int) c.defendMs);
             c.sharedReader = "true".equals(get.apply("sharedReader"));
             c.hold = "true".equals(get.apply("hold"));
+            c.deckBelief = "true".equals(get.apply("deckBelief")); // deck-belief-1105
+            c.deckWorlds = intOr(get.apply("deckWorlds"), c.deckWorlds);
+            c.deckDecline = dblOr(get.apply("deckDecline"), c.deckDecline);
+            c.deckLandShare = dblOr(get.apply("deckLandShare"), c.deckLandShare);
+            c.unprovenMs = intOr(get.apply("unprovenMs"), c.unprovenMs);
+            c.capMs = intOr(get.apply("capMs"), c.capMs);
             return c;
         }
 
@@ -290,6 +327,43 @@ public final class ForcedWinSolver {
      * belief ({@link LookaheadSearch#opponentRedraw}).
      */
     public Redraw redraw;
+
+    /**
+     * deck-belief-1105: the belief worlds' opponent hand as {@link #redraw} dealt it ({@link Config#deckBelief} with a
+     * redraw set): {@link #hideOrSample} then re-deals nothing in worlds above 0. World 0 still hides the hand.
+     */
+    private boolean keepDealtHand() {
+        return cfg.deckBelief && redraw != null;
+    }
+
+    /**
+     * deck-belief-1105: the belief worlds of one evaluation: {@link Config#deckWorlds} when the opponent holds a hidden
+     * hand card and controls an untapped mana source (where an answer could matter), else {@link Config#worlds}.
+     */
+    int beliefWorlds(Game live) {
+        if (!cfg.deckBelief || cfg.deckWorlds <= cfg.worlds) {
+            return cfg.worlds;
+        }
+        final forge.game.player.PlayerView myView = me.getView();
+        for (Player o : me.getOpponents()) {
+            boolean hidden = false;
+            for (Card c : o.getCardsIn(ZoneType.Hand)) {
+                if (!c.getView().canBeShownTo(myView)) {
+                    hidden = true;
+                    break;
+                }
+            }
+            if (!hidden) {
+                continue;
+            }
+            for (Card c : o.getCardsIn(ZoneType.Battlefield)) {
+                if (!c.isTapped() && !c.getManaAbilities().isEmpty()) {
+                    return cfg.deckWorlds;
+                }
+            }
+        }
+        return cfg.worlds;
+    }
 
     /** honest-belief-1020: re-draws the opponents' hidden cards of copy {@code g} (called inside {@code synchronized (live)}). */
     @FunctionalInterface
@@ -610,6 +684,7 @@ public final class ForcedWinSolver {
         final int index = decisionIndex++;
         final long t0 = System.nanoTime();
         decisionWall = t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
+        decisionStart = t0;
         final Position pos = readPosition(live, knownTop(live));
         if (pos == null) {
             noLineKey = key;
@@ -1403,8 +1478,13 @@ public final class ForcedWinSolver {
         el.wall = decisionWall;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
-        final long engineDeadline = Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs), budgetMs() - reserve)
+        long engineDeadline = Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs), budgetMs() - reserve)
                 * 1_000_000L, t0 + (budgetMs() - reserve) * 1_000_000L);
+        if (cfg.capMs > 0) {
+            // deck-belief-1105: no proven line yet; the engine search ends at the cap
+            engineDeadline = Math.min(engineDeadline, t0 + cfg.capMs * 1_000_000L);
+            el.wall = Math.min(el.wall, t0 + (cfg.capMs + 500L) * 1_000_000L);
+        }
         final List<Line> likelyCands = cfg.likely ? new ArrayList<>() : null;
         el.redraw = redraw;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
@@ -1493,7 +1573,7 @@ public final class ForcedWinSolver {
                     v.knownTop = line.knownTop;
                     loopVariants++;
                     ev = evaluate(live, v, mix(cfg.seed, index * 1000L + 999), deadline); // the found line's worlds
-                    if (ev.pUnopposed >= 1.0 && ev.worldsRun < cfg.worlds && System.nanoTime() > deadline) {
+                    if (ev.pUnopposed >= 1.0 && ev.worldsRun < beliefWorlds(live) && System.nanoTime() > deadline) {
                         loopVariantCuts++; // cut by the deadline: unresolved
                         curve.append(n).append(":cut ");
                         if (n > rep.times) {
@@ -1537,6 +1617,19 @@ public final class ForcedWinSolver {
     public int wallCuts;
     /** solver-gaps-1015: the current offense decision's hard wall (System.nanoTime()): its budget plus the grace. */
     private long decisionWall;
+    /** deck-belief-1105: the current offense decision's start (for {@link Config#unprovenMs}). */
+    private long decisionStart;
+    public int unprovenStops;
+
+    /** deck-belief-1105: stop starting work on an unprovable line past {@link Config#unprovenMs} (off: never). */
+    private boolean unprovenStop(boolean unproven) {
+        final int ms = cfg.capMs > 0 ? (cfg.unprovenMs > 0 ? Math.min(cfg.unprovenMs, cfg.capMs) : cfg.capMs) : cfg.unprovenMs;
+        if (ms <= 0 || !unproven || System.nanoTime() <= decisionStart + ms * 1_000_000L) {
+            return false;
+        }
+        unprovenStops++;
+        return true;
+    }
     /** Payment search: decisions where only the searched payment found width lines. */
     public int paySearchFound;
 
@@ -1637,6 +1730,9 @@ public final class ForcedWinSolver {
                     redraw.apply(live, me, g, cm, rng); // honest-belief-1020
                 }
                 for (Player o : cm.getOpponents()) {
+                    if (world != 0 && keepDealtHand()) {
+                        continue; // deck-belief-1105: the redraw dealt this world's hand
+                    }
                     hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
                 }
                 if (cfg.infoState) {
@@ -1739,6 +1835,9 @@ public final class ForcedWinSolver {
             if (System.nanoTime() > deadline && best != null) {
                 break;
             }
+            if (best != null && unprovenStop(!(best.pUnopposed >= 1.0 && best.pBelief >= 1.0))) {
+                break; // deck-belief-1105
+            }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
             receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e);
             if (evalSink != null) {
@@ -1783,9 +1882,13 @@ public final class ForcedWinSolver {
         int n = 0;
         final Map<String, Integer> fails = new HashMap<>();
         final Set<String> prot = new HashSet<>();
-        for (int w = 1; w <= cfg.worlds; w++) {
+        final int nWorlds = beliefWorlds(live); // deck-belief-1105 (cfg.worlds when off)
+        for (int w = 1; w <= nWorlds; w++) {
             if (System.nanoTime() > deadline && n > 0) {
                 break;
+            }
+            if (n > 0 && sum < n && unprovenStop(true)) {
+                break; // deck-belief-1105: unprovable already; leave the budget to the plan search
             }
             final long ws = mix(seed, w);
             Outcome worst = playout(live, line, ws, w, -1, wall);
@@ -1890,6 +1993,9 @@ public final class ForcedWinSolver {
                         redraw.apply(live, me, g, cm, rng); // honest-belief-1020
                     }
                     for (Player o : cm.getOpponents()) {
+                        if (world != 0 && keepDealtHand()) {
+                            continue; // deck-belief-1105: the redraw dealt this world's hand
+                        }
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
                         hideOrSample(live, me, liveOpp, o, world == 0, rng);
                     }
