@@ -217,6 +217,13 @@ public final class RlActorBench {
         int frameDumpLo = 0, frameDumpHi = 0;
         boolean frameDumpChoices = true;
         /**
+         * frame-score-1105 (null = off, the default: every path unchanged): beside {@code frameDump}, the GameState text
+         * frame + featurizer sidecar of every {@code every}-th priority decision ({@link forge.bench.rl.RlFrameStates}):
+         * {@code frameStates} = {"out": DIR, "every": N (default 1)}. Needs frameDump.
+         */
+        String frameStatesOut = null;
+        int frameStatesEvery = 1;
+        /**
          * bvw-step1-build-1024 (the seat/dec_idx swap, 2026-10-25; null = no check): step-0 label index files whose
          * positions (turns before the end in [0, referenceTurns)) a labelled or scanned replay must reproduce exactly,
          * or the game writes no rows ({@code label.reference} / {@code exileScan.reference}, {@code referenceTurns}).
@@ -460,6 +467,28 @@ public final class RlActorBench {
             }
             if (x.has("choices")) {
                 c.frameDumpChoices = x.get("choices").getAsBoolean();
+            }
+        }
+        if (o.has("frameStates") && !o.get("frameStates").isJsonNull()) {
+            // frame-score-1105: GameState frames + sidecars beside the frame dump
+            final JsonObject x = o.getAsJsonObject("frameStates");
+            for (String k : x.keySet()) {
+                if (!"out".equals(k) && !"every".equals(k)) {
+                    throw new IllegalArgumentException("frameStates: unknown key " + k + " (out, every)");
+                }
+            }
+            if (!x.has("out")) {
+                throw new IllegalArgumentException("frameStates needs out");
+            }
+            if (c.frameDumpOut == null) {
+                throw new IllegalArgumentException("refused: frameStates needs frameDump");
+            }
+            c.frameStatesOut = x.get("out").getAsString();
+            if (x.has("every")) {
+                c.frameStatesEvery = x.get("every").getAsInt();
+                if (c.frameStatesEvery < 1) {
+                    throw new IllegalArgumentException("frameStates.every >= 1");
+                }
             }
         }
         if (o.has("watchdog")) {
@@ -1873,6 +1902,10 @@ public final class RlActorBench {
             frameSink = new forge.bench.rl.RlFrameDump.Sink(Paths.get(cfg.frameDumpOut));
             System.err.println("[frame-dump] band [" + cfg.frameDumpLo + ", " + cfg.frameDumpHi + ") choices "
                     + cfg.frameDumpChoices + " -> " + frameSink.framesFile());
+            if (cfg.frameStatesOut != null) {
+                statesSink = new forge.bench.rl.RlFrameStates.Sink(Paths.get(cfg.frameStatesOut));
+                System.err.println("[frame-states] every " + cfg.frameStatesEvery + " -> " + statesSink.file());
+            }
         }
         // bvw-decision-log-1027: logs an earlier "record" replay wrote (forced for their digest-equal games), and this
         // replay's own sink when it records
@@ -2169,6 +2202,7 @@ public final class RlActorBench {
                 final int tobs = g.get("obs_schema").getAsInt();
                 final forge.bench.rl.RlExileScan[] scans = new forge.bench.rl.RlExileScan[1];
                 final forge.bench.rl.RlFrameDump[] dumps = new forge.bench.rl.RlFrameDump[1];
+                final forge.bench.rl.RlFrameStates[] states = new forge.bench.rl.RlFrameStates[1];
                 final GameHook hook0 = cfg.bankSpec != null ? (game, seat, know) -> {
                     banks[0] = new forge.bench.rl.RlAssemblyBank(cfg.bankSpec, bankSink, bankJob, t, game, know,
                             feat.index(), tobs);
@@ -2202,6 +2236,12 @@ public final class RlActorBench {
                     dumps[0] = new forge.bench.rl.RlFrameDump(cfg.frameDumpLo, cfg.frameDumpHi, cfg.frameDumpChoices, t,
                             jarSha, game, know, feat.index(), tobs);
                     game.addPriorityDecisionListener(dumps[0]);
+                    if (cfg.frameStatesOut != null) {
+                        // frame-score-1105: after the dump's listener (reads the tracker the dump's frame settled)
+                        states[0] = new forge.bench.rl.RlFrameStates(cfg.frameStatesEvery, t, game, know, feat.index(),
+                                tobs);
+                        game.addPriorityDecisionListener(states[0]);
+                    }
                 } : null;
                 // review #124 S2-3: a record replay's checks (the trajectory against step 0 when no labeller or scan
                 // runs it; a later step's state_sha rows), read-only
@@ -2327,6 +2367,9 @@ public final class RlActorBench {
                         } else {
                             try {
                                 dumps[0].finish(frameSink, eq, row);
+                                if (states[0] != null) {
+                                    row.addProperty("state_rows", states[0].finish(statesSink, eq)); // frame-score-1105
+                                }
                             } catch (IOException e) {
                                 row.addProperty("error", "frame dump sink: " + e);
                                 row.addProperty("equal", false);
@@ -2590,6 +2633,7 @@ public final class RlActorBench {
     static forge.bench.rl.RlExileScan.Sink scanSink = null;
     /** outcome-arm-1104: the frame-dump replay's sink (null = off). */
     static forge.bench.rl.RlFrameDump.Sink frameSink = null;
+    static forge.bench.rl.RlFrameStates.Sink statesSink = null; // frame-score-1105
     /** bvw-step1-build-1024: the step-0 reference positions (null = no trajectory check). */
     static forge.bench.rl.TrajectoryRef trajectoryRef = null;
 
