@@ -2428,6 +2428,24 @@ public final class ForcedWinSolver {
         return defaultVal;
     }
 
+    /**
+     * kill-line-1106 (plans.lineKeep): a discard answered by Forge AI while a line is followed, with the line's reserved
+     * cards swapped out, as {@link LineAi} verified it. No line, or nothing reserved: the answer as given.
+     */
+    public CardCollection keepReserved(CardCollection ordinary, CardCollectionView valid) {
+        if (active == null || active.done || ordinary == null) {
+            return ordinary;
+        }
+        final CardCollection out = avoid(ordinary, valid, active.reserved());
+        if (out != ordinary && !out.equals(ordinary)) {
+            lineKeepSwaps++;
+        }
+        return out;
+    }
+
+    /** kill-line-1106 (report only): discards where a reserved card was swapped out. */
+    public int lineKeepSwaps;
+
     /** Card ids the active line still needs in hand (discard choices avoid them). */
     public Set<Integer> reserved() {
         return active == null || active.done ? Collections.emptySet() : active.reserved();

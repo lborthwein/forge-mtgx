@@ -662,6 +662,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the S-b solver's follower config (copies follow lines with it). */
+    /** kill-line-1106: plans.lineKeep. */
+    boolean lineKeepOn() {
+        return cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).lineKeep;
+    }
+
     /** choice-search-1105: plans.lineChoices=forge (line-consistent choice answers). */
     boolean lineChoicesForge() {
         for (PlanSearch ps1 : planSearches.values()) {
@@ -2316,7 +2321,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (first.plan instanceof PlanSearch.LinePlan) {
             // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
             pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first,
-                    lineChoicesForge());
+                    lineChoicesForge(), lineKeepOn());
         }
         pc.forcedBlocks = first.block;
         return new LookaheadSearch.PlayoutSeat() {

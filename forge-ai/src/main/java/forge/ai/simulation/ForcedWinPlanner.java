@@ -487,6 +487,7 @@ public final class ForcedWinPlanner {
         dfs(s, 0);
         rank();
         result.nodes = nodes;
+        result.exhausted |= nodes >= lim.nodes; // kill-line-1106: a stop at the node limit counts as exhausted (report only)
         for (Line l : result.lines) {
             l.knownTop = pos.knownTop.size();
         }

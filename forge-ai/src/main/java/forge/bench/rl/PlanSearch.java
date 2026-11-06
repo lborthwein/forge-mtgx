@@ -104,10 +104,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * resolved: the board the solver sees has changed). Engine primitives only: zone, controller, card type.
          */
         public boolean replanOnEntry = false;
+        /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
+        public boolean lineKeep = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry"));
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -133,6 +135,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("defendCfg")) s.defendCfg = o.getAsJsonObject("defendCfg");
             if (o.has("lineChoices")) s.lineChoices = o.get("lineChoices").getAsString();
             if (o.has("replanOnEntry")) s.replanOnEntry = o.get("replanOnEntry").getAsBoolean();
+            if (o.has("lineKeep")) s.lineKeep = o.get("lineKeep").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -462,6 +465,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final ForcedWinSolver.Config sc = spec.solverConfig();
         this.driver = new SolverDriver(me, sc);
         this.driver.lineChoices = "forge".equals(spec.lineChoices);
+        this.driver.lineKeep = spec.lineKeep;
         // honest-belief-1020: the solver's verification worlds and engine root draw the opponent's hidden cards from the
         // search's belief pool (null = belief off: as before)
         this.driver.solver().redraw = rs.ls().solverRedraw(sc); // deck-belief-1105: deckBelief, else as before
@@ -689,6 +693,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return driver.forgeCosts();
     }
 
+    /** kill-line-1106: plans.lineKeep. */
+    @Override
+    public CardCollection lineKeep(final CardCollection ordinary, final CardCollection valid) {
+        return driver.lineKeep(ordinary, valid);
+    }
+
     /** choice-search-1105: the live line's choice asks are its verifier's (plans.lineChoices=forge), as the driver says. */
     @Override
     public boolean forgeChoices() {
@@ -905,14 +915,15 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** The plan's follower inside a play-out copy: a solver line on the copy seat's bridged controller. */
     static PlayerControllerBridge.PlanHook copyLineHook(final Player copyMe, final ForcedWinSolver.Config cfg,
             final LinePlan lp, final LookaheadSearch.FirstAction fa) {
-        return copyLineHook(copyMe, cfg, lp, fa, false);
+        return copyLineHook(copyMe, cfg, lp, fa, false, false);
     }
 
     /** As above; {@code lineChoices}: the line's choice asks are Forge AI's (choice-search-1105, plans.lineChoices). */
     static PlayerControllerBridge.PlanHook copyLineHook(final Player copyMe, final ForcedWinSolver.Config cfg,
-            final LinePlan lp, final LookaheadSearch.FirstAction fa, final boolean lineChoices) {
+            final LinePlan lp, final LookaheadSearch.FirstAction fa, final boolean lineChoices, final boolean lineKeep) {
         final SolverDriver d = new SolverDriver(copyMe, cfg, false);
         d.lineChoices = lineChoices;
+        d.lineKeep = lineKeep;
         d.solver().adopt(lp.line);
         return new PlayerControllerBridge.PlanHook() {
             @Override
@@ -972,6 +983,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             @Override
             public boolean forgeCosts() {
                 return d.forgeCosts();
+            }
+
+            @Override
+            public CardCollection lineKeep(final CardCollection ordinary, final CardCollection valid) {
+                return d.lineKeep(ordinary, valid);
             }
 
             @Override

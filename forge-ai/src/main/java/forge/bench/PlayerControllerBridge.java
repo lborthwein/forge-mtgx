@@ -181,6 +181,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return discard(p, sa, valid, min, max);
         }
 
+        /** kill-line-1106: a Forge AI discard while a line is followed, as the line verified it (default: unchanged). */
+        default CardCollection lineKeep(CardCollection ordinary, CardCollection valid) {
+            return ordinary;
+        }
+
         default Boolean confirm(SpellAbility sa, String message) {
             return null;
         }
@@ -3578,8 +3583,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 new Object[] {validCards, sa, playerDiscard});
         if (ans == null) {
             final Echo e = takeEcho();
-            final CardCollection out = super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max,
+            final CardCollection forge0 = super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max,
                     visibleToChooser);
+            final CardCollection out = planHook == null ? forge0 : planHook.lineKeep(forge0, validCards); // kill-line-1106
             echo(e, echoCards(out));
             return out;
         }
