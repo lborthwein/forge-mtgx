@@ -342,4 +342,31 @@ public class DeckBeliefTest extends SimulationTest {
         } catch (IllegalArgumentException expected) {
         }
     }
+    @Test
+    public void theSolverAndTheSearchDealTheSameHandFromTheSameSeed() throws Exception {
+        // deck-belief-1105 sharedWorlds: one world set per decision needs one redraw for both consumers
+        String cube = cubeFile();
+        Game game = board(false);
+        Player a = game.getPlayers().get(0);
+        forge.util.IdScope.open();
+        LookaheadSearch.Config c = cfg(cube);
+        c.beliefDeck = true;
+        LookaheadSearch ls = new LookaheadSearch(c);
+        ForcedWinSolver.Redraw solver = ls.solverRedraw(solverCfg(true));
+        for (long s = 0; s < 20; s++) {
+            GameCopier c1 = new GameCopier(game, true);
+            Game g1 = c1.makeCopy();
+            ls.redraw(game, a, g1, (Player) c1.find(a), new Random(s));
+            List<String> searchHand = new ArrayList<>();
+            for (Card x : ((Player) c1.find(game.getPlayers().get(1))).getCardsIn(ZoneType.Hand)) {
+                searchHand.add(x.getName());
+            }
+            AssertJUnit.assertEquals(world(ls, solver, game, s, ZoneType.Hand), searchHand);
+        }
+        ls.setSharedWorlds(new long[] {7L, 9L});
+        ls.setSharedWorlds(null); // set and cleared around one decision; null and empty are off
+        ls.setSharedWorlds(new long[0]);
+        ls.shutdown();
+        forge.util.IdScope.close();
+    }
 }

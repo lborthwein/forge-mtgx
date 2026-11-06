@@ -788,6 +788,11 @@ public final class ForcedWinSolver {
         public final String text;
         /** Our library's known top the line relies on (its play-outs keep that many cards in place). */
         public final int knownTop;
+        /**
+         * deck-belief-1105 (sharedWorlds): the redraw seeds of the line's belief worlds, the worlds it lost first. A search
+         * that deals its worlds with the same redraw plays its candidates in these same opponent hands.
+         */
+        public final long[] sharedSeeds;
 
         Proposal(Eval e) {
             this.line = e.line;
@@ -799,6 +804,15 @@ public final class ForcedWinSolver {
             this.engine = "engine".equals(e.line.how);
             this.text = String.valueOf(e);
             this.knownTop = e.line.knownTop;
+            final List<Long> lost = new ArrayList<>(), won = new ArrayList<>();
+            for (int i = 0; i < e.worldSeeds.size(); i++) {
+                (e.worldWon.get(i) ? won : lost).add(e.worldSeeds.get(i));
+            }
+            lost.addAll(won);
+            this.sharedSeeds = new long[lost.size()];
+            for (int i = 0; i < lost.size(); i++) {
+                sharedSeeds[i] = lost.get(i);
+            }
         }
 
         /** Verified forced: won unopposed and in every belief world it ran (at least {@code minWorlds}), adversary on. */
@@ -1799,6 +1813,9 @@ public final class ForcedWinSolver {
         int worldsRun;
         String protection = "";
         String failures = "";
+        /** deck-belief-1105 (sharedWorlds): each belief world's redraw seed and whether the line won it, in run order. */
+        final List<Long> worldSeeds = new ArrayList<>();
+        final List<Boolean> worldWon = new ArrayList<>();
 
         Eval(Line line) {
             this.line = line;
@@ -1912,6 +1929,8 @@ public final class ForcedWinSolver {
             }
             sum += worst.won ? 1 : 0;
             n++;
+            e.worldSeeds.add(mix(ws, 2)); // deck-belief-1105: the world's redraw seed (playout: new Random(mix(seed, 2)))
+            e.worldWon.add(worst.won);
             if (!worst.won) {
                 fails.merge(worst.why, 1, Integer::sum);
             }

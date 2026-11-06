@@ -104,10 +104,17 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * resolved: the board the solver sees has changed). Engine primitives only: zone, controller, card type.
          */
         public boolean replanOnEntry = false;
+        /**
+         * deck-belief-1105 (false = off, the default): at a plan point with an unproven solver line, S-c deals its worlds
+         * with the redraw seeds of that line's verification worlds, the lost ones first (one shared world set per
+         * decision, ARCH L3). Meaningful when the solver and the search deal through the same redraw (solverCfg
+         * deckBelief with search beliefDeck).
+         */
+        public boolean sharedWorlds = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry"));
+                "defendCfg", "lineChoices", "replanOnEntry", "sharedWorlds"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -133,6 +140,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("defendCfg")) s.defendCfg = o.getAsJsonObject("defendCfg");
             if (o.has("lineChoices")) s.lineChoices = o.get("lineChoices").getAsString();
             if (o.has("replanOnEntry")) s.replanOnEntry = o.get("replanOnEntry").getAsBoolean();
+            if (o.has("sharedWorlds")) s.sharedWorlds = o.get("sharedWorlds").getAsBoolean(); // deck-belief-1105
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -773,6 +781,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         int knownTop;
         double ms;
         String note = "";
+        /** deck-belief-1105 (plans.sharedWorlds): the first line proposal's world seeds for S-c (null = off or none). */
+        long[] sharedSeeds;
     }
 
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
@@ -811,6 +821,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 }
                 st.plans.add(new LinePlan(pr));
                 st.labels.add("line#" + n + " P=" + Math.round(pr.pBelief * 100) + "% steps=" + pr.steps);
+                if (spec.sharedWorlds && st.sharedSeeds == null && pr.sharedSeeds.length > 0) {
+                    st.sharedSeeds = pr.sharedSeeds; // deck-belief-1105: line#0's worlds, the lost ones first
+                }
                 n++;
                 lineCands++;
             }

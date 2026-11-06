@@ -3773,7 +3773,14 @@ public final class LookaheadSearch {
         final double[][] v2 = new double[2][r];
         final Rollout[][] o2 = new Rollout[2][r];
         final boolean[] ok2 = {true, true};
-        final int ab = playAll(live, me, two, defSa, mix(decisionSeed, 0x5ace1105L), new Carried[r], v2, o2, ok2, null);
+        final long[] shared = sharedWorlds;
+        sharedWorlds = null; // the race's worlds are fresh draws
+        final int ab;
+        try {
+            ab = playAll(live, me, two, defSa, mix(decisionSeed, 0x5ace1105L), new Carried[r], v2, o2, ok2, null);
+        } finally {
+            sharedWorlds = shared;
+        }
         if (ab > 0 || !ok2[0] || !ok2[1]) {
             synchronized (stats) {
                 stats.raceCut++;
@@ -3909,7 +3916,13 @@ public final class LookaheadSearch {
                     }
                     continue;
                 }
-                prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, cw == null ? null : cw.at);
+                final long[] sh = sharedWorlds;
+                redrawSeedOverride = sh != null && w < sh.length ? Long.valueOf(sh[w]) : null; // deck-belief-1105
+                try {
+                    prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, cw == null ? null : cw.at);
+                } finally {
+                    redrawSeedOverride = null;
+                }
                 prep[c][w].trajectory = cfg.reuse ? new ArrayList<>() : null;
                 if (choiceTag && prep[c][w].firstAction != null) {
                     // S-t (lane cm-choice-search-1009): which candidate and world this policy play-out is, and whether it
@@ -5333,7 +5346,8 @@ public final class LookaheadSearch {
                     MyRandom.setThreadRandom(PlayoutKeys.TrackedRandom.ofSnapshot(carried.rng));
                 } else {
                     if (resample) {
-                        redraw(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                        final Long ov = redrawSeedOverride; // deck-belief-1105 sharedWorlds (null = the world's own)
+                        redraw(live, liveMe, p.g, p.me, new Random(ov != null ? ov : mix(worldSeed, 2)));
                         if (ownKnownTop > 0) {
                             // search-bones-1015: the top of our library we placed ourselves (pile memory) stays in place
                             restoreOwnTop(liveMe, p.me, ownKnownTop);
@@ -7457,6 +7471,20 @@ public final class LookaheadSearch {
      * library are dealt by {@link DeckBelief#deal} from the same pool: a deck of colours consistent with what the
      * opponent has shown, its hand weighted by what it declined to do. Null when no belief is on.
      */
+    /**
+     * deck-belief-1105 (plans.sharedWorlds; null = off): the redraw seeds of the solver's verification worlds for the
+     * current plan point. World w of the search's candidates is dealt with seed w (the same opponent hand as the
+     * solver's world, when both deal through the same redraw), so a line candidate is played where it was seen to fail.
+     * Set and cleared by the plan search around one decision.
+     */
+    private volatile long[] sharedWorlds;
+    /** The override for the next {@link #prepare} (playAll's prepare loop runs on one thread). */
+    private Long redrawSeedOverride;
+
+    public void setSharedWorlds(final long[] seeds) {
+        sharedWorlds = seeds == null || seeds.length == 0 ? null : seeds.clone();
+    }
+
     /** deck-belief-1105: the search worlds' deck-belief parameters (the model defaults). */
     private volatile DeckBelief.Params searchDeckParams;
 
