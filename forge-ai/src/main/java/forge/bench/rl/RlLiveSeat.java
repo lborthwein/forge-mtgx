@@ -468,8 +468,19 @@ public final class RlLiveSeat {
      * {@code singleton}: a cube pool (our deck and the opponent cards we see leave it), else whole.
      */
     public void setBeliefPool(final java.util.List<String> pool, final boolean singleton) {
+        setBeliefPool(pool, singleton, null);
+    }
+
+    /**
+     * deck-belief-1105: as above, with the host's {@code beliefPoolMode} ("draft-pod" or "independent"; null = today's
+     * rule, the search's default).
+     */
+    public void setBeliefPool(final java.util.List<String> pool, final boolean singleton, final String mode) {
         spec.search.beliefPool = pool;
         spec.search.beliefSingleton = pool == null ? forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON : singleton;
+        if (pool != null && mode != null) {
+            spec.search.beliefPoolMode = mode;
+        }
     }
 
     /**

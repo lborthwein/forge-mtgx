@@ -79,7 +79,9 @@ public class InteractiveHonestBeliefTest extends forge.ai.simulation.SimulationT
     @Test
     public void aBadPoolIsRefused() {
         for (String bad : new String[] {",\"beliefPool\":[]}", ",\"beliefPool\":\"Shock\"}", ",\"beliefPool\":[1]}",
-                ",\"beliefPool\":[\" \"]}", ",\"beliefPoolSingleton\":true}", ",\"beliefPool\":[\"Shock\"],\"beliefPoolSingleton\":1}"}) {
+                ",\"beliefPool\":[\" \"]}", ",\"beliefPoolSingleton\":true}", ",\"beliefPool\":[\"Shock\"],\"beliefPoolSingleton\":1}",
+                ",\"beliefPoolMode\":\"independent\"}", ",\"beliefPool\":[\"Shock\"],\"beliefPoolMode\":\"pod\"}",
+                ",\"beliefPool\":[\"Shock\"],\"beliefPoolMode\":true}"}) {
             try {
                 InteractiveProtocol.readBeliefPool(BASE + bad);
                 Assert.fail("accepted " + bad);
@@ -87,5 +89,20 @@ public class InteractiveHonestBeliefTest extends forge.ai.simulation.SimulationT
                 Assert.assertEquals(expected.code(), "invalid_config");
             }
         }
+    }
+    @Test
+    public void theHostsPoolModeReachesTheSearchAndAbsentIsTodaysRule() throws Exception {
+        // deck-belief-1105: beliefPoolMode next to beliefPool; absent = null (the search default, draft-pod)
+        Assert.assertNull(InteractiveProtocol.readBeliefPool(BASE + ",\"beliefPool\":[\"Shock\"],\"beliefPoolSingleton\":true}").mode());
+        final InteractiveProtocol.BeliefPool p = InteractiveProtocol.readBeliefPool(
+                BASE + ",\"beliefPool\":[\"Shock\"],\"beliefPoolSingleton\":true,\"beliefPoolMode\":\"independent\"}");
+        Assert.assertEquals(p.mode(), "independent");
+        InteractiveMain.resetPool(p);
+        Assert.assertEquals(InteractiveMain.parseLookahead("worlds=8").config.beliefPoolMode, "independent");
+        InteractiveMain.resetPool(InteractiveProtocol.readBeliefPool(
+                BASE + ",\"beliefPool\":[\"Shock\"],\"beliefPoolSingleton\":true,\"beliefPoolMode\":\"draft-pod\"}"));
+        Assert.assertEquals(InteractiveMain.parseLookahead("worlds=8").config.beliefPoolMode, "draft-pod");
+        InteractiveMain.resetPool(InteractiveProtocol.readBeliefPool(BASE + ",\"beliefPool\":[\"Shock\"],\"beliefPoolSingleton\":true}"));
+        Assert.assertEquals(InteractiveMain.parseLookahead("worlds=8").config.beliefPoolMode, "draft-pod");
     }
 }

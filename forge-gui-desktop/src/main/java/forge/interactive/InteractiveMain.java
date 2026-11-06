@@ -835,7 +835,8 @@ public final class InteractiveMain {
                     k8Fixes = pl.aiFixes;
                 }
                 final InteractiveProtocol.BeliefPool pool = settledPool(); // honest-belief-1020
-                lp.live().setBeliefPool(pool == null ? null : pool.names(), pool != null && pool.singleton());
+                lp.live().setBeliefPool(pool == null ? null : pool.names(), pool != null && pool.singleton(),
+                        pool == null ? null : pool.mode()); // deck-belief-1105: beliefPoolMode (null = today's rule)
                 final java.util.List<String> beliefSeen = BELIEF_SEEN.get();
                 lp.live().setBeliefSeen(beliefSeen); // deck-guess-1021
                 if (beliefSeen != null) {
@@ -882,6 +883,9 @@ public final class InteractiveMain {
         if (pool != null) {
             c.beliefPool = pool.names();
             c.beliefSingleton = pool.singleton();
+            if (pool.mode() != null) {
+                c.beliefPoolMode = pool.mode(); // deck-belief-1105
+            }
         } else if (c.beliefCube == null) {
             c.beliefCube = forge.ai.simulation.BeliefSampler.LIVE_CUBE;
             c.beliefCubeSha256 = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SHA256;
@@ -929,11 +933,14 @@ public final class InteractiveMain {
                 if (cube.unresolved.size() * 4 > asked) {
                     reason = cube.unresolved.size() + " of " + asked + " names do not resolve";
                 } else {
-                    EVENT_POOL.set(new InteractiveProtocol.BeliefPool(cube.names, pool.singleton()));
+                    EVENT_POOL.set(new InteractiveProtocol.BeliefPool(cube.names, pool.singleton(), pool.mode()));
                     o.addProperty("source", "event");
                     o.addProperty("size", cube.names.size());
                     o.addProperty("sha256", cube.sha256);
                     o.addProperty("singleton", pool.singleton());
+                    if (pool.mode() != null) {
+                        o.addProperty("mode", pool.mode()); // deck-belief-1105: only when the host sent one
+                    }
                 }
             } catch (RuntimeException e) {
                 reason = String.valueOf(e.getMessage());

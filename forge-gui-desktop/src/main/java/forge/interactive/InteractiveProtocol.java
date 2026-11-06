@@ -309,11 +309,23 @@ final class InteractiveProtocol {
      * pool, a puzzle's or lesson's card set), {@code beliefPoolSingleton} = the pool is a singleton cube (default false).
      * The AI seats' look-ahead worlds draw the opponent's hidden cards from it, never from the real deck.
      */
-    record BeliefPool(List<String> names, boolean singleton) {
+    record BeliefPool(List<String> names, boolean singleton, String mode) {
         BeliefPool {
             names = List.copyOf(names);
         }
+
+        BeliefPool(List<String> names, boolean singleton) {
+            this(names, singleton, null);
+        }
     }
+
+    /**
+     * deck-belief-1105: the config line's optional {@code beliefPoolMode}, next to {@code beliefPool}: {@code "draft-pod"}
+     * (the opponent's deck came from the same draft as ours, so our cards leave a singleton pool) or
+     * {@code "independent"} (decks built apart: our cards stay possible for the opponent). Absent = null: today's rule
+     * (draft-pod with {@code beliefPoolSingleton}).
+     */
+    static final java.util.Set<String> BELIEF_POOL_MODES = java.util.Set.of("draft-pod", "independent");
 
     /**
      * The config line's {@code seatNames}, or null when absent: the two names players read for the seats (seat order),
@@ -351,6 +363,9 @@ final class InteractiveProtocol {
             if (json.has("beliefPoolSingleton") && !json.get("beliefPoolSingleton").isJsonNull()) {
                 throw new ProtocolException("invalid_config", "beliefPoolSingleton needs beliefPool");
             }
+            if (json.has("beliefPoolMode") && !json.get("beliefPoolMode").isJsonNull()) {
+                throw new ProtocolException("invalid_config", "beliefPoolMode needs beliefPool");
+            }
             return null;
         }
         if (!json.get("beliefPool").isJsonArray() || json.getAsJsonArray("beliefPool").isEmpty()
@@ -372,7 +387,15 @@ final class InteractiveProtocol {
             }
             singleton = json.get("beliefPoolSingleton").getAsBoolean();
         }
-        return new BeliefPool(names, singleton);
+        String mode = null;
+        if (json.has("beliefPoolMode") && !json.get("beliefPoolMode").isJsonNull()) {
+            if (!json.get("beliefPoolMode").isJsonPrimitive() || !json.getAsJsonPrimitive("beliefPoolMode").isString()
+                    || !BELIEF_POOL_MODES.contains(json.get("beliefPoolMode").getAsString())) {
+                throw new ProtocolException("invalid_config", "beliefPoolMode must be \"draft-pod\" or \"independent\"");
+            }
+            mode = json.get("beliefPoolMode").getAsString(); // deck-belief-1105
+        }
+        return new BeliefPool(names, singleton, mode);
     }
 
     /**
