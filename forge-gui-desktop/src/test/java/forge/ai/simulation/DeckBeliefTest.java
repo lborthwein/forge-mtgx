@@ -273,4 +273,32 @@ public class DeckBeliefTest extends SimulationTest {
         lsRef.shutdown();
         forge.util.IdScope.close();
     }
+    @Test
+    public void raceWorldsIsOffByDefaultAndParsed() {
+        LookaheadSearch.Config c = new LookaheadSearch.Config();
+        AssertJUnit.assertEquals(0, c.raceWorlds);
+        AssertJUnit.assertFalse(c.toJson().has("raceWorlds"));
+        c.raceWorlds = 8;
+        AssertJUnit.assertEquals(8, c.toJson().get("raceWorlds").getAsInt());
+        JsonObject o = new JsonObject();
+        AssertJUnit.assertEquals(0, forge.bench.rl.RlSearch.Config.parse(o).raceWorlds);
+        AssertJUnit.assertFalse(forge.bench.rl.RlSearch.Config.parse(o).beliefDeck);
+        o.addProperty("raceWorlds", 8);
+        o.addProperty("beliefDeck", true);
+        AssertJUnit.assertEquals(8, forge.bench.rl.RlSearch.Config.parse(o).raceWorlds);
+        AssertJUnit.assertTrue(forge.bench.rl.RlSearch.Config.parse(o).beliefDeck);
+        // the race's test is the departZ test over the pooled paired worlds: a lead too noisy at 8 worlds passes at 24
+        double[][] v8 = new double[2][8], v24 = new double[2][24];
+        for (int w = 0; w < 24; w++) {
+            double d = (w % 2 == 0 ? 0.25 : -0.1);
+            if (w < 8) {
+                v8[0][w] = 0.5;
+                v8[1][w] = 0.5 + d;
+            }
+            v24[0][w] = 0.5;
+            v24[1][w] = 0.5 + d;
+        }
+        AssertJUnit.assertFalse(LookaheadSearch.confident(v8, 1, 8, 1.645));
+        AssertJUnit.assertTrue(LookaheadSearch.confident(v24, 1, 24, 1.645));
+    }
 }

@@ -111,6 +111,14 @@ public final class LookaheadSearch {
          */
         public double departZ = 0.0;
         /**
+         * deck-belief-1105 (0 = off, the default: decisions unchanged): the departure race. When the best candidate's mean
+         * beats Forge's answer (candidate 0) but fails the departZ test over the K worlds, those two candidates are
+         * played in this many extra worlds (fresh draws, within the decision's budget) and the departZ test is taken
+         * again over all K + raceWorlds paired worlds; z itself is unchanged. A race the budget cuts keeps Forge's
+         * answer. Spec key {@code raceWorlds}; needs departZ.
+         */
+        public int raceWorlds = 0;
+        /**
          * Target variants (lane forge-ai-misplays-0928; 0 = off, the default: candidates unchanged). Up to this many
          * extra candidates per decision: a single-target spell or ability among the candidates played with a target
          * other than the one Forge AI would choose (or with none, when "up to one"), so the play-outs, not Forge AI's
@@ -435,6 +443,9 @@ public final class LookaheadSearch {
             if (departZ > 0) {
                 o.addProperty("departZ", departZ);
             }
+            if (raceWorlds > 0) {
+                o.addProperty("raceWorlds", raceWorlds); // deck-belief-1105: only when on
+            }
             if (deadEtb != AiFixes.Mode.OFF) {
                 o.addProperty("deadEtb", deadEtb.key());
             }
@@ -539,6 +550,8 @@ public final class LookaheadSearch {
         public long decisions, stackSkipped, uncontested, searched, departed, departFallback, loopGuard;
         /** departZ: candidates (with a finished play-out in every world) set aside for lack of confidence. */
         public long departGated;
+        /** deck-belief-1105 raceWorlds: races run, races the budget cut, departures a race made. */
+        public long raceRuns, raceCut, raceDeparted;
         /** targetVariants: variant candidates offered; departures to a variant. */
         public long targetVariantCands, targetVariantDepartures;
         /**
@@ -723,6 +736,11 @@ public final class LookaheadSearch {
             o.addProperty("departed", departed);
             o.addProperty("departFallback", departFallback);
             o.addProperty("loopGuard", loopGuard);
+            if (raceRuns > 0) {
+                o.addProperty("raceRuns", raceRuns); // deck-belief-1105: only when a race ran
+                o.addProperty("raceCut", raceCut);
+                o.addProperty("raceDeparted", raceDeparted);
+            }
             if (departGated > 0) {
                 o.addProperty("departGated", departGated);
             }
@@ -1843,7 +1861,11 @@ public final class LookaheadSearch {
             }
         }
         // Forge's own answer is candidate 0; if it could not be played out, or the budget ran out, never depart.
-        final int plainBest = overBudget ? 0 : argmax(values, ok, n, k);
+        int plainBest0 = overBudget ? 0 : argmax(values, ok, n, k);
+        if (!overBudget && cfg.raceWorlds > 0) {
+            plainBest0 = race(live, me, cands, defSa, decisionSeed, values, ok, n, k, plainBest0, true, false); // deck-belief-1105
+        }
+        final int plainBest = plainBest0;
         int best = plainBest;
         if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget) {
             final int medBest = argmaxMedian(values, ok, n, k);
@@ -2690,7 +2712,11 @@ public final class LookaheadSearch {
             res.provenLoss = provenLoss;
             res.planBroken = planBroken;
         }
-        final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick : argmax(values, okArg, n, k);
+        int plainBest0 = overBudget ? 0 : provenPick >= 0 ? provenPick : argmax(values, okArg, n, k);
+        if (!overBudget && provenPick < 0 && cfg.raceWorlds > 0) {
+            plainBest0 = race(live, me, cands, null, decisionSeed, values, okArg, n, k, plainBest0, false, hookLeaf); // deck-belief-1105
+        }
+        final int plainBest = plainBest0;
         int best = plainBest;
         if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0) {
             final int medBest = argmaxMedian(values, okArg, n, k);
@@ -3681,6 +3707,83 @@ public final class LookaheadSearch {
             if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
                 best = c;
             }
+        }
+        return best;
+    }
+
+    /**
+     * deck-belief-1105 ({@link Config#raceWorlds}): race the best candidate against Forge's answer in extra worlds when
+     * its lead fails the departZ test over the K worlds. Returns the candidate to play: {@code best} unless the race was
+     * run to the end and the paired test over all K + R worlds passes (and the margin holds).
+     */
+    private int race(Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed, double[][] values,
+            boolean[] ok, int n, int k, int best, boolean modelLeaf, boolean hookLeaf) {
+        if (cfg.raceWorlds <= 0 || cfg.departZ <= 0 || best != 0 || !ok[0] || k < 1 || n < 2) {
+            return best;
+        }
+        int top = -1;
+        double topEv = Double.NEGATIVE_INFINITY;
+        double ev0 = 0;
+        for (int w = 0; w < k; w++) {
+            ev0 += values[0][w];
+        }
+        ev0 /= k;
+        for (int c = 1; c < n; c++) {
+            if (!ok[c]) {
+                continue;
+            }
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += values[c][w];
+            }
+            if (s / k > topEv) {
+                topEv = s / k;
+                top = c;
+            }
+        }
+        if (top < 0 || !(topEv > ev0 + cfg.margin) || pastDeadline()) {
+            return best;
+        }
+        final int r = cfg.raceWorlds;
+        synchronized (stats) {
+            stats.raceRuns++;
+        }
+        final List<Cand> two = Arrays.asList(cands.get(0), cands.get(top));
+        final double[][] v2 = new double[2][r];
+        final Rollout[][] o2 = new Rollout[2][r];
+        final boolean[] ok2 = {true, true};
+        final int ab = playAll(live, me, two, defSa, mix(decisionSeed, 0x5ace1105L), new Carried[r], v2, o2, ok2, null);
+        if (ab > 0 || !ok2[0] || !ok2[1]) {
+            synchronized (stats) {
+                stats.raceCut++;
+            }
+            return best;
+        }
+        if (modelLeaf && model != null) {
+            modelLeaves(live, me, v2, o2, ok2, r);
+        }
+        if (hookLeaf) {
+            valueLeaves(v2, o2, ok2, r);
+        }
+        final double[][] comb = new double[2][k + r];
+        double s0 = 0, s1 = 0;
+        for (int w = 0; w < k; w++) {
+            comb[0][w] = values[0][w];
+            comb[1][w] = values[top][w];
+        }
+        for (int w = 0; w < r; w++) {
+            comb[0][k + w] = v2[0][w];
+            comb[1][k + w] = v2[1][w];
+        }
+        for (int w = 0; w < k + r; w++) {
+            s0 += comb[0][w];
+            s1 += comb[1][w];
+        }
+        if (confident(comb, 1, k + r, cfg.departZ) && s1 / (k + r) > s0 / (k + r) + cfg.margin) {
+            synchronized (stats) {
+                stats.raceDeparted++;
+            }
+            return top;
         }
         return best;
     }

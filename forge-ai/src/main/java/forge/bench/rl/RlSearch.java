@@ -224,6 +224,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * cards from {@link forge.ai.simulation.DeckBelief} ({@link LookaheadSearch.Config#beliefDeck}); needs a belief.
          */
         public boolean beliefDeck = false;
+        /** deck-belief-1105 (0 = off and then absent from the JSON): {@link LookaheadSearch.Config#raceWorlds}. */
+        public int raceWorlds = 0;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -235,7 +237,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "raceWorlds"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -293,6 +295,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             if (o.has("beliefDeck")) c.beliefDeck = o.get("beliefDeck").getAsBoolean(); // deck-belief-1105
+            if (o.has("raceWorlds")) c.raceWorlds = o.get("raceWorlds").getAsInt(); // deck-belief-1105
             c.check();
             return c;
         }
