@@ -202,6 +202,13 @@ public final class ForcedWinSolver {
          * search keeps the rest of the decision's budget for its own candidates. A proven line is never cut by it.
          */
         public int unprovenMs = 0;
+        /**
+         * deck-belief-1105 (0 = off, the default): the solver's whole budget while it holds no proven line, ms from the
+         * decision's start. The engine search stops there (its in-flight move is cut 500 ms later), and an unprovable
+         * line's verification starts no world or candidate past it ({@link #unprovenMs} = this when unset). A line
+         * still winning every world keeps verifying to the usual deadline. The plan search keeps the rest.
+         */
+        public int capMs = 0;
 
         public DeckBelief.Params deckParams() {
             final DeckBelief.Params p = new DeckBelief.Params();
@@ -254,6 +261,7 @@ public final class ForcedWinSolver {
             c.deckDecline = dblOr(get.apply("deckDecline"), c.deckDecline);
             c.deckLandShare = dblOr(get.apply("deckLandShare"), c.deckLandShare);
             c.unprovenMs = intOr(get.apply("unprovenMs"), c.unprovenMs);
+            c.capMs = intOr(get.apply("capMs"), c.capMs);
             return c;
         }
 
@@ -1464,8 +1472,13 @@ public final class ForcedWinSolver {
         el.wall = decisionWall;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
-        final long engineDeadline = Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs), budgetMs() - reserve)
+        long engineDeadline = Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs), budgetMs() - reserve)
                 * 1_000_000L, t0 + (budgetMs() - reserve) * 1_000_000L);
+        if (cfg.capMs > 0) {
+            // deck-belief-1105: no proven line yet; the engine search ends at the cap
+            engineDeadline = Math.min(engineDeadline, t0 + cfg.capMs * 1_000_000L);
+            el.wall = Math.min(el.wall, t0 + (cfg.capMs + 500L) * 1_000_000L);
+        }
         final List<Line> likelyCands = cfg.likely ? new ArrayList<>() : null;
         el.redraw = redraw;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
@@ -1604,7 +1617,8 @@ public final class ForcedWinSolver {
 
     /** deck-belief-1105: stop starting work on an unprovable line past {@link Config#unprovenMs} (off: never). */
     private boolean unprovenStop(boolean unproven) {
-        if (cfg.unprovenMs <= 0 || !unproven || System.nanoTime() <= decisionStart + cfg.unprovenMs * 1_000_000L) {
+        final int ms = cfg.capMs > 0 ? (cfg.unprovenMs > 0 ? Math.min(cfg.unprovenMs, cfg.capMs) : cfg.capMs) : cfg.unprovenMs;
+        if (ms <= 0 || !unproven || System.nanoTime() <= decisionStart + ms * 1_000_000L) {
             return false;
         }
         unprovenStops++;

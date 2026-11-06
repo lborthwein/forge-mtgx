@@ -266,6 +266,8 @@ public class DeckBeliefTest extends SimulationTest {
         ForcedWinSolver.Config u = ForcedWinSolver.Config.fromProps(k -> "unprovenMs".equals(k) ? "5000" : null);
         AssertJUnit.assertEquals(5000, u.unprovenMs);
         AssertJUnit.assertEquals(0, ForcedWinSolver.Config.fromProps(k -> null).unprovenMs);
+        AssertJUnit.assertEquals(0, ForcedWinSolver.Config.fromProps(k -> null).capMs);
+        AssertJUnit.assertEquals(4000, ForcedWinSolver.Config.fromProps(k -> "capMs".equals(k) ? "4000" : null).capMs);
         lsOn.shutdown();
         lsOff.shutdown();
         lsRef.shutdown();
