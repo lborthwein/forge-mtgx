@@ -189,6 +189,16 @@ public final class RlFrameObs {
                 }
             }
         }
+        // goad, by player index (GameCopier leaves it out; the featurizer reads only whether a card is goaded)
+        long ts = g.getNextTimestamp();
+        for (Card c : live.getCardsIn(ZoneType.Battlefield)) {
+            final Card n = c.isGoaded() ? g.findById(c.getId()) : null;
+            if (n != null && !n.isGoaded()) {
+                for (Player v : c.getGoaded()) {
+                    n.addGoad(ts++, to.get(from.indexOf(v)));
+                }
+            }
+        }
     }
 
     /** A venture dungeon as the frame sees it (type, room, keywords): GameCopier does not carry it. Its room triggers are not copied. */
@@ -201,6 +211,13 @@ public final class RlFrameObs {
             n = new Card(c.getId(), c.getPaperCard(), g);
             n.setOwner(owner);
             owner.getZone(ZoneType.Command).add(n);
+        }
+        // its place among the command objects (the frame's token order)
+        final int at = c.getOwner().getCardsIn(ZoneType.Command).indexOf(c);
+        if (at >= 0 && owner.getCardsIn(ZoneType.Command).indexOf(n) != at) {
+            final forge.game.zone.Zone z = owner.getZone(ZoneType.Command);
+            z.remove(n);
+            z.add(n, Math.min(at, z.size()));
         }
         n.setGamePieceType(c.getGamePieceType());
         n.setName(c.getName());
