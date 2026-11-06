@@ -17,7 +17,7 @@ import java.util.List;
  * round-trip check over position files. List: one path per line (a GameState text, or a .pzl whose [state] block is
  * taken). Each is installed into a fresh two-seat game with the JVM's {@code forge.gamestate.installAsIs} key, and
  * {@link GameState#installDiff} compares Forge's dump with the record (check mode {@code warn} unless
- * -Dforge.gamestate.installCheck says otherwise). Out: -Dforge.installRT.out, JSONL {file, ok, diff | threw}.
+ * -Dforge.gamestate.installCheck says otherwise). Out: -Dforge.installRT.out, JSONL {file, ok, diff, dump_sha | threw}.
  */
 public class InstallRoundTripRun extends AITest {
 
@@ -63,6 +63,10 @@ public class InstallRoundTripRun extends AITest {
                 gs.applyGameOnThread(game);
                 final List<String> diff = gs.getInstallDiff() == null ? new ArrayList<>() : gs.getInstallDiff();
                 o.addProperty("ok", diff.isEmpty());
+                final GameState back = new GameState().setInstallAsIs(gs.installAsIs());
+                back.initFromGame(game);
+                o.addProperty("dump_sha", com.google.common.hash.Hashing.sha256()
+                        .hashString(back.toString(), StandardCharsets.UTF_8).toString());
                 final JsonArray d = new JsonArray();
                 diff.forEach(d::add);
                 o.add("diff", d);

@@ -204,6 +204,79 @@ public class InstallFidelityTest extends AITest {
         assertTrue(String.join(";", state.getInstallDiff()).contains("LOYALTY"), state.getInstallDiff().toString());
     }
 
+    // --- found by cf-labeller-1105 on labeller frames: raw summoning sickness and the exile source --------------
+
+    static final String VEHICLE = position("", "Island;Esika's Chariot|SummonSick", "");
+
+    private String dumpOf(final Game g, final boolean asIs) {
+        final GameState dump = new GameState().setInstallAsIs(asIs);
+        dump.initFromGame(g);
+        return dump.toString();
+    }
+
+    @Test
+    public void noncreatureThatEnteredThisTurnStaysSickThroughADump() {
+        final Game g = install(VEHICLE, true, null);
+        assertNoDiff();
+        final String text = dumpOf(g, true);
+        assertTrue(text.contains("|SummonSick"), text);
+        final Game g2 = install(text, true, null);
+        assertNoDiff();
+        final Card vehicle = named(g2.getPlayers().get(0), "Esika's Chariot");
+        assertFalse(vehicle.isSick(), "not a creature yet");
+        vehicle.addChangedCardTypes(new forge.card.CardType(List.of("Creature"), false), null, false, java.util.EnumSet.noneOf(forge.card.RemoveType.class),
+                g2.getNextTimestamp(), 0, true, false); // crewed
+        assertTrue(vehicle.isSick());
+        assertFalse(forge.game.combat.CombatUtil.canAttack(vehicle), "a crewed Vehicle that entered this turn can't attack");
+    }
+
+    @Test
+    public void hasteCreatureKeepsItsRawSickness() {
+        final Game g = install(position("", "Goblin Guide|SummonSick", ""), true, null);
+        assertTrue(named(g.getPlayers().get(0), "Goblin Guide").isFirstTurnControlled());
+        assertNoDiff();
+    }
+
+    @Test
+    public void keyOffDumpDropsANoncreaturesSicknessAndTheCheckSaysSo() {
+        install(VEHICLE, false, "warn");
+        assertTrue(String.join(";", state.getInstallDiff()).contains("SummonSick"), state.getInstallDiff().toString());
+    }
+
+    static final String EXILED_NO_SOURCE = position("", "Island", "")
+            .replace("p0exile=", "p0exile=Lightning Bolt|ExiledWith:69;Brainstorm|ExiledWith:69;Shock|ExiledWith:70");
+
+    @Test
+    public void exiledCardKeepsALinkToASourceInNoZone() {
+        final Game g = install(EXILED_NO_SOURCE, true, null);
+        assertNoDiff();
+        final List<Card> ex = new ArrayList<>(g.getPlayers().get(0).getCardsIn(ZoneType.Exile));
+        assertEquals(ex.size(), 3);
+        assertNotNull(ex.get(0).getExiledWith());
+        assertEquals(ex.get(0).getExiledWith(), ex.get(1).getExiledWith(), "one object per recorded id");
+        assertFalse(ex.get(0).getExiledWith().equals(ex.get(2).getExiledWith()));
+        // the same text again, and the game copy the solver makes
+        install(dumpOf(g, true), true, null);
+        assertNoDiff();
+        final Game copy = new forge.ai.simulation.GameCopier(g, true).makeCopy();
+        assertEquals(copy.getPlayers().get(0).getCardsIn(ZoneType.Exile).size(), 3);
+    }
+
+    @Test
+    public void exiledCardKeepsARecordedSource() {
+        final Game g = install(position("", "Oblivion Ring|Id:7", "")
+                .replace("p0exile=", "p0exile=Lightning Bolt|ExiledWith:7"), true, null);
+        assertNoDiff();
+        final Card bolt = g.getPlayers().get(0).getCardsIn(ZoneType.Exile).get(0);
+        assertEquals(bolt.getExiledWith(), named(g.getPlayers().get(0), "Oblivion Ring"));
+    }
+
+    @Test
+    public void keyOffLosesASourceInNoZoneAndTheCheckSaysSo() {
+        install(EXILED_NO_SOURCE, false, "warn");
+        assertTrue(String.join(";", state.getInstallDiff()).contains("ExiledWith"), state.getInstallDiff().toString());
+    }
+
     // --- the check itself ---------------------------------------------------------------------------------------
 
     @Test
@@ -225,6 +298,10 @@ public class InstallFidelityTest extends AITest {
         assertEquals(GameState.installDiff(a, b.replace("Swamp|Tapped", "Swamp")).size(), 1);
         assertEquals(GameState.installDiff(a, b.replace("MINING=2", "MINING=3")).size(), 1);
         assertEquals(GameState.installDiff(a, b.replace("Bonesplitter|AttachedTo:99;", "Bonesplitter;")).size(), 1);
+        assertEquals(GameState.installDiff(a, b.replace("Grizzly Bears|", "Grizzly Bears|SummonSick|")).size(), 1);
+        final String e = "p0exile=Island|ExiledWith:5";
+        assertEquals(GameState.installDiff(e, "p0exile=Island|ExiledWith:88"), List.of());
+        assertEquals(GameState.installDiff(e, "p0exile=Island").size(), 1);
     }
 
     @Test
