@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -54,7 +53,13 @@ public class InstallRoundTripRun extends AITest {
                 if (System.getProperty(GameState.INSTALL_CHECK_KEY) == null) {
                     gs.setInstallCheck("warn");
                 }
-                gs.parse(Arrays.asList(text.split("\\R")));
+                final List<String> lines = new ArrayList<>();
+                for (String l : text.split("\\R")) {
+                    if (!l.isBlank()) {
+                        lines.add(l);
+                    }
+                }
+                gs.parse(lines);
                 gs.applyGameOnThread(game);
                 final List<String> diff = gs.getInstallDiff() == null ? new ArrayList<>() : gs.getInstallDiff();
                 o.addProperty("ok", diff.isEmpty());

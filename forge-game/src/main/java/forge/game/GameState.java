@@ -147,6 +147,8 @@ public class GameState {
      * enchant, which the record does not carry) is kept: the aura gets "enchant the permanent it is attached to",
      * so the end-of-install state-based check does not put it into the graveyard;</li>
      * <li>the dump writes {@code ChosenPlayer};</li>
+     * <li>a phased-out card's recorded counters are kept (phasing goes on after them: a phased-out card can't
+     * receive counters, so the counters read after the phasing were dropped);</li>
      * <li>the install round-trip check runs ({@link #INSTALL_CHECK_KEY} defaults to {@code warn}).</li>
      * </ul>
      */
@@ -1892,6 +1894,7 @@ public class GameState {
                 }
             }
             c.setSickness(false);
+            Player phasedOutBy = null; // as-is install: phasing goes on after the counters (a phased-out card gets none)
 
             for (final String info : cardinfo) {
                 if (info.startsWith("Tapped")) {
@@ -1908,7 +1911,11 @@ public class GameState {
                     c.setMonstrous(true);
                 } else if (info.startsWith("PhasedOut")) {
                     String tgt = info.substring(info.indexOf(':') + 1);
-                    c.setPhasedOut(parsePlayerString(player.getGame(), tgt));
+                    if (asIsNow) {
+                        phasedOutBy = parsePlayerString(player.getGame(), tgt);
+                    } else {
+                        c.setPhasedOut(parsePlayerString(player.getGame(), tgt));
+                    }
                 } else if (info.startsWith("CurrentRoom:")) {
                     // Mid-dungeon position. The room name has to be one the
                     // script declares — Forge's `RoomName$` values are not the
@@ -2047,6 +2054,9 @@ public class GameState {
                 } else if (info.startsWith("UnlockedRoom:")) {
                     c.unlockRoom(c.getController(), CardStateName.smartValueOf(info.substring(info.indexOf(':') + 1)));
                 }
+            }
+            if (phasedOutBy != null) {
+                c.setPhasedOut(phasedOutBy);
             }
 
             if (!hasSetCurSet && !c.isToken() && !fromTokenDb) {

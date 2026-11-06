@@ -187,6 +187,28 @@ public class InstallFidelityTest extends AITest {
         assertTrue(String.join(";", state.getInstallDiff()).contains("p0graveyard"), state.getInstallDiff().toString());
     }
 
+    // --- found by this lane's round trip over 3,179 real frames: a phased-out permanent's counters -------------
+
+    static final String PHASED = position("", "Island;Kaito Shizuki|PhasedOut:P0|Counters:LOYALTY=1", "");
+
+    @Test
+    public void phasedOutPermanentKeepsItsCounters() {
+        final Game g = install(PHASED, true, null);
+        final Card kaito = named(g.getPlayers().get(0), "Kaito Shizuki");
+        assertNotNull(kaito);
+        assertTrue(kaito.isPhasedOut());
+        assertEquals(kaito.getCounters(forge.game.card.CounterEnumType.LOYALTY), 1);
+        assertNoDiff();
+    }
+
+    @Test
+    public void keyOffPhasedOutPermanentLosesItsCountersAndTheCheckSaysSo() {
+        final Game g = install(PHASED, false, "warn");
+        assertEquals(named(g.getPlayers().get(0), "Kaito Shizuki").getCounters(forge.game.card.CounterEnumType.LOYALTY), 0,
+                "today's install: counters are read after the phasing, and a phased-out card can't receive counters");
+        assertTrue(String.join(";", state.getInstallDiff()).contains("LOYALTY"), state.getInstallDiff().toString());
+    }
+
     // --- the check itself ---------------------------------------------------------------------------------------
 
     @Test
