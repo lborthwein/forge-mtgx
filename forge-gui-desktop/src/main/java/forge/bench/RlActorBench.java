@@ -694,6 +694,12 @@ public final class RlActorBench {
                     seat.altSeat = searchSeat;
                     out.searchAlt = searchAlt;
                 }
+                // choice-scorer-1106: searched-to-top knowledge for the seats of a spec with a choice scorer (no-op otherwise)
+                search.bindChoiceScorer(searchAlt != null ? 1 << search.searchSeat
+                        : searchSeat >= 0 ? 1 << searchSeat : 3);
+                if (searchAlt != null) {
+                    searchAlt.bindChoiceScorer(1 << searchSeat);
+                }
                 // search-bones-1015: the plan hooks of the RL seats (no-op unless the spec sets forcedWin or plans)
                 final boolean[] rlSeats = new boolean[ctl.length];
                 for (int s = 0; s < ctl.length; s++) {

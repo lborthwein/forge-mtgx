@@ -1,0 +1,479 @@
+package forge.bench.rl;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
+import forge.ai.simulation.ChoiceApply;
+import forge.ai.simulation.LookaheadSearch;
+import forge.game.Game;
+import forge.game.player.Player;
+import forge.game.card.Card;
+import forge.game.spellability.SpellAbility;
+import forge.game.zone.ZoneType;
+
+/**
+ * choice-scorer-1106 (GOAL "choose-a-card"; off unless the spec's {@code choiceScorer} is set): a choice the search does
+ * not reach is answered by enumerating its options, applying each on a copy, featurizing the position it leads to for the
+ * seat, and one batched value pass. No card, combo or answer knowledge: options come from the ask's menu.
+ *
+ * <p>Honest input: a frame reads the seat's knowledge only (the live tracker forked per copy; searched-to-top cards kept
+ * with {@code searchedTop}). A menu above {@code cap} keeps the policy's answer, the menu's first cards and
+ * {@code explore} seeded random others, so the cut can't hide an option for good (N12).
+ */
+public final class ChoiceScorer {
+
+    public static final class Config {
+        /** MULLIGAN, MULLIGAN_BOTTOM, CARDS. */
+        public Set<Integer> families = new java.util.TreeSet<>(Arrays.asList(RlSchema.F_CARDS));
+        public int cap = 40;
+        public int explore = 4;
+        /** New hands per scored mulligan. */
+        public int mullWorlds = 8;
+        /** Main-loop steps from the resolved answer to the next priority. */
+        public int settleSteps = 60;
+        /** An answer must beat the policy's by more than this. */
+        public double margin = 0.0;
+        /** Wall budget of one ask's option applications, ms; past it the unapplied options are dropped (counted). */
+        public long budgetMs = 6000;
+        /** Keep searched-to-top cards for this search's seats (the live tracker and its forks). */
+        public boolean searchedTop = true;
+        public int fidelity = 1;
+        /** Score and log, keep the policy's answer. */
+        public boolean shadow = false;
+
+        static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow"));
+
+        public static Config parse(final JsonObject o) {
+            for (String k : o.keySet()) {
+                if (!KEYS.contains(k)) {
+                    throw new IllegalArgumentException("choiceScorer: unknown key " + k);
+                }
+            }
+            final Config c = new Config();
+            if (o.has("families")) {
+                c.families = new java.util.TreeSet<>();
+                for (String f : o.get("families").getAsString().split(",")) {
+                    final int i = RlSchema.FAMILIES.indexOf(f.trim());
+                    if (i != RlSchema.F_CARDS && i != RlSchema.F_MULLIGAN && i != RlSchema.F_MULLIGAN_BOTTOM) {
+                        throw new IllegalArgumentException("choiceScorer: family not supported: " + f);
+                    }
+                    c.families.add(i);
+                }
+            }
+            if (o.has("cap")) c.cap = o.get("cap").getAsInt();
+            if (o.has("explore")) c.explore = o.get("explore").getAsInt();
+            if (o.has("mullWorlds")) c.mullWorlds = o.get("mullWorlds").getAsInt();
+            if (o.has("settleSteps")) c.settleSteps = o.get("settleSteps").getAsInt();
+            if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
+            if (o.has("budgetMs")) c.budgetMs = o.get("budgetMs").getAsLong();
+            if (o.has("searchedTop")) c.searchedTop = o.get("searchedTop").getAsBoolean();
+            if (o.has("fidelity")) c.fidelity = o.get("fidelity").getAsInt();
+            if (o.has("shadow")) c.shadow = o.get("shadow").getAsBoolean();
+            return c;
+        }
+
+        public JsonObject toJson() {
+            final JsonObject o = new JsonObject();
+            final List<String> fs = new ArrayList<>();
+            for (int f : families) {
+                fs.add(RlSchema.familyName(f));
+            }
+            o.addProperty("families", String.join(",", fs));
+            o.addProperty("cap", cap);
+            o.addProperty("explore", explore);
+            o.addProperty("mullWorlds", mullWorlds);
+            o.addProperty("settleSteps", settleSteps);
+            o.addProperty("margin", margin);
+            o.addProperty("budgetMs", budgetMs);
+            o.addProperty("searchedTop", searchedTop);
+            o.addProperty("fidelity", fidelity);
+            o.addProperty("shadow", shadow);
+            return o;
+        }
+    }
+
+    /** One answer: the seat's steps, its label, and its frames (several for an expectation over new hands). */
+    public static final class Option {
+        public short[] steps;
+        public String label;
+        public final List<byte[]> frames = new ArrayList<>();
+        /** Per frame: the sub-answer group (a new hand), and terminal values. */
+        public final List<Integer> groups = new ArrayList<>();
+        public double terminal = Double.NaN;
+        public String fail;
+        public boolean policy;
+        public double value = Double.NaN;
+    }
+
+    /** One scored ask. */
+    public static final class Scored {
+        public final List<Option> options = new ArrayList<>();
+        public String unsupported;
+        public int menuOptions, cut, failed, frames;
+        public long copyNanos, runNanos, featNanos, totalNanos;
+        public boolean overBudget;
+    }
+
+    /** Frames at most for one opening-hand ask. */
+    static final int MULL_FRAMES = 120;
+
+    private final Config cfg;
+    private final CardIndex index;
+    private final int obsVersion;
+    private final long uid;
+
+    public ChoiceScorer(final Config cfg, final CardIndex index, final int obsVersion, final long uid) {
+        this.cfg = cfg;
+        this.index = index;
+        this.obsVersion = obsVersion;
+        this.uid = uid;
+    }
+
+    public Config config() {
+        return cfg;
+    }
+
+    /** The frame side over a live tracker. */
+    private ChoiceApply.Frames frames(final RlKnowledge live, final int seatMask, final Scored s) {
+        return new ChoiceApply.Frames() {
+            @Override
+            public Object onCopy(final Game copy, final Player me) {
+                final RlKnowledge k = live.forkFor(copy);
+                if (seatMask != 0) {
+                    k.setSearchedTopSeats(seatMask);
+                }
+                k.attach();
+                final RlFeaturizer f = new RlFeaturizer(index);
+                f.setVersion(obsVersion);
+                f.setKnowledge(k);
+                return f;
+            }
+
+            @Override
+            public byte[] capture(final Object ctx, final Game g, final Player me) {
+                final long t = System.nanoTime();
+                final RlFeaturizer.Obs o = ((RlFeaturizer) ctx).observe(g, me, 0, false, null);
+                final byte[] p = RlWire.encodeDecide(RlSearch.leafFrame(o, uid, g.getRegisteredPlayers().indexOf(me),
+                        g.getPhaseHandler().getTurn()));
+                s.featNanos += System.nanoTime() - t;
+                return p;
+            }
+        };
+    }
+
+    /** The ask's options with their frames; values are the caller's batched pass ({@link #choose}). */
+    public Scored enumerate(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy,
+            final RlKnowledge know, final long seed, final SpellAbility askSa) {
+        final Scored s = new Scored();
+        final long t0 = System.nanoTime();
+        final int seat = g.getRegisteredPlayers().indexOf(me);
+        final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
+        final long deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : Long.MAX_VALUE;
+        if (m.family == RlSchema.F_CARDS) {
+            cards(g, me, m, greedy, seed, fr, s, deadline);
+        } else if (m.family == RlSchema.F_MULLIGAN) {
+            mulligan(g, me, m, greedy, seed, fr, s, deadline);
+        } else if (m.family == RlSchema.F_MULLIGAN_BOTTOM) {
+            bottoms(g, me, m, greedy, seed, fr, s, deadline);
+        } else {
+            s.unsupported = "family";
+        }
+        for (Option o : s.options) {
+            s.frames += o.frames.size();
+            if (o.fail != null) {
+                s.failed++;
+            }
+        }
+        s.totalNanos = System.nanoTime() - t0;
+        return s;
+    }
+
+    private void cards(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final long seed,
+            final ChoiceApply.Frames fr, final Scored s, final long deadline) {
+        if (!ChoiceWindow.singlePick(m)) {
+            s.unsupported = "multiPick";
+            return;
+        }
+        s.unsupported = ChoiceApply.unsupported(g, null);
+        if (s.unsupported != null) {
+            return;
+        }
+        // one option per distinct card (name, zone, controller: two Islands are one answer)
+        final Map<String, Integer> byKey = new LinkedHashMap<>();
+        for (int i = 0; i < m.C(); i++) {
+            if (m.cands.get(i).kind > 0 && m.cands.get(i).host != null) {
+                byKey.putIfAbsent(ChoiceWindow.looseKey(m, i, me), i);
+            }
+        }
+        final int own = greedy != null && greedy.length == 1 ? greedy[0] : -1;
+        final String ownKey = own >= 0 && own < m.C() ? ChoiceWindow.looseKey(m, own, me) : null;
+        if (ownKey != null) {
+            byKey.put(ownKey, own); // the policy's own card stands for its name
+        }
+        s.menuOptions = byKey.size() + (m.minPick == 0 ? 1 : 0);
+        final List<Integer> keep = cut(new ArrayList<>(byKey.values()), own, seed, s);
+        if (m.minPick == 0) {
+            final Option no = new Option();
+            no.steps = new short[0];
+            no.label = "decline";
+            no.policy = greedy != null && greedy.length == 0;
+            if (System.nanoTime() < deadline) {
+                run(g, me, Collections.singletonList(-1), seed, fr, no, s);
+            } else {
+                no.fail = "budget";
+                s.overBudget = true;
+            }
+            s.options.add(no);
+        }
+        for (int i : keep) {
+            final Option o = new Option();
+            o.steps = new short[] {(short) i};
+            o.label = m.cands.get(i).host.getName();
+            o.policy = i == own;
+            if (System.nanoTime() >= deadline && !o.policy) {
+                o.fail = "budget";
+                s.overBudget = true;
+            } else {
+                run(g, me, Collections.singletonList(m.cands.get(i).host.getId()), seed, fr, o, s);
+            }
+            s.options.add(o);
+        }
+    }
+
+    private void run(final Game g, final Player me, final List<Integer> picks, final long seed,
+            final ChoiceApply.Frames fr, final Option o, final Scored s) {
+        final ChoiceApply.Result r = ChoiceApply.applyPicks(g, me, picks, seed, cfg.settleSteps, cfg.fidelity, fr);
+        note(r, o, s, 0);
+    }
+
+    private static void note(final ChoiceApply.Result r, final Option o, final Scored s, final int group) {
+        s.copyNanos += r.copyNanos;
+        s.runNanos += r.runNanos;
+        if (r.fail != null) {
+            o.fail = r.fail;
+        } else if (!Double.isNaN(r.terminal)) {
+            o.terminal = r.terminal;
+        } else if (r.payload != null) {
+            o.frames.add(r.payload);
+            o.groups.add(group);
+        }
+    }
+
+    /** Menus above the cap: the policy's answer, the menu's first, then seeded random others. */
+    private List<Integer> cut(final List<Integer> all, final int own, final long seed, final Scored s) {
+        final int room = cfg.cap + cfg.explore;
+        if (all.size() <= room) {
+            return all;
+        }
+        final List<Integer> out = new ArrayList<>();
+        if (own >= 0 && all.contains(own)) {
+            out.add(own);
+        }
+        for (int i : all) {
+            if (out.size() >= cfg.cap) {
+                break;
+            }
+            if (!out.contains(i)) {
+                out.add(i);
+            }
+        }
+        final List<Integer> rest = new ArrayList<>(all);
+        rest.removeAll(out);
+        Collections.shuffle(rest, new Random(LookaheadSearch.mix(seed, 0xE9)));
+        out.addAll(rest.subList(0, Math.min(cfg.explore, rest.size())));
+        s.cut = all.size() - out.size();
+        return out;
+    }
+
+    /**
+     * MULLIGAN: keep is this hand; mulligan is the mean over new hands (groups) of the best bottoms of that hand. The
+     * bottoms taken are every set of k from the new seven, with worlds cut so the frames stay at {@code MULL_FRAMES}.
+     */
+    private void mulligan(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final long seed,
+            final ChoiceApply.Frames fr, final Scored s, final long deadline) {
+        s.menuOptions = m.C();
+        final int handNow = me.getCardsIn(ZoneType.Hand).size();
+        final int k = Math.max(0, 7 - handNow) + 1;
+        final List<int[]> sets = new ArrayList<>();
+        if (k < 7) {
+            combos(7, k, 0, new int[k], 0, sets, MULL_FRAMES);
+        }
+        final int worlds = sets.isEmpty() ? 0 : Math.max(1, Math.min(cfg.mullWorlds, MULL_FRAMES / sets.size()));
+        for (int i = 0; i < m.C(); i++) {
+            final boolean keep = m.cands.get(i).kind == RlSchema.K_KEEP;
+            final Option o = new Option();
+            o.steps = new short[] {(short) i};
+            o.label = keep ? "keep" : "mulligan";
+            o.policy = greedy != null && greedy.length == 1 && greedy[0] == i;
+            if (keep) {
+                note(ChoiceApply.applyHand(g, me, false, null, seed, cfg.fidelity, fr), o, s, 0);
+            } else {
+                for (int w = 0; w < worlds; w++) {
+                    if (System.nanoTime() >= deadline) {
+                        s.overBudget = true;
+                        break;
+                    }
+                    final long ws = LookaheadSearch.mix(seed, 0x4D00 + w);
+                    for (int[] x : sets) {
+                        final List<Integer> idx = new ArrayList<>();
+                        for (int j : x) {
+                            idx.add(j);
+                        }
+                        note(ChoiceApply.applyHand(g, me, true, idx, ws, cfg.fidelity, fr), o, s, w);
+                    }
+                }
+            }
+            s.options.add(o);
+        }
+    }
+
+    /** MULLIGAN_BOTTOM: every set of k cards (at most {@code MULL_FRAMES} sets). */
+    private void bottoms(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final long seed,
+            final ChoiceApply.Frames fr, final Scored s, final long deadline) {
+        final int k = m.minPick;
+        final int n = m.C();
+        final List<int[]> sets = new ArrayList<>();
+        combos(n, k, 0, new int[k], 0, sets, MULL_FRAMES);
+        s.menuOptions = sets.size();
+        for (int[] x : sets) {
+            final Option o = new Option();
+            final short[] st = new short[k];
+            final List<Integer> idx = new ArrayList<>();
+            final StringBuilder lb = new StringBuilder();
+            for (int j = 0; j < k; j++) {
+                st[j] = (short) x[j];
+                idx.add(x[j]);
+                lb.append(j == 0 ? "" : "+").append(m.cands.get(x[j]).host.getName());
+            }
+            o.steps = st;
+            o.label = lb.toString();
+            o.policy = greedy != null && sameSet(greedy, st);
+            if (System.nanoTime() >= deadline && !o.policy) {
+                o.fail = "budget";
+                s.overBudget = true;
+            } else {
+                note(ChoiceApply.applyHand(g, me, false, idx, seed, cfg.fidelity, fr), o, s, 0);
+            }
+            s.options.add(o);
+        }
+    }
+
+    private static boolean sameSet(final short[] a, final short[] b) {
+        final short[] x = a.clone(), y = b.clone();
+        Arrays.sort(x);
+        Arrays.sort(y);
+        return Arrays.equals(x, y);
+    }
+
+    private static void combos(final int n, final int k, final int from, final int[] cur, final int at,
+            final List<int[]> out, final int stop) {
+        if (out.size() >= stop) {
+            return;
+        }
+        if (at == k) {
+            out.add(cur.clone());
+            return;
+        }
+        for (int i = from; i < n; i++) {
+            cur[at] = i;
+            combos(n, k, i + 1, cur, at + 1, out, stop);
+        }
+    }
+
+    /**
+     * Set each option's value from the batch's values (P(win) in [0, 1], in the options' frame order): the mean over
+     * groups of each group's best. Returns the steps to play instead of {@code greedy}, or null to keep it.
+     */
+    public short[] choose(final Scored s, final double[] v, final short[] greedy) {
+        int at = 0;
+        Option best = null;
+        Option own = null;
+        for (Option o : s.options) {
+            final Map<Integer, Double> grp = new LinkedHashMap<>();
+            for (int j = 0; j < o.frames.size(); j++) {
+                grp.merge(o.groups.get(j), v[at++], Math::max);
+            }
+            if (!Double.isNaN(o.terminal)) {
+                o.value = o.terminal;
+            } else if (!grp.isEmpty()) {
+                double sum = 0;
+                for (double x : grp.values()) {
+                    sum += x;
+                }
+                o.value = sum / grp.size();
+            }
+            if (o.policy) {
+                own = o;
+            }
+            if (!Double.isNaN(o.value) && (best == null || o.value > best.value)) {
+                best = o;
+            }
+        }
+        if (best == null || own == null || Double.isNaN(own.value) || best == own
+                || best.value <= own.value + cfg.margin) {
+            return null;
+        }
+        return best.steps;
+    }
+
+    public List<byte[]> payloads(final Scored s) {
+        final List<byte[]> out = new ArrayList<>();
+        for (Option o : s.options) {
+            out.addAll(o.frames);
+        }
+        return out;
+    }
+
+    public JsonObject row(final Scored s, final String src) {
+        final JsonObject r = new JsonObject();
+        r.addProperty("src", src);
+        r.addProperty("menu", s.menuOptions);
+        r.addProperty("cut", s.cut);
+        r.addProperty("failed", s.failed);
+        r.addProperty("frames", s.frames);
+        r.addProperty("ms", Math.round(s.totalNanos / 1e4) / 100.0);
+        r.addProperty("copy_ms", Math.round(s.copyNanos / 1e4) / 100.0);
+        r.addProperty("run_ms", Math.round(s.runNanos / 1e4) / 100.0);
+        r.addProperty("feat_ms", Math.round(s.featNanos / 1e4) / 100.0);
+        r.addProperty("over_budget", s.overBudget);
+        if (s.unsupported != null) {
+            r.addProperty("unsupported", s.unsupported);
+        }
+        final JsonArray a = new JsonArray();
+        for (Option o : s.options) {
+            final JsonObject x = new JsonObject();
+            x.addProperty("o", o.label);
+            if (o.policy) x.addProperty("policy", true);
+            if (!Double.isNaN(o.value)) x.addProperty("v", Math.round(o.value * 1e4) / 1e4);
+            if (!Double.isNaN(o.terminal)) x.addProperty("term", o.terminal);
+            if (o.fail != null) x.addProperty("fail", o.fail);
+            x.addProperty("n", o.frames.size());
+            a.add(x);
+        }
+        r.add("options", a);
+        return r;
+    }
+
+    /** The asking ability's source name, for rows (null when the stack has none). */
+    public static String srcOf(final Game g) {
+        try {
+            if (!g.getStack().isEmpty()) {
+                final Card c = g.getStack().peekAbility().getHostCard();
+                return c == null ? null : c.getName();
+            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        return null;
+    }
+}
