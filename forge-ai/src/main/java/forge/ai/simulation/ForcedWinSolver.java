@@ -169,6 +169,8 @@ public final class ForcedWinSolver {
          * turn changed the board) plans again from that world's position, as the live seat would.
          */
         public boolean verifyReplan = false;
+        /** kill-line-1106 (off by default): the planner branches over a discard's hand classes; the line records the choice. */
+        public boolean planDiscard = false;
         public int triggerVariants = 8;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
@@ -274,6 +276,7 @@ public final class ForcedWinSolver {
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
             c.verifyReplan = "true".equals(get.apply("verifyReplan")); // kill-line-1106
+            c.planDiscard = "true".equals(get.apply("planDiscard")); // kill-line-1106
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
@@ -722,6 +725,7 @@ public final class ForcedWinSolver {
         lim.nodes = cfg.nodes;
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
+        lim.planDiscard = cfg.planDiscard; // kill-line-1106
         boolean payOnly = false;
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
         // before it reaches one); lines that pass the turn only when this turn has none
@@ -2446,6 +2450,12 @@ public final class ForcedWinSolver {
         if (active == null || active.done || ordinary == null) {
             return ordinary;
         }
+        final String t = ordinary.isEmpty() || valid.size() <= ordinary.size() ? null : active.choices.next(ForcedWinChoices.DISC);
+        final CardCollection rec = t == null ? null : ForcedWinChoices.applyDisc(t, valid, ordinary.size(), ordinary.size());
+        if (rec != null) {
+            lineKeepSwaps++;
+            return rec; // planDiscard: the discard the line recorded
+        }
         final CardCollection out = avoid(ordinary, valid, active.reserved());
         if (out != ordinary && !out.equals(ordinary)) {
             lineKeepSwaps++;
@@ -2485,6 +2495,7 @@ public final class ForcedWinSolver {
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
         lim.horizon = 1;
+        lim.planDiscard = cfg.planDiscard;
         final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
         if (res.lines.isEmpty()) {
             return null;
@@ -2519,6 +2530,8 @@ public final class ForcedWinSolver {
         /** Executed steps by host id: the choice asks of a resolving step are answered from it. */
         final Map<Integer, Step> executed = new HashMap<>();
         final Map<Integer, Integer> pilePicked = new HashMap<>();
+        /** kill-line-1106 (planDiscard): the current step's recorded choices. */
+        ForcedWinChoices.Cursor choices = new ForcedWinChoices.Cursor(null);
         /** An ATTACK step is waiting for our declare-attackers step. */
         boolean attackPending;
         /** The forced trigger target of the step being resolved (ENGINE steps). */
@@ -2628,6 +2641,7 @@ public final class ForcedWinSolver {
                 cursor++;
             }
             executed.put(st.hostId, st);
+            choices = new ForcedWinChoices.Cursor(st.cac); // kill-line-1106 (planDiscard; none = empty)
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
             n.action = sa;
@@ -2992,6 +3006,14 @@ public final class ForcedWinSolver {
         @Override
         public CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa, CardCollection validCards, int min,
                 int max, CardCollectionView visibleToChooser) {
+            if (p == getPlayer() && min == max && min >= 1 && validCards != null && validCards.size() > min) {
+                // kill-line-1106 (planDiscard): the line's recorded discard
+                final String t = f.choices.next(ForcedWinChoices.DISC);
+                final CardCollection r = t == null ? null : ForcedWinChoices.applyDisc(t, validCards, min, max);
+                if (r != null) {
+                    return r;
+                }
+            }
             final CardCollection ordinary = super.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser);
             return avoid(ordinary, validCards, f.reserved());
         }

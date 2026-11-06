@@ -58,6 +58,8 @@ public final class ForcedWinPlanner {
         boolean phyrexianLife;
         /** kill-line-1106 (followPay): the follower pays this step's Phyrexian pips with life. */
         boolean forceLife;
+        /** kill-line-1106 (planDiscard; null = none): this step's forced discard tokens ({@link ForcedWinChoices}). */
+        List<String> cac;
         /** ENGINE steps: the recorded targets, "link:ref" (ref = "C" + card id or "P" + player id). */
         final List<String> targetRefs = new ArrayList<>();
         /** ENGINE steps: the forced target of the first targeting trigger of ours this step causes (null = Forge AI's). */
@@ -113,6 +115,7 @@ public final class ForcedWinPlanner {
             s.putBack.addAll(putBack);
             s.phyrexianLife = phyrexianLife;
             s.forceLife = forceLife;
+            s.cac = cac == null ? null : new ArrayList<>(cac);
             s.targetRefs.addAll(targetRefs);
             s.engineSpell = engineSpell;
             s.triggerRef = triggerRef;
@@ -206,7 +209,7 @@ public final class ForcedWinPlanner {
                     + (pickName == null ? "" : " pick=" + pickName)
                     + (targetVariant != null ? "@" + targetVariant : "")
                     + (pile.isEmpty() ? "" : " pile" + pile) + (picks.isEmpty() ? "" : " pick" + picks)
-                    + (putBack.isEmpty() ? "" : " putBack" + putBack) + (phyrexianLife ? " phyLife" : "")
+                    + (putBack.isEmpty() ? "" : " putBack" + putBack) + (phyrexianLife ? " phyLife" : "") + (cac != null ? " cac" + cac : "")
                     + (anyColors.isEmpty() ? "" : " as" + anyColors);
         }
     }
@@ -258,6 +261,8 @@ public final class ForcedWinPlanner {
         /** 1: this turn only; 2: this turn and our next turn. */
         int horizon = 2;
         int classes = 14;
+        /** kill-line-1106 (planDiscard, off by default): a DISCARD branches over hand classes, recorded for the line. */
+        boolean planDiscard;
         /** POST-FREEZE 5: a wall-time budget (ms); late-game positions with large graveyards made keys slow. */
         long ms = 1500;
         /**
@@ -998,6 +1003,22 @@ public final class ForcedWinPlanner {
                 return;
             }
             case DISCARD: {
+                if (lim.planDiscard && e.n != ForcedWinModel.ALL && s.hand.size() > e.n) {
+                    // kill-line-1106 (port of labeller-v2 (c)): each distinct class of hand cards, least useful first
+                    for (List<Integer> ch : discardChoices(s, e.n)) {
+                        final S n = s.copy();
+                        final List<String> names = new ArrayList<>();
+                        for (int c : ch) {
+                            n.hand.remove(Integer.valueOf(c));
+                            n.gyPool.add(c);
+                            names.add(cards.get(c).name);
+                        }
+                        java.util.Collections.sort(names);
+                        token(n, ForcedWinChoices.DISC + ":" + String.join(";", names));
+                        resolve(n, effs, ei + 1, 0, ab, out);
+                    }
+                    return;
+                }
                 for (int i = 0; i < e.n && !s.hand.isEmpty(); i++) {
                     final int d = leastUseful(s.hand);
                     s.hand.remove(Integer.valueOf(d));
@@ -1132,6 +1153,47 @@ public final class ForcedWinPlanner {
             return out;
         }
         combos(distinct, n, 0, new ArrayList<>(), out, 6);
+        return out;
+    }
+
+    /** Record a choice token on the step being resolved (kill-line-1106). */
+    private static void token(S n, String tok) {
+        if (n.steps.isEmpty()) {
+            return;
+        }
+        final Step st = n.steps.get(n.steps.size() - 1);
+        if (st.cac == null) {
+            st.cac = new ArrayList<>();
+        }
+        st.cac.add(tok);
+    }
+
+    /** kill-line-1106 (port of labeller-v2 (c)): the discard choices of {@code n} cards: distinct classes, least useful first. */
+    private List<List<Integer>> discardChoices(S s, int n) {
+        final List<Integer> hand = new ArrayList<>(s.hand);
+        hand.sort(Comparator.comparingInt((Integer h) -> -cards.get(h).order()).thenComparingInt(h -> cards.get(h).id));
+        final List<Integer> distinct = new ArrayList<>();
+        final Map<String, Integer> perName = new HashMap<>();
+        for (int h : hand) {
+            final int k = perName.merge(cards.get(h).name, 1, Integer::sum);
+            if (k <= n) {
+                distinct.add(h);
+            }
+        }
+        final List<List<Integer>> raw = new ArrayList<>();
+        combos(distinct, n, 0, new ArrayList<>(), raw, lim.classes * 4);
+        final List<List<Integer>> out = new ArrayList<>();
+        final Set<String> seenNames = new HashSet<>();
+        for (List<Integer> c : raw) {
+            final List<String> names = new ArrayList<>();
+            for (int x : c) {
+                names.add(cards.get(x).name);
+            }
+            java.util.Collections.sort(names);
+            if (seenNames.add(names.toString()) && out.size() < lim.classes) {
+                out.add(c);
+            }
+        }
         return out;
     }
 
