@@ -49,6 +49,9 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 public class ComputerUtilMana {
+    /** kill-line-1106: set on a followed line's copy of an ability: its Phyrexian pips are paid with life. */
+    public static final String PHYREXIAN_LIFE_PARAM = "LinePhyrexianLife";
+
     private final static boolean DEBUG_MANA_PAYMENT = false;
 
     public static boolean canPayManaCost(ManaCostBeingPaid cost, final SpellAbility sa, final Player ai, final boolean effect) {
@@ -694,7 +697,7 @@ public class ComputerUtilMana {
 
             saList.removeAll(saExcludeList);
 
-            SpellAbility saPayment;
+            final SpellAbility saPicked;
             // lane replay-record-1021: the AI tape records each source the seat taps in a real payment (a forced replay
             // taps the record's); test payments and every other player are untouched
             final AiTape tape = test ? null : AiTape.covering(ai);
@@ -702,7 +705,7 @@ public class ComputerUtilMana {
             // every other seat, and in every test payment: then this is Forge AI's own choice, unchanged)
             final ScriptedManaSources scripted = test ? null : ScriptedManaSources.of(ai);
             if (tape == null && scripted == null) {
-                saPayment = saList.isEmpty() ? null : chooseManaAbility(cost, sa, ai, toPay, saList, checkPlayable || !test);
+                saPicked = saList.isEmpty() ? null : chooseManaAbility(cost, sa, ai, toPay, saList, checkPlayable || !test);
             } else {
                 final Collection<SpellAbility> options = saList;
                 final ManaCostShard shard = toPay;
@@ -711,8 +714,12 @@ public class ComputerUtilMana {
                         : chooseManaAbility(cost, sa, ai, shard, options, checkCosts);
                 final java.util.function.Supplier<SpellAbility> choose = scripted == null ? own
                         : () -> options.isEmpty() ? null : scripted.chooseManaSource(sa, options, own);
-                saPayment = tape == null ? choose.get() : tape.mana(options, choose);
+                saPicked = tape == null ? choose.get() : tape.mana(options, choose);
             }
+
+            // kill-line-1106: a followed line's step that the planner paid with life (real payment only; off = param absent)
+            final SpellAbility saPayment = saPicked != null && !test && toPay.isPhyrexian() && sa.hasParam(PHYREXIAN_LIFE_PARAM)
+                    && ai.canPayLife(2, false, sa) && ai.getLife() > 2 ? null : saPicked;
 
             if (saPayment != null && ComputerUtilCost.isSacrificeSelfCost(saPayment.getPayCosts()) && sa.isTargeting(saPayment.getHostCard())) {
                 // not a good idea to sac a card that you're targeting with the SA you're paying for

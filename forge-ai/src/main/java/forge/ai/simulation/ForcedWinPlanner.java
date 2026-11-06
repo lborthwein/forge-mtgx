@@ -56,6 +56,8 @@ public final class ForcedWinPlanner {
         /** FLOAT of a plain source (a land before a return cost): the colour index; -1 otherwise. */
         final int floatColor;
         boolean phyrexianLife;
+        /** kill-line-1106 (followPay): the follower pays this step's Phyrexian pips with life. */
+        boolean forceLife;
         /** ENGINE steps: the recorded targets, "link:ref" (ref = "C" + card id or "P" + player id). */
         final List<String> targetRefs = new ArrayList<>();
         /** ENGINE steps: the forced target of the first targeting trigger of ours this step causes (null = Forge AI's). */
@@ -110,6 +112,7 @@ public final class ForcedWinPlanner {
             s.picks.addAll(picks);
             s.putBack.addAll(putBack);
             s.phyrexianLife = phyrexianLife;
+            s.forceLife = forceLife;
             s.targetRefs.addAll(targetRefs);
             s.engineSpell = engineSpell;
             s.triggerRef = triggerRef;

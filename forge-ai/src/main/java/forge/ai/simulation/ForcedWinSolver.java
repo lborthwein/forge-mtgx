@@ -155,6 +155,15 @@ public final class ForcedWinSolver {
          * over every legal target class, at most triggerVariants of them, mana valued (ForcedWinEngine.TriggerTargets#wide).
          */
         public boolean engineTriggerTargets = false;
+        /**
+         * kill-line-1106 (off by default): the follower pays as the line recorded. A step the planner paid with life pays
+         * its Phyrexian pips with life, not with a mana source Forge AI's payment would pick first.
+         */
+        public boolean followPay = false;
+        /** kill-line-1106 (off by default): planner lines that all fail verification fall through to the engine search. */
+        public boolean engineAfterPlanFail = false;
+        /** kill-line-1106 (off by default): a permanent's mana output is read from the position, not its learned template. */
+        public boolean sourceOutput = false;
         public int triggerVariants = 8;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
@@ -256,6 +265,9 @@ public final class ForcedWinSolver {
             c.engineRerun = "true".equals(get.apply("engineRerun")); // choice-search-1105
             c.engineNodesPerSearch = "true".equals(get.apply("engineNodesPerSearch")); // choice-search-1105 (CAP-2)
             c.engineTriggerTargets = "true".equals(get.apply("engineTriggerTargets")); // kill-line-1106
+            c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
+            c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
+            c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
@@ -686,6 +698,8 @@ public final class ForcedWinSolver {
 
     private String lastOutcome = "?";
     private int lastPlannerNodes;
+    /** kill-line-1106 (report only): planner searches stopped by their limit; engine lines taken after planner lines failed. */
+    public int plannerExhausted, planFailEngineTakes;
 
     private Line offense0(Game live, String key) {
         decisions++;
@@ -734,6 +748,16 @@ public final class ForcedWinSolver {
         }
         plannerNanos += System.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
+        if (res.exhausted) {
+            plannerExhausted++; // kill-line-1106 (report only): the planner's node or time limit stopped this search
+        }
+        if (cfg.followPay) {
+            for (Line l : res.lines) {
+                for (Step st : l.steps) {
+                    st.forceLife = st.phyrexianLife; // kill-line-1106
+                }
+            }
+        }
         if (res.lines.isEmpty()) {
             lastOutcome = "gate";
             final Line engine = engineFallback(live, pos, index, t0);
@@ -758,6 +782,17 @@ public final class ForcedWinSolver {
         final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : System.nanoTime());
         engineNanos += System.nanoTime() - t1;
         if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0) {
+            if (cfg.engineAfterPlanFail) {
+                // kill-line-1106: the planner's lines failed verification; the engine search still gets its turn, in budget
+                final Line engine = engineFallback(live, pos, index, t0);
+                if (engine != null) {
+                    planFailEngineTakes++;
+                    if (!"likely-take".equals(lastOutcome)) {
+                        lastOutcome = "engine-take";
+                    }
+                    return engine;
+                }
+            }
             lastOutcome = "declined";
             noLineKey = key;
             if (best == null) {
@@ -1797,6 +1832,9 @@ public final class ForcedWinSolver {
     /** Read the position; the library's affordances are learned only when something we hold could use them. */
     Position readPosition(Game live, List<Integer> knownOrder) {
         final Position pos = reader.read(live, me, knownOrder, true);
+        if (cfg.sourceOutput && pos != null) {
+            ForcedWinModel.Reader.readSourceOutputs(pos, me); // kill-line-1106
+        }
         return pos;
     }
 
@@ -2591,6 +2629,9 @@ public final class ForcedWinSolver {
             if (st.phyrexianLife && sa.hasParam("AIPhyrexianPayment")) {
                 sa.getMapParams().remove("AIPhyrexianPayment");
             }
+            if (st.forceLife) {
+                sa.getMapParams().put(forge.ai.ComputerUtilMana.PHYREXIAN_LIFE_PARAM, "true"); // kill-line-1106
+            }
             directAnyMana(sa, st);
             if (!sa.canPlay() || !ComputerUtilCost.canPayCost(sa, me, false)) {
                 return null;
@@ -2998,6 +3039,8 @@ public final class ForcedWinSolver {
         return "decisions=" + decisions + " gated=" + gated + " evaluated=" + evaluated + " taken=" + taken + " likelyRuns="
                 + likelyRuns + " likelyTaken=" + likelyTaken + " replans="
                 + replans + " plannerMs=" + plannerNanos / 1_000_000 + " engineMs=" + engineNanos / 1_000_000
+                + (plannerExhausted == 0 ? "" : " plannerExhausted=" + plannerExhausted)
+                + (planFailEngineTakes == 0 ? "" : " planFailEngineTakes=" + planFailEngineTakes)
                 + " copies=" + copies + " " + reader.probeStats.summary()
                 + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)
                 + (loopMarginals + loopVariantCuts == 0 ? "" : " loopMarginals=" + loopMarginals + " loopVariants="
