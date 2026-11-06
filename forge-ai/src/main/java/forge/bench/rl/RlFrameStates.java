@@ -64,6 +64,13 @@ public final class RlFrameStates implements PriorityDecisionListener {
     private int decisions = 0;
     private final List<List<Object[]>> decks;
 
+    /**
+     * Test-only probe (null = off; nothing else reads it): when set, every captured decision also forks the LIVE game
+     * ({@link RlFrameObs#forkCopy}, no install) and featurizes the copy ({@link RlFrameObs#featurizeForked}); the probe
+     * gets {key "uid:seat:dec_idx", live payload, forked payload}. Runs isolated with detached ids, like the capture.
+     */
+    public static volatile java.util.function.Consumer<Object[]> forkProbe = null;
+
     public RlFrameStates(final int every, final JsonObject tapeLine, final Game game, final RlKnowledge know,
             final CardIndex index, final int obs) {
         if (every < 1) {
@@ -111,6 +118,14 @@ public final class RlFrameStates implements PriorityDecisionListener {
         // the payload the dump wrote at this decision (same featurizer, same tracker state): the proof's reference sha
         final RlFrameObs.Frame f = RlFrameObs.valueFrame(g, p, know, index, obs, uid, ord);
         r.addProperty("payload_sha256", f.sha256());
+        final java.util.function.Consumer<Object[]> probe = forkProbe;
+        if (probe != null) {
+            final RlFrameObs.Frame ff = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+                final Game cp = (Game) RlFrameObs.forkCopy(g, p)[0];
+                return RlFrameObs.featurizeForked(cp, seat, know, index, obs, uid, ord);
+            }));
+            probe.accept(new Object[] {Long.toUnsignedString(uid) + ":" + seat + ":" + ord, f.payload, ff.payload});
+        }
         rows.add(RlWire.canonicalString(r));
     }
 
