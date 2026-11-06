@@ -164,6 +164,11 @@ public final class ForcedWinSolver {
         public boolean engineAfterPlanFail = false;
         /** kill-line-1106 (off by default): a permanent's mana output is read from the position, not its learned template. */
         public boolean sourceOutput = false;
+        /**
+         * kill-line-1106 (off by default): a verification world whose next-turn line breaks on our next turn (the opponent's
+         * turn changed the board) plans again from that world's position, as the live seat would.
+         */
+        public boolean verifyReplan = false;
         public int triggerVariants = 8;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
@@ -268,6 +273,7 @@ public final class ForcedWinSolver {
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
+            c.verifyReplan = "true".equals(get.apply("verifyReplan")); // kill-line-1106
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
@@ -2058,6 +2064,10 @@ public final class ForcedWinSolver {
             final Follower f = new Follower(line);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
             lineAi.bounded(wall);
+            if (cfg.verifyReplan && line.winTurn > 0) {
+                lineAi.startTurn = g.getPhaseHandler().getTurn();
+                lineAi.replanner = old -> replanIn(g, cm, old); // kill-line-1106
+            }
             cm.dangerouslySetController(lineAi);
             AdversaryAi adv = null;
             for (Player o : g.getPlayers()) {
@@ -2443,6 +2453,52 @@ public final class ForcedWinSolver {
         return out;
     }
 
+    /** kill-line-1106 (verifyReplan; report only): worlds that planned again after a line broke, and those that found a line. */
+    public int verifyReplans, verifyReplanLines;
+
+    /** kill-line-1106 (verifyReplan): a fresh same-turn line from a world's position; the cards the old line placed stay known. */
+    private Line replanIn(Game g, Player p, Line old) {
+        verifyReplans++;
+        final Set<Integer> placed = new HashSet<>();
+        for (Step st : old.steps) {
+            placed.addAll(st.pile);
+        }
+        final List<Integer> known = new ArrayList<>();
+        for (Card c : p.getCardsIn(ZoneType.Library)) {
+            if (!placed.contains(c.getId())) {
+                break;
+            }
+            known.add(c.getId());
+        }
+        final Position pos;
+        synchronized (reader) {
+            pos = reader.read(g, p, known, true);
+        }
+        if (pos == null) {
+            return null;
+        }
+        if (cfg.sourceOutput) {
+            ForcedWinModel.Reader.readSourceOutputs(pos, p);
+        }
+        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        lim.nodes = cfg.nodes;
+        lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
+        lim.payPolicies = 1;
+        lim.horizon = 1;
+        final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+        if (res.lines.isEmpty()) {
+            return null;
+        }
+        verifyReplanLines++;
+        final Line fresh = res.lines.get(0);
+        if (cfg.followPay) {
+            for (Step st : fresh.steps) {
+                st.forceLife = st.phyrexianLife;
+            }
+        }
+        return fresh;
+    }
+
     /** kill-line-1106 (report only): discards where a reserved card was swapped out. */
     public int lineKeepSwaps;
 
@@ -2811,7 +2867,10 @@ public final class ForcedWinSolver {
 
     /** Our seat in a play-out: the line, our counterspells against counters of it, Forge AI for the rest. */
     static final class LineAi extends ForcedWinEngine.GuardedAi {
-        final Follower f;
+        Follower f;
+        /** kill-line-1106 (verifyReplan; null = off): a fresh line from this world once the line breaks on a later turn. */
+        java.util.function.Function<Line, Line> replanner;
+        int startTurn;
         String protectedBy;
         /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
         boolean continueAfter;
@@ -2837,9 +2896,24 @@ public final class ForcedWinSolver {
                 if (n.waiting) {
                     return null;
                 }
-                if (n.broken) {
+                if (n.broken && replanner == null) {
                     return null;
                 }
+            }
+            if (f.broken && replanner != null) {
+                // kill-line-1106 (verifyReplan): wait for our next main phase, then once per world a fresh line
+                if (g.getPhaseHandler().getTurn() > startTurn && g.getStack().isEmpty()
+                        && g.getPhaseHandler().isPlayerTurn(getPlayer()) && g.getPhaseHandler().is(PhaseType.MAIN1)) {
+                    final java.util.function.Function<Line, Line> rp = replanner;
+                    replanner = null;
+                    final Line fresh = rp.apply(f.line);
+                    if (fresh != null) {
+                        f = new Follower(fresh);
+                        final Follower.Next m = f.next(g, getPlayer());
+                        return m.action != null ? capped(List.of(m.action)) : null;
+                    }
+                }
+                return null;
             }
             if (f.done && continueAfter) {
                 return super.chooseSpellAbilityToPlay();
@@ -3059,6 +3133,7 @@ public final class ForcedWinSolver {
                 + replans + " plannerMs=" + plannerNanos / 1_000_000 + " engineMs=" + engineNanos / 1_000_000
                 + (plannerExhausted == 0 ? "" : " plannerExhausted=" + plannerExhausted)
                 + (planFailEngineTakes == 0 ? "" : " planFailEngineTakes=" + planFailEngineTakes)
+                + (verifyReplans == 0 ? "" : " verifyReplans=" + verifyReplans + "/" + verifyReplanLines)
                 + " copies=" + copies + " " + reader.probeStats.summary()
                 + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)
                 + (loopMarginals + loopVariantCuts == 0 ? "" : " loopMarginals=" + loopMarginals + " loopVariants="
