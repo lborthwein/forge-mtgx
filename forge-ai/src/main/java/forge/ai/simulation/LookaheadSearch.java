@@ -367,12 +367,13 @@ public final class LookaheadSearch {
         public String beliefDeckCoocSha256 = null;
         public double beliefDeckCoocGain = 1.0;
         /**
-         * deck-belief-1105 AMEND-4: what leaves a singleton pool ({@link #beliefSingleton}). "draft" (the default, as
-         * before): our registered deck and the opponent's seen cards, since one copy of each card exists across a cube
-         * draft. "independent" (decks built apart, e.g. eval banks, gauntlets, owner decks): only the opponent's seen
-         * cards; our own cards stay possible for them. Set from the game's format by the host or harness (spec key).
+         * deck-belief-1105 AMEND-4 (owner ruling 2026-11-05): whether our own deck leaves a singleton pool
+         * ({@link #beliefSingleton}). "independent" (the default): only the opponent's seen cards leave it, since outside
+         * a shared draft (bo1 gauntlet, eval banks, owner-built or imported decks, practice) the opponent may hold any
+         * of our cards. "draft-pod": our registered deck leaves it too (as before this key), only for a tournament game
+         * whose decks all come from one draft, as the host or harness marks it (spec key).
          */
-        public String beliefPoolMode = "draft";
+        public String beliefPoolMode = "independent";
 
         /** A belief is computed at searched decisions (acting or shadow). */
         public boolean beliefOn() {
@@ -538,7 +539,7 @@ public final class LookaheadSearch {
                     o.addProperty("beliefDeckCoocSha256", beliefDeckCoocSha256);
                     o.addProperty("beliefDeckCoocGain", beliefDeckCoocGain);
                 }
-                if (!"draft".equals(beliefPoolMode)) {
+                if (!"independent".equals(beliefPoolMode)) {
                     o.addProperty("beliefPoolMode", beliefPoolMode);
                 }
             }
@@ -7356,8 +7357,8 @@ public final class LookaheadSearch {
         final PlayerView myView = liveMe.getView();
         final Set<String> known = new HashSet<>();
         if (cfg.beliefSingleton) {
-            if (!"independent".equals(cfg.beliefPoolMode)) {
-                known.addAll(ownDeckNames(liveMe)); // deck-belief-1105 AMEND-4: not for independently built decks
+            if ("draft-pod".equals(cfg.beliefPoolMode)) {
+                known.addAll(ownDeckNames(liveMe)); // deck-belief-1105 AMEND-4: only decks drafted from one pod
             }
             for (Card c : live.getCardsInGame()) {
                 if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null

@@ -329,7 +329,9 @@ public class DeckBeliefTest extends SimulationTest {
         JsonObject o = new JsonObject();
         o.addProperty("beliefPoolMode", "independent");
         AssertJUnit.assertEquals("independent", forge.bench.rl.RlSearch.Config.parse(o).beliefPoolMode);
-        AssertJUnit.assertEquals("draft", forge.bench.rl.RlSearch.Config.parse(new JsonObject()).beliefPoolMode);
+        AssertJUnit.assertEquals("independent", forge.bench.rl.RlSearch.Config.parse(new JsonObject()).beliefPoolMode);
+        o.addProperty("beliefPoolMode", "draft-pod");
+        AssertJUnit.assertEquals("draft-pod", forge.bench.rl.RlSearch.Config.parse(o).beliefPoolMode);
         o.addProperty("beliefPoolMode", "pod");
         try {
             forge.bench.rl.RlSearch.Config.parse(o);
