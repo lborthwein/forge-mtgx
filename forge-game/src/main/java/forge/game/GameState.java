@@ -97,6 +97,7 @@ public class GameState {
     private final Map<Card, List<String>> cardToMergedCards = new HashMap<>();
     private final Map<Card, List<String>> cardToNamedCard = new HashMap<>();
     private final Map<Card, String> cardToExiledWithId = new HashMap<>();
+    private final Map<String, Card> exiledWithStandIns = new HashMap<>();
     private final Map<Card, Card> cardAttackMap = new HashMap<>();
 
     private final Map<Card, String> cardToScript = new HashMap<>();
@@ -146,6 +147,8 @@ public class GameState {
      * so the end-of-install state-based check does not put it into the graveyard;</li>
      * <li>a phased-out card's recorded counters are kept (phasing goes on after them: a phased-out card can't
      * receive counters, so the counters read after the phasing were dropped);</li>
+     * <li>summoning sickness is dumped and restored raw, for every permanent, not only for a creature without haste;</li>
+     * <li>an exiled card whose recorded source is in no zone the record holds keeps a link to a stand-in object;</li>
      * <li>the install round-trip check runs ({@link #INSTALL_CHECK_KEY} defaults to {@code warn}).</li>
      * </ul>
      */
@@ -155,7 +158,7 @@ public class GameState {
      * (-Dforge.gamestate.installCheck; default {@code warn} when {@link #INSTALL_AS_IS_KEY} is on, else {@code off}).
      * After an install, Forge's own dump of the game ({@link #initFromGame}) is compared with the parsed record by
      * {@link #installDiff}: every seat's zones (the library in order), life, player counters, and per card its
-     * tapped state, face, counters and attachment. {@code warn} prints each diff to stderr; {@code throw} also fails
+     * tapped state, summoning sickness, face, counters, attachment and exile source. {@code warn} prints each diff to stderr; {@code throw} also fails
      * the install. The last diff is kept ({@link #getInstallDiff}).
      */
     public static final String INSTALL_CHECK_KEY = "forge.gamestate.installCheck";
@@ -558,7 +561,9 @@ public class GameState {
             if (c.isTapped()) {
                 newText.append("|Tapped");
             }
-            if (c.isSick()) {
+            // as-is key: the raw state, since a noncreature or haste permanent can become a sick creature later
+            // (a crewed Vehicle that entered this turn must not be able to attack)
+            if (installAsIs() ? c.isFirstTurnControlled() : c.isSick()) {
                 newText.append("|SummonSick");
             }
             if (c.isRenowned()) {
@@ -876,6 +881,7 @@ public class GameState {
         cardToEnchantPlayerId.clear();
         cardToRememberedId.clear();
         cardToExiledWithId.clear();
+        exiledWithStandIns.clear();
         cardToImprintedId.clear();
         markedDamage.clear();
         cardToChosenClrs.clear();
@@ -1016,7 +1022,7 @@ public class GameState {
      * install-fidelity-1105: the install round-trip diff of two GameState texts (a record and Forge's dump of what it
      * installed). Per seat ({@code pN}; {@code human}/{@code ai} read as p0/p1): life, player counters, and the hand,
      * library (in order), graveyard, battlefield and exile as multisets of card descriptors: name, Tapped, FaceDown,
-     * Transformed, Flipped, PhasedOut, Counters (sorted) and AttachedTo / EnchantingPlayer (the attached-to card
+     * Transformed, Flipped, PhasedOut, SummonSick, ExiledWith, Counters (sorted) and AttachedTo / EnchantingPlayer (the card
      * by name, since ids differ between the two texts). Also turn, active player and phase. Empty = equal.
      */
     public static List<String> installDiff(final String record, final String dump) {
@@ -1144,14 +1150,17 @@ public class GameState {
         final List<String> flags = new ArrayList<>();
         for (int i = 1; i < parts.length; i++) {
             final String f = parts[i].trim();
-            if (f.equals("Tapped") || f.equals("FaceDown") || f.equals("Transformed") || f.equals("Flipped")
-                    || f.startsWith("PhasedOut")) {
+            if (f.equals("Tapped") || f.equals("SummonSick") || f.equals("FaceDown") || f.equals("Transformed")
+                    || f.equals("Flipped") || f.startsWith("PhasedOut")) {
                 flags.add(f);
             } else if (f.startsWith("Counters:")) {
                 flags.add("Counters:" + sortedList(f.substring(9)));
             } else if (f.startsWith("AttachedTo:") || f.startsWith("Attaching:")) {
                 final String id = f.substring(f.indexOf(':') + 1).trim();
                 flags.add("AttachedTo:" + idName.getOrDefault(id, "?" + id));
+            } else if (f.startsWith("ExiledWith:")) {
+                // "?" = a source in no zone of the text; ids differ between the two texts
+                flags.add("ExiledWith:" + idName.getOrDefault(f.substring(11).trim(), "?"));
             } else if (f.startsWith("EnchantingPlayer:")) {
                 flags.add("EnchantingPlayer:" + diffPlayerKey(f.substring(17).trim().toLowerCase(Locale.ROOT)));
             }
@@ -1317,6 +1326,17 @@ public class GameState {
                 exiledWith.addExiledCard(c);
                 c.setExiledWith(exiledWith);
                 c.setExiledBy(exiledWith.getController());
+            } else if (asIsNow) {
+                // The source is in no zone the record holds (a command-zone effect, a token that is gone, a resolved
+                // copy). Effects that look for it find nothing, as in the source game, but the card stays linked to
+                // one object per recorded id. The record names no player, so getExiledBy stays null.
+                final Card standIn = exiledWithStandIns.computeIfAbsent(id, k -> {
+                    final Card sc = new Card(c.getGame().nextCardId(), c.getGame());
+                    sc.setOwner(c.getOwner());
+                    return sc;
+                });
+                standIn.addExiledCard(c);
+                c.setExiledWith(standIn);
             }
         }
     }
@@ -1718,7 +1738,7 @@ public class GameState {
                         continue;
                     }
                     boolean tapped = c.isTapped();
-                    boolean sickness = c.hasSickness();
+                    boolean sickness = asIsNow ? c.isFirstTurnControlled() : c.hasSickness();
                     Multiset<CounterType> counters = c.getCounters();
                     // Note: Not clearCounters() since we want to keep the counters var as-is.
                     c.setCounters(HashMultiset.create());
