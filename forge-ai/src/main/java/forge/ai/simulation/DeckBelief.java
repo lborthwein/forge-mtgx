@@ -54,6 +54,99 @@ public final class DeckBelief {
          */
         public java.util.Map<String, java.util.Map<String, Double>> cooc;
         public double coocGain = 1.0;
+        /**
+         * deck-belief-1105 AMEND-6 (null = off): the open-mana behaviour likelihood. Off its own turn, an opponent that
+         * left mana of a colour open is more likely to hold instant-speed interaction it can cast with it. Learned from
+         * generated games ({@link OpenLik}); a dealt hand is accepted with probability proportional to
+         * P(evidence | hand holds a castable instant or not), the mirror of {@link #decline}.
+         */
+        public OpenLik openLik;
+    }
+
+    /**
+     * deck-belief-1105 AMEND-6: P(the opponent's hidden hand holds an instant-speed spell castable with its open mana |
+     * open sources bucket, open colours, turn bucket), and its turn-only marginal, from a {@code mtgx-open-mana-lik/1}
+     * table. No card names: features are counts and colour masks.
+     */
+    public static final class OpenLik {
+        final java.util.Map<String, Double> q = new java.util.HashMap<>();
+        final java.util.Map<String, Double> marg = new java.util.HashMap<>();
+
+        static int openBucket(final int open) {
+            return Math.min(open, 3);
+        }
+
+        static int turnBucket(final int turn) {
+            return turn <= 4 ? 0 : turn <= 8 ? 1 : 2;
+        }
+
+        static String key(final int open, final byte colors, final int turn) {
+            return openBucket(open) + ":" + (colors & 0x1f) + ":" + turnBucket(turn);
+        }
+
+        /** The likelihood ratio for a hand that does ({@code has}) or does not hold a castable instant. */
+        double ratio(final Evidence e, final boolean has) {
+            final Double qq = q.get(key(e.openMana, e.openColors, e.turn));
+            final Double m = marg.get(String.valueOf(turnBucket(e.turn)));
+            if (qq == null || m == null || m <= 0 || m >= 1) {
+                return 1.0;
+            }
+            return has ? qq / m : (1 - qq) / (1 - m);
+        }
+    }
+
+    private static final java.util.Map<String, OpenLik> OPEN_LIK = new java.util.HashMap<>();
+
+    /** Load (once per JVM and path) an open-mana likelihood table, checking its sha256 pin when one is given. */
+    public static synchronized OpenLik loadOpenLik(final String path, final String sha256) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        final OpenLik have = OPEN_LIK.get(path + "|" + sha256);
+        if (have != null) {
+            return have;
+        }
+        try {
+            final byte[] bytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path));
+            if (sha256 != null && !sha256.isBlank()) {
+                final StringBuilder hex = new StringBuilder();
+                for (byte b : java.security.MessageDigest.getInstance("SHA-256").digest(bytes)) {
+                    hex.append(String.format("%02x", b));
+                }
+                if (!hex.toString().equals(sha256)) {
+                    throw new IllegalStateException("open-mana lik " + path + " has sha256 " + hex + ", pinned " + sha256);
+                }
+            }
+            final com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(
+                    new String(bytes, java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+            if (!"mtgx-open-mana-lik/1".equals(o.get("schema").getAsString())) {
+                throw new IllegalStateException("open-mana lik " + path + ": schema " + o.get("schema"));
+            }
+            final OpenLik t = new OpenLik();
+            for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : o.getAsJsonObject("q").entrySet()) {
+                t.q.put(e.getKey(), e.getValue().getAsDouble());
+            }
+            for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : o.getAsJsonObject("marg").entrySet()) {
+                t.marg.put(e.getKey(), e.getValue().getAsDouble());
+            }
+            OPEN_LIK.put(path + "|" + sha256, t);
+            return t;
+        } catch (java.io.IOException | java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("open-mana lik " + path + ": " + e, e);
+        }
+    }
+
+    /** Whether {@code pc} is an instant-speed spell the opponent can cast with its open mana (count and colours). */
+    public static boolean castableInstant(final PaperCard pc, final Evidence e) {
+        if (pc == null) {
+            return false;
+        }
+        final CardRules r = pc.getRules();
+        if (r.getType().isLand() || !(r.getType().isInstant() || r.hasKeyword(forge.game.keyword.Keyword.FLASH.toString()))) {
+            return false;
+        }
+        return r.getManaCost().getCMC() <= e.openMana
+                && ColorSet.fromMask(r.getManaCost().getColorProfile()).hasNoColorsExcept(e.openColors);
     }
 
     private static final java.util.Map<String, java.util.Map<String, java.util.Map<String, Double>>> COOC = new java.util.HashMap<>();
@@ -165,6 +258,8 @@ public final class DeckBelief {
         public boolean offTurn;
         /** The opponent made no land drop on its last turn. */
         public boolean noLandLastTurn;
+        /** The game turn (the open-mana likelihood's turn bucket). */
+        public int turn;
         /** The non-basic names it has shown (the archetype weights' evidence). */
         public final List<String> shownNames = new ArrayList<>();
 
@@ -200,6 +295,7 @@ public final class DeckBelief {
             }
             e.offTurn = live.getPhaseHandler().getPlayerTurn() != liveOpp;
             e.noLandLastTurn = liveOpp.getLandsPlayedLastTurn() == 0;
+            e.turn = live.getPhaseHandler().getTurn();
             return e;
         }
     }
@@ -283,6 +379,28 @@ public final class DeckBelief {
      * names; basics may repeat), for a deck of the sampled colours.
      */
     public static Deal deal(final List<String> pool, final Function<String, PaperCard> paper, final Evidence e,
+            final int need, final int libNeed, final Params p, final Random rng) {
+        if (p.openLik == null || !e.offTurn || need == 0) {
+            return deal0(pool, paper, e, need, libNeed, p, rng);
+        }
+        // AMEND-6: rejection by the open-mana likelihood ratio (at most 16 deals; the last one stands)
+        final double rHas = p.openLik.ratio(e, true), rNot = p.openLik.ratio(e, false);
+        final double max = Math.max(rHas, rNot);
+        Deal d = null;
+        for (int t = 0; t < 16; t++) {
+            d = deal0(pool, paper, e, need, libNeed, p, rng);
+            boolean has = false;
+            for (String nm : d.hand) {
+                has |= castableInstant(paper.apply(nm), e);
+            }
+            if (max <= 0 || rng.nextDouble() * max < (has ? rHas : rNot)) {
+                break;
+            }
+        }
+        return d;
+    }
+
+    private static Deal deal0(final List<String> pool, final Function<String, PaperCard> paper, final Evidence e,
             final int need, final int libNeed, final Params p, final Random rng) {
         final Deal d = new Deal();
         d.colors = sampleColors(e.shown, p, rng);

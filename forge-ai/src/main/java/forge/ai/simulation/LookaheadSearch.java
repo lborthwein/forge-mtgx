@@ -366,6 +366,9 @@ public final class LookaheadSearch {
         public String beliefDeckCooc = null;
         public String beliefDeckCoocSha256 = null;
         public double beliefDeckCoocGain = 1.0;
+        /** deck-belief-1105 AMEND-6 (null = off): the search worlds' open-mana likelihood ({@link DeckBelief.Params#openLik}). */
+        public String beliefDeckOpenLik = null;
+        public String beliefDeckOpenLikSha256 = null;
         /**
          * deck-belief-1105 AMEND-4: whether our own deck leaves a singleton pool ({@link #beliefSingleton}).
          * "draft-pod" (the default, today's behaviour): our registered deck and the opponent's seen cards leave it,
@@ -534,6 +537,10 @@ public final class LookaheadSearch {
                 }
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
+                if (beliefDeckOpenLik != null) {
+                    o.addProperty("beliefDeckOpenLik", beliefDeckOpenLik); // AMEND-6: only when on
+                    o.addProperty("beliefDeckOpenLikSha256", beliefDeckOpenLikSha256);
                 }
                 if (beliefDeckCooc != null) {
                     o.addProperty("beliefDeckCooc", beliefDeckCooc);
@@ -7495,6 +7502,7 @@ public final class LookaheadSearch {
             p = new DeckBelief.Params();
             p.cooc = DeckBelief.loadCooc(cfg.beliefDeckCooc, cfg.beliefDeckCoocSha256);
             p.coocGain = cfg.beliefDeckCoocGain;
+            p.openLik = DeckBelief.loadOpenLik(cfg.beliefDeckOpenLik, cfg.beliefDeckOpenLikSha256); // AMEND-6
             searchDeckParams = p;
         }
         return p;

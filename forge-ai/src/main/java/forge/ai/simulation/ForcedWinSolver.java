@@ -213,6 +213,9 @@ public final class ForcedWinSolver {
         public String deckCooc = null;
         public String deckCoocSha256 = null;
         public double deckCoocGain = 1.0;
+        /** deck-belief-1105 AMEND-6 (null = off): {@link DeckBelief.Params#openLik}'s table file and its sha256 pin. */
+        public String deckOpenLik = null;
+        public String deckOpenLikSha256 = null;
 
         public DeckBelief.Params deckParams() {
             final DeckBelief.Params p = new DeckBelief.Params();
@@ -220,6 +223,7 @@ public final class ForcedWinSolver {
             p.landShare = deckLandShare;
             p.cooc = DeckBelief.loadCooc(deckCooc, deckCoocSha256); // deck-belief-1105 AMEND-4 (null = off)
             p.coocGain = deckCoocGain;
+            p.openLik = DeckBelief.loadOpenLik(deckOpenLik, deckOpenLikSha256); // AMEND-6 (null = off)
             return p;
         }
 
@@ -271,6 +275,8 @@ public final class ForcedWinSolver {
             c.deckCooc = get.apply("deckCooc");
             c.deckCoocSha256 = get.apply("deckCoocSha256");
             c.deckCoocGain = dblOr(get.apply("deckCoocGain"), c.deckCoocGain);
+            c.deckOpenLik = get.apply("deckOpenLik");
+            c.deckOpenLikSha256 = get.apply("deckOpenLikSha256");
             return c;
         }
 

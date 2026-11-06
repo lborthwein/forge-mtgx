@@ -230,6 +230,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String beliefDeckCooc, beliefDeckCoocSha256;
         public double beliefDeckCoocGain = 1.0;
         public String beliefPoolMode = "draft-pod";
+        /** deck-belief-1105 AMEND-6 (null = off, absent from the JSON). */
+        public String beliefDeckOpenLik, beliefDeckOpenLikSha256;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -242,7 +244,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "raceWorlds", "beliefDeckCooc", "beliefDeckCoocSha256",
-                "beliefDeckCoocGain", "beliefPoolMode"));
+                "beliefDeckCoocGain", "beliefPoolMode", "beliefDeckOpenLik", "beliefDeckOpenLikSha256"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -305,6 +307,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("beliefDeckCoocSha256")) c.beliefDeckCoocSha256 = o.get("beliefDeckCoocSha256").getAsString();
             if (o.has("beliefDeckCoocGain")) c.beliefDeckCoocGain = o.get("beliefDeckCoocGain").getAsDouble();
             if (o.has("beliefPoolMode")) c.beliefPoolMode = o.get("beliefPoolMode").getAsString();
+            if (o.has("beliefDeckOpenLik")) c.beliefDeckOpenLik = o.get("beliefDeckOpenLik").getAsString(); // AMEND-6
+            if (o.has("beliefDeckOpenLikSha256")) c.beliefDeckOpenLikSha256 = o.get("beliefDeckOpenLikSha256").getAsString();
             if (!"draft-pod".equals(c.beliefPoolMode) && !"independent".equals(c.beliefPoolMode)) {
                 throw new IllegalArgumentException("search: beliefPoolMode must be independent or draft-pod");
             }
@@ -448,6 +452,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("beliefSingleton", beliefSingleton);
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
+                if (beliefDeckOpenLik != null) {
+                    o.addProperty("beliefDeckOpenLik", beliefDeckOpenLik); // AMEND-6: only when on
+                    o.addProperty("beliefDeckOpenLikSha256", beliefDeckOpenLikSha256);
                 }
                 if (beliefDeckCooc != null) {
                     o.addProperty("beliefDeckCooc", beliefDeckCooc);
@@ -673,6 +681,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefDeckCoocSha256 = cfg.beliefDeckCoocSha256;
             lc.beliefDeckCoocGain = cfg.beliefDeckCoocGain;
             lc.beliefPoolMode = cfg.beliefPoolMode;
+            lc.beliefDeckOpenLik = cfg.beliefDeckOpenLik; // AMEND-6
+            lc.beliefDeckOpenLikSha256 = cfg.beliefDeckOpenLikSha256;
         }
         lc.raceWorlds = cfg.raceWorlds; // deck-belief-1105 (0 = off; a search key, belief or not)
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {

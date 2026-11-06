@@ -369,4 +369,45 @@ public class DeckBeliefTest extends SimulationTest {
         ls.shutdown();
         forge.util.IdScope.close();
     }
+    @Test
+    public void openManaEvidenceRaisesCastableInstantHands() throws Exception {
+        // deck-belief-1105 AMEND-6: an opponent that left UU open off its turn more likely holds a castable instant
+        Path f = Files.createTempFile("open-lik", ".json");
+        f.toFile().deleteOnExit();
+        String key = "2:" + (MagicColor.BLUE & 0x1f) + ":1";
+        Files.writeString(f, "{\"schema\":\"mtgx-open-mana-lik/1\",\"q\":{\"" + key + "\":0.9},\"marg\":{\"1\":0.2}}");
+        List<String> pool = Arrays.asList("Counterspell", "Mana Leak", "Hill Giant", "Divination", "Air Elemental",
+                "Serra Angel", "Grizzly Bears", "Shock", "Craw Wurm", "Sengir Vampire", "Island", "Plains", "Swamp", "Mountain", "Forest");
+        DeckBelief.Evidence e = new DeckBelief.Evidence();
+        e.shown = MagicColor.BLUE;
+        e.offTurn = true;
+        e.openMana = 2;
+        e.openColors = MagicColor.BLUE;
+        e.turn = 6;
+        DeckBelief.Params off = new DeckBelief.Params();
+        DeckBelief.Params on = new DeckBelief.Params();
+        on.openLik = DeckBelief.loadOpenLik(f.toString(), null);
+        AssertJUnit.assertEquals(0.9 / 0.2, on.openLik.ratio(e, true), 1e-9);
+        AssertJUnit.assertEquals(0.1 / 0.8, on.openLik.ratio(e, false), 1e-9);
+        int hasOff = 0, hasOn = 0;
+        for (long s = 0; s < 300; s++) {
+            for (int arm = 0; arm < 2; arm++) {
+                DeckBelief.Deal d = DeckBelief.deal(pool, DeckBeliefTest::paper, e, 2, 6, arm == 0 ? off : on, new Random(s));
+                boolean has = false;
+                for (String n : d.hand) {
+                    has |= DeckBelief.castableInstant(paper(n), e);
+                }
+                if (has) {
+                    if (arm == 0) hasOff++; else hasOn++;
+                }
+            }
+        }
+        System.out.println("deck-belief-1105 castable-instant hands of 300: off " + hasOff + " openLik " + hasOn);
+        AssertJUnit.assertTrue("off " + hasOff + " on " + hasOn, hasOn > hasOff + 30);
+        // off its turn only: on its own turn the evidence is not there yet
+        e.offTurn = false;
+        DeckBelief.Deal a = DeckBelief.deal(pool, DeckBeliefTest::paper, e, 2, 6, on, new Random(1));
+        DeckBelief.Deal b = DeckBelief.deal(pool, DeckBeliefTest::paper, e, 2, 6, off, new Random(1));
+        AssertJUnit.assertEquals(b.hand, a.hand);
+    }
 }
