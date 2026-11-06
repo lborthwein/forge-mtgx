@@ -508,6 +508,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         h.addProperty("spec_sha", specSha);
         h.addProperty("jar_sha", jarSha);
+        if (knowledge != null && knowledge.searchedTop()) {
+            h.addProperty("knowledge_searched_top", true); // knowledge-searched-top-1105 (absent = off)
+        }
         if (search != null) {
             stepFields(h, tbe, r, sr);
         }
