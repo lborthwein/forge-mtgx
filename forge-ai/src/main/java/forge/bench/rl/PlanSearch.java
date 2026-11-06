@@ -104,12 +104,18 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * resolved: the board the solver sees has changed). Engine primitives only: zone, controller, card type.
          */
         public boolean replanOnEntry = false;
+        /**
+         * kill-line-1106 (0 = off): a non-proven solver line is adopted when the search could not choose (capped), or, with
+         * lineFloorAlways, kept the default, and the line's P(belief) beats the root value's P(win) by this margin.
+         */
+        public double lineFloor = 0;
+        public boolean lineFloorAlways = false;
         /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
         public boolean lineKeep = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep"));
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -136,6 +142,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineChoices")) s.lineChoices = o.get("lineChoices").getAsString();
             if (o.has("replanOnEntry")) s.replanOnEntry = o.get("replanOnEntry").getAsBoolean();
             if (o.has("lineKeep")) s.lineKeep = o.get("lineKeep").getAsBoolean();
+            if (o.has("lineFloor")) s.lineFloor = o.get("lineFloor").getAsDouble();
+            if (o.has("lineFloorAlways")) s.lineFloorAlways = o.get("lineFloorAlways").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -693,6 +701,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return driver.forgeCosts();
     }
 
+    /** kill-line-1106 (plans.lineFloor; report only): lines adopted by the floor. */
+    int lineFloorTakes;
+
     /** kill-line-1106: plans.lineKeep. */
     @Override
     public CardCollection lineKeep(final CardCollection ordinary, final CardCollection valid) {
@@ -879,13 +890,30 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
      * index here). Otherwise -2 (not a plan: the caller's answer stands).
      */
     int apply(final Stage st, final LookaheadSearch.GivenResult r, final int givenSize, final RlCandidates.Menu m,
-            final List<SpellAbility> objs, final Game g, final double ms) {
+            final List<SpellAbility> objs, final Game g, final double ms, final double vRoot) {
         planDecisions++;
         pointMs.add(ms);
         if (r.proven) {
             provenPicks++;
         }
         if (r.chosen < givenSize) {
+            if (spec.lineFloor > 0 && ("capped".equals(r.outcome) || spec.lineFloorAlways && "kept".equals(r.outcome))) {
+                // kill-line-1106: the verified line's P(win) against the root's, where the search gave no verdict for it
+                LinePlan best = null;
+                for (Object pl : st.plans) {
+                    if (pl instanceof LinePlan && ((LinePlan) pl).proposal.pUnopposed >= 1.0
+                            && (best == null || ((LinePlan) pl).proposal.pBelief > best.proposal.pBelief)) {
+                        best = (LinePlan) pl;
+                    }
+                }
+                if (best != null && best.proposal.pBelief - (1 + vRoot) / 2 >= spec.lineFloor) {
+                    driver.solver().adopt(best.line);
+                    handoff = true;
+                    lineFloorTakes++;
+                    lineTurns.add(g.getPhaseHandler().getTurn());
+                    return RlSeat.PrioritySearch.HOOK;
+                }
+            }
             return -2;
         }
         final Object plan = st.plans.get(r.chosen - givenSize);
@@ -1054,6 +1082,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("planDecisions", planDecisions);
         o.addProperty("planDepartures", planDepartures);
         o.addProperty("lineDepartures", lineDepartures);
+        if (lineFloorTakes != 0) {
+            o.addProperty("lineFloorTakes", lineFloorTakes); // kill-line-1106
+        }
         o.addProperty("policyPlanDepartures", policyPlanDepartures);
         o.addProperty("provenPicks", provenPicks);
         o.addProperty("liveSteps", liveSteps);

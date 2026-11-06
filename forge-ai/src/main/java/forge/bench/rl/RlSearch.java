@@ -1016,7 +1016,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             searchCpuMs += r.cpuMs;
         }
         if (stage != null) {
-            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6);
+            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6, sc.valueObs);
             planRow(g, frame, stage, r, order, pa, t0);
             if (pa != -2) {
                 departures++;
