@@ -97,6 +97,8 @@ public final class RlFrameDump implements PriorityDecisionListener {
     private final RlFeaturizer feat;
     /** knowledge-settle-1104: the seat-knowledge tracker settles on the fixed schedule (recorded in rows only then). */
     private final boolean fixedSettle;
+    /** knowledge-searched-top-1105: the tracker keeps searched-to-a-place cards (recorded in rows only then). */
+    private final boolean searchedTop;
     private final List<byte[]> records = new ArrayList<>();
     private int decisions = 0, priorityRows = 0, choiceRows = 0;
     private double frameMs = 0;
@@ -123,6 +125,7 @@ public final class RlFrameDump implements PriorityDecisionListener {
         this.game = game;
         this.feat = game == null ? null : new RlFeaturizer(index);
         this.fixedSettle = knowledge != null && knowledge.fixedSettle();
+        this.searchedTop = knowledge != null && knowledge.searchedTop();
         if (feat != null) {
             feat.setVersion(obs);
             feat.reset();
@@ -258,6 +261,9 @@ public final class RlFrameDump implements PriorityDecisionListener {
         if (fixedSettle) {
             h.addProperty("knowledge_settle", "fixed"); // knowledge-settle-1104 (absent = the query schedule)
         }
+        if (searchedTop) {
+            h.addProperty("knowledge_searched_top", true); // knowledge-searched-top-1105 (absent = off)
+        }
         h.add("controllers", tape.get("controllers"));
         final JsonArray dp = new JsonArray(), ds = new JsonArray();
         for (com.google.gson.JsonElement d : tape.getAsJsonArray("decks")) {
@@ -320,6 +326,9 @@ public final class RlFrameDump implements PriorityDecisionListener {
         gr.addProperty("choices", choices);
         if (fixedSettle) {
             gr.addProperty("knowledge_settle", "fixed"); // knowledge-settle-1104
+        }
+        if (searchedTop) {
+            gr.addProperty("knowledge_searched_top", true); // knowledge-searched-top-1105
         }
         gr.addProperty("jar_sha", jarSha);
         if (sink != null) {
