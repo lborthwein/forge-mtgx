@@ -52,6 +52,11 @@ public final class ChoiceScorer {
         /** Planner screen per applied option (nodes; 0 = off) and its wall cap per option, ms. */
         public int screenNodes = 0;
         public long screenMs = 200;
+        /** Ordered multi-pick choices (piles): the planner proposes, applied piles are screened and valued. Off by default. */
+        public boolean pile = false;
+        public int pileTop = 6;
+        public int pileNodes = 30000;
+        public long pileMs = 1500;
         /** Cards never answered by a copy whose frame depends on the opponent's hidden hand ({@link #hiddenGuard}). */
         public boolean guard = true;
         /** The solver's config for the screen (spec's plans.solverCfg; not a JSON key). */
@@ -63,7 +68,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard"));
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -94,6 +99,10 @@ public final class ChoiceScorer {
             if (o.has("screenNodes")) c.screenNodes = o.get("screenNodes").getAsInt();
             if (o.has("screenMs")) c.screenMs = o.get("screenMs").getAsLong();
             if (o.has("guard")) c.guard = o.get("guard").getAsBoolean();
+            if (o.has("pile")) c.pile = o.get("pile").getAsBoolean();
+            if (o.has("pileTop")) c.pileTop = o.get("pileTop").getAsInt();
+            if (o.has("pileNodes")) c.pileNodes = o.get("pileNodes").getAsInt();
+            if (o.has("pileMs")) c.pileMs = o.get("pileMs").getAsLong();
             return c;
         }
 
@@ -116,6 +125,10 @@ public final class ChoiceScorer {
             o.addProperty("screenNodes", screenNodes);
             o.addProperty("screenMs", screenMs);
             o.addProperty("guard", guard);
+            o.addProperty("pile", pile);
+            o.addProperty("pileTop", pileTop);
+            o.addProperty("pileNodes", pileNodes);
+            o.addProperty("pileMs", pileMs);
             return o;
         }
     }
@@ -134,6 +147,8 @@ public final class ChoiceScorer {
         /** Further picks of this resolution Forge AI answered. */
         public int tail;
         public forge.ai.simulation.ForcedWinSolver.Screen screen;
+        /** A pile option: the cards top first. */
+        public List<Integer> pileIds;
     }
 
     /** One scored ask. */
@@ -143,12 +158,17 @@ public final class ChoiceScorer {
         public int menuOptions, cut, failed, frames;
         public long copyNanos, runNanos, featNanos, totalNanos;
         public boolean overBudget;
+        public Option chosen;
     }
 
     /** Frames at most for one opening-hand ask. */
     static final int MULL_FRAMES = 120;
 
     private boolean guardSwap = false;
+    private int pileSeen = 0;
+    /** The chosen pile of the resolution in progress (top first), and the picks already given; null when none. */
+    private List<Integer> pilePlan;
+    private int pileKey, pileNext;
     private final Config cfg;
     private final CardIndex index;
     private final int obsVersion;
@@ -279,6 +299,10 @@ public final class ChoiceScorer {
         }
         if (cfg.guard) {
             s.unsupported = hiddenGuard(g, me, m, seed, fr, deadline);
+            if ("multiAnswer".equals(s.unsupported) && cfg.pile && cfg.solverCfg != null) {
+                piles(g, me, m, seed, fr, s);
+                return;
+            }
             if (s.unsupported != null) {
                 return;
             }
@@ -361,6 +385,50 @@ public final class ChoiceScorer {
             guardSwap = was;
         }
         return null;
+    }
+
+    /** The planner's piles for the resolving spell, each applied and screened; none: stays refused, the policy picks. */
+    private void piles(final Game g, final Player me, final RlCandidates.Menu m, final long seed,
+            final ChoiceApply.Frames fr, final Scored s) {
+        final SpellAbility top = g.getStack().peekAbility();
+        final int key = top == null ? -1 : System.identityHashCode(top);
+        if (key == pileSeen) {
+            s.unsupported = "pileLaterPick";
+            return;
+        }
+        pileSeen = key;
+        final List<List<Integer>> ps = ChoiceApply.pileChoices(g, me, cfg.solverCfg, cfg.pileNodes, cfg.pileMs, cfg.pileTop, seed);
+        s.menuOptions = ps.size();
+        if (ps.isEmpty()) {
+            s.unsupported = "noPile";
+            return;
+        }
+        s.unsupported = null;
+        final Map<Integer, Integer> menuOf = new java.util.HashMap<>();
+        for (int i = 0; i < m.C(); i++) {
+            if (m.cands.get(i).kind > 0 && m.cands.get(i).host != null) {
+                menuOf.put(m.cands.get(i).host.getId(), i);
+            }
+        }
+        for (List<Integer> p : ps) {
+            final Option o = new Option();
+            o.pileIds = p;
+            final StringBuilder lb = new StringBuilder("pile:");
+            for (int id : p) {
+                final Card c = g.findById(id);
+                lb.append(lb.length() == 5 ? "" : ">").append(c == null ? "?" + id : c.getName());
+            }
+            o.label = lb.toString();
+            final Integer first = p.isEmpty() ? null : menuOf.get(p.get(0));
+            if (first == null) {
+                o.fail = "notOnMenu";
+                o.steps = new short[0];
+            } else {
+                o.steps = new short[] {first.shortValue()};
+                note(ChoiceApply.applyPicks(g, me, p, p, seed, cfg.settleSteps, cfg.fidelity, fr), o, s, 0);
+            }
+            s.options.add(o);
+        }
     }
 
     private void run(final Game g, final Player me, final List<Integer> picks, final long seed,
@@ -507,6 +575,57 @@ public final class ChoiceScorer {
         }
     }
 
+    /** A chosen pile takes over this resolution's further picks and its order ask. */
+    public void adoptPile(final Game g, final Option o) {
+        pilePlan = o.pileIds;
+        pileKey = System.identityHashCode(g.getStack().peekAbility());
+        pileNext = 1;
+    }
+
+    public boolean pileActive(final Game g) {
+        return pilePlan != null && !g.getStack().isEmpty() && g.getStack().isResolving()
+                && System.identityHashCode(g.getStack().peekAbility()) == pileKey;
+    }
+
+    /** The plan's answer to this ask of the resolution in progress (CARDS: next pick; ORDER: top first), or null. */
+    public short[] pileAnswer(final Game g, final RlCandidates.Menu m) {
+        if (!pileActive(g)) {
+            pilePlan = null;
+            return null;
+        }
+        if (m.family == RlSchema.F_CARDS && pileNext < pilePlan.size()) {
+            final int id = pilePlan.get(pileNext++);
+            for (int i = 0; i < m.C(); i++) {
+                if (m.cands.get(i).kind > 0 && m.cands.get(i).host != null && m.cands.get(i).host.getId() == id) {
+                    return new short[] {(short) i};
+                }
+            }
+            pilePlan = null;
+            return null;
+        }
+        if (m.family == RlSchema.F_ORDER) {
+            final short[] out = new short[m.C()];
+            int at = 0;
+            final boolean[] used = new boolean[m.C()];
+            for (int id : pilePlan) {
+                for (int i = 0; i < m.C(); i++) {
+                    if (!used[i] && m.cands.get(i).host != null && m.cands.get(i).host.getId() == id) {
+                        out[at++] = (short) i;
+                        used[i] = true;
+                    }
+                }
+            }
+            for (int i = 0; i < m.C(); i++) {
+                if (!used[i]) {
+                    out[at++] = (short) i;
+                }
+            }
+            pilePlan = null;
+            return out;
+        }
+        return null;
+    }
+
     /**
      * Set each option's value from the batch's values (P(win) in [0, 1], in the options' frame order): the mean over
      * groups of each group's best. Returns the steps to play instead of {@code greedy}, or null to keep it.
@@ -532,15 +651,26 @@ public final class ChoiceScorer {
             if (o.policy) {
                 own = o;
             }
-            if (!Double.isNaN(o.value) && (best == null || o.value > best.value)) {
+            if (!Double.isNaN(o.value) && (best == null || better(o, best))) {
                 best = o;
             }
         }
+        s.chosen = best;
+        if (best != null && best.pileIds != null) {
+            return best.screen != null && best.screen.lines > 0 ? best.steps : null;
+        }
         if (best == null || own == null || Double.isNaN(own.value) || best == own
-                || best.value <= own.value + cfg.margin) {
+                || !(own.screen != null && best.screen != null && best.screen.lines > 0 && own.screen.lines == 0)
+                && best.value <= own.value + cfg.margin) {
             return null;
         }
         return best.steps;
+    }
+
+    /** A planner line outranks no line (when the screen ran); then the value. */
+    private static boolean better(final Option a, final Option b) {
+        final boolean la = a.screen != null && a.screen.lines > 0, lb = b.screen != null && b.screen.lines > 0;
+        return la != lb ? la : a.value > b.value;
     }
 
     public List<byte[]> payloads(final Scored s) {

@@ -82,6 +82,8 @@ public final class ChoiceApply {
     static final class Forced extends LookaheadSearch.RolloutAi {
         final List<Integer> picks;
         int next = 0;
+        /** Top first: the answer to the library order ask of this resolution, or null. */
+        List<Integer> order;
         final Runnable leaf;
         boolean missed = false;
         int tail = 0;
@@ -148,6 +150,33 @@ public final class ChoiceApply {
         }
 
         @Override
+        public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone,
+                final SpellAbility source) {
+            if (order != null && destinationZone == ZoneType.Library) {
+                final CardCollection top = new CardCollection();
+                for (int id : order) {
+                    for (Card c : cards) {
+                        if (c.getId() == id) {
+                            top.add(c);
+                        }
+                    }
+                }
+                final CardCollection ordered = new CardCollection();
+                for (Card c : cards) {
+                    if (!top.contains(c)) {
+                        ordered.add(c);
+                    }
+                }
+                // Forge moves each card to the top in the returned order: the last one ends on top
+                for (int i = top.size() - 1; i >= 0; i--) {
+                    ordered.add(top.get(i));
+                }
+                return ordered;
+            }
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+
+        @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             leaf.run();
             return null;
@@ -189,6 +218,62 @@ public final class ChoiceApply {
      */
     public static Result applyPicks(final Game live, final Player liveMe, final List<Integer> picks, final long seed,
             final int settleSteps, final int fidelity, final Frames frames) {
+        return applyPicks(live, liveMe, picks, null, seed, settleSteps, fidelity, frames);
+    }
+
+    /**
+     * The planner's piles for the spell now resolving: on a copy the spell goes back to hand with the mana it cost
+     * floating, so the planner sees it as castable now and searches what to pile for it (top first, shortest win first).
+     */
+    public static List<List<Integer>> pileChoices(final Game live, final Player liveMe, final ForcedWinSolver.Config cfg,
+            final int nodes, final long ms, final int top, final long seed) {
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 7)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final SpellAbility liveTop = live.getStack().peekAbility();
+            if (!liveTop.isSpell() || liveTop.getActivatingPlayer() != liveMe) {
+                return new ArrayList<>();
+            }
+            final int hostId = liveTop.getHostCard().getId();
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                final GameCopier copier = copier(live, 1, true);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+            }
+            final forge.game.spellability.SpellAbilityStackInstance si = g.getStack().peek();
+            final Card host = si.getSourceCard();
+            g.getStack().remove(si);
+            g.getAction().moveToHand(host, null);
+            final forge.game.cost.CostPartMana cm = liveTop.getPayCosts() == null ? null : liveTop.getPayCosts().getCostMana();
+            if (cm != null && cm.getMana() != null) {
+                for (forge.card.mana.ManaCostShard sh : cm.getMana()) {
+                    final byte col = sh.getColorMask();
+                    final byte one = col == 0 ? (byte) forge.card.MagicColor.COLORLESS : (byte) Integer.lowestOneBit(col);
+                    me.getManaPool().addMana(new forge.game.mana.Mana(one, host, null, me));
+                }
+                for (int i = 0; i < cm.getMana().getGenericCost(); i++) {
+                    me.getManaPool().addMana(new forge.game.mana.Mana((byte) forge.card.MagicColor.COLORLESS, host, null, me));
+                }
+            }
+            return new ForcedWinSolver(me, cfg).pileChoices(g, hostId, nodes, ms, top);
+        } catch (RuntimeException | StackOverflowError e) {
+            System.err.println("[choice-apply] pile " + e);
+            return new ArrayList<>();
+        } finally {
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    public static Result applyPicks(final Game live, final Player liveMe, final List<Integer> picks,
+            final List<Integer> order, final long seed, final int settleSteps, final int fidelity, final Frames frames) {
         final Result r = new Result();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -224,6 +309,7 @@ public final class ChoiceApply {
                 }
             };
             final Forced sc = new Forced(g, me, me.getController().getLobbyPlayer(), picks, leaf);
+            sc.order = order;
             me.dangerouslySetController(sc);
             for (Player o : g.getPlayers()) {
                 if (o != me) {

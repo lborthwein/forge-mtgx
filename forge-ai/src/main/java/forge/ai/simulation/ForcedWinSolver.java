@@ -1785,6 +1785,42 @@ public final class ForcedWinSolver {
     }
 
     /** Read the position; the library's affordances are learned only when something we hold could use them. */
+    /**
+     * choice-scorer-1106: the ordered library choices (PILE effects) of {@code hostId} in the planner's lines from
+     * {@code g}, top first, shortest win first; the cards are whatever the search drew to win. Never throws.
+     */
+    public List<List<Integer>> pileChoices(final Game g, final int hostId, final int nodes, final long ms, final int top) {
+        final List<List<Integer>> out = new ArrayList<>();
+        try {
+            final Position pos = readPosition(g, new ArrayList<>());
+            if (pos == null) {
+                return out;
+            }
+            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            lim.nodes = nodes;
+            lim.ms = ms;
+            lim.payPolicies = 1;
+            lim.horizon = cfg.horizon;
+            final List<Line> lines = new ArrayList<>(ForcedWinPlanner.plan(pos, lim).lines);
+            lines.sort((a, b) -> a.winTurn != b.winTurn ? Integer.compare(a.winTurn, b.winTurn)
+                    : Integer.compare(a.steps.size(), b.steps.size()));
+            final Set<List<Integer>> seen = new HashSet<>();
+            for (Line l : lines) {
+                for (Step st : l.steps) {
+                    if (st.hostId == hostId && !st.pile.isEmpty() && seen.add(new ArrayList<>(st.pile))) {
+                        out.add(new ArrayList<>(st.pile));
+                    }
+                }
+                if (out.size() >= top) {
+                    break;
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            receipt("pileChoices " + e);
+        }
+        return out;
+    }
+
     /** choice-scorer-1106: what the cheap width search finds from a position, unverified. */
     public static final class Screen {
         public int lines, nodes, bestTurn = -1, bestSteps = -1;

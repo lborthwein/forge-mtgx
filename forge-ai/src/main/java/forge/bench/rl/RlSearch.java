@@ -1262,7 +1262,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (scorer == null) {
             scorer = new ChoiceScorer(ChoiceScorer.Config.parse(cfg.choiceScorer), index, obsVersion, uid);
             final ChoiceScorer.Config sc = scorer.config();
-            if (sc.screenNodes > 0) {
+            if (sc.screenNodes > 0 || sc.pile) {
                 sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();
             }
         }
@@ -1278,7 +1278,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public boolean choiceAsk(final int family) {
-        return cfg.choiceScorer != null && liveKnow != null && scorer().config().families.contains(family);
+        return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
+                || family == RlSchema.F_ORDER && scorer().config().pile);
     }
 
     @Override
@@ -1286,6 +1287,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final short[] greedy) {
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
+        if (sc.pileActive(g)) {
+            return sc.pileAnswer(g, m);
+        }
+        if (m.family == RlSchema.F_ORDER) {
+            return null;
+        }
         final long seed = LookaheadSearch.mix(LookaheadSearch.mix(gameSeed, 0xC401CEL), frame.decIdx);
         final String src = ChoiceScorer.srcOf(g);
         final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed, null);
@@ -1302,6 +1309,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final boolean scored = v != null;
         if (sc.config().shadow) {
             alt = null;
+        }
+        if (alt != null && s.chosen != null && s.chosen.pileIds != null) {
+            sc.adoptPile(g, s.chosen);
         }
         if (cfg.decisionLog != null || rowsWanted) {
             final JsonObject row = sc.row(s, src);
