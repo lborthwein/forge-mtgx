@@ -110,10 +110,21 @@ public class RlFrameStatesTest {
         }
         final Path fd = on.resolve("fork-diff");
         Files.createDirectories(fd);
-        int liveEq = 0;
+        // a stack GameCopier refuses (stackUnsupported: triggers, copies, ...) is not copied: that fork is approximate,
+        // counted apart; every other live fork must be byte-identical
+        int liveEq = 0, liveN = 0, unsup = 0, unsupEq = 0;
+        final Map<String, Integer> why = new java.util.TreeMap<>();
         final List<String> liveDiff = new ArrayList<>();
         for (Object[] x : live) {
-            if (Arrays.equals((byte[]) x[1], (byte[]) x[2])) {
+            final boolean eq = Arrays.equals((byte[]) x[1], (byte[]) x[2]);
+            if (x[3] != null) {
+                unsup++;
+                unsupEq += eq ? 1 : 0;
+                why.merge(String.valueOf(x[3]).split(":")[0], 1, Integer::sum);
+                continue;
+            }
+            liveN++;
+            if (eq) {
                 liveEq++;
             } else if (liveDiff.size() < 20) {
                 liveDiff.add((String) x[0]);
@@ -121,8 +132,8 @@ public class RlFrameStatesTest {
                 Files.write(fd.resolve("live-" + x[0] + ".fork"), (byte[]) x[2]);
             }
         }
-        System.err.println("[frame-states test] live-fork-equal " + liveEq + "/" + live.size() + " first diffs "
-                + liveDiff + " -> " + fd);
+        System.err.println("[frame-states test] live-fork-equal " + liveEq + "/" + liveN + " (stack not copyable "
+                + unsupEq + "/" + unsup + " equal, " + why + ") first diffs " + liveDiff + " -> " + fd);
         for (JsonObject g : RlLabelReplayTest.jsonl(on, "games-")) {
             Assert.assertTrue(g.get("equal").getAsBoolean(), g.toString());
         }
@@ -179,7 +190,7 @@ public class RlFrameStatesTest {
         // (b) a fork of an INSTALLED frame is reported only: GameCopier does not carry everything an install + sidecar
         // sets, so installed-frame forks are approximate (like bare-frame scoring). (a) is the labeller's path: exact.
         Assert.assertFalse(live.isEmpty());
-        Assert.assertEquals(liveEq, live.size(), "a fork of the live game featurizes as the live game");
+        Assert.assertEquals(liveEq, liveN, "a fork of the live game featurizes as the live game");
         Assert.assertTrue(n0 > 0);
     }
 }

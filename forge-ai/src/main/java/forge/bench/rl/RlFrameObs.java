@@ -123,15 +123,25 @@ public final class RlFrameObs {
 
     /**
      * ChooseACard's copy of a live game for valuing an answer (GameCopier with plain AI players, copy fidelity 1, the
-     * solver's pending-copy mode), under the live game's monitor. Returns {copy, the copy's {@code me}}.
+     * solver's pending-copy mode), under the live game's monitor. Unlike ChooseACard's answer copy, it also copies the
+     * stack when {@link forge.ai.simulation.GameCopier#stackUnsupported} accepts it, and gives priority to the live
+     * game's priority player (GameCopier's devModeSet hands it to the active player), so a fork of the live game
+     * featurizes as the live game. Returns {copy, the copy's {@code me}, why the stack was not copied (null if it was
+     * copied or is empty)}: a fork with a non-null reason is approximate.
      */
     public static Object[] forkCopy(final Game live, final Player me) {
         synchronized (live) {
             final forge.ai.simulation.GameCopier copier = new forge.ai.simulation.GameCopier(live, true);
             copier.setCopyFidelity(1);
             copier.setCopyPending(forge.ai.simulation.GameCopier.SOLVER_COPY_PENDING);
+            final String why = live.getStack().isEmpty() ? null : forge.ai.simulation.GameCopier.stackUnsupported(live);
+            copier.setCopyStack(!live.getStack().isEmpty() && why == null);
             final Game g = copier.makeCopy();
-            return new Object[] {g, copier.find(me)};
+            final Player pr = live.getPhaseHandler().getPriorityPlayer();
+            if (pr != null) {
+                g.getPhaseHandler().setPriority(copier.find(pr));
+            }
+            return new Object[] {g, copier.find(me), why};
         }
     }
 

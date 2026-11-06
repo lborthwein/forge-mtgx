@@ -120,11 +120,14 @@ public final class RlFrameStates implements PriorityDecisionListener {
         r.addProperty("payload_sha256", f.sha256());
         final java.util.function.Consumer<Object[]> probe = forkProbe;
         if (probe != null) {
+            final String[] why = new String[1];
             final RlFrameObs.Frame ff = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
-                final Game cp = (Game) RlFrameObs.forkCopy(g, p)[0];
-                return RlFrameObs.featurizeForked(cp, seat, know, index, obs, uid, ord);
+                final Object[] fk = RlFrameObs.forkCopy(g, p);
+                why[0] = (String) fk[2];
+                return RlFrameObs.featurizeForked((Game) fk[0], seat, know, index, obs, uid, ord);
             }));
-            probe.accept(new Object[] {Long.toUnsignedString(uid) + ":" + seat + ":" + ord, f.payload, ff.payload});
+            probe.accept(new Object[] {Long.toUnsignedString(uid) + ":" + seat + ":" + ord, f.payload, ff.payload,
+                    why[0]});
         }
         rows.add(RlWire.canonicalString(r));
     }
