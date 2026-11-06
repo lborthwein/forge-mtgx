@@ -31,6 +31,11 @@ public final class ChoiceApply {
         Object onCopy(Game copy, Player me);
 
         byte[] capture(Object ctx, Game g, Player me);
+
+        /** At the leaf too: the planner screen of this position, or null (off). */
+        default ForcedWinSolver.Screen screen(Object ctx, Game g, Player me) {
+            return null;
+        }
     }
 
     /** One applied answer. */
@@ -44,6 +49,7 @@ public final class ChoiceApply {
         public int steps;
         /** Further picks of the same resolution that Forge AI answered (0 = this answer settled the whole choice). */
         public int tailAsks;
+        public ForcedWinSolver.Screen screen;
     }
 
     /** Why a resolving choice can't be replayed on a copy, or null. */
@@ -214,6 +220,7 @@ public final class ChoiceApply {
                 if (!reached[0]) {
                     reached[0] = true;
                     r.payload = frames.capture(ctx, g, me);
+                    r.screen = frames.screen(ctx, g, me);
                 }
             };
             final Forced sc = new Forced(g, me, me.getController().getLobbyPlayer(), picks, leaf);

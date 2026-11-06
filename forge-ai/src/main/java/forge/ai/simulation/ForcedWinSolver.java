@@ -1785,6 +1785,58 @@ public final class ForcedWinSolver {
     }
 
     /** Read the position; the library's affordances are learned only when something we hold could use them. */
+    /** choice-scorer-1106: what the cheap width search finds from a position, unverified. */
+    public static final class Screen {
+        public int lines, nodes, bestTurn = -1, bestSteps = -1;
+        public boolean exhausted, failed;
+        public long nanos;
+        public String best;
+    }
+
+    /**
+     * choice-scorer-1106: the planner alone (this turn, then by our next turn) from {@code g}, our library's known top as
+     * given (top first). No game copies, no opponent: a screen, never a proof. Never throws.
+     */
+    public Screen screen(final Game g, final List<Integer> knownTop, final int nodes, final long ms) {
+        final Screen s = new Screen();
+        final long t0 = System.nanoTime();
+        try {
+            final Position pos = readPosition(g, knownTop);
+            if (pos == null) {
+                s.failed = true;
+                return s;
+            }
+            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            lim.nodes = nodes;
+            lim.ms = ms;
+            lim.payPolicies = 1;
+            lim.horizon = 1;
+            ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
+            s.nodes = r.nodes;
+            s.exhausted = r.exhausted;
+            if (r.lines.isEmpty() && cfg.horizon >= 2) {
+                lim.horizon = cfg.horizon;
+                r = ForcedWinPlanner.plan(pos, lim);
+                s.nodes += r.nodes;
+                s.exhausted |= r.exhausted;
+            }
+            s.lines = r.lines.size();
+            for (Line l : r.lines) {
+                if (s.bestTurn < 0 || l.winTurn < s.bestTurn || l.winTurn == s.bestTurn && l.steps.size() < s.bestSteps) {
+                    s.bestTurn = l.winTurn;
+                    s.bestSteps = l.steps.size();
+                    s.best = String.valueOf(l);
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            s.failed = true;
+            s.best = String.valueOf(e);
+        } finally {
+            s.nanos = System.nanoTime() - t0;
+        }
+        return s;
+    }
+
     Position readPosition(Game live, List<Integer> knownOrder) {
         final Position pos = reader.read(live, me, knownOrder, true);
         return pos;

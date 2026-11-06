@@ -1261,6 +1261,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private ChoiceScorer scorer() {
         if (scorer == null) {
             scorer = new ChoiceScorer(ChoiceScorer.Config.parse(cfg.choiceScorer), index, obsVersion, uid);
+            final ChoiceScorer.Config sc = scorer.config();
+            if (sc.screenNodes > 0) {
+                sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();
+            }
         }
         return scorer;
     }

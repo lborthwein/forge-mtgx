@@ -49,6 +49,13 @@ public final class ChoiceScorer {
         public int fidelity = 1;
         /** Score and log, keep the policy's answer. */
         public boolean shadow = false;
+        /** Planner screen per applied option (nodes; 0 = off) and its wall cap per option, ms. */
+        public int screenNodes = 0;
+        public long screenMs = 200;
+        /** Cards never answered by a copy whose frame depends on the opponent's hidden hand ({@link #hiddenGuard}). */
+        public boolean guard = true;
+        /** The solver's config for the screen (spec's plans.solverCfg; not a JSON key). */
+        public forge.ai.simulation.ForcedWinSolver.Config solverCfg;
         /**
          * Leak test only (never a JSON key): before the frame, swap the opponent's unknown hand cards with unknown library
          * cards and shuffle its library when none of it is known. A frame that changes reads hidden cards.
@@ -56,7 +63,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow"));
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -84,6 +91,9 @@ public final class ChoiceScorer {
             if (o.has("searchedTop")) c.searchedTop = o.get("searchedTop").getAsBoolean();
             if (o.has("fidelity")) c.fidelity = o.get("fidelity").getAsInt();
             if (o.has("shadow")) c.shadow = o.get("shadow").getAsBoolean();
+            if (o.has("screenNodes")) c.screenNodes = o.get("screenNodes").getAsInt();
+            if (o.has("screenMs")) c.screenMs = o.get("screenMs").getAsLong();
+            if (o.has("guard")) c.guard = o.get("guard").getAsBoolean();
             return c;
         }
 
@@ -103,6 +113,9 @@ public final class ChoiceScorer {
             o.addProperty("searchedTop", searchedTop);
             o.addProperty("fidelity", fidelity);
             o.addProperty("shadow", shadow);
+            o.addProperty("screenNodes", screenNodes);
+            o.addProperty("screenMs", screenMs);
+            o.addProperty("guard", guard);
             return o;
         }
     }
@@ -120,6 +133,7 @@ public final class ChoiceScorer {
         public double value = Double.NaN;
         /** Further picks of this resolution Forge AI answered. */
         public int tail;
+        public forge.ai.simulation.ForcedWinSolver.Screen screen;
     }
 
     /** One scored ask. */
@@ -134,6 +148,7 @@ public final class ChoiceScorer {
     /** Frames at most for one opening-hand ask. */
     static final int MULL_FRAMES = 120;
 
+    private boolean guardSwap = false;
     private final Config cfg;
     private final CardIndex index;
     private final int obsVersion;
@@ -159,7 +174,7 @@ public final class ChoiceScorer {
                 if (seatMask != 0) {
                     k.setSearchedTopSeats(seatMask);
                 }
-                if (cfg.probeOpp) {
+                if (cfg.probeOpp || guardSwap) {
                     swapOpponentHidden(copy, me, k);
                 }
                 k.attach();
@@ -178,9 +193,27 @@ public final class ChoiceScorer {
                 s.featNanos += System.nanoTime() - t;
                 return p;
             }
+
+            @Override
+            public forge.ai.simulation.ForcedWinSolver.Screen screen(final Object ctx, final Game g, final Player me) {
+                if (cfg.screenNodes <= 0 || cfg.solverCfg == null) {
+                    return null;
+                }
+                final RlKnowledge k = ((RlFeaturizer) ctx).knowledge();
+                final int st = k.seatOf(me);
+                final List<Integer> top = new ArrayList<>();
+                for (Card c : me.getCardsIn(ZoneType.Library)) {
+                    if (!k.knows(st, c)) {
+                        break;
+                    }
+                    top.add(c.getId());
+                }
+                return new forge.ai.simulation.ForcedWinSolver(me, cfg.solverCfg).screen(g, top, cfg.screenNodes, cfg.screenMs);
+            }
         };
     }
 
+    /** The opponent's unknown hand cards trade places with unknown library cards below the top. Positions stay. */
     private static void swapOpponentHidden(final Game g, final Player me, final RlKnowledge k) {
         final int seat = k.seatOf(me);
         for (Player o : me.getOpponents()) {
@@ -190,22 +223,19 @@ public final class ChoiceScorer {
                     hand.add(c);
                 }
             }
-            final List<Card> lib = new ArrayList<>();
-            boolean libKnown = false;
-            for (Card c : o.getCardsIn(ZoneType.Library)) {
-                if (k.knows(seat, c)) {
-                    libKnown = true;
-                } else {
-                    lib.add(c);
+            final List<Card> lib = new ArrayList<>(new forge.game.card.CardCollection(o.getCardsIn(ZoneType.Library)));
+            int at = lib.size() - 1;
+            for (Card h : hand) {
+                while (at > 0 && k.knows(seat, lib.get(at))) {
+                    at--;
                 }
-            }
-            if (!libKnown) {
-                o.shuffle(null);
-            }
-            for (int i = 0; i < hand.size() && i < lib.size(); i++) {
-                final Card a = hand.get(i), b = lib.get(lib.size() - 1 - i);
-                g.getAction().moveTo(ZoneType.Library, a, null, null);
-                g.getAction().moveTo(ZoneType.Hand, b, null, null);
+                if (at <= 0) {
+                    break;
+                }
+                final Card l = lib.get(at);
+                g.getAction().moveToLibrary(h, at, null);
+                g.getAction().moveTo(ZoneType.Hand, l, null, null);
+                at--;
             }
         }
     }
@@ -246,6 +276,12 @@ public final class ChoiceScorer {
         s.unsupported = ChoiceApply.unsupported(g, null);
         if (s.unsupported != null) {
             return;
+        }
+        if (cfg.guard) {
+            s.unsupported = hiddenGuard(g, me, m, seed, fr, deadline);
+            if (s.unsupported != null) {
+                return;
+            }
         }
         // one option per distinct card (name, zone, controller: two Islands are one answer)
         final Map<String, Integer> byKey = new LinkedHashMap<>();
@@ -289,6 +325,44 @@ public final class ChoiceScorer {
         }
     }
 
+    /**
+     * Whether a copy can answer this ask honestly, from one option applied twice: "multiAnswer" if Forge AI would
+     * answer further picks of the same resolution (an earlier pick is not replayed, and the tail is stream noise), or
+     * "oppHidden" if the frame changes when the opponent's unknown hand cards are swapped with unknown library cards
+     * (the opponent acts on hidden cards during the resolution). Null = fine. No card knowledge.
+     */
+    private String hiddenGuard(final Game g, final Player me, final RlCandidates.Menu m, final long seed,
+            final ChoiceApply.Frames fr, final long deadline) {
+        int first = -1;
+        for (int i = 0; i < m.C() && first < 0; i++) {
+            if (m.cands.get(i).kind > 0 && m.cands.get(i).host != null) {
+                first = i;
+            }
+        }
+        if (first < 0) {
+            return null;
+        }
+        final List<Integer> pick = Collections.singletonList(m.cands.get(first).host.getId());
+        final ChoiceApply.Result a = ChoiceApply.applyPicks(g, me, pick, seed, cfg.settleSteps, cfg.fidelity, fr);
+        if (a.fail != null) {
+            return null; // the options report their own failures
+        }
+        if (a.tailAsks > 0) {
+            return "multiAnswer";
+        }
+        final boolean was = guardSwap;
+        guardSwap = true;
+        try {
+            final ChoiceApply.Result b = ChoiceApply.applyPicks(g, me, pick, seed, cfg.settleSteps, cfg.fidelity, fr);
+            if (b.fail == null && !Arrays.equals(a.payload, b.payload)) {
+                return "oppHidden";
+            }
+        } finally {
+            guardSwap = was;
+        }
+        return null;
+    }
+
     private void run(final Game g, final Player me, final List<Integer> picks, final long seed,
             final ChoiceApply.Frames fr, final Option o, final Scored s) {
         final ChoiceApply.Result r = ChoiceApply.applyPicks(g, me, picks, seed, cfg.settleSteps, cfg.fidelity, fr);
@@ -299,6 +373,9 @@ public final class ChoiceScorer {
         s.copyNanos += r.copyNanos;
         s.runNanos += r.runNanos;
         o.tail = Math.max(o.tail, r.tailAsks);
+        if (r.screen != null) {
+            o.screen = r.screen;
+        }
         if (r.fail != null) {
             o.fail = r.fail;
         } else if (!Double.isNaN(r.terminal)) {
@@ -499,6 +576,17 @@ public final class ChoiceScorer {
             if (o.fail != null) x.addProperty("fail", o.fail);
             x.addProperty("n", o.frames.size());
             if (o.tail > 0) x.addProperty("tail", o.tail);
+            if (o.screen != null) {
+                x.addProperty("lines", o.screen.lines);
+                x.addProperty("plan_nodes", o.screen.nodes);
+                x.addProperty("plan_ms", Math.round(o.screen.nanos / 1e4) / 100.0);
+                if (o.screen.exhausted) x.addProperty("plan_exh", true);
+                if (o.screen.failed) x.addProperty("plan_fail", String.valueOf(o.screen.best));
+                if (o.screen.bestTurn >= 0) {
+                    x.addProperty("win_turn", o.screen.bestTurn);
+                    x.addProperty("win_steps", o.screen.bestSteps);
+                }
+            }
             a.add(x);
         }
         r.add("options", a);
