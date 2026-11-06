@@ -295,6 +295,65 @@ public final class RlFrameObs {
             }
         }
         o.add("visible", vis);
+        // links between objects the text may drop: [ref, kind, ref | "player:<seat>"]
+        final JsonArray lk = new JsonArray();
+        for (int i = 0; i < ps.size(); i++) {
+            for (ZoneType z : REF_ZONES) {
+                for (Card c : ps.get(i).getCardsIn(z, false)) {
+                    final String r = refOf(refs, c.getId());
+                    try {
+                        if (z == ZoneType.Battlefield) {
+                            final forge.game.GameEntity host = c.getEntityAttachedTo();
+                            if (host != null) {
+                                link(lk, r, "attached", entityRef(refs, ps, host));
+                            }
+                            for (Card im : c.getImprintedCards()) {
+                                link(lk, r, "imprinted", refOf(refs, im.getId()));
+                            }
+                            for (Card en : c.getEncodedCards()) {
+                                link(lk, r, "encoded", refOf(refs, en.getId()));
+                            }
+                            if (c.getPairedWith() != null) {
+                                link(lk, r, "paired", refOf(refs, c.getPairedWith().getId()));
+                            }
+                            if (c.getHaunting() != null) {
+                                link(lk, r, "haunting", refOf(refs, c.getHaunting().getId()));
+                            }
+                        } else if (z == ZoneType.Exile && c.getExiledWith() != null && c.getExiledWith() != c) {
+                            link(lk, r, "exiled_with", refOf(refs, c.getExiledWith().getId()));
+                        }
+                    } catch (RuntimeException e) {
+                        // a link unreadable: left to the text
+                    }
+                }
+            }
+        }
+        o.add("links", lk);
+        // combat (GameState text restores it only in the declare steps)
+        final forge.game.combat.Combat cb = game.getCombat();
+        if (cb != null) {
+            final JsonObject co = new JsonObject();
+            final JsonArray at = new JsonArray(), bl = new JsonArray();
+            for (Card a : cb.getAttackers()) {
+                final JsonArray y = new JsonArray();
+                y.add(refOf(refs, a.getId()));
+                y.add(entityRef(refs, ps, cb.getDefenderByAttacker(a)));
+                at.add(y);
+            }
+            for (Card b : cb.getAllBlockers()) {
+                final JsonArray y = new JsonArray();
+                y.add(refOf(refs, b.getId()));
+                final JsonArray as = new JsonArray();
+                for (Card a : cb.getAttackersBlockedBy(b)) {
+                    as.add(refOf(refs, a.getId()));
+                }
+                y.add(as);
+                bl.add(y);
+            }
+            co.add("attackers", at);
+            co.add("blockers", bl);
+            o.add("combat", co);
+        }
         if (decks != null) {
             final JsonArray da = new JsonArray();
             for (List<Object[]> d : decks) {
@@ -421,6 +480,66 @@ public final class RlFrameObs {
                 }
             }
         }
+        if (sc.has("links")) {
+            for (JsonElement e : sc.getAsJsonArray("links")) {
+                final JsonArray y = e.getAsJsonArray();
+                final Card c = cardOf(game, ids, y.get(0).getAsString());
+                final String kind = y.get(1).getAsString(), to = y.get(2).getAsString();
+                if (c == null) {
+                    continue;
+                }
+                try {
+                    if ("attached".equals(kind)) {
+                        final forge.game.GameEntity h = entityOf(game, ids, ps, to);
+                        if (h != null && c.getEntityAttachedTo() != h) {
+                            c.attachToEntity(h, null, true);
+                        }
+                        continue;
+                    }
+                    final Card d = cardOf(game, ids, to);
+                    if (d == null) {
+                        continue;
+                    }
+                    if ("imprinted".equals(kind) && !c.getImprintedCards().contains(d)) {
+                        c.addImprintedCard(d);
+                    } else if ("encoded".equals(kind) && !c.getEncodedCards().contains(d)) {
+                        c.addEncodedCard(d);
+                    } else if ("paired".equals(kind) && c.getPairedWith() != d) {
+                        c.setPairedWith(d);
+                    } else if ("haunting".equals(kind) && c.getHaunting() != d) {
+                        c.setHaunting(d);
+                    } else if ("exiled_with".equals(kind) && c.getExiledWith() != d) {
+                        c.setExiledWith(d);
+                    }
+                } catch (RuntimeException ex) {
+                    // left as installed
+                }
+            }
+        }
+        if (sc.has("combat") && game.getCombat() == null && game.getPhaseHandler().getPhase() != null
+                && game.getPhaseHandler().getPhase().name().startsWith("COMBAT_")) {
+            final JsonObject co = sc.getAsJsonObject("combat");
+            final forge.game.combat.Combat cb = new forge.game.combat.Combat(game.getPhaseHandler().getPlayerTurn());
+            for (JsonElement e : co.getAsJsonArray("attackers")) {
+                final JsonArray y = e.getAsJsonArray();
+                final Card a = cardOf(game, ids, y.get(0).getAsString());
+                final forge.game.GameEntity d = entityOf(game, ids, ps, y.get(1).getAsString());
+                if (a != null && d != null) {
+                    cb.addAttacker(a, d);
+                }
+            }
+            for (JsonElement e : co.getAsJsonArray("blockers")) {
+                final JsonArray y = e.getAsJsonArray();
+                final Card b = cardOf(game, ids, y.get(0).getAsString());
+                for (JsonElement x : y.get(1).getAsJsonArray()) {
+                    final Card a = cardOf(game, ids, x.getAsString());
+                    if (a != null && b != null && cb.isAttacking(a)) {
+                        cb.addBlocker(a, b);
+                    }
+                }
+            }
+            game.getPhaseHandler().setCombat(cb);
+        }
         if (!sc.has("knowledge")) {
             return null;
         }
@@ -471,6 +590,35 @@ public final class RlFrameObs {
                 }
             }
         }
+    }
+
+    private static void link(final JsonArray lk, final String a, final String kind, final String b) {
+        final JsonArray y = new JsonArray();
+        y.add(a);
+        y.add(kind);
+        y.add(b);
+        lk.add(y);
+    }
+
+    static String entityRef(final Map<Integer, String> refs, final List<Player> ps, final forge.game.GameEntity e) {
+        if (e instanceof Player) {
+            return "player:" + ps.indexOf(e);
+        }
+        return e instanceof Card ? refOf(refs, ((Card) e).getId()) : "#none";
+    }
+
+    static Card cardOf(final Game g, final Map<String, Integer> ids, final String ref) {
+        final Integer id = ids.get(ref);
+        return id == null ? null : g.findById(id);
+    }
+
+    static forge.game.GameEntity entityOf(final Game g, final Map<String, Integer> ids, final List<Player> ps,
+            final String ref) {
+        if (ref.startsWith("player:")) {
+            final int i = Integer.parseInt(ref.substring(7));
+            return i >= 0 && i < ps.size() ? ps.get(i) : null;
+        }
+        return cardOf(g, ids, ref);
     }
 
     private static void setInt(final Object o, final String field, final int v) {
