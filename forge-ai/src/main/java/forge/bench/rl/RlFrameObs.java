@@ -168,17 +168,61 @@ public final class RlFrameObs {
                 n.setExiledWith(w != c && m == n ? forge.game.card.CardCopyService.getLKICopy(n) : m);
             }
         }
+        final List<Player> from = live.getRegisteredPlayers(), to = g.getRegisteredPlayers();
+        for (Card c : live.getCardsIn(ZoneType.Exile)) {
+            final Card n = c.isFaceDown() ? g.findById(c.getId()) : null;
+            if (n == null) {
+                continue;
+            }
+            n.updateStateForView(); // GameCopier turns it face down without updating its view: it would show
+            for (int i = 0; i < from.size(); i++) {
+                if (c.getView().canFaceDownBeShownTo(from.get(i).getView())
+                        && !n.getView().canFaceDownBeShownTo(to.get(i).getView())) {
+                    n.addMayLookFaceDownExile(to.get(i));
+                }
+            }
+        }
+        for (int i = 0; i < from.size(); i++) {
+            for (Card c : from.get(i).getCardsIn(ZoneType.Command)) {
+                if (c.getType().isDungeon()) {
+                    forkDungeon(c, to.get(i), g);
+                }
+            }
+        }
+    }
+
+    /** A venture dungeon: GameCopier does not carry it as a dungeon in its room. */
+    private static void forkDungeon(final Card c, final Player owner, final Game g) {
+        Card n = null;
+        for (Card x : owner.getCardsIn(ZoneType.Command)) {
+            n = x.getId() == c.getId() ? x : n;
+        }
+        if (n == null) {
+            n = new Card(c.getId(), c.getPaperCard(), g);
+            n.setOwner(owner);
+            owner.getZone(ZoneType.Command).add(n);
+        }
+        n.setGamePieceType(c.getGamePieceType());
+        n.setName(c.getName());
+        n.setType(new forge.card.CardType(c.getType()));
+        n.setCurrentRoom(c.getCurrentRoom());
     }
 
     /**
      * Cast choices GameCopier's faithful stack copy leaves out: the alternative cost, and a modal spell's chosen modes
-     * chained as sub-abilities with their targets. Both stacks list top first and have the same size.
+     * chained as sub-abilities with their targets, and the stack instance ids (a tracked event's target refers to one).
+     * Both stacks list top first and have the same size. The copy's stack is rebuilt last, as an instance captures its
+     * sub-abilities when built.
      */
     private static void forkStackChoices(final Game live, final Game g, final forge.ai.simulation.GameCopier copier) {
         final java.util.Iterator<SpellAbilityStackInstance> copied = g.getStack().iterator();
+        final List<SpellAbility> sas = new ArrayList<>();
+        final List<Integer> ids = new ArrayList<>();
         for (SpellAbilityStackInstance si : live.getStack()) {
             final SpellAbility a = si.getSpellAbility();
             final SpellAbility b = copied.next().getSpellAbility();
+            sas.add(b);
+            ids.add(si.getId());
             b.setAlternativeCost(a.getAlternativeCost());
             if (a.getChosenList() != null && b.getChosenList() != null && b.getSubAbility() == null) {
                 forge.game.ability.effects.CharmEffect.chainAbilities(b, b.getChosenList());
@@ -193,6 +237,10 @@ public final class RlFrameObs {
                     }
                 }
             }
+        }
+        g.getStack().clear();
+        for (int i = sas.size() - 1; i >= 0; i--) {
+            g.getStack().dangerouslyPushCopy(sas.get(i), ids.get(i));
         }
     }
 

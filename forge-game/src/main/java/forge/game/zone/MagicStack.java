@@ -1126,6 +1126,12 @@ public class MagicStack /* extends MyObservable */ implements Iterable<SpellAbil
         game.updateStackForView();
     }
 
+    /** {@link #dangerouslyPushCopy(SpellAbility)} keeping the stack instance id of the entry this copies. */
+    public final void dangerouslyPushCopy(final SpellAbility sp, final int id) {
+        stack.addFirst(new SpellAbilityStackInstance(sp, id));
+        game.updateStackForView();
+    }
+
     public void clear() {
         if (stack.isEmpty()) { return; }
         stack.clear();
