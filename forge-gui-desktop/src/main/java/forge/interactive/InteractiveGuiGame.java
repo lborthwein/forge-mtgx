@@ -2909,6 +2909,30 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         emitNotice("warning", message, "mana-x-unaffordable");
     }
 
+    /**
+     * A typed fact for this seat's log ({@code mana_color_forced}): an any-colour source this seat
+     * activated made the one colour that can pay the cost being paid, with no question asked.
+     */
+    @Override
+    public void notifyManaColourForced(final CardView source, final byte colour) {
+        if (channel.isEnded() || source == null) {
+            return;
+        }
+        try {
+            final JsonObject body = new JsonObject();
+            final JsonObject eventBody = new JsonObject();
+            eventBody.addProperty("class", "ManaColourForced");
+            eventBody.addProperty("kind", "mana_color_forced");
+            eventBody.addProperty("playerSeat", humanSeat);
+            eventBody.addProperty("card", source.getName());
+            eventBody.addProperty("color", forge.card.MagicColor.toShortString(colour));
+            body.add("event", eventBody);
+            channel.send("event", body);
+        } catch (InteractiveProtocol.ProtocolException e) {
+            fail("eof", e.getMessage(), null, "notifyManaColourForced", null, e);
+        }
+    }
+
     @Override
     public Integer chooseManaX(final String message, final int min, final int max,
                               final boolean exact, final String detail, final boolean cancellable) {
