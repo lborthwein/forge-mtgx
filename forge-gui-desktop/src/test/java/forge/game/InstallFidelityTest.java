@@ -73,7 +73,7 @@ public class InstallFidelityTest extends AITest {
     }
 
     private static Card named(final Player p, final String name) {
-        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+        for (Card c : p.getZone(ZoneType.Battlefield).getCards(false)) { // phased-out cards too
             if (c.getPaperCard().getName().equals(name)) {
                 return c;
             }
