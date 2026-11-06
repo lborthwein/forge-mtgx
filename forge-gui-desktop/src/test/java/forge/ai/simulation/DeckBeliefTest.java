@@ -281,6 +281,7 @@ public class DeckBeliefTest extends SimulationTest {
         c.raceWorlds = 8;
         AssertJUnit.assertEquals(8, c.toJson().get("raceWorlds").getAsInt());
         JsonObject o = new JsonObject();
+        o.addProperty("server", "localhost:1");
         AssertJUnit.assertEquals(0, forge.bench.rl.RlSearch.Config.parse(o).raceWorlds);
         AssertJUnit.assertFalse(forge.bench.rl.RlSearch.Config.parse(o).beliefDeck);
         o.addProperty("raceWorlds", 8);
@@ -327,11 +328,13 @@ public class DeckBeliefTest extends SimulationTest {
         // weights e^1.5 : 1 : e^-1 : 1, so Counterspell leads about 4.48 / 6.85 of the time
         AssertJUnit.assertTrue("first " + first, first > 220 && first < 300);
         JsonObject o = new JsonObject();
+        o.addProperty("server", "localhost:1");
         o.addProperty("beliefPoolMode", "independent");
         AssertJUnit.assertEquals("independent", forge.bench.rl.RlSearch.Config.parse(o).beliefPoolMode);
-        AssertJUnit.assertEquals("independent", forge.bench.rl.RlSearch.Config.parse(new JsonObject()).beliefPoolMode);
-        o.addProperty("beliefPoolMode", "draft-pod");
-        AssertJUnit.assertEquals("draft-pod", forge.bench.rl.RlSearch.Config.parse(o).beliefPoolMode);
+        JsonObject none = new JsonObject();
+        none.addProperty("server", "localhost:1");
+        AssertJUnit.assertEquals("draft-pod", forge.bench.rl.RlSearch.Config.parse(none).beliefPoolMode); // today's rule
+        AssertJUnit.assertEquals("draft-pod", new LookaheadSearch.Config().beliefPoolMode);
         o.addProperty("beliefPoolMode", "pod");
         try {
             forge.bench.rl.RlSearch.Config.parse(o);

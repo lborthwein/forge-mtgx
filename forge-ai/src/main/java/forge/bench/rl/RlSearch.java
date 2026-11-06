@@ -229,7 +229,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /** deck-belief-1105 AMEND-4 (off by default and then absent from the JSON). */
         public String beliefDeckCooc, beliefDeckCoocSha256;
         public double beliefDeckCoocGain = 1.0;
-        public String beliefPoolMode = "independent";
+        public String beliefPoolMode = "draft-pod";
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -454,7 +454,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     o.addProperty("beliefDeckCoocSha256", beliefDeckCoocSha256);
                     o.addProperty("beliefDeckCoocGain", beliefDeckCoocGain);
                 }
-                if (!"independent".equals(beliefPoolMode)) {
+                if (!"draft-pod".equals(beliefPoolMode)) {
                     o.addProperty("beliefPoolMode", beliefPoolMode);
                 }
             }
