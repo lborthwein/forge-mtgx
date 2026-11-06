@@ -191,7 +191,7 @@ public final class RlFrameObs {
         }
     }
 
-    /** A venture dungeon: GameCopier does not carry it as a dungeon in its room. */
+    /** A venture dungeon as the frame sees it (type, room, keywords): GameCopier does not carry it. Its room triggers are not copied. */
     private static void forkDungeon(final Card c, final Player owner, final Game g) {
         Card n = null;
         for (Card x : owner.getCardsIn(ZoneType.Command)) {
@@ -206,6 +206,15 @@ public final class RlFrameObs {
         n.setName(c.getName());
         n.setType(new forge.card.CardType(c.getType()));
         n.setCurrentRoom(c.getCurrentRoom());
+        final List<String> has = new ArrayList<>();
+        for (forge.game.keyword.KeywordInterface k : n.getKeywords()) {
+            has.add(k.getOriginal());
+        }
+        for (forge.game.keyword.KeywordInterface k : c.getKeywords()) {
+            if (!has.contains(k.getOriginal())) {
+                n.addIntrinsicKeyword(k.getOriginal());
+            }
+        }
     }
 
     /**
