@@ -127,7 +127,8 @@ public final class RlFrameObs {
      * stack when {@link forge.ai.simulation.GameCopier#stackUnsupported} accepts it, and gives priority to the live
      * game's priority player (GameCopier's devModeSet hands it to the active player), so a fork of the live game
      * featurizes as the live game. Returns {copy, the copy's {@code me}, why the stack was not copied (null if it was
-     * copied or is empty)}: a fork with a non-null reason is approximate.
+     * copied or is empty, or why a fidelity step failed)}: a fork with a non-null reason is approximate. Exiled-with links
+     * and the stack's cast choices are set here rather than in GameCopier, so the solver's copies do not change.
      */
     public static Object[] forkCopy(final Game live, final Player me) {
         synchronized (live) {
@@ -141,7 +142,57 @@ public final class RlFrameObs {
             if (pr != null) {
                 g.getPhaseHandler().setPriority(copier.find(pr));
             }
-            return new Object[] {g, copier.find(me), why};
+            String approx = why;
+            try {
+                forkLinks(live, g);
+                if (why == null && !live.getStack().isEmpty()) {
+                    forkStackChoices(live, g, copier);
+                }
+            } catch (RuntimeException e) {
+                approx = "fidelity: " + e;
+            }
+            return new Object[] {g, copier.find(me), approx};
+        }
+    }
+
+    /** Exiled-with links, which GameCopier leaves out. A live link to an LKI of the card itself stays an LKI link. */
+    private static void forkLinks(final Game live, final Game g) {
+        for (Card c : live.getCardsIn(ZoneType.Exile)) {
+            final Card w = c.getExiledWith();
+            final Card n = w == null ? null : g.findById(c.getId());
+            if (n == null) {
+                continue;
+            }
+            final Card m = g.findById(w.getId());
+            if (m != null) {
+                n.setExiledWith(w != c && m == n ? forge.game.card.CardCopyService.getLKICopy(n) : m);
+            }
+        }
+    }
+
+    /**
+     * Cast choices GameCopier's faithful stack copy leaves out: the alternative cost, and a modal spell's chosen modes
+     * chained as sub-abilities with their targets. Both stacks list top first and have the same size.
+     */
+    private static void forkStackChoices(final Game live, final Game g, final forge.ai.simulation.GameCopier copier) {
+        final java.util.Iterator<SpellAbilityStackInstance> copied = g.getStack().iterator();
+        for (SpellAbilityStackInstance si : live.getStack()) {
+            final SpellAbility a = si.getSpellAbility();
+            final SpellAbility b = copied.next().getSpellAbility();
+            b.setAlternativeCost(a.getAlternativeCost());
+            if (a.getChosenList() != null && b.getChosenList() != null && b.getSubAbility() == null) {
+                forge.game.ability.effects.CharmEffect.chainAbilities(b, b.getChosenList());
+                for (SpellAbility x = a.getSubAbility(), y = b.getSubAbility(); x != null && y != null;
+                        x = x.getSubAbility(), y = y.getSubAbility()) {
+                    for (forge.game.GameObject t : x.getTargets()) {
+                        final forge.game.GameObject m = copier.findWithStack(t);
+                        y.getTargets().add(m);
+                        if (x.isDividedAsYouChoose()) {
+                            y.addDividedAllocation(m, x.getDividedValue(t));
+                        }
+                    }
+                }
+            }
         }
     }
 

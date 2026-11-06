@@ -126,14 +126,14 @@ public class RlFrameStatesTest {
             liveN++;
             if (eq) {
                 liveEq++;
-            } else if (liveDiff.size() < 20) {
+            } else {
                 liveDiff.add((String) x[0]);
                 Files.write(fd.resolve("live-" + x[0] + ".orig"), (byte[]) x[1]);
                 Files.write(fd.resolve("live-" + x[0] + ".fork"), (byte[]) x[2]);
             }
         }
         System.err.println("[frame-states test] live-fork-equal " + liveEq + "/" + liveN + " (stack not copyable "
-                + unsupEq + "/" + unsup + " equal, " + why + ") first diffs " + liveDiff + " -> " + fd);
+                + unsupEq + "/" + unsup + " equal, " + why + ") first diffs " + liveDiff.subList(0, Math.min(20, liveDiff.size())) + " -> " + fd);
         for (JsonObject g : RlLabelReplayTest.jsonl(on, "games-")) {
             Assert.assertTrue(g.get("equal").getAsBoolean(), g.toString());
         }
