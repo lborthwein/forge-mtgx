@@ -49,6 +49,11 @@ public final class ChoiceScorer {
         public int fidelity = 1;
         /** Score and log, keep the policy's answer. */
         public boolean shadow = false;
+        /**
+         * Leak test only (never a JSON key): before the frame, swap the opponent's unknown hand cards with unknown library
+         * cards and shuffle its library when none of it is known. A frame that changes reads hidden cards.
+         */
+        public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
                 "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow"));
@@ -113,6 +118,8 @@ public final class ChoiceScorer {
         public String fail;
         public boolean policy;
         public double value = Double.NaN;
+        /** Further picks of this resolution Forge AI answered. */
+        public int tail;
     }
 
     /** One scored ask. */
@@ -152,6 +159,9 @@ public final class ChoiceScorer {
                 if (seatMask != 0) {
                     k.setSearchedTopSeats(seatMask);
                 }
+                if (cfg.probeOpp) {
+                    swapOpponentHidden(copy, me, k);
+                }
                 k.attach();
                 final RlFeaturizer f = new RlFeaturizer(index);
                 f.setVersion(obsVersion);
@@ -169,6 +179,35 @@ public final class ChoiceScorer {
                 return p;
             }
         };
+    }
+
+    private static void swapOpponentHidden(final Game g, final Player me, final RlKnowledge k) {
+        final int seat = k.seatOf(me);
+        for (Player o : me.getOpponents()) {
+            final List<Card> hand = new ArrayList<>();
+            for (Card c : o.getCardsIn(ZoneType.Hand)) {
+                if (!k.knows(seat, c)) {
+                    hand.add(c);
+                }
+            }
+            final List<Card> lib = new ArrayList<>();
+            boolean libKnown = false;
+            for (Card c : o.getCardsIn(ZoneType.Library)) {
+                if (k.knows(seat, c)) {
+                    libKnown = true;
+                } else {
+                    lib.add(c);
+                }
+            }
+            if (!libKnown) {
+                o.shuffle(null);
+            }
+            for (int i = 0; i < hand.size() && i < lib.size(); i++) {
+                final Card a = hand.get(i), b = lib.get(lib.size() - 1 - i);
+                g.getAction().moveTo(ZoneType.Library, a, null, null);
+                g.getAction().moveTo(ZoneType.Hand, b, null, null);
+            }
+        }
     }
 
     /** The ask's options with their frames; values are the caller's batched pass ({@link #choose}). */
@@ -259,6 +298,7 @@ public final class ChoiceScorer {
     private static void note(final ChoiceApply.Result r, final Option o, final Scored s, final int group) {
         s.copyNanos += r.copyNanos;
         s.runNanos += r.runNanos;
+        o.tail = Math.max(o.tail, r.tailAsks);
         if (r.fail != null) {
             o.fail = r.fail;
         } else if (!Double.isNaN(r.terminal)) {
@@ -458,6 +498,7 @@ public final class ChoiceScorer {
             if (!Double.isNaN(o.terminal)) x.addProperty("term", o.terminal);
             if (o.fail != null) x.addProperty("fail", o.fail);
             x.addProperty("n", o.frames.size());
+            if (o.tail > 0) x.addProperty("tail", o.tail);
             a.add(x);
         }
         r.add("options", a);

@@ -42,6 +42,8 @@ public final class ChoiceApply {
         public String fail;
         public long copyNanos, runNanos;
         public int steps;
+        /** Further picks of the same resolution that Forge AI answered (0 = this answer settled the whole choice). */
+        public int tailAsks;
     }
 
     /** Why a resolving choice can't be replayed on a copy, or null. */
@@ -76,6 +78,7 @@ public final class ChoiceApply {
         int next = 0;
         final Runnable leaf;
         boolean missed = false;
+        int tail = 0;
 
         Forced(final Game g, final Player p, final forge.LobbyPlayer lp, final List<Integer> picks, final Runnable leaf) {
             super(g, p, lp);
@@ -98,6 +101,8 @@ public final class ChoiceApply {
                     }
                 }
                 missed = true;
+            } else {
+                tail++;
             }
             return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt,
                     isOptional, decider);
@@ -130,6 +135,8 @@ public final class ChoiceApply {
                 if (!missed && out.size() >= min) {
                     return out;
                 }
+            } else {
+                tail++;
             }
             return super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
         }
@@ -236,6 +243,7 @@ public final class ChoiceApply {
                 steps++;
             }
             r.steps = steps;
+            r.tailAsks = sc.tail;
             r.runNanos = System.nanoTime() - t1;
             if (g.isGameOver() || !me.isInGame()) {
                 r.terminal = me.hasWon() ? 1.0 : me.hasLost() || !me.isInGame() ? 0.0 : 0.5;
