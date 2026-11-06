@@ -382,6 +382,16 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
         }
     }
 
+    public void clearManaExpressChoice() {
+        AbilityManaPart mp = getManaPart();
+        if (mp != null) {
+            mp.clearExpressChoice();
+        }
+        if (subAbility != null) {
+            subAbility.clearManaExpressChoice();
+        }
+    }
+
     public final AbilityManaPart getManaPart() {
         return manaPart;
     }

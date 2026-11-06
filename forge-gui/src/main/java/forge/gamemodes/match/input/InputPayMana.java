@@ -521,9 +521,13 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         // source took the express choice's first colour every time: Botanical Sanctum paying for
         // Oko ({1}{G}{U}) always made {U}, even after an Island had floated the {U} (owner report
         // 2026-10-06T00-39-37). Count the floating mana first; ask when colours remain.
-        final byte stillNeeded = floatingPaymentColours(chosen, (byte) producedColorMask);
+        // An any-colour source on this seat (owner, 2026-11-06T20-10-11): the seat is asked unless only
+        // one colour can pay what is left, and then the table is told which colour Forge took.
+        final byte anyColour = anyColourPayable(chosen);
+        final byte stillNeeded = anyColour != 0 ? anyColour : floatingPaymentColours(chosen, (byte) producedColorMask);
         final boolean askColour = Integer.bitCount(stillNeeded & 0xFF) > 1 && chosen.getManaPart().isComboMana();
-        if (Integer.bitCount(stillNeeded & 0xFF) == 1) {
+        final boolean forcedAnyColour = anyColour != 0 && Integer.bitCount(anyColour & 0xFF) == 1;
+        if (anyColour != 0 || Integer.bitCount(stillNeeded & 0xFF) == 1) {
             producedColorMask = stillNeeded;
         }
         chosen.setManaExpressChoice(ColorSet.fromMask(producedColorMask));
@@ -561,12 +565,65 @@ public abstract class InputPayMana extends InputSyncronizedBase {
                     updateButtons();
                     invalidateAutoPayManaSources();
                 }
+                if (forcedAnyColour) {
+                    getController().getGui().notifyManaColourForced(CardView.get(chosen.getHostCard()), anyColour);
+                }
+            } else {
+                // The activation was cancelled, usually while paying its own cost. The ability object
+                // outlives this payment, so the narrowing must not: left set, a later activation with
+                // no cost pending made this payment's colour without a question (a source tapped for a
+                // {B}{B}{B} and cancelled made {B} two turns later, owner report 2026-11-06T20-10-11).
+                chosen.clearManaExpressChoice();
             }
             // Need to call this to unlock
             onStateChanged();
         });
 
         return true;
+    }
+
+    /**
+     * For a seat whose produced mana floats ({@link FullControlFlag#NoPaymentFromManaAbility}), when
+     * {@code chosen} is a source that offers any colour (from its produced-mana options): the colours
+     * it may make, which are those that can pay what is left of the cost once the floating unrestricted
+     * mana is counted, or every colour when none can (it then only floats) or the spell cares what was
+     * spent. 0 when this is not such a source or not such a seat. {@code Combo Any} with an amount of
+     * two or more is "any combination" and keeps its own path.
+     */
+    private byte anyColourPayable(final SpellAbility chosen) {
+        if (!player.getController().isFullControl(FullControlFlag.NoPaymentFromManaAbility)) {
+            return 0;
+        }
+        final AbilityManaPart part = chosen.getManaPart();
+        if (part == null || chosen.getAllManaParts().size() != 1) {
+            return 0;
+        }
+        final byte every = ColorSet.WUBRG.getColor();
+        for (final byte color : ManaAtom.MANATYPES) {
+            if ((every & color) != 0 && !chosen.canProduce(MagicColor.toShortString(color))) {
+                return 0;
+            }
+        }
+        if (!part.isAnyMana() && !(part.isComboMana() && chosen.amountOfManaGenerated(false) == 1)) {
+            return 0;
+        }
+        final ManaPool pool = player.getManaPool();
+        final ManaCostBeingPaid left = new ManaCostBeingPaid(manaCost);
+        for (final Mana mana : Lists.newArrayList(pool)) {
+            if (!mana.isRestricted() && left.isNeeded(mana, pool)) {
+                left.payMana(mana, pool);
+            }
+        }
+        byte payable = 0;
+        if (part.meetsManaRestrictions(saPaidFor) && !saPaidFor.tracksManaSpent()) {
+            for (final byte color : ManaAtom.MANATYPES) {
+                if ((every & color) != 0 && left.isAnyPartPayableWith(color, pool)
+                        && saPaidFor.allowsPayingWithShard(chosen.getHostCard(), color)) {
+                    payable |= color;
+                }
+            }
+        }
+        return payable == 0 ? every : payable;
     }
 
     /**

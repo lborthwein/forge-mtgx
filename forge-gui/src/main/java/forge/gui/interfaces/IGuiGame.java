@@ -203,6 +203,8 @@ public interface IGuiGame {
         return chooseManaX(message, min, max, exact, detail, cancellable);
     }
     default void notifyUnableToPayManaX(String message) { message(message, "Forge"); }
+    /** Forge made an any-colour source's mana in the one colour that can pay the cost being paid. */
+    default void notifyManaColourForced(CardView source, byte colour) { }
 
     /**
      * Convenience for getChoices(message, 0, 1, choices).

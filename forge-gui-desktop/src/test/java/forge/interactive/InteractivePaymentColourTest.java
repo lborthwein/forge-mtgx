@@ -107,6 +107,8 @@ public class InteractivePaymentColourTest extends AITest {
 
         /** Acks read past while waiting for something else, by inputId. */
         final java.util.Map<String, JsonObject> acks = new java.util.HashMap<>();
+        /** Every event read so far. */
+        final List<JsonObject> events = new java.util.ArrayList<>();
 
         JsonObject next(final String type) throws InterruptedException {
             final long deadline = System.currentTimeMillis() + 30000;
@@ -122,6 +124,9 @@ public class InteractivePaymentColourTest extends AITest {
                 }
                 if ("ack".equals(got)) {
                     acks.put(message.get("inputId").getAsString(), message);
+                }
+                if ("event".equals(got) && message.has("event")) {
+                    events.add(message.getAsJsonObject("event"));
                 }
                 if (type.equals(got)) {
                     return message;
@@ -325,6 +330,214 @@ public class InteractivePaymentColourTest extends AITest {
             assertEquals(kind(after), "mana", "no question: " + after);
             assertEquals(floating(after, "U"), 1, after.toString());
             assertEquals(floating(after, "G"), 0, after.toString());
+        }
+    }
+
+    /** The color list Forge offers an any-color source, as its item labels. */
+    private static List<String> colourOptions(final JsonObject request) {
+        final List<String> labels = new java.util.ArrayList<>();
+        for (JsonElement item : control(request, "Select Mana to Produce").getAsJsonArray("items")) {
+            labels.add(item.getAsJsonObject().get("label").getAsString());
+        }
+        return labels;
+    }
+
+    private static void chooseColour(final Harness h, final JsonObject question, final String colour) throws Exception {
+        final JsonObject chooser = control(question, "Select Mana to Produce");
+        assertNotNull(chooser, "a color list: " + question);
+        String id = null;
+        for (JsonElement item : chooser.getAsJsonArray("items")) {
+            if (colour.equals(item.getAsJsonObject().get("label").getAsString())) {
+                id = item.getAsJsonObject().get("id").getAsString();
+            }
+        }
+        assertNotNull(id, colour + " is offered: " + question);
+        final JsonObject action = new JsonObject();
+        action.addProperty("type", "choice");
+        action.addProperty("controlId", "choices");
+        final com.google.gson.JsonArray choices = new com.google.gson.JsonArray();
+        choices.add(id);
+        action.add("choices", choices);
+        h.answer(question, action);
+    }
+
+    /** Answer the source's own costs (tap {@code payer} for its mana, pay with the pool, yes to the sacrifice) until a request that is neither. */
+    private static JsonObject throughSourceCosts(final Harness h, JsonObject request, final Card payer) throws Exception {
+        while (true) {
+            final String kind = kind(request);
+            final JsonObject action = new JsonObject();
+            if ("confirm".equals(kind) && control(request, "Yes") != null && message(request).contains("Sacrifice")) {
+                action.addProperty("type", "confirm");
+                action.addProperty("controlId", "confirm:yes");
+                action.addProperty("confirm", true);
+                h.answer(request, action);
+            } else if ("mana".equals(kind) && payer != null && payer.isUntapped()) {
+                h.select(request, payer);
+            } else if ("mana".equals(kind) && payer != null && request.getAsJsonArray("controls").toString().contains("payment:0")) {
+                action.addProperty("type", "choice");
+                action.addProperty("controlId", "payment:0");
+                h.answer(request, action);
+            } else {
+                return request;
+            }
+            request = h.request();
+        }
+    }
+
+    private static void noForcedColour(final Harness h) {
+        for (JsonObject event : h.events) {
+            assertFalse(event.has("kind") && "mana_color_forced".equals(event.get("kind").getAsString()),
+                    "no color was forced: " + event);
+        }
+    }
+
+    private static void forcedColour(final Harness h, final String card, final String colour) {
+        for (JsonObject event : h.events) {
+            if (event.has("kind") && "mana_color_forced".equals(event.get("kind").getAsString())) {
+                assertEquals(event.get("card").getAsString(), card, event.toString());
+                assertEquals(event.get("color").getAsString(), colour, event.toString());
+                assertEquals(event.get("playerSeat").getAsInt(), 1, event.toString());
+                return;
+            }
+        }
+        fail("the log is told which color: " + h.events);
+    }
+
+    /** An any-color source with nothing being paid: the seat says which color. */
+    @Test(timeOut = 600000)
+    public void anAnyColourSourceAsksWithAnEmptyStack() throws Exception {
+        final Card[] star = new Card[1];
+        final Card[] island = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            star[0] = addCard("Chromatic Star", seat);
+            island[0] = addCard("Island", seat);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject priority = h.request();
+            assertEquals(kind(priority), "priority", priority.toString());
+            final String activate = h.sendSelect(priority, star[0]);
+            final JsonObject question = throughSourceCosts(h, h.request(), island[0]);
+            assertEquals(colourOptions(question).size(), 5, question.toString());
+            chooseColour(h, question, "BLUE");
+            h.acked(activate);
+            final JsonObject after = h.request();
+            assertEquals(floating(after, "U"), 1, after.toString());
+            noForcedColour(h);
+        }
+    }
+
+    /**
+     * The report: the source was tapped for a {B}{B}{B}, its own cost was cancelled, and later, with
+     * nothing being paid, it made {B} with no question. A cancelled activation leaves no color behind.
+     */
+    @Test(timeOut = 600000)
+    public void aCancelledActivationLeavesNoColourBehind() throws Exception {
+        final Card[] star = new Card[1];
+        final Card[] island = new Card[1];
+        final Card[] doomsday = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            star[0] = addCard("Chromatic Star", seat);
+            island[0] = addCard("Island", seat);
+            addCard("Swamp", seat);
+            addCard("Swamp", seat);
+            addCard("Swamp", seat);
+            doomsday[0] = addCardToZone("Doomsday", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, doomsday[0]);
+            // No ack yet: the tap is still open while the source's own {1} is asked.
+            h.sendSelect(payment, star[0]);
+            JsonObject request = h.request();
+            assertEquals(kind(request), "mana", "the source's own {1}: " + request);
+            while ("mana".equals(kind(request))) {
+                final JsonObject cancel = new JsonObject();
+                cancel.addProperty("type", "cancel");
+                cancel.addProperty("controlId", "button:cancel");
+                h.send(request, cancel);
+                request = h.request();
+            }
+            assertEquals(kind(request), "priority", request.toString());
+            assertTrue(star[0].isInPlay(), "the source is still there");
+            final String activate = h.sendSelect(request, star[0]);
+            final JsonObject question = throughSourceCosts(h, h.request(), island[0]);
+            assertEquals(colourOptions(question).size(), 5, "every color, not the cancelled payment's: " + question);
+            chooseColour(h, question, "BLUE");
+            h.acked(activate);
+            final JsonObject after = h.request();
+            assertEquals(floating(after, "U"), 1, after.toString());
+            assertEquals(floating(after, "B"), 0, after.toString());
+            noForcedColour(h);
+        }
+    }
+
+    /** A cost pending with a generic part: every color can pay it, so the seat is asked. */
+    @Test(timeOut = 600000)
+    public void anAnyColourSourceAsksWithACostPending() throws Exception {
+        final Card[] petal = new Card[1];
+        final Card[] whisper = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            petal[0] = addCard("Lotus Petal", seat);
+            addCard("Swamp", seat);
+            whisper[0] = addCardToZone("Night's Whisper", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, whisper[0]);
+            final String tap = h.sendSelect(payment, petal[0]);
+            final JsonObject question = throughSourceCosts(h, h.request(), null);
+            assertEquals(colourOptions(question).size(), 5, question.toString());
+            chooseColour(h, question, "BLUE");
+            h.acked(tap);
+            final JsonObject after = h.request();
+            assertEquals(kind(after), "mana", after.toString());
+            assertEquals(floating(after, "U"), 1, after.toString());
+            noForcedColour(h);
+        }
+    }
+
+    /** Only one color can pay a {B}{B}{B}: Forge may take it, and the log is told which. */
+    @Test(timeOut = 600000)
+    public void onlyOneColourCanPayAndTheLogSaysWhich() throws Exception {
+        final Card[] petal = new Card[1];
+        final Card[] doomsday = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            petal[0] = addCard("Lotus Petal", seat);
+            addCard("Swamp", seat);
+            addCard("Swamp", seat);
+            addCard("Swamp", seat);
+            doomsday[0] = addCardToZone("Doomsday", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, doomsday[0]);
+            final String tap = h.sendSelect(payment, petal[0]);
+            final JsonObject after = throughSourceCosts(h, h.request(), null);
+            h.acked(tap);
+            assertEquals(kind(after), "mana", "no color question: " + after);
+            assertEquals(floating(after, "B"), 1, after.toString());
+            forcedColour(h, "Lotus Petal", "B");
+        }
+    }
+
+    /** Floating mana already covers the generic part of a {1}{B}: only {B} is left, and the log says so. */
+    @Test(timeOut = 600000)
+    public void floatingManaThatLeavesOneColourForcesIt() throws Exception {
+        final Card[] petal = new Card[1];
+        final Card[] island = new Card[1];
+        final Card[] whisper = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            petal[0] = addCard("Lotus Petal", seat);
+            island[0] = addCard("Island", seat);
+            whisper[0] = addCardToZone("Night's Whisper", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, whisper[0]);
+            h.select(payment, island[0]);
+            final JsonObject afterIsland = h.request();
+            final String tap = h.sendSelect(afterIsland, petal[0]);
+            final JsonObject after = throughSourceCosts(h, h.request(), null);
+            h.acked(tap);
+            assertEquals(kind(after), "mana", "no color question: " + after);
+            assertEquals(floating(after, "B"), 1, after.toString());
+            forcedColour(h, "Lotus Petal", "B");
         }
     }
 
