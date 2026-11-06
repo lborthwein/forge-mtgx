@@ -20,6 +20,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import forge.bench.rl.RlFrameObs;
+import forge.bench.rl.RlFrameStates;
 import forge.bench.rl.RlKnowledge;
 import forge.bench.rl.RlWire;
 import forge.game.Game;
