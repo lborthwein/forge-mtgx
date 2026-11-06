@@ -145,8 +145,10 @@ public class InstallFidelityTest extends AITest {
     public void keyOffExileOnEntryExilesAndTheCheckSaysSo() {
         final Game g = install(PRIEST, false, "warn");
         final Player me = g.getPlayers().get(0);
-        assertEquals(names(me, ZoneType.Exile), List.of("Grizzly Bears", "Tough Cookie"), "today's install");
-        assertTrue(String.join(";", state.getInstallDiff()).contains("p0exile"), state.getInstallDiff().toString());
+        // today's install: the replacement exiles them, and the record's exile zone, installed after the battlefield,
+        // then replaces that zone's cards, so they are in no zone at all (scn-747568094: only the battlefield differs)
+        assertEquals(names(me, ZoneType.Battlefield), List.of("Containment Priest"), "today's install");
+        assertTrue(String.join(";", state.getInstallDiff()).contains("p0battlefield"), state.getInstallDiff().toString());
     }
 
     // --- 4. a changed-Enchant aura ------------------------------------------------------------------------------
