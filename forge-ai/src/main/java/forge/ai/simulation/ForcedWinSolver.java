@@ -150,6 +150,12 @@ public final class ForcedWinSolver {
         public boolean engineRerun = false;
         /** choice-search-1105 (CAP-2, off by default): each engine search gets its own engineNodes (#149's key). */
         public boolean engineNodesPerSearch = false;
+        /**
+         * kill-line-1106 (off by default; port of solver-gaps-1104): an engine move's targeting trigger of ours branches
+         * over every legal target class, at most triggerVariants of them, mana valued (ForcedWinEngine.TriggerTargets#wide).
+         */
+        public boolean engineTriggerTargets = false;
+        public int triggerVariants = 8;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -249,6 +255,8 @@ public final class ForcedWinSolver {
             c.loopMarginal = "true".equals(get.apply("loopMarginal")); // choice-search-1105
             c.engineRerun = "true".equals(get.apply("engineRerun")); // choice-search-1105
             c.engineNodesPerSearch = "true".equals(get.apply("engineNodesPerSearch")); // choice-search-1105 (CAP-2)
+            c.engineTriggerTargets = "true".equals(get.apply("engineTriggerTargets")); // kill-line-1106
+            c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1470,6 +1478,8 @@ public final class ForcedWinSolver {
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
         el.perSearchNodes = cfg.engineNodesPerSearch;
+        el.triggerTargets = cfg.engineTriggerTargets; // kill-line-1106
+        el.triggerVariants = cfg.triggerVariants;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
