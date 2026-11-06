@@ -46,6 +46,110 @@ public final class DeckBelief {
         public double landShare = 0.425;
         /** Prior weight of a deck colour set by its size (index 1..3), before the shown-colour constraint. */
         public double[] sizePrior = {0, 0.15, 0.6, 0.25};
+        /**
+         * deck-belief-1105 AMEND-4 (null = off: the fitting cards are drawn uniformly): archetype weights from a card
+         * co-occurrence table (log-lift of b given a, learned from a generated-deck corpus with the faced decks' lineage
+         * held out). A fitting card b is drawn with weight exp(clamp(coocGain * mean over the shown cards a of L[a][b],
+         * -2, 2)).
+         */
+        public java.util.Map<String, java.util.Map<String, Double>> cooc;
+        public double coocGain = 1.0;
+    }
+
+    private static final java.util.Map<String, java.util.Map<String, java.util.Map<String, Double>>> COOC = new java.util.HashMap<>();
+
+    /**
+     * Load (once per JVM and path) a {@code mtgx-deck-cooc/1} table ({@code classpath:} = a jar resource), checking its
+     * sha256 pin when one is given.
+     */
+    @SuppressWarnings("unchecked")
+    public static synchronized java.util.Map<String, java.util.Map<String, Double>> loadCooc(final String path, final String sha256) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        final java.util.Map<String, java.util.Map<String, Double>> have = COOC.get(path + "|" + sha256);
+        if (have != null) {
+            return have;
+        }
+        try {
+            final byte[] bytes;
+            if (path.startsWith("classpath:")) {
+                try (java.io.InputStream in = DeckBelief.class.getResourceAsStream(path.substring("classpath:".length()))) {
+                    if (in == null) {
+                        throw new IllegalStateException("deck cooc: no resource " + path);
+                    }
+                    bytes = in.readAllBytes();
+                }
+            } else {
+                bytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path));
+            }
+            if (sha256 != null && !sha256.isBlank()) {
+                final StringBuilder hex = new StringBuilder();
+                for (byte b : java.security.MessageDigest.getInstance("SHA-256").digest(bytes)) {
+                    hex.append(String.format("%02x", b));
+                }
+                if (!hex.toString().equals(sha256)) {
+                    throw new IllegalStateException("deck cooc " + path + " has sha256 " + hex + ", pinned " + sha256);
+                }
+            }
+            final com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(
+                    new String(bytes, java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+            if (!"mtgx-deck-cooc/1".equals(o.get("schema").getAsString())) {
+                throw new IllegalStateException("deck cooc " + path + ": schema " + o.get("schema"));
+            }
+            final java.util.Map<String, java.util.Map<String, Double>> t = new java.util.HashMap<>();
+            for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : o.getAsJsonObject("table").entrySet()) {
+                final java.util.Map<String, Double> row = new java.util.HashMap<>();
+                for (java.util.Map.Entry<String, com.google.gson.JsonElement> f : e.getValue().getAsJsonObject().entrySet()) {
+                    row.put(f.getKey(), f.getValue().getAsDouble());
+                }
+                t.put(e.getKey(), row);
+            }
+            COOC.put(path + "|" + sha256, t);
+            return t;
+        } catch (java.io.IOException | java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("deck cooc " + path + ": " + e, e);
+        }
+    }
+
+    /** The archetype weight of {@code name} given the shown card names (1 without a table or a shown card in it). */
+    public static double coocWeight(final String name, final List<String> shown, final Params p) {
+        if (p.cooc == null || shown == null || shown.isEmpty()) {
+            return 1.0;
+        }
+        double s = 0;
+        int n = 0;
+        for (String a : shown) {
+            final java.util.Map<String, Double> row = p.cooc.get(a);
+            if (row == null) {
+                continue;
+            }
+            final Double v = row.get(name);
+            s += v == null ? 0.0 : v;
+            n++;
+        }
+        if (n == 0) {
+            return 1.0;
+        }
+        return Math.exp(Math.max(-2.0, Math.min(2.0, p.coocGain * s / n)));
+    }
+
+    /** A weighted random order without replacement (Efraimidis-Spirakis keys), for the archetype weights. */
+    static void weightedOrder(final List<String> names, final List<String> shown, final Params p, final Random rng) {
+        final double[] key = new double[names.size()];
+        final Integer[] ix = new Integer[names.size()];
+        for (int i = 0; i < key.length; i++) {
+            final double u = Math.max(1e-300, rng.nextDouble());
+            key[i] = -Math.log(u) / coocWeight(names.get(i), shown, p);
+            ix[i] = i;
+        }
+        java.util.Arrays.sort(ix, (a, b) -> Double.compare(key[a], key[b]));
+        final List<String> out = new ArrayList<>(names.size());
+        for (Integer i : ix) {
+            out.add(names.get(i));
+        }
+        names.clear();
+        names.addAll(out);
     }
 
     /** What the seat has seen of one opponent. */
@@ -61,6 +165,8 @@ public final class DeckBelief {
         public boolean offTurn;
         /** The opponent made no land drop on its last turn. */
         public boolean noLandLastTurn;
+        /** The non-basic names it has shown (the archetype weights' evidence). */
+        public final List<String> shownNames = new ArrayList<>();
 
         public static Evidence read(final Game live, final Player liveOpp, final PlayerView myView) {
             final Evidence e = new Evidence();
@@ -71,6 +177,9 @@ public final class DeckBelief {
                 }
                 final CardRules r = c.getPaperCard().getRules();
                 e.seen++;
+                if (!BeliefSampler.isBasic(c.getPaperCard().getName())) {
+                    e.shownNames.add(c.getPaperCard().getName());
+                }
                 if (r.getType().isLand()) {
                     e.seenLands++;
                     e.shown |= r.getColorIdentity().getColor();
@@ -207,6 +316,11 @@ public final class DeckBelief {
         Collections.shuffle(spells, rng);
         Collections.shuffle(offSpells, rng);
         Collections.shuffle(lands, rng);
+        if (p.cooc != null) {
+            // AMEND-4: the archetype weights order the fitting cards (a weighted draw without replacement)
+            weightedOrder(spells, e.shownNames, p, rng);
+            weightedOrder(lands, e.shownNames, p, rng);
+        }
         Collections.shuffle(offLands, rng);
         // lands: the fitting nonbasics and the basics of the deck's colours, about half each
         int li = 0;

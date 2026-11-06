@@ -362,6 +362,17 @@ public final class LookaheadSearch {
          * what they declined to do) instead of the uniform or decision belief. Spec key {@code beliefDeck}.
          */
         public boolean beliefDeck = false;
+        /** deck-belief-1105 AMEND-4 (null = off): the search worlds' archetype weights ({@link DeckBelief.Params#cooc}). */
+        public String beliefDeckCooc = null;
+        public String beliefDeckCoocSha256 = null;
+        public double beliefDeckCoocGain = 1.0;
+        /**
+         * deck-belief-1105 AMEND-4: what leaves a singleton pool ({@link #beliefSingleton}). "draft" (the default, as
+         * before): our registered deck and the opponent's seen cards, since one copy of each card exists across a cube
+         * draft. "independent" (decks built apart, e.g. eval banks, gauntlets, owner decks): only the opponent's seen
+         * cards; our own cards stay possible for them. Set from the game's format by the host or harness (spec key).
+         */
+        public String beliefPoolMode = "draft";
 
         /** A belief is computed at searched decisions (acting or shadow). */
         public boolean beliefOn() {
@@ -521,6 +532,14 @@ public final class LookaheadSearch {
                 }
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
+                if (beliefDeckCooc != null) {
+                    o.addProperty("beliefDeckCooc", beliefDeckCooc);
+                    o.addProperty("beliefDeckCoocSha256", beliefDeckCoocSha256);
+                    o.addProperty("beliefDeckCoocGain", beliefDeckCoocGain);
+                }
+                if (!"draft".equals(beliefPoolMode)) {
+                    o.addProperty("beliefPoolMode", beliefPoolMode);
                 }
             }
             if (rankerOn()) {
@@ -7337,7 +7356,9 @@ public final class LookaheadSearch {
         final PlayerView myView = liveMe.getView();
         final Set<String> known = new HashSet<>();
         if (cfg.beliefSingleton) {
-            known.addAll(ownDeckNames(liveMe));
+            if (!"independent".equals(cfg.beliefPoolMode)) {
+                known.addAll(ownDeckNames(liveMe)); // deck-belief-1105 AMEND-4: not for independently built decks
+            }
             for (Card c : live.getCardsInGame()) {
                 if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
                         && c.getView().canBeShownTo(myView)) {
@@ -7395,7 +7416,7 @@ public final class LookaheadSearch {
     void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
         if (beliefCube != null && !cfg.beliefShadow && cfg.beliefDeck) {
             // deck-belief-1105: the opponents' hidden cards from the deck posterior, then our own library as before
-            redrawOpponentsDeck(live, liveMe, g, me, rng, DECK_PARAMS);
+            redrawOpponentsDeck(live, liveMe, g, me, rng, searchDeckParams());
             ownLibrary(live, liveMe, me, rng);
         } else if (beliefCube != null && !cfg.beliefShadow) {
             resampleBelief(live, liveMe, g, me, rng, decisionBelief);
@@ -7435,7 +7456,19 @@ public final class LookaheadSearch {
      * opponent has shown, its hand weighted by what it declined to do. Null when no belief is on.
      */
     /** deck-belief-1105: the search worlds' deck-belief parameters (the model defaults). */
-    private static final DeckBelief.Params DECK_PARAMS = new DeckBelief.Params();
+    private volatile DeckBelief.Params searchDeckParams;
+
+    /** deck-belief-1105: the search worlds' deck-belief parameters (model defaults plus AMEND-4's archetype table). */
+    private DeckBelief.Params searchDeckParams() {
+        DeckBelief.Params p = searchDeckParams;
+        if (p == null) {
+            p = new DeckBelief.Params();
+            p.cooc = DeckBelief.loadCooc(cfg.beliefDeckCooc, cfg.beliefDeckCoocSha256);
+            p.coocGain = cfg.beliefDeckCoocGain;
+            searchDeckParams = p;
+        }
+        return p;
+    }
 
     public ForcedWinSolver.Redraw opponentRedrawDeck(final DeckBelief.Params p) {
         if (beliefCube == null || cfg.beliefShadow) {

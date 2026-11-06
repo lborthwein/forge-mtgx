@@ -209,11 +209,17 @@ public final class ForcedWinSolver {
          * still winning every world keeps verifying to the usual deadline. The plan search keeps the rest.
          */
         public int capMs = 0;
+        /** deck-belief-1105 AMEND-4 (null = off): {@link DeckBelief.Params#cooc}'s table file, its sha256 pin and gain. */
+        public String deckCooc = null;
+        public String deckCoocSha256 = null;
+        public double deckCoocGain = 1.0;
 
         public DeckBelief.Params deckParams() {
             final DeckBelief.Params p = new DeckBelief.Params();
             p.decline = deckDecline;
             p.landShare = deckLandShare;
+            p.cooc = DeckBelief.loadCooc(deckCooc, deckCoocSha256); // deck-belief-1105 AMEND-4 (null = off)
+            p.coocGain = deckCoocGain;
             return p;
         }
 
@@ -262,6 +268,9 @@ public final class ForcedWinSolver {
             c.deckLandShare = dblOr(get.apply("deckLandShare"), c.deckLandShare);
             c.unprovenMs = intOr(get.apply("unprovenMs"), c.unprovenMs);
             c.capMs = intOr(get.apply("capMs"), c.capMs);
+            c.deckCooc = get.apply("deckCooc");
+            c.deckCoocSha256 = get.apply("deckCoocSha256");
+            c.deckCoocGain = dblOr(get.apply("deckCoocGain"), c.deckCoocGain);
             return c;
         }
 

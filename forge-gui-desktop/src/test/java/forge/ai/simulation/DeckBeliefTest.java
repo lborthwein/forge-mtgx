@@ -301,4 +301,40 @@ public class DeckBeliefTest extends SimulationTest {
         AssertJUnit.assertFalse(LookaheadSearch.confident(v8, 1, 8, 1.645));
         AssertJUnit.assertTrue(LookaheadSearch.confident(v24, 1, 24, 1.645));
     }
+    @Test
+    public void archetypeWeightsFollowTheTableAndOffIsUniform() throws Exception {
+        Path f = Files.createTempFile("deck-cooc", ".json");
+        f.toFile().deleteOnExit();
+        Files.writeString(f, "{\"schema\":\"mtgx-deck-cooc/1\",\"table\":{\"Brainstorm\":{\"Counterspell\":1.5,\"Hill Giant\":-1.0}}}");
+        DeckBelief.Params p = new DeckBelief.Params();
+        List<String> shown = Arrays.asList("Brainstorm", "Unknown Card");
+        AssertJUnit.assertEquals(1.0, DeckBelief.coocWeight("Counterspell", shown, p)); // no table: off
+        p.cooc = DeckBelief.loadCooc(f.toString(), null);
+        AssertJUnit.assertEquals(Math.exp(1.5), DeckBelief.coocWeight("Counterspell", shown, p), 1e-9);
+        AssertJUnit.assertEquals(Math.exp(-1.0), DeckBelief.coocWeight("Hill Giant", shown, p), 1e-9);
+        AssertJUnit.assertEquals(1.0, DeckBelief.coocWeight("Shock", shown, p), 1e-9);
+        try {
+            DeckBelief.loadCooc(f.toString(), "00");
+            AssertJUnit.fail("a wrong sha256 pin must be refused");
+        } catch (IllegalStateException expected) {
+        }
+        int first = 0;
+        for (long s = 0; s < 400; s++) {
+            List<String> names = new ArrayList<>(Arrays.asList("Shock", "Counterspell", "Hill Giant", "Serra Angel"));
+            DeckBelief.weightedOrder(names, shown, p, new Random(s));
+            first += "Counterspell".equals(names.get(0)) ? 1 : 0;
+        }
+        // weights e^1.5 : 1 : e^-1 : 1, so Counterspell leads about 4.48 / 6.85 of the time
+        AssertJUnit.assertTrue("first " + first, first > 220 && first < 300);
+        JsonObject o = new JsonObject();
+        o.addProperty("beliefPoolMode", "independent");
+        AssertJUnit.assertEquals("independent", forge.bench.rl.RlSearch.Config.parse(o).beliefPoolMode);
+        AssertJUnit.assertEquals("draft", forge.bench.rl.RlSearch.Config.parse(new JsonObject()).beliefPoolMode);
+        o.addProperty("beliefPoolMode", "pod");
+        try {
+            forge.bench.rl.RlSearch.Config.parse(o);
+            AssertJUnit.fail("an unknown pool mode must be refused");
+        } catch (IllegalArgumentException expected) {
+        }
+    }
 }

@@ -226,6 +226,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean beliefDeck = false;
         /** deck-belief-1105 (0 = off and then absent from the JSON): {@link LookaheadSearch.Config#raceWorlds}. */
         public int raceWorlds = 0;
+        /** deck-belief-1105 AMEND-4 (off by default and then absent from the JSON). */
+        public String beliefDeckCooc, beliefDeckCoocSha256;
+        public double beliefDeckCoocGain = 1.0;
+        public String beliefPoolMode = "draft";
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -237,7 +241,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "raceWorlds"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "raceWorlds", "beliefDeckCooc", "beliefDeckCoocSha256",
+                "beliefDeckCoocGain", "beliefPoolMode"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -296,6 +301,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             if (o.has("beliefDeck")) c.beliefDeck = o.get("beliefDeck").getAsBoolean(); // deck-belief-1105
             if (o.has("raceWorlds")) c.raceWorlds = o.get("raceWorlds").getAsInt(); // deck-belief-1105
+            if (o.has("beliefDeckCooc")) c.beliefDeckCooc = o.get("beliefDeckCooc").getAsString(); // deck-belief-1105 AMEND-4
+            if (o.has("beliefDeckCoocSha256")) c.beliefDeckCoocSha256 = o.get("beliefDeckCoocSha256").getAsString();
+            if (o.has("beliefDeckCoocGain")) c.beliefDeckCoocGain = o.get("beliefDeckCoocGain").getAsDouble();
+            if (o.has("beliefPoolMode")) c.beliefPoolMode = o.get("beliefPoolMode").getAsString();
+            if (!"draft".equals(c.beliefPoolMode) && !"independent".equals(c.beliefPoolMode)) {
+                throw new IllegalArgumentException("search: beliefPoolMode must be draft or independent");
+            }
             c.check();
             return c;
         }
@@ -437,6 +449,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
                 }
+                if (beliefDeckCooc != null) {
+                    o.addProperty("beliefDeckCooc", beliefDeckCooc);
+                    o.addProperty("beliefDeckCoocSha256", beliefDeckCoocSha256);
+                    o.addProperty("beliefDeckCoocGain", beliefDeckCoocGain);
+                }
+                if (!"draft".equals(beliefPoolMode)) {
+                    o.addProperty("beliefPoolMode", beliefPoolMode);
+                }
+            }
+            if (raceWorlds > 0) {
+                o.addProperty("raceWorlds", raceWorlds); // deck-belief-1105: only when on
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -646,7 +669,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefPool = cfg.beliefPool;
             lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
             lc.beliefDeck = cfg.beliefDeck; // deck-belief-1105 (off by default)
+            lc.beliefDeckCooc = cfg.beliefDeckCooc; // AMEND-4
+            lc.beliefDeckCoocSha256 = cfg.beliefDeckCoocSha256;
+            lc.beliefDeckCoocGain = cfg.beliefDeckCoocGain;
+            lc.beliefPoolMode = cfg.beliefPoolMode;
         }
+        lc.raceWorlds = cfg.raceWorlds; // deck-belief-1105 (0 = off; a search key, belief or not)
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
             lc.stack = true;
