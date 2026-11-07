@@ -186,6 +186,7 @@ public final class ForcedWinSolver {
         public boolean offBattlefieldLimits = false;
         public boolean historyLki = false;
         public boolean copyBackFace = false;
+        public boolean stackAbilityCopies = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -299,6 +300,7 @@ public final class ForcedWinSolver {
             c.offBattlefieldLimits = "true".equals(get.apply("offBattlefieldLimits"));
             c.historyLki = "true".equals(get.apply("historyLki"));
             c.copyBackFace = "true".equals(get.apply("copyBackFace"));
+            c.stackAbilityCopies = "true".equals(get.apply("stackAbilityCopies"));
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1095,6 +1097,7 @@ public final class ForcedWinSolver {
                     copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits);
                     copier.setHistoryLki(cfg.historyLki);
                     copier.setCopyBackFace(cfg.copyBackFace);
+                    copier.setStackAbilityCopies(cfg.stackAbilityCopies);
                     g = copier.makeCopy();
                     g.staleStatics = cfg.staleStatics;
                     g.stalePlayerStatics = cfg.stalePlayerStatics;
@@ -1562,6 +1565,7 @@ public final class ForcedWinSolver {
         el.offBattlefieldLimits = cfg.offBattlefieldLimits;
         el.historyLki = cfg.historyLki;
         el.copyBackFace = cfg.copyBackFace;
+        el.stackAbilityCopies = cfg.stackAbilityCopies;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -1818,6 +1822,7 @@ public final class ForcedWinSolver {
                 copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits);
                 copier.setHistoryLki(cfg.historyLki);
                 copier.setCopyBackFace(cfg.copyBackFace);
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies);
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
                 g.stalePlayerStatics = cfg.stalePlayerStatics;
@@ -2186,6 +2191,7 @@ public final class ForcedWinSolver {
                 copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits);
                 copier.setHistoryLki(cfg.historyLki);
                 copier.setCopyBackFace(cfg.copyBackFace);
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies);
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
                 g.stalePlayerStatics = cfg.stalePlayerStatics;

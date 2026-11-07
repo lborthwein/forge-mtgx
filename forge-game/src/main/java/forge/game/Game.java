@@ -71,6 +71,8 @@ public class Game {
     public boolean historyLki = false;
     /** Default-off preservation of physical back-face orientation in search copies. */
     public boolean copyBackFace = false;
+    /** Default-off independent ability objects for copied stack entries. */
+    public boolean stackAbilityCopies = false;
 
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 

@@ -141,6 +141,9 @@ public class GameCopier {
     private boolean offBattlefieldLimits = false;
     private boolean historyLki = false;
     private boolean copyBackFace = false;
+    private boolean stackAbilityCopies = false;
+
+    public void setStackAbilityCopies(boolean on) { this.stackAbilityCopies = on; }
 
     public void setCopyBackFace(boolean on) { this.copyBackFace = on; }
 
@@ -329,6 +332,14 @@ public class GameCopier {
             }
             if (base == null) {
                 throw new IllegalStateException("stack copy: no ability '" + orig.getDescription() + "' on " + newHost);
+            }
+            if (stackAbilityCopies || origGame.stackAbilityCopies) {
+                // A pending activation must not alias the reusable card template or another
+                // stack entry. Menu enumeration mutates that template's activator and choices.
+                base = base.copy(newHost, activator, false, true);
+                if (base == null) {
+                    throw new IllegalStateException("stack copy: unable to isolate ability on " + newHost);
+                }
             }
             base.setActivatingPlayer(activator);
             SpellAbility copy = SpellAbilityChoiceCopier.copyCastChoices(orig, base, activator);
@@ -535,6 +546,7 @@ public class GameCopier {
         newGame.offBattlefieldLimits = offBattlefieldLimits || origGame.offBattlefieldLimits;
         newGame.historyLki = historyLki || origGame.historyLki;
         newGame.copyBackFace = copyBackFace || origGame.copyBackFace;
+        newGame.stackAbilityCopies = stackAbilityCopies || origGame.stackAbilityCopies;
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
