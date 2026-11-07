@@ -186,6 +186,11 @@ public final class ForcedWinSolver {
          * unknown, not refuted: the position is not cached as having no line, so a later ask can verify it.
          */
         public boolean unknownWorlds = false;
+        /**
+         * unified-search-1106 (off by default): the position key behind the no-line cache also holds our graveyard and our
+         * coloured mana, so a mill or a floated colour is not answered by an old "no line".
+         */
+        public boolean positionKeyFull = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -296,6 +301,7 @@ public final class ForcedWinSolver {
             c.planDiscard = "true".equals(get.apply("planDiscard")); // kill-line-1106
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.unknownWorlds = "true".equals(get.apply("unknownWorlds")); // unified-search-1106
+            c.positionKeyFull = "true".equals(get.apply("positionKeyFull")); // unified-search-1106
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -681,8 +687,19 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ offense: width search, then engine
 
     /** The position key the width search's verdict is cached under (same key, same verdict). */
-    private String positionKey(Game live, Player me) {
+    String positionKey(Game live, Player me) {
         final StringBuilder sb = new StringBuilder();
+        if (cfg.positionKeyFull) {
+            // unified-search-1106
+            for (Card c : me.getCardsIn(ZoneType.Graveyard)) {
+                sb.append(c.getId()).append(',');
+            }
+            sb.append('m');
+            for (byte b : forge.card.MagicColor.WUBRG) {
+                sb.append(me.getManaPool().getAmountOfColor(b)).append(',');
+            }
+            sb.append('|');
+        }
         sb.append(live.getPhaseHandler().getTurn()).append(live.getPhaseHandler().getPhase()).append('|')
                 .append(me.getLife()).append('|').append(me.getManaPool().totalMana()).append('|')
                 .append(me.getLandsPlayedThisTurn()).append('|').append(live.getStack().getSpellsCastThisTurn().size())
@@ -1094,6 +1111,7 @@ public final class ForcedWinSolver {
                     copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                     g = copier.makeCopy();
+                    g.staleStatics = cfg.staleStatics;
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -1834,6 +1852,7 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1);
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -2206,6 +2225,7 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
