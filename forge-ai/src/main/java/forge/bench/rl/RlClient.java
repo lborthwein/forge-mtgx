@@ -125,6 +125,7 @@ public final class RlClient implements Closeable {
 
     public RlWire.Decision decide(final byte[] decidePayload) throws IOException {
         send(RlWire.T_DECIDE, decidePayload);
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107 (no clock = no-op)
         try {
             return RlWire.decodeDecision(expect(RlWire.T_DECISION).payload);
         } catch (IllegalArgumentException e) {

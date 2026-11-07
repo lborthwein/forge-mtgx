@@ -537,8 +537,22 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     // ------------------------------------------------------------------ the hook (live)
 
+    /** work-units-1107: {@code body} as one decision of the seat on its work clock (workUnits off: the body alone). */
+    private <T> T worked(final java.util.function.Supplier<T> body) {
+        final forge.game.WorkClock.Span ws = rs.workBegin();
+        try {
+            return body.get();
+        } finally {
+            rs.workEnd(ws);
+        }
+    }
+
     @Override
     public List<SpellAbility> priority(final PlayerControllerBridge c) {
+        return worked(() -> priority0(c));
+    }
+
+    private List<SpellAbility> priority0(final PlayerControllerBridge c) {
         if (defender != null && !me.getGame().getStack().isEmpty() && !driver.solver().lineActive()) {
             final long t0 = System.nanoTime();
             final int c0 = defender.counters, h0 = defender.holds, k0 = defender.threatChecks;
@@ -687,6 +701,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     @Override
     public CardCollection discard(final Player p, final SpellAbility sa, final CardCollection valid, final int min,
             final int max, final CardCollectionView visibleToChooser) {
+        return worked(() -> discard0(p, sa, valid, min, max, visibleToChooser));
+    }
+
+    private CardCollection discard0(final Player p, final SpellAbility sa, final CardCollection valid, final int min,
+            final int max, final CardCollectionView visibleToChooser) {
         if (defender == null) {
             return null;
         }
@@ -714,7 +733,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     @Override
     public boolean attack(final Player attacker, final Combat combat) {
-        return driver.attack(attacker, combat);
+        return worked(() -> driver.attack(attacker, combat));
     }
 
     @Override
@@ -859,6 +878,15 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
     Stage propose(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs, final long t0) {
+        return propose(g, p, m, objs, t0, t0);
+    }
+
+    /**
+     * As above; work-units-1107: {@code b0} is the decision's start on the budget clock (the work clock's time with
+     * workUnits, else {@code t0}), and the recording deadline counts from it.
+     */
+    Stage propose(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs, final long t0,
+            final long b0) {
         final Stage st = new Stage();
         planPoints++;
         final ForcedWinSolver solver = driver.solver();
@@ -919,13 +947,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final PhaseHandler ph = g.getPhaseHandler();
         if (spec.samples > 0 && ph.isPlayerTurn(p)) {
             final long a = System.nanoTime();
+            final long ba = forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : a; // work-units-1107 (off: a)
             // J0 (block-search-1019): both clocks go through WallClock, so a "Continue from here" rebuild unbinds them
             // (unchanged live)
             // bvw-step1-build-1024: with the solver on budget=counter the recordings read no wall clock either (their
             // play-outs stop at the look-ahead's step caps); recordMs and the decision budget bind only on the ms path
-            final long deadline = followCfg.counter ? a + Long.MAX_VALUE / 4
-                    : Math.min(a + forge.ai.WallClock.budgetMs(spec.recordMs) * 1_000_000L,
-                    t0 + Math.max(1000L, forge.ai.WallClock.budgetMs(rs.budgetMs()) / 2) * 1_000_000L);
+            final long deadline = followCfg.counter ? ba + Long.MAX_VALUE / 4
+                    : Math.min(ba + forge.ai.WallClock.budgetMs(spec.recordMs) * 1_000_000L,
+                    b0 + Math.max(1000L, forge.ai.WallClock.budgetMs(rs.budgetMs()) / 2) * 1_000_000L);
             final List<Object> recs = new ArrayList<>();
             final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps);
             recs.add(greedy);

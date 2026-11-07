@@ -133,6 +133,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * {@link LookaheadSearch#WALL_GRACE_MS} at the latest (lane sc-wallguard-1009).
          */
         public long budgetMs = 0L;
+        /**
+         * work-units-1107 (ARCH-APPENDIX-1104 A3; false = off, the default, unrecorded, and then nothing changes): every
+         * search budget of this seat (look-ahead, plans, solver, defense, choice scorer) binds on engine work
+         * ({@link forge.game.WorkClock}) instead of the host's clock. workScale: the budgets bind at this times their
+         * reference work. workWallMs (0 = budgetMs): the real-time safety wall per decision; past it every budget stops
+         * as on a wall cut, and the decision row says {@code wall_cap}.
+         */
+        public boolean workUnits = false;
+        public double workScale = 1.0;
+        public long workWallMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
         public int connectTimeoutMs = 10_000;
         /**
@@ -294,7 +304,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "choiceScorer", "alwaysKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard"));
+                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "workUnits", "workScale", "workWallMs"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -327,6 +337,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("decisionLog") && !o.get("decisionLog").isJsonNull()) c.decisionLog = o.get("decisionLog").getAsString();
             if (o.has("policySha") && !o.get("policySha").isJsonNull()) c.policySha = o.get("policySha").getAsString();
             if (o.has("budgetMs")) c.budgetMs = o.get("budgetMs").getAsLong();
+            if (o.has("workUnits")) c.workUnits = o.get("workUnits").getAsBoolean(); // work-units-1107
+            if (o.has("workScale")) c.workScale = o.get("workScale").getAsDouble();
+            if (o.has("workWallMs")) c.workWallMs = o.get("workWallMs").getAsLong();
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
             if (o.has("choices")) c.choices = o.get("choices").getAsInt();
             if (o.has("choiceAlts")) c.choiceAlts = o.get("choiceAlts").getAsInt();
@@ -403,6 +416,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (budgetMs < 0 || connectTimeoutMs < 1 || readTimeoutMs < 1) {
                 throw new IllegalArgumentException("search: budgetMs >= 0, connectTimeoutMs >= 1, readTimeoutMs >= 1");
+            }
+            if (!(workScale > 0) || workWallMs < 0 || (!workUnits && (workScale != 1.0 || workWallMs != 0))) {
+                throw new IllegalArgumentException("search: workScale > 0, workWallMs >= 0, both only with workUnits");
             }
             if (server == null) {
                 throw new IllegalArgumentException("search.server (host:port of the search service) is required");
@@ -523,6 +539,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (budgetMs > 0) {
                 // live-sc-1009: only when set, so a bench spec's JSON is unchanged
                 o.addProperty("budgetMs", budgetMs);
+            }
+            if (workUnits) {
+                // work-units-1107: only when on, so every other spec's JSON is unchanged
+                o.addProperty("workUnits", true);
+                o.addProperty("workScale", workScale);
+                o.addProperty("workWallMs", workWallMs);
             }
             if (sameDepartures != 2) {
                 // cm-choice-search-1009: only when changed, so an S1 spec's JSON is unchanged
@@ -728,7 +750,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     row.addProperty("seat", seatIdx);
                     row.add("cac", e);
                     synchronized (rows) {
-                        rows.add(row);
+                        addRow(row);
                     }
                 });
                 c.install(b);
@@ -1091,8 +1113,93 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         ls.forcePlayed = null;
     }
 
+    // ------------------------------------------------------------------------------------------------ work-units-1107
+
+    /** work-units-1107: the decision in progress (null = none, or workUnits off). */
+    private forge.game.WorkClock.Span workSpan;
+    private long workDecisions, workWallHits;
+    /** This seat's work clock: installed on the deciding thread only inside its decisions (another seat never sees it). */
+    private forge.game.WorkClock.Clock workClock;
+    private forge.game.WorkClock.Clock workPrev;
+
+    /** The real-time safety wall per decision (ms). */
+    long workWallMs() {
+        return cfg.workWallMs > 0 ? cfg.workWallMs : cfg.budgetMs;
+    }
+
+    /**
+     * work-units-1107: begin a decision of this seat on its game thread's work clock (installed on first use); null
+     * when workUnits is off, and then nothing happens.
+     */
+    forge.game.WorkClock.Span workBegin() {
+        if (!cfg.workUnits) {
+            return null;
+        }
+        final forge.game.WorkClock.Span outer = workSpan;
+        if (outer == null) {
+            if (workClock == null) {
+                workClock = forge.game.WorkClock.newClock(cfg.workScale);
+            }
+            workPrev = forge.game.WorkClock.install(workClock);
+        }
+        final forge.game.WorkClock.Span sp = forge.game.WorkClock.begin(workWallMs());
+        if (outer == null) {
+            workSpan = sp;
+        }
+        return sp;
+    }
+
+    void workEnd(final forge.game.WorkClock.Span sp) {
+        if (sp == null) {
+            return;
+        }
+        final boolean outer = sp == workSpan;
+        if (outer) {
+            workDecisions++;
+            if (sp.wallHit()) {
+                workWallHits++;
+            }
+            workSpan = null;
+        }
+        forge.game.WorkClock.end(sp);
+        if (outer) {
+            forge.game.WorkClock.install(workPrev);
+            workPrev = null;
+        }
+    }
+
+    /** The decision's start on the budget clock: the work clock's time with workUnits, else {@code t0}. */
+    long budgetStart(final long t0) {
+        return cfg.workUnits && forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
+    }
+
+    /** A search row, with the decision's work when workUnits is on (unchanged otherwise). */
+    private void addRow(final JsonObject row) {
+        final forge.game.WorkClock.Span sp = workSpan;
+        if (sp != null) {
+            row.addProperty("work_ms", Math.round(sp.workMs() * 10) / 10.0);
+            final JsonArray wc = new JsonArray();
+            for (long x : sp.counts()) {
+                wc.add(x);
+            }
+            row.add("work_counts", wc);
+            row.addProperty("wall_cap", sp.wallHit());
+        }
+        addRow(row);
+    }
+
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
+            final List<SpellAbility> menuObjs) {
+        final forge.game.WorkClock.Span ws = workBegin();
+        try {
+            return decide0(g, me, m, frame, greedy, menuObjs);
+        } finally {
+            workEnd(ws);
+        }
+    }
+
+    private int decide0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
         pendingWindow = null;
         liveMacro = null;
@@ -1121,6 +1228,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         final long t0 = System.nanoTime();
+        final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
         try {
@@ -1217,7 +1325,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         PlanSearch.Stage stage = null;
         if (sb != null && sb.planPoint(g)) {
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
-            stage = sb.propose(g, me, m, menuObjs, t0);
+            stage = sb.propose(g, me, m, menuObjs, t0, bt0);
             if (stage.hook) {
                 // J1: a proven line taken at once; live must have taken one here too
                 final forge.ai.simulation.AiReplay.Mark mk = mark();
@@ -1249,7 +1357,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 expandLimit = order.size();
                 ex = this;
             }
-            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat, ex)
+            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : cfg.breadth, stage.plans, stage.labels, kt, bt0, sb.threat, ex)
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
@@ -1447,7 +1555,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("ms", Math.round(r.ms * 10) / 10.0);
             row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
             row.addProperty("score_ms", Math.round((System.nanoTime() - t0) / 1e5 - r.ms * 10) / 10.0);
-            rows.add(row);
+            addRow(row);
         }
         tap(r.givenIndex.length > 0 ? "searched" : String.valueOf(r.outcome), stage, r, order.size(), answer);
         return answer;
@@ -1567,7 +1675,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         row.addProperty("answer", answer);
         row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
-        rows.add(row);
+        addRow(row);
     }
 
     // ------------------------------------------------------------------------------------------------ block search
@@ -1596,7 +1704,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             row.add("hand", hand);
             row.addProperty("lands", lands);
-            rows.add(row);
+            addRow(row);
         }
         return keep < 0 ? null : new short[] {keep};
     }
@@ -1632,6 +1740,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public short[] decideChoice(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
+        try {
+            return decideChoice0(g, me, m, frame, greedy);
+        } finally {
+            workEnd(ws);
+        }
+    }
+
+    private short[] decideChoice0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
         if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
             return keepAnswer(g, me, m, frame, greedy);
@@ -1675,7 +1793,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("scored", scored);
             row.addProperty("departed", alt != null);
             row.addProperty("total_ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
-            rows.add(row);
+            addRow(row);
         }
         return alt;
     }
@@ -1693,6 +1811,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      */
     @Override
     public short[] decideBlocks(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
+        if (cfg.blocks <= 0) {
+            return null;
+        }
+        final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
+        try {
+            return decideBlocks0(g, me, m, frame, greedy, objs);
+        } finally {
+            workEnd(ws);
+        }
+    }
+
+    private short[] decideBlocks0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
         if (cfg.blocks <= 0) {
             return null;
@@ -1845,7 +1976,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("prep_ms", Math.round(prepMs * 10) / 10.0);
             row.addProperty("ms", Math.round(ms * 10) / 10.0);
             row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
-            rows.add(row);
+            addRow(row);
         }
         return answer;
     }
@@ -2253,6 +2384,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final JsonObject o = new JsonObject();
         o.add("spec", cfg.toJson());
         o.addProperty("priority_asks", priorityAsks);
+        if (cfg.workUnits) {
+            o.addProperty("work_decisions", workDecisions); // work-units-1107: only when on
+            o.addProperty("work_wall_hits", workWallHits);
+        }
         o.addProperty("searched", searchedAsks);
         o.addProperty("departures", departures);
         o.addProperty("stack_skipped", searchStackSkipped);

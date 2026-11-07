@@ -842,6 +842,7 @@ public class AiController {
     private AiPlayDecision canPlayAndPayFor(final SpellAbility sa) {
         final Card host = sa.getHostCard();
         AiWork.tick("canPlayAndPayFor"); // rollout-budget-1101: a counted unit (no budget open = no-op)
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.AI_PLAY); // work-units-1107 (no clock = no-op)
 
         if (sa instanceof Spell sp) {
             Card altHost = sp.canPlayFromHost();
@@ -1746,7 +1747,8 @@ public class AiController {
         // lane s1-search-1007); with none set it is the FutureTask itself, as before
         // rollout-budget-1101: AiWork.carried: the eval thread works under the asking thread's counted budget (none = the
         // task itself, as before); a spent budget is handed back to the asking thread as AiWork.Exhausted, never a pass
-        Thread t = new Thread(AiWork.carried(CpuAccount.charged(future)), "Game AI Eval");
+        // work-units-1107: and under the asking thread's work clock (none = the same task)
+        Thread t = new Thread(forge.game.WorkClock.carried(AiWork.carried(CpuAccount.charged(future))), "Game AI Eval");
         t.setDaemon(true);
         t.start();
         try {
