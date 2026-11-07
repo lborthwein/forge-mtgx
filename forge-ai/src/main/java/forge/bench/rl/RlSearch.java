@@ -230,6 +230,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean beliefStatics = false;
         /** Default off: carry player-only stale-static repair into resampled look-ahead copies. */
         public boolean beliefPlayerStatics = false;
+        /** Default off: belief worlds retain hand identities already present in the seat's observation. */
+        public boolean beliefRememberedHand = false;
         /** Default off: preserve turn-use limits in look-ahead copies. */
         public boolean copyTurnLimits = false;
         public boolean offBattlefieldLimits = false;
@@ -256,7 +258,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "beliefPlayerStatics", "copyTurnLimits", "offBattlefieldLimits", "historyLki", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer", "basicsByType"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand", "copyTurnLimits", "offBattlefieldLimits", "historyLki", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer", "basicsByType"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -325,6 +327,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
             if (o.has("beliefStatics")) c.beliefStatics = o.get("beliefStatics").getAsBoolean();
             if (o.has("beliefPlayerStatics")) c.beliefPlayerStatics = o.get("beliefPlayerStatics").getAsBoolean();
+            if (o.has("beliefRememberedHand")) c.beliefRememberedHand = o.get("beliefRememberedHand").getAsBoolean();
             if (o.has("copyTurnLimits")) c.copyTurnLimits = o.get("copyTurnLimits").getAsBoolean();
             if (o.has("offBattlefieldLimits")) c.offBattlefieldLimits = o.get("offBattlefieldLimits").getAsBoolean();
             if (o.has("historyLki")) c.historyLki = o.get("historyLki").getAsBoolean();
@@ -453,6 +456,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.add("choiceScorer", choiceScorer); // choice-scorer-1106: only when on
             }
             if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
+            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
             if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
             if (historyLki) o.addProperty("historyLki", true);
             if (basicsByType) {
@@ -706,6 +710,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.infoState = cfg.infoState; // order-memory-1102 (off by default)
         lc.beliefStatics = cfg.beliefStatics;
         lc.beliefPlayerStatics = cfg.beliefPlayerStatics;
+        lc.beliefRememberedHand = cfg.beliefRememberedHand;
         lc.copyTurnLimits = cfg.copyTurnLimits;
         lc.offBattlefieldLimits = cfg.offBattlefieldLimits;
         lc.historyLki = cfg.historyLki;
@@ -2111,6 +2116,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         f.setVersion(obsVersion);
         f.setKnowledge(k);
         return new CopyCtx(k, f);
+    }
+
+    @Override
+    public boolean remembersHandCard(final Game live, final Player observer, final forge.game.card.Card card) {
+        // Reject other games even if physical card/player IDs happen to agree.
+        return cfg.beliefRememberedHand && liveKnow != null && liveKnow.game() == live
+                && observer != null && observer.getGame() == live && card != null && card.getGame() == live
+                && card.isInZone(forge.game.zone.ZoneType.Hand) && !card.isFaceDown()
+                && liveKnow.knows(liveKnow.seatOf(observer), card);
     }
 
     /**
