@@ -164,6 +164,8 @@ final class ForcedWinEngine {
 
     static final class Limits {
         int nodes = 250;
+        /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
+        boolean staleStatics = false;
         int depth = 64;
         int branching = 8;
         int targetVariants = 3;
@@ -501,6 +503,7 @@ final class ForcedWinEngine {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 root.g = copier.makeCopy();
+                root.g.staleStatics = lim.staleStatics; // unified-search-1106 (a belief world after the redraw below)
                 root.me = (Player) copier.find(liveMe);
                 st.copies++;
                 final Random rng = new Random(LookaheadSearch.mix(seed, 2));
@@ -1144,6 +1147,7 @@ final class ForcedWinEngine {
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
+            copier.setStaleStatics(lim.staleStatics); // unified-search-1106
                 copier.setCopyFidelity(1); // storm count, per-turn records
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);

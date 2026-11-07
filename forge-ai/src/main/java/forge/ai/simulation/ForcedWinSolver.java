@@ -135,6 +135,8 @@ public final class ForcedWinSolver {
         public boolean act = true;
         /** search-bones-1015 (c), off by default: the engine search's cycle table and REPEAT moves. */
         public boolean cycles = false;
+        /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
+        public boolean staleStatics = false;
         /**
          * search-bones-1015, off by default: the engine search's root copy shuffles our library below the known top
          * (pile memory), as the verification worlds do; without it the engine plays on our real library order, hidden
@@ -198,6 +200,7 @@ public final class ForcedWinSolver {
             c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
+            c.staleStatics = "true".equals(get.apply("staleStatics")); // unified-search-1106
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
@@ -915,6 +918,7 @@ public final class ForcedWinSolver {
                 synchronized (live) {
                     final GameCopier copier = new GameCopier(live, true);
                     g = copier.makeCopy();
+                    g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -1348,6 +1352,7 @@ public final class ForcedWinSolver {
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
         el.cycles = cfg.cycles;
+        el.staleStatics = cfg.staleStatics; // unified-search-1106
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
             el.ownKnownTop = kt == null ? 0 : kt.size();
@@ -1488,6 +1493,7 @@ public final class ForcedWinSolver {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1);
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -1737,6 +1743,7 @@ public final class ForcedWinSolver {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));

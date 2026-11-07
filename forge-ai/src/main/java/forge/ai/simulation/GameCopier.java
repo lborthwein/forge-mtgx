@@ -104,6 +104,15 @@ public class GameCopier {
      * left-the-battlefield / graveyard, counters and damage records of this turn.
      */
     private int copyFidelity = 0;
+    /**
+     * unified-search-1106 (off by default): the original is itself a copy whose hidden cards a belief world swapped out; its
+     * static effects can still name those cards. They are skipped, instead of failing the copy.
+     */
+    private boolean staleStatics = false;
+
+    public void setStaleStatics(boolean on) {
+        this.staleStatics = on;
+    }
     private int fidelityLeftOut = 0, fidelityStandIns = 0;
 
     public void setCopyFidelity(int level) {
@@ -447,8 +456,14 @@ public class GameCopier {
 
         // Undo effects first before calculating them below, to avoid them applying twice.
         for (StaticEffect effect : origGame.getStaticEffects().getEffects()) {
-            effect.removeMapped(gameObjectMap);
+            if (staleStatics || origGame.staleStatics) {
+                effect.removeMapped(gameObjectMap, c -> cardMap.containsKey(c)); // unified-search-1106
+            } else {
+                effect.removeMapped(gameObjectMap);
+            }
         }
+
+        newGame.staleStatics = origGame.staleStatics;
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
