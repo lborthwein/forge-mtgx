@@ -235,6 +235,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean beliefDeck = false;
         /** choice-scorer-1106 (null = off, the default, and then absent from the JSON): {@link ChoiceScorer.Config}. */
         public JsonObject choiceScorer = null;
+        /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
+        public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -246,7 +248,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer", "basicsByType"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -292,6 +294,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
             if (o.has("forcedWin") && !o.get("forcedWin").isJsonNull()) c.forcedWin = o.getAsJsonObject("forcedWin");
             if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
+            if (o.has("basicsByType") && o.get("basicsByType").getAsBoolean()) {
+                c.basicsByType = true;
+                forge.ai.simulation.BeliefSampler.BASICS_BY_TYPE = true; // bugfix-basics: process-wide, same names on a real DB
+            }
             if (o.has("choiceScorer") && !o.get("choiceScorer").isJsonNull()) {
                 c.choiceScorer = o.getAsJsonObject("choiceScorer");
                 ChoiceScorer.Config.parse(c.choiceScorer); // a bad key fails at parse, not at the first ask
@@ -432,6 +438,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (choiceScorer != null) {
                 o.add("choiceScorer", choiceScorer); // choice-scorer-1106: only when on
+            }
+            if (basicsByType) {
+                o.addProperty("basicsByType", true); // bugfix-basics: only when on
             }
             if (blocks > 0) {
                 // block-search-1019: only when on, so every other spec's JSON is unchanged
