@@ -117,7 +117,7 @@ final class ForcedWinEngine {
 
     /** Throw {@link OutOfBudget} when {@code wall} (System.nanoTime(); 0 = none) has passed. */
     static void checkWall(long wall, String where) {
-        if (wall != 0 && System.nanoTime() > wall) {
+        if (wall != 0 && forge.game.WorkClock.nanoTime() > wall) {
             throw new OutOfBudget("wall: " + where);
         }
         if (forge.ai.AiWork.spent()) {
@@ -1690,7 +1690,7 @@ final class ForcedWinEngine {
      */
     static Line search(Game live, Player liveMe, Limits lim, Stats st, long deadline, long seed, List<Line> likelyOut,
             int keep) {
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         final ForcedWinEngine[] held = new ForcedWinEngine[1];
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -1770,7 +1770,7 @@ final class ForcedWinEngine {
             } else {
                 win = e.dfs(root, 0);
             }
-            if (win == null && twoTurns && System.nanoTime() < deadline) {
+            if (win == null && twoTurns && forge.game.WorkClock.nanoTime() < deadline) {
                 lim.passTurn = true;
                 final int scale = Math.max(1, lim.passScale); // solver-gaps-1104 (1 = unchanged)
                 lim.nodes = st.nodes + nodeCap / 2 * scale;
@@ -1830,12 +1830,12 @@ final class ForcedWinEngine {
         } finally {
             lim.nodes = nodeCap0;
             lim.passTurn = passTurn0;
-            st.nanos += System.nanoTime() - t0;
+            st.nanos += forge.game.WorkClock.nanoTime() - t0;
             if (DIAG != null && held[0] != null) {
                 final ForcedWinEngine e = held[0];
                 diag("{\"e\":\"E\",\"sid\":" + e.diagSid + ",\"cap\":" + jq(e.capWhy) + ",\"time\":" + e.stoppedByTime
                         + ",\"life\":" + e.stoppedByLifetime + ",\"steps\":" + (st.steps - e.stepBase) + ",\"cards\":"
-                        + (st.cards - e.cardBase) + ",\"pass\":" + e.diagPass + ",\"ms\":" + (System.nanoTime() - t0) / 1_000_000 + "}");
+                        + (st.cards - e.cardBase) + ",\"pass\":" + e.diagPass + ",\"ms\":" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000 + "}");
             }
             if (held[0] != null) {
                 // bvw-step1-build-1024 (diagnostics): which budget stopped this search, if any
@@ -1891,7 +1891,7 @@ final class ForcedWinEngine {
         return b;
     }
 
-    /** engine-reach-1107: a stage's own end (System.nanoTime(); 0 = none), inside the search's deadline. */
+    /** engine-reach-1107: a stage's own end (WorkClock.nanoTime(); 0 = none), inside the search's deadline. */
     private long stageEnd;
 
     private boolean out() {
@@ -1915,11 +1915,11 @@ final class ForcedWinEngine {
             capAt("cards", st.cards - cardBase, lim.totalCards * budgetScale); // bvw-step1-build-1024: copied-card cap
             return true;
         }
-        if (System.nanoTime() > deadline) {
+        if (forge.game.WorkClock.nanoTime() > deadline) {
             stoppedByTime = true;
             return true;
         }
-        if (stageEnd != 0 && System.nanoTime() > stageEnd) {
+        if (stageEnd != 0 && forge.game.WorkClock.nanoTime() > stageEnd) {
             return true; // engine-reach-1107: a stage of the search ends (engineFrontierPct)
         }
         if (forge.ai.AiWork.spent()) {
@@ -1944,13 +1944,13 @@ final class ForcedWinEngine {
 
     /** engine-reach-1107 ({@link Limits#frontierAfterPct}): depth-first for its share of the time left, then the frontier. */
     private List<Step> staged(Node root) {
-        final long t = System.nanoTime();
+        final long t = forge.game.WorkClock.nanoTime();
         stageEnd = t + (deadline - t) / 100 * lim.frontierAfterPct;
         List<Step> win = null;
         try {
             win = dfs(root, 0);
             stageEnd = 0;
-            if (win == null && System.nanoTime() < deadline) {
+            if (win == null && forge.game.WorkClock.nanoTime() < deadline) {
                 table.clear();
                 seen.clear();
                 win = frontier(root);
@@ -2150,6 +2150,7 @@ final class ForcedWinEngine {
             return null;
         }
         st.nodes++;
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.ENGINE_NODE); // work-units-1107 (no clock = no-op)
         forge.util.IdScope.install(cloneScope(node.ids));
         // a node is our priority with an empty stack (the copy was taken just after we passed it)
         LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
@@ -2297,6 +2298,7 @@ final class ForcedWinEngine {
             return null;
         }
         st.nodes++;
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.ENGINE_NODE); // work-units-1107 (no clock = no-op)
         forge.util.IdScope.install(cloneScope(node.ids));
         LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
         final List<Step> moves = moves(node);

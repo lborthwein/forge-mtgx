@@ -530,16 +530,16 @@ public final class ForcedWinPlanner {
     // ------------------------------------------------------------------ entry
 
     static Result plan(Position pos, Limits lim) {
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         final Result r = new ForcedWinPlanner(pos, lim).run();
-        r.nanos = System.nanoTime() - t0;
+        r.nanos = forge.game.WorkClock.nanoTime() - t0;
         return r;
     }
 
     private long deadline = Long.MAX_VALUE;
 
     Result run() {
-        deadline = lim.ms < 0 ? Long.MAX_VALUE : System.nanoTime() + lim.ms * 1_000_000L;
+        deadline = lim.ms < 0 ? Long.MAX_VALUE : forge.game.WorkClock.nanoTime() + lim.ms * 1_000_000L;
         final S s = new S();
         s.sorcery = pos.sorcerySpeed;
         s.preMain = pos.preMain;
@@ -597,12 +597,12 @@ public final class ForcedWinPlanner {
             record(s);
             return;
         }
-        if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines || (nodes & 63) == 0 && System.nanoTime() > deadline) {
-            result.exhausted |= nodes >= lim.nodes || System.nanoTime() > deadline;
+        if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines || (nodes & 63) == 0 && forge.game.WorkClock.nanoTime() > deadline) {
+            result.exhausted |= nodes >= lim.nodes || forge.game.WorkClock.nanoTime() > deadline;
             if (result.stoppedBy.isEmpty() && result.exhausted) {
                 result.stoppedBy = nodes >= lim.nodes ? "nodes" : "time"; // unified-search-1106
             }
-            if (System.nanoTime() > deadline) {
+            if (forge.game.WorkClock.nanoTime() > deadline) {
                 result.timedOut = true;
                 nodes = Math.max(nodes, lim.nodes);
             }
@@ -613,6 +613,7 @@ public final class ForcedWinPlanner {
             return;
         }
         nodes++;
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.PLAN_NODE); // work-units-1107 (no clock = no-op)
         result.visited++;
         if (!seen.add(s.key())) {
             return;

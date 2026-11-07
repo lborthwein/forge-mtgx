@@ -411,6 +411,11 @@ public class GameCopier {
         forge.game.IndependentCopies.enter();
         try {
             final Game copy = makeCopy0(advanceToPhase, aiPlayer);
+            if (forge.game.WorkClock.active()) {
+                // work-units-1107: one copy plus one unit per card in it (copying dominates a copy's cost)
+                forge.game.WorkClock.tick(forge.game.WorkClock.Site.COPY);
+                forge.game.WorkClock.tick(forge.game.WorkClock.Site.COPY_CARD, copy.getCardsInGame().size());
+            }
             // decisionpoint-1102 (census attribution only; a no-op without an observer): this game is a copy
             forge.ai.dp.DecisionPoints.markCopy(copy, origGame);
             return copy;
@@ -1744,6 +1749,7 @@ public class GameCopier {
             return null;
         }
         forge.game.WorkMeter.tick("copyLeakWalk"); // void-causes-1104: hang watchdog unit (no meter open = no-op)
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.LEAK); // work-units-1107 (no clock = no-op)
         if (depth > 24) {
             return path + "!depth";
         }
