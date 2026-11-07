@@ -889,7 +889,11 @@ public final class StaticAbilityContinuous {
                 }
             }
 
-            if (controllerMayPlay && (mayPlayLimit == null || stAb.getMayPlayTurn() < mayPlayLimit)) {
+            // A copied game can leave the defined player empty (a Prepared Spell effect whose source is not in the copy):
+            // no one may play the card then, instead of an exception out of every game copy holding it.
+            if (controllerMayPlay && (mayPlayLimit == null || stAb.getMayPlayTurn() < mayPlayLimit)
+                    && !(forge.game.EngineFixes.copyRobust() && params.containsKey("MayPlayPlayer")
+                            && AbilityUtils.getDefinedPlayers(affectedCard, params.get("MayPlayPlayer"), stAb).isEmpty())) {
                 String mayPlayAltCost = mayPlayAltManaCost;
 
                 if (mayPlayAltCost != null) {

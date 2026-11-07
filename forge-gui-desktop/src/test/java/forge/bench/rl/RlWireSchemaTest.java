@@ -336,6 +336,32 @@ public class RlWireSchemaTest {
         Assert.assertEquals(ix.sha(), CardIndex.sha256(tsv.getBytes(StandardCharsets.UTF_8)));
     }
 
+    @Test
+    public void cardIndexFaceRulesAreBehindTheKey() {
+        final String tsv = "<pad>\t0\n<unk>\t1\nKessig Forgemaster // Flameheart Werewolf\t2\nA One // Shared Back\t3\n"
+                + "B One // Shared Back\t4\nTamiyo, Seasoned Scholar\t5\nDelver\t6\nDelver // Back Row\t7\n";
+        final byte[] b = tsv.getBytes(StandardCharsets.UTF_8);
+        final CardIndex off = CardIndex.of(b, false);
+        Assert.assertFalse(off.facesOn());
+        Assert.assertEquals(off.resolve("Kessig Forgemaster"), 1);
+        Assert.assertEquals(off.resolve("Flameheart Werewolf"), 1);
+        Assert.assertEquals(off.resolve("Tamiyo, Seasoned Scholar (21)'s Effect"), 1);
+        final CardIndex on = CardIndex.of(b, true);
+        Assert.assertTrue(on.facesOn());
+        Assert.assertEquals(on.sha(), off.sha());
+        Assert.assertEquals(on.resolve("Kessig Forgemaster"), 2);    // the main face, Forge's full name
+        Assert.assertEquals(on.resolve("Flameheart Werewolf"), 2);   // the back face
+        Assert.assertEquals(on.resolve("A One"), 3);
+        Assert.assertEquals(on.resolve("Shared Back"), 1);           // two rows claim it: no guess
+        Assert.assertEquals(on.resolve("Delver"), 6);                // its own row first
+        Assert.assertEquals(on.resolve("Tamiyo, Seasoned Scholar (21)'s Effect"), 5);
+        Assert.assertEquals(on.resolve("Kessig Forgemaster (7)'s Effect"), 2);
+        Assert.assertEquals(on.resolve("Nope (7)'s Effect"), 1);
+        Assert.assertEquals(on.resolve("The Initiative"), 1);        // a designation has no row
+        Assert.assertEquals(on.lookup("Nope"), 1);
+        Assert.assertEquals(on.unknownLookups(), 1);
+    }
+
     // ------------------------------------------------------------------------------------------------ 3. goldens
 
     @Test

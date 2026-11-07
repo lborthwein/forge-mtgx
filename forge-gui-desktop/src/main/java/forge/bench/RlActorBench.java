@@ -1207,6 +1207,9 @@ public final class RlActorBench {
         s.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
         s.addProperty("process_cpu_s", (os.getProcessCpuTime() - pcpu0) / 1e9);
         s.addProperty("unknown_card_lookups", index.unknownLookups());
+        if (index.facesOn()) {
+            s.addProperty("card_index_faces", true);
+        }
         final JsonArray unk = new JsonArray();
         final List<String> un = new ArrayList<>(index.unknownNames());
         Collections.sort(un);
