@@ -172,6 +172,11 @@ public final class ForcedWinSolver {
          */
         public boolean turnLimits = false;
         /**
+         * engine-reach-1107 (off by default): engine moves: single targets on each opponent first, nonland mana floats (tap-only
+         * floats first), and the top card of our library.
+         */
+        public boolean engineMoves = false;
+        /**
          * kill-line-1106 (off by default): the follower pays as the line recorded. A step the planner paid with life pays
          * its Phyrexian pips with life, not with a mana source Forge AI's payment would pick first.
          */
@@ -308,6 +313,7 @@ public final class ForcedWinSolver {
             c.engineVerify = "true".equals(get.apply("engineVerify")); // unified-search-1106
             c.engineLongLoops = "true".equals(get.apply("engineLongLoops")); // unified-search-1106
             c.turnLimits = "true".equals(get.apply("turnLimits")); // engine-reach-1107
+            c.engineMoves = "true".equals(get.apply("engineMoves")); // engine-reach-1107
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
@@ -1593,6 +1599,12 @@ public final class ForcedWinSolver {
         el.staleStatics = cfg.staleStatics; // unified-search-1106
         el.longLoops = cfg.engineLongLoops; // unified-search-1106
         el.turnLimits = cfg.turnLimits; // engine-reach-1107
+        if (cfg.engineMoves) {
+            el.oppTargets = true; // engine-reach-1107
+            el.floatMana = true;
+            el.floatFirst = true;
+            el.libraryTop = true;
+        }
         if (cfg.engineVerify) {
             final int[] tries = {0};
             el.verify = path -> {

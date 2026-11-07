@@ -181,6 +181,21 @@ final class ForcedWinEngine {
         boolean longLoops = false;
         /** engine-reach-1107 (false = off): node copies keep this turn's may-play and activation counts ({@link GameCopier#setTurnLimits}). */
         boolean turnLimits = false;
+        // M1 engine-reach-1107: moves
+        /** engine-reach-1107 (false = off): a single-target ability is offered on each opponent first, not only on our permanents. */
+        boolean oppTargets = false;
+        /** engine-reach-1107 (false = off): the top card of our library is looked at for moves (a permission to play it). */
+        boolean libraryTop = false;
+        /**
+         * engine-reach-1107 (false = off): a mana ability of a nonland permanent is a move, one per source class and colour. A
+         * source can then be tapped before it leaves or untaps.
+         */
+        boolean floatMana = false;
+        /**
+         * engine-reach-1107 (false = off, with floatMana): a nonland source's float that keeps the source comes right after the
+         * previous move's ability, before other moves; floats that sacrifice their source stay late.
+         */
+        boolean floatFirst = false;
         /**
          * unified-search-1106 (null = off): a found win must also win here (a play-out in another world of our library), or the
          * search goes on; and at each node the moves that drew from our library are searched after the others, so a line
@@ -926,6 +941,12 @@ final class ForcedWinEngine {
                 ZoneType.Command}) {
             cards.addAll(me.getCardsIn(z));
         }
+        if (lim.libraryTop) {
+            final forge.game.card.CardCollectionView lib = me.getCardsIn(ZoneType.Library);
+            if (!lib.isEmpty()) {
+                cards.add(lib.get(0));
+            }
+        }
         for (Card c : cards) {
             List<SpellAbility> all;
             try {
@@ -1006,7 +1027,20 @@ final class ForcedWinEngine {
                 }
             }
         }
+        if (lim.floatMana) {
+            floatMoves(me, needed, keys, floats);
+        }
         final List<Step> out = new ArrayList<>(rep);
+        if (lim.floatFirst) {
+            for (java.util.Iterator<Step> it = floats.iterator(); it.hasNext();) {
+                final Step f = it.next();
+                final Card src = g.findById(f.hostId);
+                if (src != null && !sacrificesSelf(src, f.desc)) {
+                    out.add(f);
+                    it.remove();
+                }
+            }
+        }
         out.addAll(act);
         out.addAll(spells);
         out.addAll(floats);
@@ -1027,6 +1061,59 @@ final class ForcedWinEngine {
             }
         }
         return out;
+    }
+
+    /**
+     * engine-reach-1107 ({@link Limits#floatMana}): tap-only mana abilities of our untapped nonland permanents, one move per
+     * source name and colour: the colours our cards need that the source makes, else its first.
+     */
+    private static void floatMoves(Player me, int needed, Set<String> keys, List<Step> floats) {
+        final Set<String> classes = new HashSet<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isLand() || !classes.add(c.getName() + c.isTapped())) {
+                continue;
+            }
+            for (SpellAbility m : c.getManaAbilities()) {
+                if (m.getPayCosts() == null) {
+                    continue;
+                }
+                final SpellAbility mc = m.copy(me);
+                mc.setActivatingPlayer(me);
+                if (!mc.canPlay() || !ComputerUtilCost.canPayCost(mc, me, false) || mc.getManaPart() == null) {
+                    continue;
+                }
+                int first = -1;
+                boolean any = false;
+                for (int i = 0; i < 6; i++) {
+                    if (!mc.canProduce(ForcedWinModel.SHORT[i])) {
+                        continue;
+                    }
+                    if (first < 0) {
+                        first = i;
+                    }
+                    if (i < 5 && (needed & (1 << i)) != 0) {
+                        any = true;
+                        if (keys.add("float|" + c.getId() + "|" + i)) {
+                            floats.add(Step.floatMana(c.getId(), c.getName(), m.getDescription(), i));
+                        }
+                    }
+                }
+                if (!any && first >= 0 && keys.add("float|" + c.getId() + "|" + first)) {
+                    floats.add(Step.floatMana(c.getId(), c.getName(), m.getDescription(), first));
+                }
+            }
+        }
+    }
+
+    /** Whether the mana ability with this description sacrifices its source. */
+    private static boolean sacrificesSelf(Card c, String desc) {
+        for (SpellAbility m : c.getManaAbilities()) {
+            if (m.getDescription().equals(desc) && m.getPayCosts() != null && m.getPayCosts().getCostParts().stream().anyMatch(
+                    p -> p instanceof forge.game.cost.CostSacrifice cs && cs.payCostFromSource())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean oppDecked(Player me) {
@@ -1135,6 +1222,9 @@ final class ForcedWinEngine {
         if (slot != null && firstTargeting(sa) == slot) {
             int n = 0;
             final List<GameObject> cands = new ArrayList<>();
+            if (lim.oppTargets) {
+                cands.addAll(me.getOpponents()); // engine-reach-1107
+            }
             for (Card p : me.getCardsIn(ZoneType.Battlefield)) {
                 cands.add(p);
             }
