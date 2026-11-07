@@ -1543,6 +1543,15 @@ public final class RlActorBench {
 
     /** Replay: RL seats answer from the tape's {@code dec} rows, asserting family and C at each dec_idx. */
     static RlSeat.Endpoint tapeEndpoint(final JsonObject line, final long uid) {
+        return tapeEndpoint(line, uid, false);
+    }
+
+    /**
+     * @param bankFork unified-jar-1106: an R1 bank job on an RL seat's forced tape. The forced part never asks the seat;
+     *     after the job's fork the tapes are detached and the seat has no answers, so it leaves its asks to Forge AI, as a
+     *     Forge seat does there.
+     */
+    static RlSeat.Endpoint tapeEndpoint(final JsonObject line, final long uid, final boolean bankFork) {
         final int version = line.has("schema_sha")
                 && forge.bench.rl.RlSchemaV2.schemaSha().equals(line.get("schema_sha").getAsString()) ? 2 : 1;
         final Map<Integer, JsonArray> rows = new HashMap<>();
@@ -1554,6 +1563,14 @@ public final class RlActorBench {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
                 final RlWire.Decide d = RlWire.decodeDecide(p, version);
+                if (bankFork) {
+                    final RlWire.Decision x = new RlWire.Decision();
+                    x.gameUid = uid;
+                    x.decIdx = d.decIdx;
+                    x.status = RlWire.ST_DELEGATE;
+                    x.steps = new short[0];
+                    return x;
+                }
                 final JsonArray r = rows.get(d.decIdx);
                 if (r == null) {
                     throw new RlClient.ServerError("replay", "no tape row for dec " + d.decIdx);
@@ -2339,7 +2356,7 @@ public final class RlActorBench {
                     game.addPriorityDecisionListener(checks[0]);
                 };
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
-                        t.get("game_uid").getAsString())), null, jarSha, hook, dl);
+                        t.get("game_uid").getAsString()), cfg.bankSpec != null), null, jarSha, hook, dl);
                 final forge.bench.rl.RlReplayLabeller lab = labs[0];
                 if (p.guardError != null) {
                     row.addProperty("error", "deck_guard: " + p.guardError);
