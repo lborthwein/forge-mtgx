@@ -259,6 +259,12 @@ public final class RlActorBench {
          * per-decision diagnostics ({@code "d"}: wall ms; the forced-win solver's engine ms, worlds, nodes, ms_bound).
          */
         boolean decisionLogDiag = false;
+        /**
+         * unified-jar-1106 (false, the default: a bridged seat refuses the log): the log also tapes RL seats, the pilot's
+         * bridge included. A pilot's tape's dec rows miss the moves its plan hook plays, so a tape without a log can't be
+         * forced past the first such line (doomsday-audit-1106: 49 of 84).
+         */
+        boolean decisionLogRlSeats = false;
         /** bvw-decision-log-1027: replay {@code "record"}: the directory of {@code decision-logs-<pid>.jsonl.gz}. */
         String decisionLogOut = null;
         /** bvw-decision-log-1027: replay: logs an earlier {@code "record"} replay wrote (used for digest-equal games). */
@@ -539,6 +545,9 @@ public final class RlActorBench {
             if (c.decisionLogDiag && !"record".equals(c.decisionLog)) {
                 throw new IllegalArgumentException("decisionLogDiag is for decisionLog record");
             }
+        }
+        if (o.has("decisionLogRlSeats") && !o.get("decisionLogRlSeats").isJsonNull()) {
+            c.decisionLogRlSeats = o.get("decisionLogRlSeats").getAsBoolean();
         }
         if (o.has("decisionLogOut") && !o.get("decisionLogOut").isJsonNull()) {
             c.decisionLogOut = o.get("decisionLogOut").getAsString();
@@ -920,7 +929,8 @@ public final class RlActorBench {
             // bvw-decision-log-1027: the log tapes Forge seats (forge, forge:<Profile>); a bridged seat's answers are its
             // dec rows, and the K8 seat is not taped here
             for (int s = 0; s < 2; s++) {
-                if (K8_CONTROLLER.equals(ctl[s]) || RlSeat.roleOf(ctl[s]) != RlSeat.Role.FORGE) {
+                if (K8_CONTROLLER.equals(ctl[s]) || RlSeat.roleOf(ctl[s]) != RlSeat.Role.FORGE
+                        && !(cfg.decisionLogRlSeats && RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL)) {
                     out.guardError = "decision log: seat " + s + " (" + ctl[s] + ") is not a Forge seat";
                     return out;
                 }
