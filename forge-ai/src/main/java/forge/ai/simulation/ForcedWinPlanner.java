@@ -75,7 +75,6 @@ public final class ForcedWinPlanner {
          * labeller-v2 (a)/(c) (null = none, v1): the forced choice tokens of this step's window ({@link ForcedWinChoices}):
          * the engine's variant identity, or the planner's scry / surveil / discard answers.
          */
-        List<String> cac;
         /** labeller-v2 (a): every choice token the engine's move played (forced and Forge AI's), for the line; null = none. */
         List<String> cacPlayed;
         /** labeller-v2 (e) (null = Forge AI pays): the sources this step floats first, as FLOAT steps (a payment variant). */
@@ -150,7 +149,6 @@ public final class ForcedWinPlanner {
             s.expHand = expHand;
             s.expLib = expLib;
             s.anyColors.addAll(anyColors);
-            s.cac = cac == null ? null : new ArrayList<>(cac);
             s.cacPlayed = cacPlayed == null ? null : new ArrayList<>(cacPlayed);
             s.payFloats = payFloats == null ? null : new ArrayList<>(payFloats);
             if (body != null) {
@@ -1415,46 +1413,6 @@ public final class ForcedWinPlanner {
     }
 
     /** Record a choice token on the step being resolved (kill-line-1106). */
-    private static void token(S n, String tok) {
-        if (n.steps.isEmpty()) {
-            return;
-        }
-        final Step st = n.steps.get(n.steps.size() - 1);
-        if (st.cac == null) {
-            st.cac = new ArrayList<>();
-        }
-        st.cac.add(tok);
-    }
-
-    /** kill-line-1106 (port of labeller-v2 (c)): the discard choices of {@code n} cards: distinct classes, least useful first. */
-    private List<List<Integer>> discardChoices(S s, int n) {
-        final List<Integer> hand = new ArrayList<>(s.hand);
-        hand.sort(Comparator.comparingInt((Integer h) -> -cards.get(h).order()).thenComparingInt(h -> cards.get(h).id));
-        final List<Integer> distinct = new ArrayList<>();
-        final Map<String, Integer> perName = new HashMap<>();
-        for (int h : hand) {
-            final int k = perName.merge(cards.get(h).name, 1, Integer::sum);
-            if (k <= n) {
-                distinct.add(h);
-            }
-        }
-        final List<List<Integer>> raw = new ArrayList<>();
-        combos(distinct, n, 0, new ArrayList<>(), raw, lim.classes * 4);
-        final List<List<Integer>> out = new ArrayList<>();
-        final Set<String> seenNames = new HashSet<>();
-        for (List<Integer> c : raw) {
-            final List<String> names = new ArrayList<>();
-            for (int x : c) {
-                names.add(cards.get(x).name);
-            }
-            java.util.Collections.sort(names);
-            if (seenNames.add(names.toString()) && out.size() < lim.classes) {
-                out.add(c);
-            }
-        }
-        return out;
-    }
-
     private static void combos(List<Integer> xs, int n, int from, List<Integer> cur, List<List<Integer>> out, int cap) {
         if (out.size() >= cap) {
             return;

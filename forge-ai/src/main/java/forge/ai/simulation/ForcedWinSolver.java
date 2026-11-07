@@ -162,7 +162,6 @@ public final class ForcedWinSolver {
          * kill-line-1106 (off by default; port of solver-gaps-1104): an engine move's targeting trigger of ours branches
          * over every legal target class, at most triggerVariants of them, mana valued (ForcedWinEngine.TriggerTargets#wide).
          */
-        public boolean engineTriggerTargets = false;
         /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
         public boolean staleStatics = false;
         /**
@@ -178,7 +177,6 @@ public final class ForcedWinSolver {
          */
         public boolean followPay = false;
         /** kill-line-1106 (off by default): planner lines that all fail verification fall through to the engine search. */
-        public boolean engineAfterPlanFail = false;
         /** kill-line-1106 (off by default): a permanent's mana output is read from the position, not its learned template. */
         public boolean sourceOutput = false;
         /**
@@ -375,7 +373,6 @@ public final class ForcedWinSolver {
         public boolean oppMinRevealPoints = false;
         public boolean enginePassFirst = false, enginePassToEnd = false, engineTriggerTargets = false, oppMinLoopMemo = false;
         /** solver-gaps-1104: the trigger target classes one engine move branches over (engineTriggerTargets only). */
-        public int triggerVariants = 8;
         /** solver-gaps-1104 (0 = off): ForcedWinEngine.Limits#passScale, the turn-crossing pass's budget multiplier. */
         public int enginePassScale = 0;
         /** solver-gaps-1104 (0 = off): ForcedWinEngine.Limits#altLines, the engine's winning lines verified per search. */
@@ -4730,7 +4727,6 @@ public final class ForcedWinSolver {
          * payment sources float before its action.
          */
         boolean cacLine, payRecord;
-        ForcedWinChoices.Cursor choices = new ForcedWinChoices.Cursor(null);
         int floatDone;
 
         Follower(Line line) {
@@ -5432,7 +5428,7 @@ public final class ForcedWinSolver {
         @Override
         public CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa, CardCollection validCards, int min,
                 int max, CardCollectionView visibleToChooser) {
-            if ((f.cacLine || cfg.planDiscard) && p == getPlayer() && min == max && min >= 1 && validCards != null && validCards.size() > min) {
+            if (p == getPlayer() && min == max && min >= 1 && validCards != null && validCards.size() > min) {
                 final String t = f.choices.next(ForcedWinChoices.DISC);
                 if (t != null) {
                     final CardCollection r = ForcedWinChoices.applyDisc(t, validCards, min, max);

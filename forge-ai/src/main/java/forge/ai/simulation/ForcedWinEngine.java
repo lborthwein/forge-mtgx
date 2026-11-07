@@ -333,8 +333,6 @@ final class ForcedWinEngine {
          */
         int altLines;
         /** solver-gaps-1104 (engineTriggerTargets; false = off): {@link TriggerTargets#wide}, at most triggerVariants. */
-        boolean triggerTargets;
-        int triggerVariants = 8;
         int loopWindow = 8;
         int loopCap = 128;
         /**
