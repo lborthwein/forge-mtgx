@@ -27,20 +27,39 @@ public class ExplicitDrawResultTest {
         return o;
     }
 
+    private static boolean isDraw(final GameOutcome outcome, final boolean honorReason) throws Exception {
+        try {
+            return (Boolean) GameOutcome.class.getMethod("isDraw", boolean.class).invoke(outcome, honorReason);
+        } catch (NoSuchMethodException baseline) {
+            return outcome.isDraw();
+        }
+    }
+
+    private static boolean configured(final JsonObject config) throws Exception {
+        final RlActorBench.Cfg parsed = RlActorBench.parse(config);
+        try {
+            final Field field = parsed.getClass().getDeclaredField("honorDrawReason");
+            field.setAccessible(true);
+            return field.getBoolean(parsed);
+        } catch (NoSuchFieldException baseline) {
+            return false;
+        }
+    }
+
     @Test
     public void explicitDrawOverridesSurvivingWinBitsOnlyWhenEnabled() throws Exception {
         final GameOutcome draw = survivingWinner(GameEndReason.Draw);
         Assert.assertFalse(draw.isDraw(), "reproduction: legacy outcome disagrees with its explicit draw reason");
-        Assert.assertFalse(draw.isDraw(false), "keys-off identity");
-        Assert.assertTrue(draw.isDraw(true), "actor must leave both results zero for an explicit draw");
-        Assert.assertFalse(survivingWinner(GameEndReason.AllOpposingTeamsLost).isDraw(true));
+        Assert.assertFalse(isDraw(draw, false), "keys-off identity");
+        Assert.assertTrue(isDraw(draw, true), "actor must leave both results zero for an explicit draw");
+        Assert.assertFalse(isDraw(survivingWinner(GameEndReason.AllOpposingTeamsLost), true));
     }
 
     @Test
-    public void actorKeyIsOffByDefault() {
+    public void actorKeyIsOffByDefault() throws Exception {
         final JsonObject config = new JsonObject();
-        Assert.assertFalse(RlActorBench.parse(config).honorDrawReason);
+        Assert.assertFalse(configured(config));
         config.addProperty("honorDrawReason", true);
-        Assert.assertTrue(RlActorBench.parse(config).honorDrawReason);
+        Assert.assertTrue(configured(config));
     }
 }
