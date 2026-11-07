@@ -226,6 +226,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String beliefCubeSha256;
         /** honest-belief-1020: copies of each basic in the pool. */
         public int beliefBasics = 8;
+        /** Default off: preserve the published copier protection in resampled look-ahead worlds. */
+        public boolean beliefStatics = false;
         /** honest-belief-1020: the pool is a singleton cube (our deck and the cards we saw leave it). */
         public boolean beliefSingleton = true;
         /**
@@ -248,7 +250,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer", "basicsByType"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer", "basicsByType"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -315,6 +317,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 c.beliefCubeSha256 = o.get("beliefCubeSha256").getAsString();
             }
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
+            if (o.has("beliefStatics")) c.beliefStatics = o.get("beliefStatics").getAsBoolean();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             if (o.has("beliefDeck")) c.beliefDeck = o.get("beliefDeck").getAsBoolean(); // deck-belief-1105
             c.check();
@@ -460,6 +463,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 }
                 o.addProperty("beliefBasics", beliefBasics);
+                if (beliefStatics) o.addProperty("beliefStatics", true);
                 o.addProperty("beliefSingleton", beliefSingleton);
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
@@ -686,6 +690,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.maxSameDepartures = cfg.sameDepartures;
         lc.copyFidelity = cfg.copyFidelity;
         lc.infoState = cfg.infoState; // order-memory-1102 (off by default)
+        lc.beliefStatics = cfg.beliefStatics;
         if (!"off".equals(cfg.belief)) {
             // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
             lc.belief = cfg.belief;
