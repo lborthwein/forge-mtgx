@@ -88,6 +88,9 @@ final class AiTapePlays {
                 ex.add(x == null || x.isEmpty() ? null : x);
             }
             o.add("ph", ph);
+            if (sa.hasParam(ComputerUtilMana.PHYREXIAN_LIFE_PARAM)) {
+                o.addProperty("pl", true); // unified-jar-1106: the line paid this step's Phyrexian pips with life (followPay)
+            }
             if (anyEx) {
                 o.add("ex", ex);
             }
@@ -288,6 +291,9 @@ final class AiTapePlays {
 
     /** bvw-decision-log-1027: what the record's copy carried per chain link ({@link #encode}'s ph / ex), set on ours. */
     private static void copyFields(final SpellAbility sa, final JsonObject o) {
+        if (o.has("pl")) {
+            sa.getMapParams().put(ComputerUtilMana.PHYREXIAN_LIFE_PARAM, "true"); // unified-jar-1106: as the record's copy
+        }
         final JsonArray ph = o.has("ph") ? o.getAsJsonArray("ph") : null;
         final JsonArray ex = o.has("ex") ? o.getAsJsonArray("ex") : null;
         int i = 0;
