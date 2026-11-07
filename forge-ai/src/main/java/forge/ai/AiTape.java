@@ -57,7 +57,23 @@ public final class AiTape {
     public enum Mode { RECORD, FORCED }
 
     public static final String PREFIX = "[ai-tape] ";
-    public static final int FORMAT = 1;
+    /**
+     * 2 (review #124 S3-4): the research bench's records (seat-tagged, cross-seat deliberation excluded, trigger orders
+     * and checkpoints with ability ids, copies with cp/ph/ex, scoped trait builds with sci). A format-1 record is refused
+     * by the bench's decision log, never read as this one.
+     */
+    public static final int FORMAT = 2;
+    /**
+     * Lane bvw-decision-log-1027: the first id of a decode's detached scope. A bench game's own ids start at 1e9 (its
+     * IdScope) and a cube combo seat's probe ids at 1.1e9, so "built by this decode" is this range, not "id >= 1e9".
+     */
+    static final int DECODE_BASE = 1_060_000_000;
+    static final int DECODE_SPAN = 30_000_000;
+
+    /** An id a decode's detached scope handed out ({@link #DECODE_BASE}). */
+    static boolean decodeId(final int id) {
+        return id > DECODE_BASE && id <= DECODE_BASE + DECODE_SPAN;
+    }
 
     /** A forced replay that cannot go on: the record's next answer is not this game's. */
     public static final class Divergence extends RuntimeException {
@@ -75,6 +91,7 @@ public final class AiTape {
     private static final DecisionTap.Tap DISPATCH = new DecisionTap.Tap() {
         @Override
         public boolean covers(final Player payer) {
+            refuseDiverged(payer);
             for (AiTape t : installed) {
                 if (t.covers(payer)) {
                     return true;
@@ -86,6 +103,7 @@ public final class AiTape {
         @Override
         public PaymentDecision cost(final Player payer, final CostPart part, final int index, final SpellAbility ability,
                 final Supplier<PaymentDecision> decide) {
+            refuseDiverged(payer);
             for (AiTape t : installed) {
                 if (t.covers(payer)) {
                     return t.cost(payer, part, index, ability, decide);
@@ -95,6 +113,22 @@ public final class AiTape {
         }
     };
 
+    /**
+     * Review #124 S3-3: a hook of a seat whose FORCED (not resumed) tape diverged throws that divergence again on the game
+     * thread, as its controller does ({@link #refuseAfterDivergence}): a payment, mana source, target or trigger order is
+     * never decided live in the record's place.
+     */
+    static void refuseDiverged(final Player p) {
+        if (p == null) {
+            return;
+        }
+        for (AiTape t : installed) {
+            if (t.seat == p && t.game == p.getGame()) {
+                t.refuseAfterDivergence();
+            }
+        }
+    }
+
     /** The first installed tape, or null (every game without one: nothing anywhere changes). */
     public static AiTape current() {
         return installed.isEmpty() ? null : installed.get(0);
@@ -102,6 +136,7 @@ public final class AiTape {
 
     /** The tape when {@code p}'s decisions, on this thread, are taped (record or forced) and a hook may act; else null. */
     public static AiTape covering(final Player p) {
+        refuseDiverged(p);
         for (AiTape t : installed) {
             if (t.covers(p) && t.hookHere()) {
                 return t;
@@ -125,6 +160,12 @@ public final class AiTape {
     private final PlayoutKeys.TrackedRandom rng;
     private final PrintStream out;
     private volatile Thread gameThread;
+    /**
+     * Lane bvw-decision-log-1027: the game thread's own id scope when the game runs inside one (a bench game: RlActorBench
+     * opens one per game, ids from 1e9), else null (a live server game: the process-wide counters). The sync reads and
+     * restores this scope's counters; a trait built in another scope is the AI's look-ahead's.
+     */
+    private volatile Object gameScope;
 
     // RECORD
     /**
@@ -141,6 +182,8 @@ public final class AiTape {
         /** The start state differs from what the last entry left (so the entry carries it). */
         final boolean preNew;
         JsonArray sub;
+        /** bvw-tape-decisions-1028: the diagnostics hook's token for a top-level entry (null without a hook). */
+        Object diag;
 
         Rec(final boolean exec, final String pre, final boolean preNew) {
             this.exec = exec;
@@ -157,6 +200,8 @@ public final class AiTape {
         final JsonArray list;
         final boolean exec;
         int i;
+        /** codec-1103 (class A): a trigger preparation's frame, see {@link #skipNeutral}. */
+        boolean prep;
 
         Cur(final JsonArray list, final boolean exec) {
             this.list = list;
@@ -168,6 +213,8 @@ public final class AiTape {
     private final ArrayDeque<Cur> cursors = new ArrayDeque<>();
 
     private String lastPost;
+    /** codec-1103 (class A): state-neutral AI deliberation asks skipped inside forced trigger preparations. */
+    private int prepNeutral;
     private int entries;
     private int children;
     private int forcedEntries;
@@ -317,9 +364,12 @@ public final class AiTape {
 
     /** Make this a live tape: the controller swap and the hooks start reading it. */
     public void install() {
-        installed.add(this);
-        DecisionTap.install(DISPATCH);
-        forge.game.card.LazyTraits.install(LAZY_TAP);
+        synchronized (installed) {
+            // bvw-decision-log-1027: a bench JVM plays several games at once; the seams are installed under one lock
+            installed.add(this);
+            DecisionTap.install(DISPATCH);
+            forge.game.card.LazyTraits.install(LAZY_TAP);
+        }
         final JsonObject o = new JsonObject();
         o.addProperty("format", FORMAT);
         o.addProperty("mode", resume ? (strict ? "restore" : "resume") : mode == Mode.RECORD ? "record" : "forced");
@@ -343,11 +393,32 @@ public final class AiTape {
     private volatile Object gameScope;
 
     public void uninstall() {
-        installed.remove(this);
-        if (installed.isEmpty()) {
-            DecisionTap.install(null);
-            forge.game.card.LazyTraits.install(null);
+        synchronized (installed) {
+            installed.remove(this);
+            if (installed.isEmpty()) {
+                DecisionTap.install(null);
+                forge.game.card.LazyTraits.install(null);
+            }
         }
+    }
+
+    /**
+     * bvw-tape-decisions-1028 (research, diagnostics only): told when each top-level RECORD entry begins and ends; what
+     * {@link #end(Object)} returns is the entry's {@code "d"} field, which no replay reads. Null (the default, and every
+     * live path): no field, and nothing changes.
+     */
+    public interface Diag {
+        Object begin();
+
+        JsonObject end(Object token);
+    }
+
+    private Diag diag;
+
+    /** Set the diagnostics hook (RECORD only; before {@link #install}). */
+    public AiTape diag(final Diag d) {
+        this.diag = d;
+        return this;
     }
 
     public boolean isForced() {
@@ -364,12 +435,80 @@ public final class AiTape {
         return payer == seat && payer.getGame() == game && Thread.currentThread() == gameThread && divergence == null;
     }
 
+    /**
+     * Lane bvw-decision-log-1027: a FORCED replay (not a resume) that diverged decides nothing more. Every later call of
+     * this seat's controller on the game thread throws the divergence again, so a game whose engine swallowed the first
+     * throw stops at its next decision instead of letting the AI decide in the record's place.
+     */
+    /**
+     * r1-assembly-bank-1029 (research; never set on any live or replay path unless a bank probe diverts): from here on this
+     * tape decides nothing; every call of its controller is the inner controller's, and the engine seams are off.
+     */
+    private volatile boolean detached;
+
+    public void detach() {
+        detached = true;
+        uninstall();
+    }
+
+    public boolean isDetached() {
+        return detached;
+    }
+
+    void refuseAfterDivergence() {
+        if (detached) {
+            return;
+        }
+        if (divergence != null && mode == Mode.FORCED && !resume && Thread.currentThread() == gameThread) {
+            throw new Divergence("the AI's recorded decision " + currentTop + " does not fit this game");
+        }
+    }
+
     /** A controller call here is a decision: on the game thread, and no choice frame open (the AI's own deliberation). */
     boolean controllerHere() {
-        if (Thread.currentThread() != gameThread || divergence != null) {
+        if (detached || Thread.currentThread() != gameThread || divergence != null) {
             return false;
         }
-        return mode == Mode.RECORD ? open.isEmpty() || open.peek().exec : cursors.isEmpty() || cursors.peek().exec;
+        if (!(mode == Mode.RECORD ? open.isEmpty() || open.peek().exec : cursors.isEmpty() || cursors.peek().exec)) {
+            return false;
+        }
+        // bvw-decision-log-1027: nor while another taped seat of this game is deciding a choice: its AI's deliberation
+        // asks this seat's controller too (a cost reduction's choice of static ability, an opponent's targets), and a
+        // forced replay, which does not deliberate, never asks those
+        return !otherSeatDeciding();
+    }
+
+    /** bvw-decision-log-1027: the innermost open frame of another tape of this game, on this thread, is a choice. */
+    private boolean otherSeatDeciding() {
+        for (AiTape t : installed) {
+            if (t != this && t.game == game && t.gameThread == Thread.currentThread() && t.choiceOpen()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean choiceOpen() {
+        return mode == Mode.RECORD ? !open.isEmpty() && !open.peek().exec : !cursors.isEmpty() && !cursors.peek().exec;
+    }
+
+    /**
+     * bvw-decision-log-1027 (forced): the next recorded entry of the open execution that is not a trait build, or null.
+     * A forced body reads it to follow an execution the seat's policy shaped (the forced-win solver plays its forced
+     * trigger before the native order runs).
+     */
+    JsonObject peekChild() {
+        if (mode != Mode.FORCED || cursors.isEmpty()) {
+            return null;
+        }
+        final Cur c = cursors.peek();
+        for (int i = c.i; i < c.list.size(); i++) {
+            final JsonObject n = c.list.get(i).getAsJsonObject();
+            if (!LAZY.equals(str(n, "k"))) {
+                return n;
+            }
+        }
+        return null;
     }
 
     boolean hookHere() {
@@ -401,7 +540,7 @@ public final class AiTape {
 
     /** Restore {@code s}; the names of the counters that were already past it go into {@code aheadFields}. */
     private int restore(final String s) {
-        final int[] before = GlobalIds.capture();
+        final int[] before = GlobalIds.capture(gameScope);
         final int[] cidBefore = game.peekCardIdCounters();
         final long tsBefore = game.getTimestamp();
         final int n = restoreCounting(s);
@@ -420,6 +559,14 @@ public final class AiTape {
     }
 
     /** Has this replay's {@code field} counter ever been ahead of the record's (see {@link #restore})? */
+    /** codec-1103 (class C): decodes that matched an ability whose id is not the record's; such a replay is inexact. */
+    private int idShift;
+
+    void noteIdShift() {
+        idShift++;
+        aheadFields.add("saIds");
+    }
+
     boolean aheadOn(final String field) {
         return aheadFields.contains(field);
     }
@@ -449,7 +596,7 @@ public final class AiTape {
         for (int i = 0; i < ids.length; i++) {
             ids[i] = Integer.parseUnsignedInt(p[4 + i], 16);
         }
-        return behind + GlobalIds.restoreForward(ids);
+        return behind + GlobalIds.restoreForward(gameScope, ids);
     }
 
     // ------------------------------------------------------------------ RECORD
@@ -459,6 +606,9 @@ public final class AiTape {
         final long t0 = System.nanoTime();
         final String pre = sync();
         final Rec r = new Rec(exec, pre, !pre.equals(lastPost));
+        if (diag != null && open.isEmpty()) {
+            r.diag = diag.begin();
+        }
         r.o.addProperty("k", k);
         if (m != null) {
             r.o.addProperty("m", m);
@@ -497,6 +647,12 @@ public final class AiTape {
         r.o.addProperty("post", post);
         lastPost = post;
         if (open.isEmpty()) {
+            if (r.diag != null) {
+                final JsonObject d = diag.end(r.diag);
+                if (d != null) {
+                    r.o.add("d", d);
+                }
+            }
             r.o.addProperty("n", entries++);
             r.o.addProperty("t", game.getPhaseHandler().getTurn());
             if (tagged) {
@@ -536,12 +692,34 @@ public final class AiTape {
         final int at = cursors.isEmpty() ? forcedTop : cursors.peek().i;
         if (cursors.isEmpty()) {
             currentTop = forcedTop;
+            goneBuilds.clear(); // bvw-decision-log-1027: a copy's build is reused within its own top-level entry only
         }
         if (at >= list.size()) {
             throw diverge("the record has no " + what(k, m) + " here: " + (cursors.isEmpty()
                     ? "the tape ended after " + list.size() + " entries" : "its frame had only " + list.size() + " entries"));
         }
-        final JsonObject e = list.get(at).getAsJsonObject();
+        JsonObject e = list.get(at).getAsJsonObject();
+        if (cursors.isEmpty() && !fits(e, k, m)) {
+            // codec-1103 (class A, top level): a one-option ask of Forge AI's deliberation that changed nothing, which the
+            // forced replay never makes, carries no information: skipped (counted), never any other entry
+            while (forcedTop < list.size() && !fits(list.get(forcedTop).getAsJsonObject(), k, m)
+                    && trivial(list.get(forcedTop).getAsJsonObject(),
+                            forcedTop > 0 ? str(list.get(forcedTop - 1).getAsJsonObject(), "post") : null)) {
+                forcedTop++;
+                prepNeutral++;
+            }
+            if (forcedTop >= list.size()) {
+                throw diverge("the record has no " + what(k, m) + " here: the tape ended after " + list.size() + " entries");
+            }
+            e = list.get(forcedTop).getAsJsonObject();
+        }
+        if (!cursors.isEmpty() && cursors.peek().prep && !fits(e, k, m) && neutral(e, prevPost(cursors.peek()))) {
+            skipNeutral(cursors.peek(), k, m);
+            if (cursors.peek().i >= list.size()) {
+                throw diverge("the record has no " + what(k, m) + " here: its frame had only " + list.size() + " entries");
+            }
+            e = list.get(cursors.peek().i).getAsJsonObject();
+        }
         final String ek = str(e, "k");
         final String em = str(e, "m");
         if (!k.equals(ek) || (m != null && !m.equals(em))) {
@@ -603,8 +781,56 @@ public final class AiTape {
         }
     }
 
+    private static boolean fits(final JsonObject e, final String k, final String m) {
+        return k.equals(str(e, "k")) && (m == null || m.equals(str(e, "m")));
+    }
+
+    /**
+     * codec-1103 (class A, DIAG-REPLAY-PILOT): a recorded ask is NEUTRAL when it is a controller decision ("m") without
+     * children whose recorded start and end states are equal: it changed nothing (ids, timestamps, rng and the state
+     * hash included). Inside a trigger's preparation the record's PlayerControllerAi.prepareSingleSa also runs Forge AI's
+     * own deliberation, whose asks (a static-ability choice, the cards it would delve, ...) are recorded there; the forced
+     * preparation runs only the parts that are not the AI's choice ({@link #forcedPrep}) and never makes those asks.
+     * (An entry that records no start state started where the entry before it ended.) A neutral one is skipped (counted); anything else still diverges, and the preparation's own end state is still
+     * checked against the record ({@link #done}).
+     */
+    static boolean neutral(final JsonObject x, final String prevPost) {
+        // an entry without its own start state started where the entry before it ended (the record's convention)
+        final String pre = x.has("pre") ? str(x, "pre") : prevPost;
+        return "m".equals(str(x, "k")) && !x.has("sub") && pre != null && x.has("post") && pre.equals(str(x, "post"));
+    }
+
+    /** A neutral ask with exactly one option offered ({@code "a": {"of": 1, ...}}). */
+    static boolean trivial(final JsonObject x, final String prevPost) {
+        if (!neutral(x, prevPost) || !x.has("a") || !x.get("a").isJsonObject()) {
+            return false;
+        }
+        final JsonObject a = x.getAsJsonObject("a");
+        return a.has("of") && a.get("of").isJsonPrimitive() && a.get("of").getAsInt() == 1;
+    }
+
+    private static String prevPost(final Cur c) {
+        return c.i > 0 && c.list.get(c.i - 1).getAsJsonObject().has("post")
+                ? str(c.list.get(c.i - 1).getAsJsonObject(), "post") : null;
+    }
+
+    /** Skip the neutral asks at {@code c}'s cursor, up to (not past) the next entry that fits {@code k}/{@code m}. */
+    private void skipNeutral(final Cur c, final String k, final String m) {
+        while (c.i < c.list.size()) {
+            final JsonObject x = c.list.get(c.i).getAsJsonObject();
+            if ((k != null && fits(x, k, m)) || !neutral(x, prevPost(c))) {
+                return;
+            }
+            c.i++;
+            prepNeutral++;
+        }
+    }
+
     void leave(final JsonObject e) {
         applyLazyAhead();
+        if (!cursors.isEmpty() && cursors.peek().prep) {
+            skipNeutral(cursors.peek(), null, null);
+        }
         final Cur c = cursors.pop();
         if (c.i < c.list.size()) {
             final JsonObject next = c.list.get(c.i).getAsJsonObject();
@@ -680,6 +906,67 @@ public final class AiTape {
     }
     private int lazyMissed;
     private int lazyGone;
+    /**
+     * bvw-decision-log-1027: trait builds the record made on a copy (gone in the replay), by card | kind | state, with
+     * the ids that build took: the scope counters it started from. A copy can share its CardState with the card the
+     * engine makes next (moving a card to the stack copies it), so the live game's real card had the trait already; a
+     * replay that has to build it there builds it on those ids, as the record did ({@link #lazyLate}).
+     */
+    private final java.util.Map<String, int[]> goneBuilds = new java.util.HashMap<>();
+    private int lazyLate;
+
+    private static String lazyKey(final int card, final String kind, final String state) {
+        return card + "|" + kind + "|" + state;
+    }
+
+    /**
+     * bvw-decision-log-1027: the cursor's next entry, a build on a copy only the AI's deliberation made, is gone: the
+     * record's state after it restored (as {@link #applyLazyAhead} does for one).
+     */
+    private void skipGone(final Cur c) {
+        final JsonObject n = c.list.get(c.i).getAsJsonObject();
+        final String start = n.has("pre") ? str(n, "pre") : lastPost;
+        c.i++;
+        final String post = str(n, "post");
+        if (post != null) {
+            if (!post.equals(sync())) {
+                ahead += restore(post);
+            }
+            lastPost = post;
+        }
+        lazyGone++;
+        final int[] ids = buildIds(n, start);
+        if (ids != null) {
+            goneBuilds.put(lazyKey(n.get("a").getAsInt(), str(n, "m"), str(n, "st")), ids);
+        }
+    }
+
+    /** The scope counters a recorded build started from ({@link #goneBuilds}); null when the record cannot say. */
+    private int[] buildIds(final JsonObject n, final String start) {
+        if (n.has("sc")) {
+            if (!n.has("sci")) {
+                return null; // a fresh look-ahead scope: no ids of the game's to reuse
+            }
+            final JsonArray sci = n.getAsJsonArray("sci");
+            final int[] a = new int[sci.size()];
+            for (int i = 0; i < a.length; i++) {
+                a[i] = sci.get(i).getAsInt();
+            }
+            return a;
+        }
+        if (start == null) {
+            return null;
+        }
+        final String[] p = start.split("\\.");
+        if (p.length < 11) {
+            return null;
+        }
+        final int[] a = new int[7];
+        for (int i = 0; i < 7; i++) {
+            a[i] = Integer.parseUnsignedInt(p[4 + i], 16);
+        }
+        return a;
+    }
 
     private static final class LazyTok {
         final AiTape tape;
@@ -731,7 +1018,7 @@ public final class AiTape {
         decodeSeq = FRAMES.incrementAndGet();
         decodeDepth++;
         try {
-            return forge.util.IdScope.detached(body);
+            return forge.util.IdScope.detached(DECODE_BASE, body);
         } finally {
             decodeDepth--;
             decodeSeq = prevSeq;
@@ -754,9 +1041,20 @@ public final class AiTape {
             if (state != null) {
                 put(r, "st", new JsonPrimitive(state));
             }
-            // lane shared-engine-1104: "scoped" is a scope other than the game's own (none in a one-game process)
-            if (forge.util.IdScope.capture() != gameScope) {
-                put(r, "sc", new JsonPrimitive(1)); // inside the AI's look-ahead: built on scoped ids
+            final Object here = forge.util.IdScope.capture();
+            if (here != gameScope) {
+                // inside the AI's look-ahead: built on scoped ids (bvw-decision-log-1027: a scope other than the game's own)
+                put(r, "sc", new JsonPrimitive(1));
+                if (here != null) {
+                    // bvw-decision-log-1027: and where that scope's counters stood (a cube combo seat's probe scope lives
+                    // all game, from 1.1e9): the replay builds the trait on the same ids, never on a fresh scope's
+                    // 1e9 + n, which a bench game's own scope hands out too
+                    final JsonArray sci = new JsonArray();
+                    for (int v : forge.util.IdScope.peek(here)) {
+                        sci.add(v);
+                    }
+                    put(r, "sci", sci);
+                }
             }
             if (game.findById(card) != st.getCard()) {
                 // not the game's own card of that id: a copy (last known information, a card mid-move) or a card the AI
@@ -768,6 +1066,26 @@ public final class AiTape {
         JsonObject e = null;
         if (!cursors.isEmpty()) {
             final Cur c = cursors.peek();
+            // bvw-decision-log-1027: past the record's pending builds on copies only the AI's deliberation made (gone in a
+            // replay), to this build's own entry: the record may have built this trait on a copy that shares its state
+            // (and so the card's) after building another copy's; a real build of another trait is never skipped
+            int j = c.i;
+            while (j < c.list.size()) {
+                final JsonObject n = c.list.get(j).getAsJsonObject();
+                if (!LAZY.equals(str(n, "k"))) {
+                    break;
+                }
+                if (kind.equals(str(n, "m")) && n.get("a").getAsInt() == card && java.util.Objects.equals(state, str(n, "st"))) {
+                    while (c.i < j) {
+                        skipGone(c);
+                    }
+                    break;
+                }
+                if (!n.has("cp")) {
+                    break;
+                }
+                j++;
+            }
             if (c.i < c.list.size()) {
                 final JsonObject n = c.list.get(c.i).getAsJsonObject();
                 if (LAZY.equals(str(n, "k")) && kind.equals(str(n, "m")) && n.get("a").getAsInt() == card
@@ -780,18 +1098,44 @@ public final class AiTape {
             if (cursors.isEmpty() && decodeDepth == 0) {
                 return null; // the engine's, between decisions, as in the record
             }
+            // review #124 S3-1: only on the game's own card (a copy's state shared with it), never on another copy
+            final int[] late = cursors.isEmpty() || game.findById(card) != st.getCard() ? null
+                    : goneBuilds.remove(lazyKey(card, kind, state));
+            if (late != null) {
+                // bvw-decision-log-1027: the record built this trait on a copy that shares this state (gone above); the
+                // live game's card had it from then. Built now on the ids that build took, never on new ones.
+                lazyLate++;
+                lazyDepth++;
+                final Object prevScope = forge.util.IdScope.capture();
+                forge.util.IdScope.install(forge.util.IdScope.scopeAt(late));
+                return new LazyTok(this, null, null, prevScope, true, card);
+            }
+            if (decodeDepth > 0) {
+                // bvw-decision-log-1027: a decode's own lookup built it (the record's builds of this decision are already
+                // made): e.g. on the temporary clone state an alternative cost's candidate puts the card in. Built in the
+                // decode's scope, never on the game's ids. Had it been the card's real state, the record's own build of it
+                // later finds it built, and that counts as a recorded build the replay could not make.
+                return null;
+            }
             lazyMissed("a trait built where the record built none (" + kind + ")");
         }
         lazyDepth++;
         // where the record built it on scoped ids, so does the replay; anywhere else on the game's own (never a decode's)
         final Object prev = forge.util.IdScope.capture();
         final boolean scoped = e != null && e.has("sc");
-        if (scoped) {
+        if (scoped && e.has("sci")) {
+            final JsonArray sci = e.getAsJsonArray("sci");
+            final int[] at = new int[sci.size()];
+            for (int i = 0; i < at.length; i++) {
+                at[i] = sci.get(i).getAsInt();
+            }
+            forge.util.IdScope.install(forge.util.IdScope.scopeAt(at)); // bvw-decision-log-1027: the record's ids
+        } else if (scoped) {
             forge.util.IdScope.open();
-        } else if (prev != null) {
-            forge.util.IdScope.install(null);
+        } else if (prev != gameScope) {
+            forge.util.IdScope.install(gameScope); // bvw-decision-log-1027: the game's own ids (its scope, or none)
         }
-        return new LazyTok(this, null, e, prev, scoped || prev != null, card);
+        return new LazyTok(this, null, e, prev, scoped || prev != gameScope, card);
     }
 
     private void lazyAfter(final LazyTok t) {
@@ -834,6 +1178,7 @@ public final class AiTape {
                 return;
             }
             final int at = c.i;
+            final String start = n.has("pre") ? str(n, "pre") : lastPost; // where the record's build started
             final forge.game.card.Card card = n.has("cp") ? null : game.findById(n.get("a").getAsInt());
             final String st = str(n, "st");
             final forge.game.card.CardState state = card == null ? null
@@ -855,6 +1200,10 @@ public final class AiTape {
                     // a copy only the AI's deliberation made, or a card it imagined (a token), never the game's own: not
                     // built on the game's card, and the ids its trait took are the record's next state, restored there
                     lazyGone++;
+                    final int[] ids = buildIds(n, start);
+                    if (ids != null) {
+                        goneBuilds.put(lazyKey(n.get("a").getAsInt(), str(n, "m"), str(n, "st")), ids);
+                    }
                 } else {
                     // the replay's card had it already: the replay is not exact
                     lazyMissed("a recorded trait build the replay could not make (" + str(n, "m") + ")");
@@ -926,8 +1275,15 @@ public final class AiTape {
                 o.add("driftNotes", dn);
             }
             o.addProperty("ahead", ahead);
+            if (prepNeutral > 0) {
+                o.addProperty("prepNeutral", prepNeutral); // codec-1103: forced replays only; a record never has it
+            }
+            if (idShift > 0) {
+                o.addProperty("idShift", idShift); // codec-1103 class C: forced replays only
+            }
             o.addProperty("lazyMissed", lazyMissed);
             o.addProperty("lazyGone", lazyGone);
+            o.addProperty("lazyLate", lazyLate);
             if (divergence != null) {
                 o.addProperty("divergence", divergence);
             }
@@ -1023,7 +1379,14 @@ public final class AiTape {
     void config(final SpellAbility sa, final String where) {
         if (recordsNow("cfg", where)) {
             final Object r = begin("cfg", where, false);
-            end(r, safe(() -> AiTapeCodec.config(game, seat, sa)));
+            end(r, safe(() -> {
+                final JsonElement c = AiTapeCodec.config(game, seat, sa);
+                if (c.isJsonObject()) {
+                    // review #124 S2-1: the ability's id, so a forced replay finds the record's own trigger, not a look-alike
+                    c.getAsJsonObject().addProperty("id", sa.getId());
+                }
+                return c;
+            }));
             return;
         }
         final JsonObject e = takeChoice("cfg", where);
@@ -1049,19 +1412,81 @@ public final class AiTape {
                 o = choose.get();
             } finally {
                 final List<SpellAbility> chosen = o;
-                end(r, safe(() -> AiTapeCodec.indices(offered, chosen)));
+                end(r, safe(() -> orderAnswer(offered, chosen)));
             }
             return o;
         }
         final JsonObject e = takeChoice("order", null);
         final List<SpellAbility> o;
         try {
-            o = AiTapeCodec.pick(sas, e.get("a"));
+            o = pickOrder(sas, e.get("a"));
         } catch (RuntimeException x) {
             throw diverge("trigger order: " + x.getMessage());
         }
         done(e);
         return new ArrayList<>(o);
+    }
+
+    /**
+     * bvw-decision-log-1027: the order as positions among the offered list plus the abilities' ids. A seat may reorder
+     * the list before its native order runs (the forced-win solver's forced trigger first), so a forced replay, which
+     * gets the engine's list, places the abilities by id.
+     */
+    static JsonElement orderAnswer(final List<SpellAbility> offered, final List<SpellAbility> chosen) {
+        final JsonElement a = AiTapeCodec.indices(offered, chosen);
+        if (a.isJsonObject() && chosen != null) {
+            final JsonArray ids = new JsonArray();
+            for (SpellAbility sa : chosen) {
+                ids.add(sa == null ? -1 : sa.getId());
+            }
+            a.getAsJsonObject().add("ids", ids);
+        }
+        return a;
+    }
+
+    /** {@link #orderAnswer}'s forced side: by id when every id names one offered ability, else by the positions. */
+    static List<SpellAbility> pickOrder(final List<SpellAbility> sas, final JsonElement a) {
+        if (a == null || a.isJsonNull() || !a.getAsJsonObject().has("ids")) {
+            return AiTapeCodec.pick(sas, a);
+        }
+        final JsonObject o = a.getAsJsonObject();
+        if (o.has("err")) {
+            return AiTapeCodec.pick(sas, a); // throws with the record's reason
+        }
+        final JsonArray ids = o.getAsJsonArray("ids");
+        final int of = o.get("of").getAsInt();
+        if (of != sas.size()) {
+            throw new IllegalStateException(sas.size() + " options offered, " + of + " recorded");
+        }
+        final List<SpellAbility> out = new ArrayList<>();
+        final boolean[] used = new boolean[sas.size()];
+        for (JsonElement x : ids) {
+            int at = -1;
+            for (int i = 0; i < sas.size(); i++) {
+                if (!used[i] && sas.get(i) != null && sas.get(i).getId() == x.getAsInt()) {
+                    if (at >= 0) {
+                        at = -2; // two offered abilities share the id: the positions decide (checked below)
+                        break;
+                    }
+                    at = i;
+                }
+            }
+            if (at == -2) {
+                final List<SpellAbility> byPos = AiTapeCodec.pick(sas, a);
+                for (int i = 0; i < ids.size(); i++) {
+                    if (byPos.get(i) == null || byPos.get(i).getId() != ids.get(i).getAsInt()) {
+                        throw new IllegalStateException("the recorded order's abilities are not where the record had them");
+                    }
+                }
+                return byPos;
+            }
+            if (at < 0) {
+                throw new IllegalStateException("the recorded order names ability " + x.getAsInt() + ", which is not offered");
+            }
+            used[at] = true;
+            out.add(sas.get(at));
+        }
+        return out;
     }
 
     /** An encoding that cannot fail the live game: an unencodable answer is recorded as such (a forced replay stops there). */
@@ -1105,11 +1530,11 @@ public final class AiTape {
         }
         final JsonObject e = take("prep", null);
         final boolean want = e.get("a").getAsBoolean();
-        if (!want) {
-            done(e);
-            return false;
-        }
+        // bvw-decision-log-1027: a declined trigger runs its non-AI preparation too, as live did before declining: a
+        // charm's modes (this tape's child), another player's targets (that player's own tape: they declined). A
+        // trigger the AI itself declined asks nothing there.
         enter(e, true);
+        cursors.peek().prep = true;
         final boolean got;
         boolean ok = false;
         try {
@@ -1126,11 +1551,27 @@ public final class AiTape {
             }
         }
         leave(e);
+        if (!want) {
+            done(e);
+            return false;
+        }
         if (!got) {
             throw diverge("a trigger the record prepared could not be prepared in the replay");
         }
         done(e);
         return true;
+    }
+
+    /** bvw-decision-log-1027: did this entry's run decide anything (a child that is not a trait build)? */
+    static boolean hasDecisions(final JsonObject e) {
+        if (e.has("sub")) {
+            for (JsonElement c : e.getAsJsonArray("sub")) {
+                if (!LAZY.equals(str(c.getAsJsonObject(), "k"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** PlayerControllerAi.prepareSingleSa and the policy seat's own: {@code body} (recorded) unless {@code p} is not taped. */
@@ -1143,6 +1584,9 @@ public final class AiTape {
 
     /** ComputerUtil's checkpoints: {@code sa} is about to be paid for (and put on the stack or resolved). */
     public static void checkpoint(final Player ai, final SpellAbility sa, final String where) {
+        // decisionpoint-1102 PR-C: the targets / X Forge AI fixed are decision points (a no-op without an answerer
+        // or observer); a forced replay's tape still sets the record's below
+        CheckpointPoints.at(ai, sa, where);
         final AiTape t = covering(ai);
         if (t != null && sa != null) {
             t.config(sa, where);

@@ -212,6 +212,75 @@ public class LookaheadGivenTest extends SimulationTest {
         }
     }
 
+    /** Lane bvw-p3-batch-1023: {@link Hooks} whose value service fails (null), giving {@code why} as its reason. */
+    static final class FailingHooks implements LookaheadSearch.SearchHooks {
+        final Hooks h;
+        final String why;
+
+        FailingHooks(Hooks h, String why) {
+            this.h = h;
+            this.why = why;
+        }
+
+        @Override
+        public Object onCopy(Game copy, Player me) {
+            return h.onCopy(copy, me);
+        }
+
+        @Override
+        public Object captureLeaf(Object ctx, Game g, Player me) {
+            return h.captureLeaf(ctx, g, me);
+        }
+
+        @Override
+        public double[] leafValues(List<Object> payloads) {
+            return null;
+        }
+
+        @Override
+        public String leafError() {
+            return why;
+        }
+
+        @Override
+        public LookaheadSearch.PlayoutSeat playoutSeat(Object ctx, Game g, Player me, LookaheadSearch.FirstAction first,
+                long seed, LookaheadSearch.LeafProbe probe) {
+            return h.playoutSeat(ctx, g, me, first, seed, probe);
+        }
+    }
+
+    /**
+     * Lane bvw-p3-batch-1023: a failed value leaf keeps the decision's static values, is counted, and is said on stderr
+     * every time with its cause (the hook's reason; before, the line read "static fallback: null").
+     */
+    @Test
+    public void aFailedValueLeafIsLoudAndNamesItsCause() {
+        for (String why : new String[] {"LEAVES failed: java.io.IOException: boom (6 leaves, 4321 leaf bytes)", null}) {
+            Game game = board();
+            Player a = game.getPlayers().get(0);
+            LookaheadSearch s = new LookaheadSearch(config());
+            s.setHooks(new FailingHooks(new Hooks(game.getPhaseHandler().getTurn() + 2), why), true, false);
+            final java.io.PrintStream err = System.err;
+            final java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+            LookaheadSearch.GivenResult r;
+            try {
+                System.setErr(new java.io.PrintStream(buf, true));
+                r = s.decideGiven(game, a, given(a), 3);
+            } finally {
+                System.setErr(err);
+                s.shutdown();
+            }
+            final String want = why != null ? why : "the value hook returned no values";
+            AssertJUnit.assertEquals(1, s.getStats().leafFallbacks);
+            AssertJUnit.assertEquals(0, s.getStats().leafCalls);
+            AssertJUnit.assertEquals(want, s.getStats().leafLastError);
+            AssertJUnit.assertTrue(r.leafFallback);
+            final String line = "[lookahead] value leaf failed, static fallback: " + want + " [STATIC leaf values for ";
+            AssertJUnit.assertTrue(buf.toString(), buf.toString().contains(line));
+            AssertJUnit.assertTrue(buf.toString(), buf.toString().contains("; leafFallbacks 1]"));
+        }
+    }
+
     @Test
     public void policyPlayoutSeatTakesTheCandidateFirst() {
         Game game = board();
