@@ -11,6 +11,7 @@ import org.apache.commons.lang3.tuple.ImmutablePair;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonElement;
 
 import forge.ai.simulation.ForcedWinSolver;
 import forge.ai.simulation.LookaheadSearch;
@@ -115,13 +116,15 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * solverCfg.budgetMs this reserves the rest of the decision for that comparison.
          */
         public boolean lineDuel = false;
+        /** Preserve the priority answer's announced X in sampled plans; absent means legacy matching. */
+        public boolean exactActions = false;
         public boolean lineFloorAlways = false;
         /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
         public boolean lineKeep = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel"));
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "exactActions"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -151,6 +154,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineFloor")) s.lineFloor = o.get("lineFloor").getAsDouble();
             if (o.has("lineFloorAlways")) s.lineFloorAlways = o.get("lineFloorAlways").getAsBoolean();
             if (o.has("lineDuel")) s.lineDuel = o.get("lineDuel").getAsBoolean();
+            if (o.has("exactActions")) s.exactActions = o.get("exactActions").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -219,8 +223,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final boolean land;
         final String phase;
         final String label;
+        final Integer x; // null = legacy; -1 = no announcement
 
         PStep(final SpellAbility sa, final String phase) {
+            this(sa, phase, null);
+        }
+
+        PStep(final SpellAbility sa, final String phase, final Integer x) {
+            this.x = x;
             this.pass = sa == null;
             this.hostId = sa == null || sa.getHostCard() == null ? -1 : sa.getHostCard().getId();
             this.desc = sa == null ? "" : sa.getDescription();
@@ -230,7 +240,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
 
         String key() {
-            return phase + ":" + (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc);
+            return phase + ":" + (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc)
+                    + (x == null ? "" : "|x=" + x);
         }
 
         boolean matches(final SpellAbility sa) {
@@ -342,7 +353,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
     }
 
-    /** The menu candidate of a step (the first one: X variants of one entry play its first variant), or -1. */
+    /** The menu candidate of a step, including X when exactActions recorded it; -1 if unavailable. */
     static int match(final RlCandidates.Menu m, final List<SpellAbility> objs, final PStep st) {
         for (int c = 0; c < m.C(); c++) {
             if (m.cands.get(c).kind <= 0) {
@@ -352,7 +363,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (ch < 0 || ch > objs.size()) {
                 continue;
             }
-            if (st.matches(ch == 0 ? null : objs.get(ch - 1))) {
+            final JsonElement frag = m.cands.get(c).frag;
+            final int x = frag != null && frag.isJsonObject() && frag.getAsJsonObject().has("x")
+                    ? frag.getAsJsonObject().get("x").getAsInt() : -1;
+            if ((st.x == null || st.x == x) && st.matches(ch == 0 ? null : objs.get(ch - 1))) {
                 return c;
             }
         }
@@ -369,10 +383,17 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final double temperature;
         final boolean sampled;
         final int maxSteps;
+        final boolean exactActions;
         final List<PStep> steps = new ArrayList<>();
         Player seatPlayer;
 
         Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps) {
+            this(turn, seed, temperature, sampled, maxSteps, false);
+        }
+
+        Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps,
+                final boolean exactActions) {
+            this.exactActions = exactActions;
             this.turn = turn;
             this.rng = new Random(seed);
             this.temperature = temperature;
@@ -393,10 +414,17 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         @Override
         public void answered(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
                 final int choice) {
+            answered(g, p, m, objs, choice, -1);
+        }
+
+        @Override
+        public void answered(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
+                final int choice, final int x) {
             if (!inPlan(g, p) || choice < 0 || choice > objs.size()) {
                 return;
             }
-            steps.add(new PStep(choice == 0 ? null : objs.get(choice - 1), String.valueOf(g.getPhaseHandler().getPhase())));
+            steps.add(new PStep(choice == 0 ? null : objs.get(choice - 1), String.valueOf(g.getPhaseHandler().getPhase()),
+                    exactActions ? Integer.valueOf(x) : null));
         }
 
         /** A sampled answer from the policy's probabilities over the frame's candidates. */
@@ -869,12 +897,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             final long deadline = Math.min(a + forge.ai.WallClock.budgetMs(spec.recordMs) * 1_000_000L,
                     t0 + Math.max(1000L, forge.ai.WallClock.budgetMs(rs.budgetMs()) / 2) * 1_000_000L);
             final List<Object> recs = new ArrayList<>();
-            final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps);
+            final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps, spec.exactActions);
             recs.add(greedy);
             final long seed0 = rs.ls().nextWorld0Seed();
             for (int i = 0; i < spec.samples; i++) {
                 recs.add(new Recorder(ph.getTurn(), RlSearch.splitmix(seed0 ^ (0x5a3L + i)), spec.temperature, true,
-                        spec.maxSteps));
+                        spec.maxSteps, spec.exactActions));
             }
             final boolean[] ok = rs.ls().recordPlans(g, p, recs, st.knownTop, deadline);
             recordings += recs.size();
