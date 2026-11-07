@@ -345,6 +345,26 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertEquals(ForcedWinPlanner.plan(pos, nodes).stoppedBy, "nodes");
     }
 
+    /** unified-search-1106: the no-line cache's key ignored our graveyard: a mill answered by an old "no line". */
+    @Test
+    public void positionKeyFullSeesTheGraveyard() {
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(
+                "Grizzly Bears", "Island", 20, "", "Island", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver.Config on = ForcedWinSolver.Config.fromProps(k -> "positionKeyFull".equals(k) ? "true" : null);
+        final ForcedWinSolver.Config off = ForcedWinSolver.Config.fromProps(k -> null);
+        final ForcedWinSolver a = new ForcedWinSolver(me, on), b = new ForcedWinSolver(me, off);
+        final String ka = a.positionKey(g, me), kb = b.positionKey(g, me);
+        final forge.game.card.Card c = me.getCardsIn(ZoneType.Hand).get(0);
+        me.getZone(ZoneType.Hand).remove(c);
+        me.getZone(ZoneType.Graveyard).add(c);
+        Assert.assertNotEquals(a.positionKey(g, me), ka);
+        // the hand changed too; with the hand restored, only the graveyard differs and only the key on sees it
+        final String kb2 = b.positionKey(g, me);
+        Assert.assertNotEquals(kb2, kb);
+        Assert.assertTrue(a.positionKey(g, me).endsWith(kb2), "off is the tail of on: nothing else changes");
+    }
+
     @Test
     public void pileMemoryKnowsWhatTheSeatPutOnTopUntilAShuffle() {
         final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(
