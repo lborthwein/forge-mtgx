@@ -51,6 +51,29 @@ public class StaleStaticsTest extends SimulationTest {
         AssertJUnit.assertEquals(0, node.getPlayers().get(1).getCardsIn(ZoneType.Library).size());
     }
 
+    /** End to end: the engine search over a belief world. Key off: every move throws, and the receipt now says so. */
+    @Test
+    public void engineStopsSilentlyWithoutTheKey() {
+        final Game live = gameWithStaticInLibrary("Grist, the Hunger Tide");
+        final Player me = live.getPlayers().get(0);
+        addCardToZone("Mountain", me, ZoneType.Hand);
+        addCardToZone("Mountain", me, ZoneType.Hand);
+        final ForcedWinSolver.Redraw swap = (l, m, g, cm, rng) -> swapOutLibrary(g);
+        final ForcedWinEngine.Stats off = new ForcedWinEngine.Stats();
+        final ForcedWinEngine.Limits a = new ForcedWinEngine.Limits();
+        a.redraw = swap;
+        ForcedWinEngine.search(live, me, a, off, System.nanoTime() + 5_000_000_000L, 1L, null, 0);
+        AssertJUnit.assertTrue(off.summary(), off.moveErrors > 0);
+        AssertJUnit.assertTrue(off.summary(), off.lastMoveError.contains("Couldn't map Grist"));
+        AssertJUnit.assertTrue(off.summary(), off.summary().contains("moveErrors="));
+        final ForcedWinEngine.Stats on = new ForcedWinEngine.Stats();
+        final ForcedWinEngine.Limits b = new ForcedWinEngine.Limits();
+        b.redraw = swap;
+        b.staleStatics = true;
+        ForcedWinEngine.search(live, me, b, on, System.nanoTime() + 5_000_000_000L, 1L, null, 0);
+        AssertJUnit.assertEquals(on.summary(), 0, on.moveErrors);
+    }
+
     @Test
     public void keyOnKeepsAStaticOfACardStillInTheGame() {
         final Game live = gameWithStaticInLibrary("Grist, the Hunger Tide");

@@ -50,9 +50,13 @@ final class ForcedWinEngine {
         long nanos;
         /** search-bones-1015 (c): nodes pruned by the progress table, loops found, body repetitions applied. */
         int pruned, loops, loopReps, loopWins;
+        /** unified-search-1106 (report only): moves that threw, and the last error. */
+        int moveErrors;
+        String lastMoveError = "";
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
+                    + (moveErrors > 0 ? " moveErrors=" + moveErrors + " lastMoveError=" + lastMoveError : "")
                     + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "")
                     + (loops > 0 || pruned > 0 ? " pruned=" + pruned + " loops=" + loops + " loopReps=" + loopReps
                             + " loopWins=" + loopWins : "");
@@ -1208,6 +1212,8 @@ final class ForcedWinEngine {
             return null;
         } catch (RuntimeException | StackOverflowError ex) {
             lastError = String.valueOf(ex);
+            st.moveErrors++; // unified-search-1106 (report only)
+            st.lastMoveError = lastError.length() > 80 ? lastError.substring(0, 80) : lastError;
             if (TRACE) {
                 ex.printStackTrace();
             }
