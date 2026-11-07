@@ -359,12 +359,19 @@ public class StaticEffect {
         if (!present.test(this.source) && kept.isEmpty()) {
             return;
         }
-        final StaticEffect copy = new StaticEffect(present.test(this.source) ? map.map(this.source) : this.source);
+        // A source that is gone gets no reference into this copy: the only use of the source in remove() is IgnoreEffectCost's trait undo, which then has nothing to undo.
+        final boolean hasSource = present.test(this.source);
+        final StaticEffect copy = new StaticEffect(hasSource ? map.map(this.source) : null);
         copy.ability = this.ability;
         copy.affectedCards = kept;
         copy.affectedPlayers = map.mapList(this.affectedPlayers);
         copy.timestamp = this.timestamp;
-        copy.mapParams = this.mapParams;
+        if (hasSource || !hasParam("IgnoreEffectCost")) {
+            copy.mapParams = this.mapParams;
+        } else {
+            copy.mapParams = new java.util.HashMap<>(this.mapParams);
+            copy.mapParams.remove("IgnoreEffectCost");
+        }
         copy.remove(Maps.newHashMap());
     }
 

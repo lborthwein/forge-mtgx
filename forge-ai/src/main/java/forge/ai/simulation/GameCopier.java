@@ -499,12 +499,14 @@ public class GameCopier {
 
         // Undo effects first before calculating them below, to avoid them applying twice.
         for (StaticEffect effect : origGame.getStaticEffects().getEffects()) {
-            if (staleStatics) {
+            if (staleStatics || origGame.staleStatics) {
                 effect.removeMapped(gameObjectMap, c -> cardMap.containsKey(c)); // judge lane
             } else {
                 effect.removeMapped(gameObjectMap);
             }
         }
+
+        newGame.staleStatics = origGame.staleStatics;
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));

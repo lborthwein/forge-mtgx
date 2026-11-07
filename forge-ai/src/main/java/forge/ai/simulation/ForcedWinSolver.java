@@ -1070,6 +1070,7 @@ public final class ForcedWinSolver {
                     copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                     g = copier.makeCopy();
+                    g.staleStatics = cfg.staleStatics;
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -1782,6 +1783,7 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1);
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -2144,6 +2146,7 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
