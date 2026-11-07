@@ -69,6 +69,8 @@ public class Game {
     public boolean offBattlefieldLimits = false;
     /** Default off: history references retain last-known card state and timestamp in copies. */
     public boolean historyLki = false;
+    /** Default-off preservation of physical back-face orientation in search copies. */
+    public boolean copyBackFace = false;
 
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 

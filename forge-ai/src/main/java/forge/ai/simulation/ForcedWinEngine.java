@@ -171,6 +171,7 @@ final class ForcedWinEngine {
         boolean turnLimits = false;
         boolean offBattlefieldLimits = false;
         boolean historyLki = false;
+        boolean copyBackFace = false;
         /**
          * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
          * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
@@ -524,6 +525,7 @@ final class ForcedWinEngine {
                 copier.setTurnLimits(lim.turnLimits);
                 copier.setOffBattlefieldLimits(lim.offBattlefieldLimits);
                 copier.setHistoryLki(lim.historyLki);
+                copier.setCopyBackFace(lim.copyBackFace);
                 root.g = copier.makeCopy();
                 root.g.staleStatics = lim.staleStatics;
                 root.g.stalePlayerStatics = lim.stalePlayerStatics;
@@ -1316,6 +1318,7 @@ final class ForcedWinEngine {
             copier.setTurnLimits(lim.turnLimits);
             copier.setOffBattlefieldLimits(lim.offBattlefieldLimits);
             copier.setHistoryLki(lim.historyLki);
+            copier.setCopyBackFace(lim.copyBackFace);
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);
             st.copies++;
