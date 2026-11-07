@@ -164,6 +164,8 @@ public final class ForcedWinSolver {
         public boolean engineOpen = false;
         /** unified-search-1106 (off by default): {@link ForcedWinEngine.Limits#verify}. */
         public boolean engineVerify = false;
+        /** unified-search-1106 (off by default): {@link ForcedWinEngine.Limits#longLoops}. */
+        public boolean engineLongLoops = false;
         /**
          * kill-line-1106 (off by default): the follower pays as the line recorded. A step the planner paid with life pays
          * its Phyrexian pips with life, not with a mana source Forge AI's payment would pick first.
@@ -294,6 +296,7 @@ public final class ForcedWinSolver {
             c.staleStatics = "true".equals(get.apply("staleStatics")); // unified-search-1106
             c.engineOpen = "true".equals(get.apply("engineOpen")); // unified-search-1106
             c.engineVerify = "true".equals(get.apply("engineVerify")); // unified-search-1106
+            c.engineLongLoops = "true".equals(get.apply("engineLongLoops")); // unified-search-1106
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
@@ -1575,6 +1578,7 @@ public final class ForcedWinSolver {
         el.perSearchNodes = cfg.engineNodesPerSearch;
         el.triggerTargets = cfg.engineTriggerTargets; // kill-line-1106
         el.staleStatics = cfg.staleStatics; // unified-search-1106
+        el.longLoops = cfg.engineLongLoops; // unified-search-1106
         if (cfg.engineVerify) {
             final int[] tries = {0};
             el.verify = path -> {

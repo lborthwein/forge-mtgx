@@ -174,6 +174,12 @@ final class ForcedWinEngine {
         /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
         boolean staleStatics = false;
         /**
+         * unified-search-1106 (false = off): a loop body may be any length; a fast-forward stops at what the opponent's life,
+         * library or poison needs at the body's measured rate, not at a fixed count; and it copies the game once per chunk,
+         * chunks doubling, not once per step. More budget plays longer loops.
+         */
+        boolean longLoops = false;
+        /**
          * unified-search-1106 (null = off): a found win must also win here (a play-out in another world of our library), or the
          * search goes on; and at each node the moves that drew from our library are searched after the others, so a line
          * that needs no luck is found first.
@@ -365,9 +371,10 @@ final class ForcedWinEngine {
      * (c): the loop body that ends at {@code child}: its last L moves (L <= 3) repeat the L before them, each repetition
      * made progress, and the body has no pass, attack or REPEAT. Null when there is none.
      */
-    private static List<Step> loopBody(Node child) {
+    private static List<Step> loopBody(Node child, boolean longLoops) {
         final List<Step> p = child.path;
-        for (int len = 1; len <= 3; len++) {
+        final int maxLen = longLoops ? p.size() / 2 : 3;
+        for (int len = 1; len <= maxLen; len++) {
             if (p.size() < 2 * len) {
                 break;
             }
@@ -406,6 +413,9 @@ final class ForcedWinEngine {
         int reps = 2;
         Node cur = from;
         final Forward f = new Forward();
+        if (lim.longLoops) {
+            return fastForwardChunks(from, body, prefix, f); // unified-search-1106
+        }
         while (reps < lim.repeatCap && !out()) {
             Node next = cur;
             final List<Step> partial = new ArrayList<>();
@@ -463,6 +473,108 @@ final class ForcedWinEngine {
         n.path.add(Step.repeat(body, reps));
         f.node = n;
         return f;
+    }
+
+    /**
+     * unified-search-1106 ({@link Limits#longLoops}): as {@link #fastForward}, playing chunks of repetitions on one copy, the
+     * chunk doubling while nothing fails. A chunk that fails is dropped: the search goes on from the last whole chunk with
+     * a chunk of one. The count stops where the goal is met at the body's measured rate, or at the budget.
+     */
+    private Forward fastForwardChunks(Node from, List<Step> body, List<Step> prefix, Forward f) {
+        final int len = body.size();
+        final Node a1 = ancestor(from, len);
+        int reps = 2;
+        Node cur = from;
+        int chunk = 1;
+        int cap = goalCap(from.pv, a1 == null ? null : a1.pv, reps);
+        while (reps < cap && !out()) {
+            Node next = cur;
+            int done = 0;
+            boolean failed = false;
+            final int want = Math.min(chunk, cap - reps);
+            long[] before = cur.pv;
+            chunkLoop:
+            for (int r = 0; r < want; r++) {
+                final List<Step> partial = new ArrayList<>();
+                for (Step b : body) {
+                    final Applied a = apply(next, b, next != cur);
+                    st.loopReps++;
+                    if (a == null) {
+                        failed = true;
+                        break chunkLoop;
+                    }
+                    partial.add(b);
+                    if (a.won) {
+                        final List<Step> win = new ArrayList<>(prefix);
+                        win.add(Step.repeat(body, reps + done));
+                        if (partial.size() == len) {
+                            win.set(win.size() - 1, Step.repeat(body, reps + done + 1));
+                        } else {
+                            win.addAll(partial);
+                        }
+                        st.loopWins++;
+                        f.win = win;
+                        return f;
+                    }
+                    if (a.child == null) {
+                        failed = true;
+                        break chunkLoop;
+                    }
+                    a.child.parent = from;
+                    a.child.pv = progress(a.child.g, a.child.me);
+                    a.child.passed = next.passed;
+                    next = a.child;
+                }
+                if (!progressed(next.pv, before)) {
+                    failed = true;
+                    break;
+                }
+                before = next.pv;
+                done++;
+                if (lethalPastBlockers(next)) {
+                    cap = reps + done; // as the plain fast-forward: stop here, the next node's first move is the attack
+                    break;
+                }
+            }
+            if (failed) {
+                if (chunk == 1) {
+                    break;
+                }
+                chunk = 1;
+                continue;
+            }
+            cur = next;
+            reps += done;
+            chunk *= 2;
+        }
+        final Node n = new Node();
+        n.g = cur.g;
+        n.me = cur.me;
+        n.ids = cur.ids;
+        n.turn = cur.turn;
+        n.passed = cur.passed;
+        n.parent = from;
+        n.pv = cur.pv;
+        n.path.addAll(prefix);
+        n.path.add(Step.repeat(body, reps));
+        f.node = n;
+        return f;
+    }
+
+    /** The repetitions at which the opponent's life, library or poison is done at this rate, past {@code reps}; else the cap. */
+    private int goalCap(long[] now, long[] prev, int reps) {
+        if (prev == null) {
+            return lim.repeatCap;
+        }
+        long need = Long.MAX_VALUE;
+        final long[] left = {-now[0], -now[1], 10 - now[3]};
+        final long[] rate = {now[0] - prev[0], now[1] - prev[1], now[3] - prev[3]};
+        for (int i = 0; i < 3; i++) {
+            if (rate[i] > 0) {
+                need = Math.min(need, (left[i] + rate[i] - 1) / rate[i]);
+            }
+        }
+        return need == Long.MAX_VALUE ? lim.repeatCap : (int) Math.min(Integer.MAX_VALUE / 2, reps + need + 1);
     }
 
     private final Limits lim;
@@ -712,7 +824,7 @@ final class ForcedWinEngine {
                 // search-bones-1015 (c): the progress table instead of the exact-key set, and loops fast-forwarded
                 a.child.parent = node;
                 a.child.pv = progress(a.child.g, a.child.me);
-                final List<Step> body = loopBody(a.child);
+                final List<Step> body = loopBody(a.child, lim.longLoops);
                 if (body != null) {
                     final Forward fw = fastForward(a.child, body);
                     if (fw.win != null) {
@@ -1332,19 +1444,31 @@ final class ForcedWinEngine {
     private String lastError;
 
     private Applied apply(Node node, Step mv) {
+        return apply(node, mv, false);
+    }
+
+    /** {@code inPlace} (unified-search-1106): play the move on the node's own game, which the caller gives up. */
+    private Applied apply(Node node, Step mv, boolean inPlace) {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, st.copies)));
         final MoveAi[] held = new MoveAi[1];
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
-            final GameCopier copier = new GameCopier(node.g, true);
-            copier.setStaleStatics(lim.staleStatics); // unified-search-1106
-            copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
+            final Game g;
+            final Player me;
+            if (inPlace) {
+                g = node.g;
+                me = node.me;
+            } else {
+                final GameCopier copier = new GameCopier(node.g, true);
+                copier.setStaleStatics(lim.staleStatics); // unified-search-1106
+                copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
-            final Game g = copier.makeCopy();
-            final Player me = (Player) copier.find(node.me);
-            st.copies++;
+                g = copier.makeCopy();
+                me = (Player) copier.find(node.me);
+                st.copies++;
+            }
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
             if (lim.triggerTargets) {
                 ai.triggers.wide = true; // kill-line-1106
