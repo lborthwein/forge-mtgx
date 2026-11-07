@@ -15,6 +15,9 @@ import forge.game.spellability.SpellAbility;
  * stack whose token was sacrificed to pay for it (a Clue's "sacrifice: draw") passed the check (the host's last-known
  * zone is the graveyard), then {@code copyStackFaithfully} threw "Couldn't map Clue Token": the host exists in no zone
  * of the game, so the copy has no card to rebuild the ability on. The check now refuses such a stack ("gone").
+ *
+ * <p>unified-jar-1106 (936560e5cf9) keyed this refusal on {@code -Dforge.researchFixes} (off = the live line's copier,
+ * byte for byte), so the test sets the key: on, the stack is refused; off, it is accepted as before.
  */
 public class GameCopierStackHostGoneTest extends SimulationTest {
 
@@ -42,18 +45,27 @@ public class GameCopierStackHostGoneTest extends SimulationTest {
         game.getAction().checkStateEffects(true);
         Assert.assertNull(game.findById(clue.getId()), "a sacrificed token exists in no zone");
         Assert.assertFalse(game.getStack().isEmpty());
-        // before the fix the check accepted this stack and the copy threw (the label void's stack)
-        final String why = GameCopier.stackUnsupported(game);
-        if (why == null) {
-            final GameCopier copier = new GameCopier(game, true);
-            copier.setCopyStack(true);
-            try {
-                copier.makeCopy();
-                Assert.fail("accepted, and the copy did not throw either");
-            } catch (RuntimeException e) {
-                Assert.fail("stackUnsupported accepted a stack the copier cannot rebuild: " + e);
+        final boolean was = forge.game.EngineFixes.researchFixes();
+        try {
+            // key off: the live line's check, unchanged, accepts this stack (the label void's stack)
+            forge.game.EngineFixes.setResearchFixesForTest(false);
+            Assert.assertNull(GameCopier.stackUnsupported(game), "key off: the check is unchanged");
+            // key on: refused before the copy, instead of the copy throwing
+            forge.game.EngineFixes.setResearchFixesForTest(true);
+            final String why = GameCopier.stackUnsupported(game);
+            if (why == null) {
+                final GameCopier copier = new GameCopier(game, true);
+                copier.setCopyStack(true);
+                try {
+                    copier.makeCopy();
+                    Assert.fail("accepted, and the copy did not throw either");
+                } catch (RuntimeException e) {
+                    Assert.fail("stackUnsupported accepted a stack the copier cannot rebuild: " + e);
+                }
             }
+            Assert.assertEquals(why, "gone");
+        } finally {
+            forge.game.EngineFixes.setResearchFixesForTest(was);
         }
-        Assert.assertEquals(why, "gone");
     }
 }

@@ -3,6 +3,8 @@ package forge.ai.simulation;
 import java.lang.ref.WeakReference;
 
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import forge.game.Game;
@@ -23,8 +25,39 @@ import forge.game.zone.ZoneType;
  *
  * <p>The prototype now belongs to the copy. These tests pin: the copy's prototype is the copy's card (game and owner),
  * and a copy of a copy of a copy no longer keeps its ancestors alive.
+ *
+ * <p>unified-jar-1106 (936560e5cf9) keyed the prototype copy on {@code -Dforge.researchFixes} (off = the live line's
+ * copier, byte for byte), so these tests run with the key on; {@link #keyOffTheCopierIsUnchanged} pins the off side.
  */
 public class GameCopierPrototypeTest extends forge.ai.AITest {
+
+    private boolean researchFixesWas;
+
+    @BeforeClass
+    public void researchFixesOn() {
+        researchFixesWas = forge.game.EngineFixes.researchFixes();
+        forge.game.EngineFixes.setResearchFixesForTest(true);
+    }
+
+    @AfterClass(alwaysRun = true)
+    public void researchFixesRestored() {
+        forge.game.EngineFixes.setResearchFixesForTest(researchFixesWas);
+    }
+
+    @Test
+    public void keyOffTheCopierIsUnchanged() {
+        forge.game.EngineFixes.setResearchFixesForTest(false);
+        try {
+            final Game g = withCopyToken();
+            final Game c = copy(g);
+            final Card t = token(c);
+            Assert.assertNotNull(t, "the copied token");
+            Assert.assertNotNull(t.getCopiedPermanent());
+            Assert.assertNotSame(t.getCopiedPermanent().getGame(), c, "key off: the prototype is still not the copy's card");
+        } finally {
+            forge.game.EngineFixes.setResearchFixesForTest(true);
+        }
+    }
 
     /** A game with a creature and a token copy of it (made as a copy effect makes one). */
     static Game withCopyToken() {
