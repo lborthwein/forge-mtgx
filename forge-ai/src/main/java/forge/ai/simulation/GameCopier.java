@@ -143,6 +143,13 @@ public class GameCopier {
      */
     private boolean staleStatics = false;
 
+    /** engine-reach-1107 (false = off): per-turn limits of statics (may-play caps) and non-planeswalker abilities are copied. */
+    private boolean turnLimits = false;
+
+    public void setTurnLimits(boolean on) {
+        this.turnLimits = on;
+    }
+
     public void setStaleStatics(boolean on) {
         this.staleStatics = on;
     }
@@ -2060,6 +2067,36 @@ public class GameCopier {
         return newCard;
     }
 
+    /**
+     * engine-reach-1107 ({@link #setTurnLimits}): a copied card comes fresh from its script, so "once each turn" counts on its
+     * static abilities and its activated abilities read zero. A copy could use the limit again. Statics match by position when
+     * both cards have the same list.
+     */
+    private void copyTurnLimits(Card c, Card newCard) {
+        final java.util.List<StaticAbility> from = new java.util.ArrayList<>(c.getStaticAbilities());
+        final java.util.List<StaticAbility> to = new java.util.ArrayList<>(newCard.getStaticAbilities());
+        if (from.size() == to.size()) {
+            for (int i = 0; i < from.size(); i++) {
+                if (from.get(i).getMapParams().equals(to.get(i).getMapParams())) {
+                    for (int n = from.get(i).getMayPlayTurn(); n > 0; n--) {
+                        to.get(i).incMayPlayTurn();
+                    }
+                }
+            }
+        }
+        if (!c.isPlaneswalker()) {
+            for (SpellAbility sa : c.getAllSpellAbilities()) {
+                final int active = sa.getActivationsThisTurn();
+                if (active > 0 && sa.isActivatedAbility()) {
+                    final SpellAbility newSa = findSAInCard(sa, newCard);
+                    for (int i = 0; newSa != null && i < active; i++) {
+                        newCard.addAbilityActivated(newSa);
+                    }
+                }
+            }
+        }
+    }
+
     private void addCard(Game newGame, ZoneType zone, Card c, Player aiPlayer) {
         final Player owner = playerMap.get(c.getOwner());
         final Card newCard = createCardCopy(newGame, owner, c, aiPlayer);
@@ -2132,6 +2169,10 @@ public class GameCopier {
                         }
                     }
                 }
+            }
+
+            if (turnLimits) {
+                copyTurnLimits(c, newCard); // engine-reach-1107
             }
 
             newCard.setFlipped(c.isFlipped());
