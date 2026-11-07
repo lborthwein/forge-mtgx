@@ -233,6 +233,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /** Default off: preserve turn-use limits in look-ahead copies. */
         public boolean copyTurnLimits = false;
         public boolean offBattlefieldLimits = false;
+        public boolean historyLki = false;
         /** honest-belief-1020: the pool is a singleton cube (our deck and the cards we saw leave it). */
         public boolean beliefSingleton = true;
         /**
@@ -255,7 +256,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "beliefPlayerStatics", "copyTurnLimits", "offBattlefieldLimits", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer", "basicsByType"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "beliefPlayerStatics", "copyTurnLimits", "offBattlefieldLimits", "historyLki", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer", "basicsByType"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -326,6 +327,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("beliefPlayerStatics")) c.beliefPlayerStatics = o.get("beliefPlayerStatics").getAsBoolean();
             if (o.has("copyTurnLimits")) c.copyTurnLimits = o.get("copyTurnLimits").getAsBoolean();
             if (o.has("offBattlefieldLimits")) c.offBattlefieldLimits = o.get("offBattlefieldLimits").getAsBoolean();
+            if (o.has("historyLki")) c.historyLki = o.get("historyLki").getAsBoolean();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             if (o.has("beliefDeck")) c.beliefDeck = o.get("beliefDeck").getAsBoolean(); // deck-belief-1105
             c.check();
@@ -452,6 +454,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
             if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (historyLki) o.addProperty("historyLki", true);
             if (basicsByType) {
                 o.addProperty("basicsByType", true); // bugfix-basics: only when on
             }
@@ -705,6 +708,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.beliefPlayerStatics = cfg.beliefPlayerStatics;
         lc.copyTurnLimits = cfg.copyTurnLimits;
         lc.offBattlefieldLimits = cfg.offBattlefieldLimits;
+        lc.historyLki = cfg.historyLki;
         if (!"off".equals(cfg.belief)) {
             // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
             lc.belief = cfg.belief;

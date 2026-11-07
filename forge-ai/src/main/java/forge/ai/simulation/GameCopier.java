@@ -139,6 +139,9 @@ public class GameCopier {
     /** Off by default: per-turn limits of statics (may-play caps) and non-planeswalker abilities are copied. */
     private boolean turnLimits = false;
     private boolean offBattlefieldLimits = false;
+    private boolean historyLki = false;
+
+    public void setHistoryLki(boolean on) { this.historyLki = on; }
 
     public void setOffBattlefieldLimits(boolean on) {
         this.offBattlefieldLimits = on;
@@ -527,6 +530,7 @@ public class GameCopier {
         newGame.staleStatics = origGame.staleStatics;
         newGame.stalePlayerStatics = stalePlayerStatics || origGame.stalePlayerStatics;
         newGame.offBattlefieldLimits = offBattlefieldLimits || origGame.offBattlefieldLimits;
+        newGame.historyLki = historyLki || origGame.historyLki;
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
@@ -572,6 +576,7 @@ public class GameCopier {
     private void copyTurnState(final Game newGame) {
         fidelityLeftOut = 0;
         fidelityStandIns = 0;
+        if (historyLki || origGame.historyLki) staleMap.clear();
         final Map<Integer, Card> byId = new java.util.HashMap<>();
         for (Card c : cardMap.values()) {
             byId.putIfAbsent(c.getId(), c);
@@ -602,6 +607,9 @@ public class GameCopier {
                 if (c == null) {
                     return null;
                 }
+                // Card equality is by id: the ordinary map otherwise collapses a historical
+                // object onto the current zone object before the old LKI fallback can run.
+                if (historyLki || origGame.historyLki) return mapCardPending(c, newGame);
                 Card r = memo.get(c);
                 if (r != null) {
                     return r;

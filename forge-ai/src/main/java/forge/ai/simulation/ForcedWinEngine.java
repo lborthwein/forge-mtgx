@@ -170,6 +170,7 @@ final class ForcedWinEngine {
         /** Off by default: node copies keep this turn's may-play and activation counts ({@link GameCopier#setTurnLimits}). */
         boolean turnLimits = false;
         boolean offBattlefieldLimits = false;
+        boolean historyLki = false;
         /**
          * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
          * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
@@ -522,6 +523,7 @@ final class ForcedWinEngine {
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 copier.setTurnLimits(lim.turnLimits);
                 copier.setOffBattlefieldLimits(lim.offBattlefieldLimits);
+                copier.setHistoryLki(lim.historyLki);
                 root.g = copier.makeCopy();
                 root.g.staleStatics = lim.staleStatics;
                 root.g.stalePlayerStatics = lim.stalePlayerStatics;
@@ -1313,6 +1315,7 @@ final class ForcedWinEngine {
                 copier.setCopyFidelity(1); // storm count, per-turn records
             copier.setTurnLimits(lim.turnLimits);
             copier.setOffBattlefieldLimits(lim.offBattlefieldLimits);
+            copier.setHistoryLki(lim.historyLki);
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);
             st.copies++;

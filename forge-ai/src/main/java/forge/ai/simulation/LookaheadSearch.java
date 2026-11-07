@@ -338,6 +338,7 @@ public final class LookaheadSearch {
         public boolean copyTurnLimits = false;
         /** Default off: retain turn-use limits outside the battlefield. */
         public boolean offBattlefieldLimits = false;
+        public boolean historyLki = false;
         /**
          * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
          * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
@@ -461,6 +462,7 @@ public final class LookaheadSearch {
             }
             if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
             if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (historyLki) o.addProperty("historyLki", true);
             if (copyFidelity != 0) {
                 o.addProperty("copyFidelity", copyFidelity);
             }
@@ -5284,6 +5286,7 @@ public final class LookaheadSearch {
         final GameCopier c = new GameCopier(live, true);
         if (cfg.copyTurnLimits) c.setTurnLimits(true);
         if (cfg.offBattlefieldLimits) c.setOffBattlefieldLimits(true);
+        if (cfg.historyLki) c.setHistoryLki(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }

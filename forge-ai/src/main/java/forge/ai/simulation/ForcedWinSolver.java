@@ -184,6 +184,7 @@ public final class ForcedWinSolver {
         public boolean turnLimits = false;
         /** Default off: retain turn-use limits outside the battlefield in all solver copies. */
         public boolean offBattlefieldLimits = false;
+        public boolean historyLki = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -295,6 +296,7 @@ public final class ForcedWinSolver {
             c.stalePlayerStatics = "true".equals(get.apply("stalePlayerStatics"));
             c.turnLimits = "true".equals(get.apply("turnLimits"));
             c.offBattlefieldLimits = "true".equals(get.apply("offBattlefieldLimits"));
+            c.historyLki = "true".equals(get.apply("historyLki"));
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1087,6 +1089,7 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                     copier.setTurnLimits(cfg.turnLimits);
                     copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits);
+                    copier.setHistoryLki(cfg.historyLki);
                     g = copier.makeCopy();
                     g.staleStatics = cfg.staleStatics;
                     g.stalePlayerStatics = cfg.stalePlayerStatics;
@@ -1552,6 +1555,7 @@ public final class ForcedWinSolver {
         el.stalePlayerStatics = cfg.stalePlayerStatics;
         el.turnLimits = cfg.turnLimits;
         el.offBattlefieldLimits = cfg.offBattlefieldLimits;
+        el.historyLki = cfg.historyLki;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -1806,6 +1810,7 @@ public final class ForcedWinSolver {
                 copier.setCopyFidelity(1);
                 copier.setTurnLimits(cfg.turnLimits);
                 copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits);
+                copier.setHistoryLki(cfg.historyLki);
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
                 g.stalePlayerStatics = cfg.stalePlayerStatics;
@@ -2172,6 +2177,7 @@ public final class ForcedWinSolver {
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 copier.setTurnLimits(cfg.turnLimits);
                 copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits);
+                copier.setHistoryLki(cfg.historyLki);
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
                 g.stalePlayerStatics = cfg.stalePlayerStatics;

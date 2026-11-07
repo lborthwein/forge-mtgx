@@ -67,6 +67,8 @@ public class Game {
     public boolean stalePlayerStatics = false;
     /** Default off: copies retain turn-use limits outside the battlefield; inherited only by copies. */
     public boolean offBattlefieldLimits = false;
+    /** Default off: history references retain last-known card state and timestamp in copies. */
+    public boolean historyLki = false;
 
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 
