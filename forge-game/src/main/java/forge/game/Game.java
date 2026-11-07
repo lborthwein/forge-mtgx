@@ -61,6 +61,8 @@ import java.util.function.Predicate;
  * Represents the state of a <i>single game</i>, a new instance is created for each game.
  */
 public class Game {
+    /** Off by default: copies of this game skip static effects naming cards with no copy (a belief world swapped them out). Inherited by copies. */
+    public boolean staleStatics = false;
 
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 
