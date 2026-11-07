@@ -822,6 +822,11 @@ public final class R3LabelSearch {
                 final ForcedWinSolver.Redraw rd = env.redraw();
                 if (rd != null) {
                     rd.apply(live, liveMe, g, me, new Random(LookaheadSearch.mix(seed, 0x5244L)));
+                    if (ForcedWinSolver.Config.staleStaticsIn(spec.solverSpec)) {
+                        // pr209-followups: a belief world (the line copy and choose-a-card's apply copy); the line seats'
+                        // solvers, on solverSpec, copy it, so they skip swapped-out cards' statics
+                        g.staleStatics = true;
+                    }
                 }
                 shuffleUnknown(me, knownMe, new Random(LookaheadSearch.mix(seed, 0x4D45L)));
             }

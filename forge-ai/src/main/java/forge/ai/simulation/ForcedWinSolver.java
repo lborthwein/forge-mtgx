@@ -499,6 +499,21 @@ public final class ForcedWinSolver {
             return oppMin || cacPicks || cacLine || planScry || planDiscard || payRecord;
         }
 
+        /**
+         * pr209-followups (#212's belief-world sites): the {@code staleStatics} key of a comma spec ({@code k=v,...}) as a
+         * seat's solver reads it (CubeComboControl: the last value of a key wins; null or absent = off).
+         */
+        public static boolean staleStaticsIn(final String spec) {
+            boolean on = false;
+            for (String part : spec == null ? new String[0] : spec.split(",")) {
+                final int eq = part.indexOf('=');
+                if (eq > 0 && "staleStatics".equals(part.substring(0, eq).trim())) {
+                    on = "true".equals(part.substring(eq + 1).trim());
+                }
+            }
+            return on;
+        }
+
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
             final String budget = get.apply("budget");
@@ -3756,6 +3771,9 @@ public final class ForcedWinSolver {
             final Random rng = new Random(mix(cfg.seed, 0x425657L + decisionIndex));
             copies++;
             redraw.apply(live, me, g, cm, rng);
+            if (cfg.staleStatics) {
+                g.staleStatics = true; // pr209-followups: a belief world; the probes' copies of it skip swapped-out cards' statics
+            }
             shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), pinnedIn(cm), rng, cfg.infoState);
             return g;
         }
