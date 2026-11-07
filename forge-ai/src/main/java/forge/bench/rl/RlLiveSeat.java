@@ -90,11 +90,18 @@ public final class RlLiveSeat {
 
         /** sb-live-1018: the {@code plans.<key>} keys live accepts (numbers, or true/false for {@code solver}). */
         public static final java.util.Set<String> LIVE_PLAN_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
-                "samples", "temperature", "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs"));
+                "samples", "temperature", "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs",
+                "unified", "lineKeep"));
         /** sb-live-1018: the {@code plans.solverCfg.<key>} keys live accepts (the solver's sizes, its wall, cycles, the leak fix). */
         public static final java.util.Set<String> LIVE_SOLVER_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "budgetMs", "engineMs", "evalReserveMs", "wallGraceMs", "planMs", "nodes", "engineNodes", "worlds", "top",
-                "horizon", "cycles", "hideOwnLibrary"));
+                "horizon", "cycles", "hideOwnLibrary", "staleStatics", "engineOpen", "engineVerify", "followPay", "paySearch",
+                "engineAfterPlanFail", "sourceOutput", "planDiscard", "engineTriggerTargets", "verifyReplan"));
+
+        /** The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless set). */
+        private static final java.util.Set<String> LIVE_SOLVER_FLAGS = new java.util.TreeSet<>(java.util.Arrays.asList(
+                "cycles", "hideOwnLibrary", "staleStatics", "engineOpen", "engineVerify", "followPay", "paySearch",
+                "engineAfterPlanFail", "sourceOutput", "planDiscard", "engineTriggerTargets", "verifyReplan"));
 
         /**
          * strong-opp-1020: the {@code plans.defendCfg.<key>} keys live accepts and their value pattern; {@code prior} names
@@ -157,7 +164,7 @@ public final class RlLiveSeat {
                     throw new IllegalArgumentException("policySearch: " + k + " is not supported live (plans.solverCfg keys "
                             + String.join("|", LIVE_SOLVER_KEYS) + ")");
                 }
-                if (("cycles".equals(sk) || "hideOwnLibrary".equals(sk)) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
+                if (LIVE_SOLVER_FLAGS.contains(sk) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
                     throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want a number, or true|false)");
                 }
                 if (!c.plans.has("solverCfg")) {
@@ -177,7 +184,7 @@ public final class RlLiveSeat {
             if (c.plans.has(sub)) {
                 throw new IllegalArgumentException("policySearch: " + k + " twice");
             }
-            if ("solver".equals(sub)) {
+            if ("solver".equals(sub) || "unified".equals(sub) || "lineKeep".equals(sub)) {
                 if (!v.matches("true|false")) {
                     throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want true|false)");
                 }
@@ -243,6 +250,7 @@ public final class RlLiveSeat {
                     case "maxSteps": c.maxSteps = Integer.parseInt(v); break;
                     case "leafExtraSteps": c.leafExtraSteps = Integer.parseInt(v); break;
                     case "departZ": c.departZ = Double.parseDouble(v); break;
+                    case "anytime": c.anytime = Boolean.parseBoolean(v); break;
                     case "margin": c.margin = Double.parseDouble(v); break;
                     case "leaf": c.leaf = v; break;
                     case "playout": c.playout = v; break;
