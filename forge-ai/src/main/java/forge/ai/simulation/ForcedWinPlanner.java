@@ -345,6 +345,9 @@ public final class ForcedWinPlanner {
         final List<Line> lines = new ArrayList<>();
         int nodes;
         boolean exhausted;
+        /** unified-search-1106 (report only): branches cut at the depth limit; which limit stopped the search ("" = none). */
+        int depthStops;
+        String stoppedBy = "";
         boolean sameTurn, nextTurn;
         long nanos;
         /** bvw-step1-build-1024 (read-only): nodes actually visited, and whether the wall time cut the search. */
@@ -352,7 +355,8 @@ public final class ForcedWinPlanner {
         boolean timedOut;
 
         String summary() {
-            return "lines=" + lines.size() + " nodes=" + nodes + (exhausted ? "(budget)" : "") + " sameTurn=" + sameTurn
+            return "lines=" + lines.size() + " nodes=" + nodes + (exhausted ? "(budget)" : "") + (stoppedBy.isEmpty() ? "" : " stoppedBy=" + stoppedBy)
+                    + (depthStops > 0 ? " depthStops=" + depthStops : "") + " sameTurn=" + sameTurn
                     + " nextTurn=" + nextTurn + " ms=" + nanos / 1_000_000;
         }
     }
@@ -579,6 +583,9 @@ public final class ForcedWinPlanner {
         }
         if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines || (nodes & 63) == 0 && forge.game.WorkClock.nanoTime() > deadline) {
             result.exhausted |= nodes >= lim.nodes || forge.game.WorkClock.nanoTime() > deadline;
+            if (result.stoppedBy.isEmpty() && result.exhausted) {
+                result.stoppedBy = nodes >= lim.nodes ? "nodes" : "time"; // unified-search-1106
+            }
             if (forge.game.WorkClock.nanoTime() > deadline) {
                 result.timedOut = true;
                 nodes = Math.max(nodes, lim.nodes);
@@ -586,6 +593,7 @@ public final class ForcedWinPlanner {
             return;
         }
         if (depth >= lim.depth) {
+            result.depthStops++; // unified-search-1106
             return;
         }
         nodes++;

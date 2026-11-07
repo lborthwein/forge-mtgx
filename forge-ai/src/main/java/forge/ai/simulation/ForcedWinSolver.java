@@ -177,6 +177,23 @@ public final class ForcedWinSolver {
         public boolean verifyReplan = false;
         /** kill-line-1106 (off by default): the planner branches over a discard's hand classes; the line records the choice. */
         public int triggerVariants = 8;
+        /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
+        public boolean staleStatics = false;
+        /**
+         * unified-search-1106 (off by default): a line that won unopposed with no belief world verified before the deadline is
+         * unknown, not refuted: the position is not cached as having no line, so a later ask can verify it.
+         */
+        public boolean unknownWorlds = false;
+        /**
+         * unified-search-1106 (off by default): the position key behind the no-line cache also holds our graveyard and our
+         * coloured mana, so a mill or a floated colour is not answered by an old "no line".
+         */
+        public boolean positionKeyFull = false;
+        /**
+         * unified-search-1106 (off by default): a followed line's own steps are not cut by the play-out loop breaker. A line is
+         * finite; a REPEAT longer than the breaker's window stopped mid-way in verification and read as no win.
+         */
+        public boolean lineUncapped = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -482,6 +499,21 @@ public final class ForcedWinSolver {
             return oppMin || cacPicks || cacLine || planScry || planDiscard || payRecord;
         }
 
+        /**
+         * pr209-followups (#212's belief-world sites): the {@code staleStatics} key of a comma spec ({@code k=v,...}) as a
+         * seat's solver reads it (CubeComboControl: the last value of a key wins; null or absent = off).
+         */
+        public static boolean staleStaticsIn(final String spec) {
+            boolean on = false;
+            for (String part : spec == null ? new String[0] : spec.split(",")) {
+                final int eq = part.indexOf('=');
+                if (eq > 0 && "staleStatics".equals(part.substring(0, eq).trim())) {
+                    on = "true".equals(part.substring(eq + 1).trim());
+                }
+            }
+            return on;
+        }
+
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
             final String budget = get.apply("budget");
@@ -605,6 +637,10 @@ public final class ForcedWinSolver {
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
             c.verifyReplan = "true".equals(get.apply("verifyReplan")); // kill-line-1106
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
+            c.staleStatics = "true".equals(get.apply("staleStatics")); // unified-search-1106
+            c.unknownWorlds = "true".equals(get.apply("unknownWorlds")); // unified-search-1106
+            c.positionKeyFull = "true".equals(get.apply("positionKeyFull")); // unified-search-1106
+            c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1916,8 +1952,19 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ offense: width search, then engine
 
     /** The position key the width search's verdict is cached under (same key, same verdict). */
-    private String positionKey(Game live, Player me) {
+    String positionKey(Game live, Player me) {
         final StringBuilder sb = new StringBuilder();
+        if (cfg.positionKeyFull) {
+            // unified-search-1106
+            for (Card c : me.getCardsIn(ZoneType.Graveyard)) {
+                sb.append(c.getId()).append(',');
+            }
+            sb.append('m');
+            for (byte b : forge.card.MagicColor.WUBRG) {
+                sb.append(me.getManaPool().getAmountOfColor(b)).append(',');
+            }
+            sb.append('|');
+        }
         sb.append(live.getPhaseHandler().getTurn()).append(live.getPhaseHandler().getPhase()).append('|')
                 .append(me.getLife()).append('|').append(me.getManaPool().totalMana()).append('|')
                 .append(me.getLandsPlayedThisTurn()).append('|').append(live.getStack().getSpellsCastThisTurn().size())
@@ -2034,6 +2081,8 @@ public final class ForcedWinSolver {
     }
 
     private String lastOutcome = "?";
+    /** unified-search-1106 (unknownWorlds): the engine's line this decision had no verified world. */
+    private boolean engineUnverified;
     private int lastPlannerNodes;
     /** rollout-budget-1101: the last offense's cap hit ({@link forge.ai.AiWork#CAP}), or null. */
     private String lastCap;
@@ -2046,6 +2095,22 @@ public final class ForcedWinSolver {
     }
     /** kill-line-1106 (report only): planner searches stopped by their limit; engine lines taken after planner lines failed. */
     public int plannerExhausted, planFailEngineTakes;
+
+    /**
+     * unified-search-1106 (unknownWorlds): a gated position (no planner line) is cached as having no line, unless the key
+     * is on and the engine's line there had no verified world (unknown, not refuted). Key off: always cached.
+     */
+    static boolean cachesGated(final Config cfg, final boolean engineUnverified) {
+        return !(cfg.unknownWorlds && engineUnverified);
+    }
+
+    /**
+     * unified-search-1106 (unknownWorlds): a declined position is cached as having no line, unless the key is on and its
+     * best line had no verified world (unknown, not refuted). Key off: always cached.
+     */
+    static boolean cachesDeclined(final Config cfg, final Eval best) {
+        return !(cfg.unknownWorlds && best != null && best.unverified());
+    }
 
     private Line offense0(Game live, String key) {
         decisions++;
@@ -2120,6 +2185,7 @@ public final class ForcedWinSolver {
                 }
             }
         }
+        engineUnverified = false;
         if (res.lines.isEmpty()) {
             lastOutcome = "gate";
             final Line engine = engineFallback(live, pos, index, t0);
@@ -2130,7 +2196,9 @@ public final class ForcedWinSolver {
                 return engine;
             }
             gated++;
-            noLineKey = key;
+            if (cachesGated(cfg, engineUnverified)) {
+                noLineKey = key;
+            }
             receipt("FORCED_WIN gate" + tag() + " turn=" + pos.turn + " none " + res.summary() + " probes=" + reader.probeStats.summary());
             return null;
         }
@@ -2167,7 +2235,9 @@ public final class ForcedWinSolver {
                 }
                 lastOutcome = "declined";
             }
-            noLineKey = key;
+            if (cachesDeclined(cfg, best)) {
+                noLineKey = key;
+            }
             if (best == null) {
                 // diagnostics (solver-gaps-1015): a width-model mismatch, with the position the width search saw
                 receipt("FORCED_WIN mismatch" + tag() + " turn=" + pos.turn + " phase=" + live.getPhaseHandler().getPhase()
@@ -2255,6 +2325,8 @@ public final class ForcedWinSolver {
             return out;
         }
         evalSink = new ArrayList<>();
+        receipt("INFO_STATE" + tag() + " turn=" + ph.getTurn() + " attached=" + (InfoStates.find(live) != null) + " solverInfoState="
+                + cfg.infoState); // unified-search-1106 (report only)
         try {
             offense(live);
             final Set<String> seen = new HashSet<>();
@@ -2453,6 +2525,7 @@ public final class ForcedWinSolver {
                     copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                     g = copier.makeCopy();
+                    g.staleStatics = cfg.staleStatics;
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -3017,6 +3090,7 @@ public final class ForcedWinSolver {
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
         el.perSearchNodes = cfg.engineNodesPerSearch;
+        el.staleStatics = cfg.staleStatics; // unified-search-1106
         el.loopMacro = cfg.loopMacro; // R2-3
         el.loopMacro3 = cfg.loopMacro3; // review #154 S2
         el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
@@ -3194,6 +3268,7 @@ public final class ForcedWinSolver {
         if (evalSink != null) {
             evalSink.add(e);
         }
+        engineUnverified = e.unverified();
         if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold || cfg.honestProbes && e.worldsRun < cfg.worlds) {
             if (likelyCands != null) {
                 // not forced: a likely-win candidate like the others (Part B)
@@ -3517,6 +3592,7 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1);
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -3711,6 +3787,9 @@ public final class ForcedWinSolver {
             final Random rng = new Random(mix(cfg.seed, 0x425657L + decisionIndex));
             copies++;
             redraw.apply(live, me, g, cm, rng);
+            if (cfg.staleStatics) {
+                g.staleStatics = true; // pr209-followups: a belief world; the probes' copies of it skip swapped-out cards' statics
+            }
             shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), pinnedIn(cm), rng, cfg.infoState);
             return g;
         }
@@ -3736,6 +3815,11 @@ public final class ForcedWinSolver {
 
         Eval(Line line) {
             this.line = line;
+        }
+
+        /** Won unopposed, and no belief world was verified: P(belief) here is unknown, not 0 (unified-search-1106). */
+        boolean unverified() {
+            return pUnopposed >= 1.0 && worldsRun == 0;
         }
 
         @Override
@@ -4099,6 +4183,7 @@ public final class ForcedWinSolver {
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 ForcedWinEngine.copyStackIf(copier, live, cfg.engineStack); // R3-5
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -4144,6 +4229,7 @@ public final class ForcedWinSolver {
             // bvw-step1-build-1024: budget=counter: each seat's calls in the play-out are capped (the wall's stand-in)
             final long callLimit = cfg.counter ? 2L * cfg.maxSteps : 0L;
             lineAi.bounded(wall).callLimited(callLimit);
+            lineAi.uncapped = cfg.lineUncapped; // unified-search-1106
             if (cfg.verifyReplan && line.winTurn > 0) {
                 lineAi.startTurn = g.getPhaseHandler().getTurn();
                 lineAi.replanner = old -> replanIn(g, cm, old); // kill-line-1106
@@ -5106,6 +5192,12 @@ public final class ForcedWinSolver {
         String protectedBy;
         /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
         boolean continueAfter;
+        /** unified-search-1106 ({@link Config#lineUncapped}). */
+        boolean uncapped;
+
+        List<SpellAbility> lineAction(SpellAbility sa) {
+            return uncapped || f.uncapped ? List.of(sa) : capped(List.of(sa));
+        }
 
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
@@ -5152,7 +5244,7 @@ public final class ForcedWinSolver {
                             + getPlayer().getManaPool().totalMana());
                 }
                 if (n.action != null) {
-                    return f.uncapped ? List.of(n.action) : capped(List.of(n.action));
+                    return lineAction(n.action);
                 }
                 if (n.waiting) {
                     return null;
