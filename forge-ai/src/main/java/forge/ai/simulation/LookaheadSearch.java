@@ -334,6 +334,8 @@ public final class LookaheadSearch {
         public boolean beliefStatics = false;
         /** Default off: carry player-only stale-static repair into resampled look-ahead copies. */
         public boolean beliefPlayerStatics = false;
+        /** Default off: preserve this turn's use limits in look-ahead copies, as p9 does for solver copies. */
+        public boolean copyTurnLimits = false;
         /**
          * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
          * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
@@ -455,6 +457,7 @@ public final class LookaheadSearch {
             if (copyEot != AiFixes.Mode.OFF) {
                 o.addProperty("copyEot", copyEot.key());
             }
+            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
             if (copyFidelity != 0) {
                 o.addProperty("copyFidelity", copyFidelity);
             }
@@ -5276,6 +5279,7 @@ public final class LookaheadSearch {
     /** A copier of the live game for this search: carries until-EOT commands when copyEot is ON (lane misplays-1005). */
     GameCopier copierOf(Game live) {
         final GameCopier c = new GameCopier(live, true);
+        if (cfg.copyTurnLimits) c.setTurnLimits(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }
