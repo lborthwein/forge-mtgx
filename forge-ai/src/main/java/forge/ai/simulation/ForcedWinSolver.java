@@ -894,6 +894,8 @@ public final class ForcedWinSolver {
             return out;
         }
         evalSink = new ArrayList<>();
+        receipt("INFO_STATE" + tag() + " turn=" + ph.getTurn() + " attached=" + (InfoStates.find(live) != null) + " solverInfoState="
+                + cfg.infoState); // unified-search-1106 (report only)
         try {
             offense(live);
             final Set<String> seen = new HashSet<>();
