@@ -1579,7 +1579,9 @@ public final class ForcedWinSolver {
             final int[] tries = {0};
             el.verify = path -> {
                 final Line l = new Line(path, List.of(), path.contains(Step.PASS) ? 1 : 0, me.getLife(), 0, 0, List.of(), "engine");
-                return playout(live, l, mix(cfg.seed, 7_100_000L + 64L * index + tries[0]++), 0, -1, decisionWall).won;
+                // evaluate's own unopposed world first: a line that fails it would be dropped after the search had stopped
+                return playout(live, l, mix(mix(cfg.seed, index * 1000L + 999), 0), 0, -1, decisionWall).won
+                        && playout(live, l, mix(cfg.seed, 7_100_000L + 64L * index + tries[0]++), 0, -1, decisionWall).won;
             };
         }
         el.triggerVariants = cfg.triggerVariants;
