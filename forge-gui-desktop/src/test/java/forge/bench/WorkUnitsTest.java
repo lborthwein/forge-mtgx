@@ -140,7 +140,9 @@ public class WorkUnitsTest {
         Assert.assertEquals(on.workScale, 0.8);
         Assert.assertEquals(on.workWallMs, 7500L);
         Assert.assertTrue(on.toJson().get("workUnits").getAsBoolean());
-        Assert.assertEquals(RlSearch.Config.parse(on.toJson()).workScale, 0.8, "the recorded spec parses back");
+        final JsonObject rec = on.toJson();
+        rec.addProperty("server", "127.0.0.1:1"); // the recorded spec leaves the host out
+        Assert.assertEquals(RlSearch.Config.parse(rec).workScale, 0.8, "the recorded spec parses back");
         Assert.assertThrows(IllegalArgumentException.class, () -> RlSearch.Config.parse(spec(",\"workScale\":0.8")));
         Assert.assertThrows(IllegalArgumentException.class,
                 () -> RlSearch.Config.parse(spec(",\"workUnits\":true,\"workScale\":0")));
