@@ -176,6 +176,8 @@ public final class ForcedWinSolver {
          * floats first), and the top card of our library.
          */
         public boolean engineMoves = false;
+        /** engine-reach-1107 (off by default): loops found by covering an ancestor, and a small outlet search at each doubling. */
+        public boolean engineLoopReach = false;
         /**
          * kill-line-1106 (off by default): the follower pays as the line recorded. A step the planner paid with life pays
          * its Phyrexian pips with life, not with a mana source Forge AI's payment would pick first.
@@ -314,6 +316,7 @@ public final class ForcedWinSolver {
             c.engineLongLoops = "true".equals(get.apply("engineLongLoops")); // unified-search-1106
             c.turnLimits = "true".equals(get.apply("turnLimits")); // engine-reach-1107
             c.engineMoves = "true".equals(get.apply("engineMoves")); // engine-reach-1107
+            c.engineLoopReach = "true".equals(get.apply("engineLoopReach")); // engine-reach-1107
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
@@ -1604,6 +1607,10 @@ public final class ForcedWinSolver {
             el.floatMana = true;
             el.floatFirst = true;
             el.libraryTop = true;
+        }
+        if (cfg.engineLoopReach) {
+            el.loopOutlets = true; // engine-reach-1107
+            el.looseCycles = true;
         }
         if (cfg.engineVerify) {
             final int[] tries = {0};

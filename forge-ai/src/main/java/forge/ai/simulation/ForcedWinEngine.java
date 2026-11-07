@@ -196,6 +196,20 @@ final class ForcedWinEngine {
          * previous move's ability, before other moves; floats that sacrifice their source stay late.
          */
         boolean floatFirst = false;
+        // M2 engine-reach-1107: loop reach
+        /**
+         * engine-reach-1107 (false = off, needs longLoops): at each doubling of a loop's fast-forward, a small search from the
+         * position reached, leaving out the body's own moves. The line stops at the first count that wins, at that doubling, in
+         * place of a fixed cap. No win by the last count leaves the loop as before.
+         */
+        boolean loopOutlets = false;
+        /** engine-reach-1107: nodes of one such search. */
+        int outletNodes = 6;
+        /**
+         * engine-reach-1107 (false = off, with longLoops): a round back to an ancestor is also a loop when the boards match and
+         * our hand holds at least the ancestor's cards (draws are kept, the library may shrink), with progress.
+         */
+        boolean looseCycles = false;
         /**
          * unified-search-1106 (null = off): a found win must also win here (a play-out in another world of our library), or the
          * search goes on; and at each node the moves that drew from our library are searched after the others, so a line
@@ -441,6 +455,53 @@ final class ForcedWinEngine {
         return null;
     }
 
+    /** engine-reach-1107: the boards (non-token permanents with their state, both sides), the turn and phase, the opponent's hand size. */
+    static String boardKey(Game g, Player me) {
+        final StringBuilder sb = new StringBuilder(512);
+        final PhaseHandler ph = g.getPhaseHandler();
+        sb.append(ph.getTurn()).append(ph.getPhase()).append('|');
+        for (Player p : g.getPlayers()) {
+            sb.append(p == me ? "me" : "op").append('|');
+            if (p != me) {
+                sb.append("h").append(p.getCardsIn(ZoneType.Hand).size());
+            }
+            sb.append("|b");
+            names(sb, p.getCardsIn(ZoneType.Battlefield), true);
+            sb.append(';');
+        }
+        return sb.toString();
+    }
+
+    /** engine-reach-1107: a's hand holds every card (by name, with multiplicity) of b's. */
+    private static boolean handCovers(Player a, Player b) {
+        final java.util.Map<String, Integer> need = new java.util.HashMap<>();
+        for (Card c : b.getCardsIn(ZoneType.Hand)) {
+            need.merge(c.getName(), 1, Integer::sum);
+        }
+        for (Card c : a.getCardsIn(ZoneType.Hand)) {
+            need.computeIfPresent(c.getName(), (k, v) -> v > 1 ? v - 1 : null);
+        }
+        return need.isEmpty();
+    }
+
+    /** engine-reach-1107 ({@link Limits#looseCycles}): the moves back to an ancestor that this node covers, with progress. */
+    private static List<Step> looseCycleBody(Node child) {
+        final List<Step> p = child.path;
+        final String key = boardKey(child.g, child.me);
+        Node a = child.parent;
+        for (int len = 1; a != null && len <= p.size(); len++, a = a.parent) {
+            final Step st = p.get(p.size() - len);
+            if (st.pass || st.kind == AbilKind.ATTACK || st.kind == AbilKind.REPEAT) {
+                return null;
+            }
+            if (a.pv != null && a.g != null && progressed(child.pv, a.pv) && child.pv[7] >= a.pv[7]
+                    && key.equals(boardKey(a.g, a.me)) && handCovers(child.me, a.me)) {
+                return new ArrayList<>(p.subList(p.size() - len, p.size()));
+            }
+        }
+        return null;
+    }
+
     /** The result of fast-forwarding a loop: a win (its path), or the node after the last repetition that progressed. */
     static final class Forward {
         List<Step> win;
@@ -549,6 +610,9 @@ final class ForcedWinEngine {
                         failed = true;
                         break chunkLoop;
                     }
+                    if (TRACE && a.child == null && !a.won) {
+                        ForcedWinSolver.receipt("FW_ENGINE chunk step " + b + " no child: " + a.why);
+                    }
                     partial.add(b);
                     if (a.won) {
                         final List<Step> win = new ArrayList<>(prefix);
@@ -582,6 +646,10 @@ final class ForcedWinEngine {
                     break;
                 }
             }
+            if (TRACE) {
+                ForcedWinSolver.receipt("FW_ENGINE chunk reps=" + reps + " want=" + want + " done=" + done + " failed=" + failed + " err=" + lastError
+                        + " pv=" + java.util.Arrays.toString(next.pv) + " before=" + java.util.Arrays.toString(before));
+            }
             if (failed) {
                 if (chunk == 1) {
                     break;
@@ -592,6 +660,14 @@ final class ForcedWinEngine {
             cur = next;
             reps += done;
             chunk *= 2;
+            if (lim.loopOutlets && reps < cap) {
+                final List<Step> win = outletSearch(cur, from, prefix, body, reps);
+                if (win != null) {
+                    st.loopWins++;
+                    f.win = win;
+                    return f;
+                }
+            }
         }
         final Node n = new Node();
         n.g = cur.g;
@@ -607,6 +683,47 @@ final class ForcedWinEngine {
         return f;
     }
 
+    /**
+     * engine-reach-1107 ({@link Limits#loopOutlets}): a small search from a loop's position at this count, with the body's moves
+     * left out at its first ply. A found win that fails verify counts as none. The game of {@code cur} is copied, not played on.
+     */
+    private List<Step> outletSearch(Node cur, Node from, List<Step> prefix, List<Step> body, int reps) {
+        final Node n = new Node();
+        n.g = cur.g;
+        n.me = cur.me;
+        n.ids = cur.ids;
+        n.turn = cur.turn;
+        n.passed = cur.passed;
+        n.parent = from;
+        n.pv = cur.pv;
+        n.path.addAll(prefix);
+        n.path.add(Step.repeat(body, reps));
+        final int nodes = lim.nodes;
+        final Set<String> skip = outletSkip;
+        final java.util.Map<String, List<long[]>> keep = new java.util.HashMap<>(table);
+        lim.nodes = Math.min(nodes, st.nodes + lim.outletNodes);
+        final boolean nested = inOutlet;
+        inOutlet = true;
+        outletSkip = new HashSet<>();
+        for (Step b : body) {
+            outletSkip.add(b.kind + "|" + b.hostId + "|" + b.desc);
+        }
+        try {
+            return dfs(n, 0);
+        } finally {
+            inOutlet = nested;
+            lim.nodes = nodes;
+            outletSkip = skip;
+            table.clear();
+            table.putAll(keep);
+            forge.util.IdScope.install(cloneScope(cur.ids));
+        }
+    }
+
+    /** engine-reach-1107: the moves a {@link #outletSearch} leaves out at its first ply (null = none). */
+    private Set<String> outletSkip;
+    /** engine-reach-1107: inside an outlet search no loop is fast-forwarded. */
+    private boolean inOutlet;
 
     /** The repetitions at which the opponent's life, library or poison is done at this rate, past {@code reps}; else the cap. */
     private int goalCap(long[] now, long[] prev, int reps) {
@@ -783,6 +900,11 @@ final class ForcedWinEngine {
         // a node is our priority with an empty stack (the copy was taken just after we passed it)
         LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
         final List<Step> moves = moves(node);
+        if (outletSkip != null) {
+            final Set<String> skip = outletSkip;
+            outletSkip = null; // first ply only
+            moves.removeIf(m -> skip.contains(m.kind + "|" + m.hostId + "|" + m.desc));
+        }
         if (TRACE) {
             ForcedWinSolver.receipt("FW_ENGINE node depth=" + depth + " path=" + node.path + " moves=" + moves);
         }
@@ -879,6 +1001,14 @@ final class ForcedWinEngine {
                 if (body == null && lim.longLoops) {
                     body = cycleBody(a.child); // unified-search-1106: back at an ancestor's position, with progress
                     played = 1;
+                }
+                if (body == null && lim.looseCycles) {
+                    body = looseCycleBody(a.child); // engine-reach-1107
+                    played = 1;
+                }
+                if (body != null && inOutlet) {
+                    st.pruned++;
+                    continue;
                 }
                 if (body != null) {
                     final Forward fw = fastForward(a.child, body, played);
