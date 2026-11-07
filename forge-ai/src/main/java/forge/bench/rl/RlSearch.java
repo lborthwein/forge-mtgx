@@ -736,6 +736,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return cfg.budgetMs;
     }
 
+    /** line-adoption-1107: the search's horizon in turns. */
+    int horizonTurns() {
+        return cfg.horizon;
+    }
+
     static long splitmix(long z) {
         z += 0x9e3779b97f4a7c15L;
         z = (z ^ (z >>> 30)) * 0xbf58476d1ce4e5b9L;
@@ -1044,6 +1049,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 expandLimit = order.size();
                 ex = this;
             }
+            if (stage != null && stage.horizonTurn > 0) {
+                ls.setPlanHorizonTurn(stage.horizonTurn); // line-adoption-1107 (plans.lineHorizon); cleared by the decision
+            }
             r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat, ex)
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
@@ -1266,6 +1274,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         row.add("plans", labels);
         row.addProperty("known_top", st.knownTop);
+        if (st.horizonTurn > 0) {
+            row.addProperty("horizon_turn", st.horizonTurn); // line-adoption-1107 (only when extended)
+        }
         if (r != null) {
             row.addProperty("outcome", r.outcome);
             row.addProperty("proven", r.proven);

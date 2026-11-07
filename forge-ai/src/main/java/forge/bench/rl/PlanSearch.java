@@ -128,10 +128,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
         /** unified-search-1106 (off by default): a sampled plan's steps keep the announced X they were recorded with. */
         public boolean planX = false;
+        /**
+         * line-adoption-1107 (off by default): at a plan point whose solver line wins on a later turn than the search's
+         * horizon reaches, every candidate's play-out runs to the start of the turn after the line's win turn (with a value
+         * leaf: the seat's first priority in it). The line is then valued by its own outcome in each world and the
+         * alternatives by the same later leaf, in the same worlds and under the same departZ gate, instead of the line
+         * being cut at the leaf before its kill.
+         */
+        public boolean lineHorizon = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX"));
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX",
+                "lineHorizon"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -163,6 +172,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineDuel")) s.lineDuel = o.get("lineDuel").getAsBoolean();
             if (o.has("unified")) s.unified = o.get("unified").getAsBoolean();
             if (o.has("planX")) s.planX = o.get("planX").getAsBoolean();
+            if (o.has("lineHorizon")) s.lineHorizon = o.get("lineHorizon").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -749,6 +759,36 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return driver.forgeCosts();
     }
 
+    /** line-adoption-1107 (plans.lineHorizon; report only): plan points whose play-outs ran past the search's horizon. */
+    int horizonExtends;
+
+    /**
+     * line-adoption-1107: the turn after the latest win turn of the plan's solver lines, when that is later than the
+     * search's horizon (now + horizonTurns); else 0. A line's win turn counts our turns from this one (0 = this turn):
+     * from our turn T it is T + 2w, from theirs T + 2w - 1.
+     */
+    static int lineHorizonTurn(final Game g, final Player me, final List<Object> plans, final int horizonTurns) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        final int turn = ph.getTurn();
+        final boolean ours = ph.isPlayerTurn(me);
+        int out = 0;
+        for (Object pl : plans) {
+            if (!(pl instanceof LinePlan)) {
+                continue;
+            }
+            final int w = ((LinePlan) pl).proposal.winTurn;
+            if (w <= 0) {
+                continue;
+            }
+            out = Math.max(out, winAbs(turn, w, ours) + 1);
+        }
+        return out > turn + horizonTurns ? out : 0;
+    }
+
+    static int winAbs(final int turn, final int winTurn, final boolean ourTurn) {
+        return turn + 2 * winTurn - (ourTurn ? 0 : 1);
+    }
+
     /** kill-line-1106 (plans.lineFloor; report only): lines adopted by the floor. */
     int lineFloorTakes;
     /** kill-line-1106 (plans.lineDuel; report only): points scored as default against the line. */
@@ -848,6 +888,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         int knownTop;
         double ms;
         String note = "";
+        /** line-adoption-1107 (plans.lineHorizon): the absolute turn the play-outs run to, 0 = the search's own horizon. */
+        int horizonTurn;
     }
 
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
@@ -900,6 +942,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 st.labels.add("line#" + n + " P=" + Math.round(pr.pBelief * 100) + "% steps=" + pr.steps);
                 n++;
                 lineCands++;
+            }
+            if (spec.lineHorizon) {
+                st.horizonTurn = lineHorizonTurn(g, me, st.plans, rs.horizonTurns());
+                if (st.horizonTurn > 0) {
+                    horizonExtends++;
+                }
             }
             if (duel != null) {
                 st.duel = true;
@@ -1204,6 +1252,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
         if (lineFloorTakes != 0) {
             o.addProperty("lineFloorTakes", lineFloorTakes); // kill-line-1106
+        }
+        if (spec.lineHorizon) {
+            o.addProperty("horizonExtends", horizonExtends); // line-adoption-1107 (only when on)
         }
         o.addProperty("policyPlanDepartures", policyPlanDepartures);
         o.addProperty("provenPicks", provenPicks);
