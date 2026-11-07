@@ -129,6 +129,16 @@ public final class RlCandidates {
             return cands.size();
         }
 
+        /** The KEEP candidate of a mulligan ask, or -1. */
+        public int keepIndex() {
+            for (int i = 0; i < cands.size(); i++) {
+                if (cands.get(i).kind == RlSchema.K_KEEP) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
         public int S() {
             return slotCards.size();
         }

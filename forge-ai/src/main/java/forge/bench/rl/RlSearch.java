@@ -226,6 +226,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean beliefDeck = false;
         /** choice-scorer-1106 (null = off, the default, and then absent from the JSON): {@link ChoiceScorer.Config}. */
         public JsonObject choiceScorer = null;
+        /**
+         * mull-off (owner 2026-11-06; off by default and then absent from the JSON): this search's seat keeps every opening
+         * hand, whatever the policy answers. Generic: no card or deck logic. The policy's answer is logged.
+         */
+        public boolean alwaysKeep = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -237,7 +242,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "choiceScorer"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "choiceScorer", "alwaysKeep"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -287,6 +292,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 c.choiceScorer = o.getAsJsonObject("choiceScorer");
                 ChoiceScorer.Config.parse(c.choiceScorer); // a bad key fails at parse, not at the first ask
             }
+            if (o.has("alwaysKeep")) c.alwaysKeep = o.get("alwaysKeep").getAsBoolean();
             if (o.has("blocks")) c.blocks = o.get("blocks").getAsInt();
             if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
@@ -420,6 +426,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (choiceScorer != null) {
                 o.add("choiceScorer", choiceScorer); // choice-scorer-1106: only when on
+            }
+            if (alwaysKeep) {
+                o.addProperty("alwaysKeep", true); // mull-off: only when on
             }
             if (blocks > 0) {
                 // block-search-1019: only when on, so every other spec's JSON is unchanged
@@ -1256,6 +1265,32 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private int blockAsks = 0, blockSearched = 0, blockDepartures = 0, blockCapped = 0, blockForgeMissing = 0,
             blockSampleFailures = 0;
 
+    /** mull-off: the keep answer, with the policy's own answer and the hand logged. */
+    private short[] keepAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "alwaysKeep");
+            row.addProperty("would_mulligan", greedy == null || greedy.length != 1 || greedy[0] != keep);
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            rows.add(row);
+        }
+        return keep < 0 ? null : new short[] {keep};
+    }
+
     private ChoiceScorer scorer;
 
     private ChoiceScorer scorer() {
@@ -1278,6 +1313,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public boolean choiceAsk(final int family) {
+        if (cfg.alwaysKeep && family == RlSchema.F_MULLIGAN) {
+            return true;
+        }
         return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
                 || family == RlSchema.F_ORDER && scorer().config().pile);
     }
@@ -1285,6 +1323,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public short[] decideChoice(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
+        if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
+            return keepAnswer(g, me, m, frame, greedy);
+        }
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
         if (sc.pileActive(g)) {
