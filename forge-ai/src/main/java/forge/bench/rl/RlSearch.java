@@ -97,6 +97,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int maxSteps = 5000;
         public int leafExtraSteps = 400;
         public double departZ = 1.645;
+        /** unified-search-1106 (off by default): {@link LookaheadSearch.Config#anytime}. */
+        public boolean anytime = false;
         public double margin = 0.0;
         /** static | value */
         public String leaf = "static";
@@ -218,6 +220,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * InfoStates ({@link LookaheadSearch.Config#infoState}). Live: only the policy spec's {@code infoState=on}.
          */
         public boolean infoState = false;
+        /**
+         * unified-search-1106 (off by default): a bench seat wired as live is. Without it, infoState on a bench seat reads no
+         * InfoStates (only RlLiveSeat.bind attaches one): every look-ahead world shuffles the seat's whole library. With it,
+         * {@link #attach} attaches one at game creation and the plan solver and the defender are armed as RlLiveSeat arms them.
+         * Attaching is per game: a second seat of that game with infoState on reads it too.
+         */
+        public boolean infoAttach = false;
         /** honest-belief-1020: the cube list file ({@code mtgx-belief-cube/1}; {@code classpath:} = a jar resource) and its pin. */
         public String beliefCube;
         public String beliefCubeSha256;
@@ -294,7 +303,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "choiceScorer", "alwaysKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard"));
+                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "infoAttach", "anytime"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -310,6 +319,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("maxSteps")) c.maxSteps = o.get("maxSteps").getAsInt();
             if (o.has("leafExtraSteps")) c.leafExtraSteps = o.get("leafExtraSteps").getAsInt();
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
+            if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
             if (o.has("leaf")) c.leaf = o.get("leaf").getAsString();
             if (o.has("playout")) c.playout = o.get("playout").getAsString();
@@ -359,6 +369,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
             if (o.has("belief")) c.belief = o.get("belief").getAsString();
             if (o.has("infoState")) c.infoState = o.get("infoState").getAsBoolean();
+            if (o.has("infoAttach")) c.infoAttach = o.get("infoAttach").getAsBoolean();
+            armInfoState(c);
             if (o.has("beliefCube") && !o.get("beliefCube").isJsonNull()) c.beliefCube = o.get("beliefCube").getAsString();
             if (o.has("beliefCubeSha256") && !o.get("beliefCubeSha256").isJsonNull()) {
                 c.beliefCubeSha256 = o.get("beliefCubeSha256").getAsString();
@@ -684,10 +696,33 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return g != null && wantsInfoStates(c) ? forge.ai.simulation.InfoStates.attach(g) : null;
     }
 
+    /** unified-search-1106: {@link Config#infoAttach}. */
+    public static void attachInfoState(final Game g, final Config c) {
+        if (c.infoAttach && c.infoState) {
+            forge.ai.simulation.InfoStates.attach(g);
+        }
+    }
+
+    /** unified-search-1106: {@link Config#infoAttach}: the solver keys RlLiveSeat.Spec.parse sets. */
+    static void armInfoState(final Config c) {
+        if (!c.infoAttach || !c.infoState || c.plans == null) {
+            return;
+        }
+        for (String sub : new String[] {"solverCfg", "defendCfg"}) {
+            if (sub.equals("solverCfg") || c.plans.has("defend") && c.plans.get("defend").getAsBoolean()) {
+                if (!c.plans.has(sub)) {
+                    c.plans.add(sub, new JsonObject());
+                }
+                c.plans.getAsJsonObject(sub).addProperty("infoState", "true");
+            }
+        }
+    }
+
     public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
         // review #172 S2: the game's InfoStates is attached here, at the seat's setup on the game's own thread (a
         // consumer only finds it)
         attachInfoStates(cfg, g);
+        attachInfoState(g, cfg);
         if (cfg.forcedWin == null && cfg.plans == null && cfg.cac == null) {
             return;
         }
@@ -849,6 +884,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.seed = splitmix(gameSeed ^ splitmix(cfg.seedSalt));
         lc.threads = cfg.threads;
         lc.departZ = cfg.departZ;
+        lc.anytime = cfg.anytime;
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
@@ -908,6 +944,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the S-b solver's follower config (copies follow lines with it). */
+    /** kill-line-1106: plans.lineKeep. */
+    boolean lineKeepOn() {
+        return cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).lineKeep;
+    }
+
     /** choice-search-1105: plans.lineChoices=forge (line-consistent choice answers). */
     boolean lineChoicesForge() {
         for (PlanSearch ps1 : planSearches.values()) {
@@ -924,6 +965,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the decision budget, ms (0 = none). */
+    double departZ() {
+        return cfg.departZ; // unified-search-1106
+    }
+
     long budgetMs() {
         return cfg.budgetMs;
     }
@@ -1225,6 +1270,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         armForce(mark());
+        if (cfg.anytime && "value".equals(cfg.leaf)) {
+            ls.setRootP((1 + sc.valueObs) / 2); // unified-search-1106
+        }
         if (sb != null) {
             // S-b: every searched decision has the proof flags; a plan point also has its plans (and its budget counts
             // from the decision's start, the proposals included)
@@ -1243,7 +1291,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 expandLimit = order.size();
                 ex = this;
             }
-            r = stage != null ? ls.decideGivenPlans(g, me, given, cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat, ex)
+            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat, ex)
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
@@ -1267,7 +1315,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             searchCpuMs += r.cpuMs;
         }
         if (stage != null) {
-            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6);
+            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6, sc.valueObs);
             planRow(g, frame, stage, r, order, pa, t0);
             if (pa != -2) {
                 departures++;
@@ -2823,7 +2871,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (first.plan instanceof PlanSearch.LinePlan) {
             // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
             pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first,
-                    lineChoicesForge());
+                    lineChoicesForge(), lineKeepOn());
         }
         pc.forcedBlocks = first.block;
         return new LookaheadSearch.PlayoutSeat() {

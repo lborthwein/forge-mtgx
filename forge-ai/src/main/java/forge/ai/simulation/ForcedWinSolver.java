@@ -158,6 +158,41 @@ public final class ForcedWinSolver {
         public boolean engineRerun = false;
         /** choice-search-1105 (CAP-2, off by default): each engine search gets its own engineNodes (#149's key). */
         public boolean engineNodesPerSearch = false;
+        /**
+         * kill-line-1106 (off by default; port of solver-gaps-1104): an engine move's targeting trigger of ours branches
+         * over every legal target class, at most triggerVariants of them, mana valued (ForcedWinEngine.TriggerTargets#wide).
+         */
+        public boolean engineTriggerTargets = false;
+        /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
+        public boolean staleStatics = false;
+        /**
+         * unified-search-1106 (off by default): the engine search is not gated on an unmodeled ability or board power, and runs
+         * in either main phase of ours, once per phase and again when a nonland permanent of ours entered.
+         */
+        public boolean engineOpen = false;
+        /** unified-search-1106 (off by default): {@link ForcedWinEngine.Limits#verify}. */
+        public boolean engineVerify = false;
+        /**
+         * kill-line-1106 (off by default): the follower pays as the line recorded. A step the planner paid with life pays
+         * its Phyrexian pips with life, not with a mana source Forge AI's payment would pick first.
+         */
+        public boolean followPay = false;
+        /** kill-line-1106 (off by default): planner lines that all fail verification fall through to the engine search. */
+        public boolean engineAfterPlanFail = false;
+        /** kill-line-1106 (off by default): a permanent's mana output is read from the position, not its learned template. */
+        public boolean sourceOutput = false;
+        /**
+         * kill-line-1106 (off by default): a verification world whose next-turn line breaks on our next turn (the opponent's
+         * turn changed the board) plans again from that world's position, as the live seat would.
+         */
+        public boolean verifyReplan = false;
+        /** kill-line-1106 (off by default): the planner branches over a discard's hand classes; the line records the choice. */
+        public int triggerVariants = 8;
+        /**
+         * unified-search-1106 (off by default): a line that won unopposed with no belief world verified before the deadline is
+         * unknown, not refuted: the position is not cached as having no line, so a later ask can verify it.
+         */
+        public boolean unknownWorlds = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -581,6 +616,16 @@ public final class ForcedWinSolver {
             c.loopMarginal = "true".equals(get.apply("loopMarginal")); // choice-search-1105
             c.engineRerun = "true".equals(get.apply("engineRerun")); // choice-search-1105
             c.engineNodesPerSearch = "true".equals(get.apply("engineNodesPerSearch")); // choice-search-1105 (CAP-2)
+            c.engineTriggerTargets = "true".equals(get.apply("engineTriggerTargets")); // kill-line-1106
+            c.staleStatics = "true".equals(get.apply("staleStatics")); // unified-search-1106
+            c.engineOpen = "true".equals(get.apply("engineOpen")); // unified-search-1106
+            c.engineVerify = "true".equals(get.apply("engineVerify")); // unified-search-1106
+            c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
+            c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
+            c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
+            c.verifyReplan = "true".equals(get.apply("verifyReplan")); // kill-line-1106
+            c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
+            c.unknownWorlds = "true".equals(get.apply("unknownWorlds")); // unified-search-1106
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -2010,6 +2055,8 @@ public final class ForcedWinSolver {
     }
 
     private String lastOutcome = "?";
+    /** unified-search-1106 (unknownWorlds): the engine's line this decision had no verified world. */
+    private boolean engineUnverified;
     private int lastPlannerNodes;
     /** rollout-budget-1101: the last offense's cap hit ({@link forge.ai.AiWork#CAP}), or null. */
     private String lastCap;
@@ -2020,13 +2067,15 @@ public final class ForcedWinSolver {
     public String lastCap() {
         return lastCap;
     }
+    /** kill-line-1106 (report only): planner searches stopped by their limit; engine lines taken after planner lines failed. */
+    public int plannerExhausted, planFailEngineTakes;
 
     private Line offense0(Game live, String key) {
         decisions++;
         final int index = decisionIndex++;
         final long t0 = System.nanoTime();
         // bvw-step1-build-1024: budget=counter reads no wall clock (0 = no wall)
-        decisionWall = cfg.counter ? 0L : t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
+        decisionWall = cfg.counter ? 0L : hardDeadline != 0 ? hardDeadline : t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
         decisionStart = t0;
         decisionSteps0 = meter.playoutSteps;
         meter.offenses++;
@@ -2084,6 +2133,17 @@ public final class ForcedWinSolver {
         }
         plannerNanos += System.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
+        if (res.exhausted) {
+            plannerExhausted++; // kill-line-1106 (report only): the planner's node or time limit stopped this search
+        }
+        if (cfg.followPay) {
+            for (Line l : res.lines) {
+                for (Step st : l.steps) {
+                    st.forceLife = st.phyrexianLife; // kill-line-1106
+                }
+            }
+        }
+        engineUnverified = false;
         if (res.lines.isEmpty()) {
             lastOutcome = "gate";
             final Line engine = engineFallback(live, pos, index, t0);
@@ -2094,7 +2154,9 @@ public final class ForcedWinSolver {
                 return engine;
             }
             gated++;
-            noLineKey = key;
+            if (!(cfg.unknownWorlds && engineUnverified)) {
+                noLineKey = key;
+            }
             receipt("FORCED_WIN gate" + tag() + " turn=" + pos.turn + " none " + res.summary() + " probes=" + reader.probeStats.summary());
             return null;
         }
@@ -2105,7 +2167,7 @@ public final class ForcedWinSolver {
             receipt("FW_POSITION " + pos.describe());
         }
         final long t1 = System.nanoTime();
-        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : System.nanoTime());
+        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch || hardDeadline != 0 ? t0 : System.nanoTime());
         engineNanos += System.nanoTime() - t1;
         if (cfg.engineAfterPlanFail && evalSink != null && (best == null || best.pUnopposed < 1.0 || best.pBelief < 1.0
                 || best.worldsRun < cfg.worlds)) {
@@ -2122,6 +2184,7 @@ public final class ForcedWinSolver {
                 // label's proposals ran it above already; review #152-2)
                 final Line engine = engineFallback(live, pos, index, t0, true);
                 if (engine != null) {
+                    planFailEngineTakes++;
                     if (!"likely-take".equals(lastOutcome)) {
                         lastOutcome = "engine-take";
                     }
@@ -2130,7 +2193,9 @@ public final class ForcedWinSolver {
                 }
                 lastOutcome = "declined";
             }
-            noLineKey = key;
+            if (!(cfg.unknownWorlds && best != null && best.unverified())) {
+                noLineKey = key;
+            }
             if (best == null) {
                 // diagnostics (solver-gaps-1015): a width-model mismatch, with the position the width search saw
                 receipt("FORCED_WIN mismatch" + tag() + " turn=" + pos.turn + " phase=" + live.getPhaseHandler().getPhase()
@@ -2218,6 +2283,8 @@ public final class ForcedWinSolver {
             return out;
         }
         evalSink = new ArrayList<>();
+        receipt("INFO_STATE" + tag() + " turn=" + ph.getTurn() + " attached=" + (InfoStates.find(live) != null) + " solverInfoState="
+                + cfg.infoState); // unified-search-1106 (report only)
         try {
             offense(live);
             final Set<String> seen = new HashSet<>();
@@ -2899,6 +2966,7 @@ public final class ForcedWinSolver {
     /** choice-search-1105 (engineRerun): our nonland permanents at the turn's last engine run, and the reruns. */
     private java.util.Set<Integer> engineBoard;
     public int engineReruns;
+    private PhaseType enginePhase;
 
     private java.util.Set<Integer> ourNonlandIds() {
         final java.util.Set<Integer> out = new java.util.HashSet<>();
@@ -2919,7 +2987,8 @@ public final class ForcedWinSolver {
         final boolean ourMain1 = eph.isPlayerTurn(me) && eph.is(PhaseType.MAIN1);
         final boolean otherWindow = stackWindow || cfg.engineAnyWindow && (eph.isPlayerTurn(me) ? eph.is(PhaseType.MAIN2)
                 : eph.is(PhaseType.END_OF_TURN)) || cfg.engineAnyWindow && cfg.engineEveryWindow && !ourMain1; // endstep-rows-1103
-        if (!cfg.engine || !main1 && !otherWindow && !eph.is(PhaseType.MAIN1)) {
+        if (!cfg.engine || !main1 && !otherWindow && !eph.is(PhaseType.MAIN1)
+                && !(cfg.engineOpen && eph.is(PhaseType.MAIN2) && eph.isPlayerTurn(me))) {
             return null;
         }
         final String window = pos.turn + (main1 && !stackWindow || !otherWindow ? "" : ":" + eph.getPhase())
@@ -2929,7 +2998,9 @@ public final class ForcedWinSolver {
             return null;
         }
         final java.util.Set<Integer> board = cfg.engineRerun ? ourNonlandIds() : null;
-        if (!windowed && engineTurn == pos.turn) {
+        final boolean newPhase = cfg.engineOpen && eph.getPhase() != enginePhase; // unified-search-1106
+        enginePhase = eph.getPhase();
+        if (!windowed && engineTurn == pos.turn && !newPhase) {
             // choice-search-1105 (engineRerun): once per turn, unless a nonland permanent of ours entered since that run
             if (board == null || engineBoard == null || engineBoard.containsAll(board)) {
                 return null;
@@ -2967,7 +3038,7 @@ public final class ForcedWinSolver {
         // gate reads our power now; the turn before the kill, next turn's attackers are still in our hand)
         final boolean passOpen = cfg.enginePassFirst && eph.isPlayerTurn(me) && live.getStack().isEmpty()
                 && (eph.is(PhaseType.MAIN1) || eph.is(PhaseType.MAIN2));
-        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal && !endStepOpen && !passOpen) {
+        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal && !endStepOpen && !passOpen && !cfg.engineOpen) {
             return null;
         }
         if (!cfg.forced && !cfg.likely) {
@@ -2991,6 +3062,14 @@ public final class ForcedWinSolver {
         el.triggerVariants = cfg.triggerVariants;
         el.passScale = cfg.enginePassScale;
         el.altLines = "off".equals(cfg.engineOrder) ? cfg.engineAltLines : 0; // the ordered DFS returns its first line
+        el.staleStatics = cfg.staleStatics; // unified-search-1106
+        if (cfg.engineVerify) {
+            final int[] tries = {0};
+            el.verify = path -> {
+                final Line l = new Line(path, List.of(), path.contains(Step.PASS) ? 1 : 0, me.getLife(), 0, 0, List.of(), "engine");
+                return playout(live, l, mix(cfg.seed, 7_100_000L + 64L * index + tries[0]++), 0, -1, decisionWall).won;
+            };
+        }
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -3029,6 +3108,9 @@ public final class ForcedWinSolver {
             // deck-belief-1105: no proven line yet; the engine search ends at the cap
             engineDeadline = Math.min(engineDeadline, t0 + cfg.capMs * 1_000_000L);
             el.wall = Math.min(el.wall, t0 + (cfg.capMs + 500L) * 1_000_000L);
+        }
+        if (hardDeadline != 0) {
+            engineDeadline = Math.min(engineDeadline, hardDeadline - reserve * 1_000_000L); // unified-search-1106
         }
         final List<Line> likelyCands = cfg.likely ? new ArrayList<>() : null;
         el.redraw = redraw;
@@ -3145,10 +3227,9 @@ public final class ForcedWinSolver {
                 }
             }
         }
-        // unified-jar-1106: one key, two implementations from the split. A label run (evalSink set) keeps research's
-        // (endstep-rows-1103); a live seat keeps its own (choice-search-1105), so a pilot's read is unchanged.
+        // unified-jar-1106: one key, two implementations from the split (see the jar branch)
         final Eval em = !cfg.loopMarginal ? e : evalSink != null ? loopMarginal(live, line, e, index, t0)
-                : loopMarginal(live, e, index, evalDeadline);
+                : e.pUnopposed >= 1.0 ? loopMarginal(live, e, index, evalDeadline) : e;
         if (em != e) {
             e = em;
             line = em.line;
@@ -3157,6 +3238,7 @@ public final class ForcedWinSolver {
         if (evalSink != null) {
             evalSink.add(e);
         }
+        engineUnverified = e.unverified();
         if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold || cfg.honestProbes && e.worldsRun < cfg.worlds) {
             if (likelyCands != null) {
                 // not forced: a likely-win candidate like the others (Part B)
@@ -3374,6 +3456,15 @@ public final class ForcedWinSolver {
     public int wallCuts;
     /** solver-gaps-1015: the current offense decision's hard wall (System.nanoTime()): its budget plus the grace. */
     private long decisionWall;
+    /**
+     * unified-search-1106 (plans.unified; 0 = off): the decision's one deadline. Nothing in the solver runs past it, a line
+     * that has won every world so far keeps verifying up to it, and a world not reached is unknown.
+     */
+    private long hardDeadline;
+
+    public void setHardDeadline(long nanos) {
+        this.hardDeadline = nanos;
+    }
     /** deck-belief-1105: the current offense decision's start (for {@link Config#unprovenMs}). */
     private long decisionStart;
     public int unprovenStops;
@@ -3654,6 +3745,9 @@ public final class ForcedWinSolver {
             }));
         }
         final Position pos = reader.read(live, me, knownOrder, true);
+        if (cfg.sourceOutput && pos != null) {
+            ForcedWinModel.Reader.readSourceOutputs(pos, me); // kill-line-1106
+        }
         return pos;
     }
 
@@ -3696,6 +3790,11 @@ public final class ForcedWinSolver {
 
         Eval(Line line) {
             this.line = line;
+        }
+
+        /** Won unopposed, and no belief world was verified: P(belief) here is unknown, not 0 (unified-search-1106). */
+        boolean unverified() {
+            return pUnopposed >= 1.0 && worldsRun == 0;
         }
 
         @Override
@@ -3784,7 +3883,7 @@ public final class ForcedWinSolver {
         }
         final Eval e = new Eval(line);
         // bvw-step1-build-1024: budget=counter: no wall (0); maxSteps bounds each play-out
-        final long wall = cfg.counter ? 0L : Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        final long wall = cfg.counter ? 0L : hardDeadline != 0 ? hardDeadline : Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
         meter.lines++;
         meter.worlds++;
         final Outcome u = playout(live, line, mix(seed, 0), 0, -1, wall);
@@ -3807,7 +3906,12 @@ public final class ForcedWinSolver {
         final Set<String> prot = new HashSet<>();
         final int nWorlds = beliefWorlds(live); // deck-belief-1105 (cfg.worlds when off)
         for (int w = 1; w <= nWorlds; w++) {
-            if (n > 0 && System.nanoTime() > deadline) {
+            if (hardDeadline != 0) {
+                // unified-search-1106: a line that has won every world so far keeps verifying to the decision's deadline
+                if (System.nanoTime() > (sum >= n ? hardDeadline : deadline)) {
+                    break;
+                }
+            } else if (n > 0 && System.nanoTime() > deadline) {
                 meter.evalDeadlineStops++;
                 break;
             }
@@ -4104,6 +4208,10 @@ public final class ForcedWinSolver {
             // bvw-step1-build-1024: budget=counter: each seat's calls in the play-out are capped (the wall's stand-in)
             final long callLimit = cfg.counter ? 2L * cfg.maxSteps : 0L;
             lineAi.bounded(wall).callLimited(callLimit);
+            if (cfg.verifyReplan && line.winTurn > 0) {
+                lineAi.startTurn = g.getPhaseHandler().getTurn();
+                lineAi.replanner = old -> replanIn(g, cm, old); // kill-line-1106
+            }
             cm.dangerouslySetController(lineAi);
             AdversaryAi adv = null;
             for (Player o : g.getPlayers()) {
@@ -4521,6 +4629,77 @@ public final class ForcedWinSolver {
         return defaultVal;
     }
 
+    /**
+     * kill-line-1106 (plans.lineKeep): a discard answered by Forge AI while a line is followed, with the line's reserved
+     * cards swapped out, as {@link LineAi} verified it. No line, or nothing reserved: the answer as given.
+     */
+    public CardCollection keepReserved(CardCollection ordinary, CardCollectionView valid) {
+        if (active == null || active.done || ordinary == null) {
+            return ordinary;
+        }
+        final String t = ordinary.isEmpty() || valid.size() <= ordinary.size() ? null : active.choices.next(ForcedWinChoices.DISC);
+        final CardCollection rec = t == null ? null : ForcedWinChoices.applyDisc(t, valid, ordinary.size(), ordinary.size());
+        if (rec != null) {
+            lineKeepSwaps++;
+            return rec; // planDiscard: the discard the line recorded
+        }
+        final CardCollection out = avoid(ordinary, valid, active.reserved());
+        if (out != ordinary && !out.equals(ordinary)) {
+            lineKeepSwaps++;
+        }
+        return out;
+    }
+
+    /** kill-line-1106 (verifyReplan; report only): worlds that planned again after a line broke, and those that found a line. */
+    public int verifyReplans, verifyReplanLines;
+
+    /** kill-line-1106 (verifyReplan): a fresh same-turn line from a world's position; the cards the old line placed stay known. */
+    private Line replanIn(Game g, Player p, Line old) {
+        verifyReplans++;
+        final Set<Integer> placed = new HashSet<>();
+        for (Step st : old.steps) {
+            placed.addAll(st.pile);
+        }
+        final List<Integer> known = new ArrayList<>();
+        for (Card c : p.getCardsIn(ZoneType.Library)) {
+            if (!placed.contains(c.getId())) {
+                break;
+            }
+            known.add(c.getId());
+        }
+        final Position pos;
+        synchronized (reader) {
+            pos = reader.read(g, p, known, true);
+        }
+        if (pos == null) {
+            return null;
+        }
+        if (cfg.sourceOutput) {
+            ForcedWinModel.Reader.readSourceOutputs(pos, p);
+        }
+        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        lim.nodes = cfg.nodes;
+        lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
+        lim.payPolicies = 1;
+        lim.horizon = 1;
+        lim.planDiscard = cfg.planDiscard;
+        final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+        if (res.lines.isEmpty()) {
+            return null;
+        }
+        verifyReplanLines++;
+        final Line fresh = res.lines.get(0);
+        if (cfg.followPay) {
+            for (Step st : fresh.steps) {
+                st.forceLife = st.phyrexianLife;
+            }
+        }
+        return fresh;
+    }
+
+    /** kill-line-1106 (report only): discards where a reserved card was swapped out. */
+    public int lineKeepSwaps;
+
     /** Card ids the active line still needs in hand (discard choices avoid them). */
     public Set<Integer> reserved() {
         return active == null || active.done ? Collections.emptySet() : active.reserved();
@@ -4538,6 +4717,8 @@ public final class ForcedWinSolver {
         /** Executed steps by host id: the choice asks of a resolving step are answered from it. */
         final Map<Integer, Step> executed = new HashMap<>();
         final Map<Integer, Integer> pilePicked = new HashMap<>();
+        /** kill-line-1106 (planDiscard): the current step's recorded choices. */
+        ForcedWinChoices.Cursor choices = new ForcedWinChoices.Cursor(null);
         /** An ATTACK step is waiting for our declare-attackers step. */
         boolean attackPending;
         /** The forced trigger target of the step being resolved (ENGINE steps). */
@@ -4714,6 +4895,7 @@ public final class ForcedWinSolver {
                 cursor++;
             }
             executed.put(st.hostId, st);
+            choices = new ForcedWinChoices.Cursor(st.cac); // kill-line-1106 (planDiscard; none = empty)
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
             floatDone = 0;
@@ -4817,6 +4999,9 @@ public final class ForcedWinSolver {
             }
             if (st.phyrexianLife && sa.hasParam("AIPhyrexianPayment")) {
                 sa.getMapParams().remove("AIPhyrexianPayment");
+            }
+            if (st.forceLife) {
+                sa.getMapParams().put(forge.ai.ComputerUtilMana.PHYREXIAN_LIFE_PARAM, "true"); // kill-line-1106
             }
             directAnyMana(sa, st);
             if (!sa.canPlay() || !ComputerUtilCost.canPayCost(sa, me, false)) {
@@ -4979,7 +5164,10 @@ public final class ForcedWinSolver {
 
     /** Our seat in a play-out: the line, our counterspells against counters of it, Forge AI for the rest. */
     static final class LineAi extends ForcedWinEngine.GuardedAi {
-        final Follower f;
+        Follower f;
+        /** kill-line-1106 (verifyReplan; null = off): a fresh line from this world once the line breaks on a later turn. */
+        java.util.function.Function<Line, Line> replanner;
+        int startTurn;
         String protectedBy;
         /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
         boolean continueAfter;
@@ -5034,9 +5222,24 @@ public final class ForcedWinSolver {
                 if (n.waiting) {
                     return null;
                 }
-                if (n.broken) {
+                if (n.broken && replanner == null) {
                     return null;
                 }
+            }
+            if (f.broken && replanner != null) {
+                // kill-line-1106 (verifyReplan): wait for our next main phase, then once per world a fresh line
+                if (g.getPhaseHandler().getTurn() > startTurn && g.getStack().isEmpty()
+                        && g.getPhaseHandler().isPlayerTurn(getPlayer()) && g.getPhaseHandler().is(PhaseType.MAIN1)) {
+                    final java.util.function.Function<Line, Line> rp = replanner;
+                    replanner = null;
+                    final Line fresh = rp.apply(f.line);
+                    if (fresh != null) {
+                        f = new Follower(fresh);
+                        final Follower.Next m = f.next(g, getPlayer());
+                        return m.action != null ? capped(List.of(m.action)) : null;
+                    }
+                }
+                return null;
             }
             if (f.done && continueAfter) {
                 return super.chooseSpellAbilityToPlay();
@@ -5229,7 +5432,7 @@ public final class ForcedWinSolver {
         @Override
         public CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa, CardCollection validCards, int min,
                 int max, CardCollectionView visibleToChooser) {
-            if (f.cacLine && p == getPlayer() && min == max && min >= 1 && validCards != null && validCards.size() > min) {
+            if ((f.cacLine || cfg.planDiscard) && p == getPlayer() && min == max && min >= 1 && validCards != null && validCards.size() > min) {
                 final String t = f.choices.next(ForcedWinChoices.DISC);
                 if (t != null) {
                     final CardCollection r = ForcedWinChoices.applyDisc(t, validCards, min, max);
@@ -5478,6 +5681,9 @@ public final class ForcedWinSolver {
         return "decisions=" + decisions + " gated=" + gated + " evaluated=" + evaluated + " taken=" + taken + " likelyRuns="
                 + likelyRuns + " likelyTaken=" + likelyTaken + " replans="
                 + replans + " plannerMs=" + plannerNanos / 1_000_000 + " engineMs=" + engineNanos / 1_000_000
+                + (plannerExhausted == 0 ? "" : " plannerExhausted=" + plannerExhausted)
+                + (planFailEngineTakes == 0 ? "" : " planFailEngineTakes=" + planFailEngineTakes)
+                + (verifyReplans == 0 ? "" : " verifyReplans=" + verifyReplans + "/" + verifyReplanLines)
                 + " copies=" + copies + " " + reader.probeStats.summary()
                 + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)
                 + (loopMarginals + loopVariantCuts == 0 ? "" : " loopMarginals=" + loopMarginals + " loopVariants="

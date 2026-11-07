@@ -148,6 +148,14 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
 
     /** choice-search-1105: line-consistent choices (plans.lineChoices=forge); false = the seat's (the default). */
     boolean lineChoices = false;
+    /** kill-line-1106: plans.lineKeep. */
+    boolean lineKeep = false;
+
+    /** kill-line-1106: a followed line's discard keeps its reserved cards (key off or no line: unchanged). */
+    @Override
+    public CardCollection lineKeep(final CardCollection ordinary, final CardCollection valid) {
+        return lineKeep ? solver.keepReserved(ordinary, valid) : ordinary;
+    }
 
     /** Live safety: line-consistent answers per turn at most; past it the seat answers (its loop guard sees them). */
     static final int LINE_CHOICES_PER_TURN = 400;

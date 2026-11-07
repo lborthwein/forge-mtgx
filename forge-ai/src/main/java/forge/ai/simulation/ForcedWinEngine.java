@@ -82,9 +82,16 @@ final class ForcedWinEngine {
         int pathPrunes;
         /** solver-cap12 round 3 (R3-3): nodes whose moves were value-ordered, and value passes that failed. */
         int ordered, orderFails;
+        /** unified-search-1106 (report only): moves that threw, and the last error. */
+        int moveErrors;
+        /** unified-search-1106 (report only): found wins another library world refuted. */
+        int refutedWins;
+        String lastMoveError = "";
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
+                    + (refutedWins > 0 ? " refutedWins=" + refutedWins : "")
+                    + (moveErrors > 0 ? " moveErrors=" + moveErrors + " lastMoveError=" + lastMoveError : "")
                     + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "")
                     + (loops > 0 || pruned > 0 ? " pruned=" + pruned + " loops=" + loops + " loopReps=" + loopReps
                             + " loopWins=" + loopWins : "")
@@ -224,12 +231,26 @@ final class ForcedWinEngine {
 
     static final class Limits {
         int nodes = 250;
+        /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
+        boolean staleStatics = false;
+        /**
+         * unified-search-1106 (null = off): a found win must also win here (a play-out in another world of our library), or the
+         * search goes on; and at each node the moves that drew from our library are searched after the others, so a line
+         * that needs no luck is found first.
+         */
+        java.util.function.Predicate<List<Step>> verify;
         /**
          * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
          * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
          * whole game gets no same-turn engine nodes after its first searches.
          */
         boolean perSearchNodes;
+        /**
+         * kill-line-1106 (port of solver-gaps-1104, engineTriggerTargets; false = off): {@link TriggerTargets#wide}, at
+         * most triggerVariants trigger targets per move.
+         */
+        boolean triggerTargets;
+        int triggerVariants = 8;
         int depth = 64;
         int branching = 8;
         int targetVariants = 3;
@@ -1371,6 +1392,9 @@ final class ForcedWinEngine {
         final Set<Step> variants = new HashSet<>();
         // labeller-v2 (a)/(e): variants applied while ranking, kept for their turn in the loop (by identity)
         final java.util.Map<Step, Applied> pre = new java.util.IdentityHashMap<>();
+        final List<Applied> luck = lim.verify != null ? new ArrayList<>() : null; // unified-search-1106
+        final List<Step> lucky = new ArrayList<>();
+        final int libHere = node.me.getCardsIn(ZoneType.Library).size();
         for (int mi = 0; mi < moves.size(); mi++) {
             final Step mv = moves.get(mi);
             // solver-gaps-1015: the branching cap counts distinct moves only; the forced-answer variants of a move (its
@@ -1445,6 +1469,11 @@ final class ForcedWinEngine {
             if (a.won) {
                 final List<Step> path = new ArrayList<>(node.path);
                 path.add(mv);
+                if (lim.verify != null && !lim.verify.test(path)) { // unified-search-1106
+                    st.refutedWins++;
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                    continue;
+                }
                 final List<Step> w = won(path); // solver-gaps-1104 (engineAltLines; off = return path)
                 if (w != null) {
                     return w;
@@ -1469,9 +1498,25 @@ final class ForcedWinEngine {
             if (a.child == null) {
                 continue;
             }
+            if (luck != null && a.child.me.getCardsIn(ZoneType.Library).size() < libHere) {
+                luck.add(a); // unified-search-1106: this move drew from our library: after the moves that did not
+                lucky.add(mv);
+                continue;
+            }
             final List<Step> r = descendShared(node, mv, a, depth);
             if (r != null) {
                 return r;
+            }
+        }
+        if (luck != null) {
+            for (int li = 0; li < luck.size(); li++) {
+                if (out()) {
+                    break;
+                }
+                final List<Step> r = descendShared(node, lucky.get(li), luck.get(li), depth);
+                if (r != null) {
+                    return r;
+                }
             }
         }
         return null;
@@ -1746,10 +1791,14 @@ final class ForcedWinEngine {
             final List<Step> body = loopBody(a.child);
             if (body != null) {
                 final Forward fw = fastForward(a.child, body);
-                if (fw.win != null) {
-                    return won(fw.win); // solver-gaps-1104 (off = fw.win)
+                if (fw.win != null && (lim.verify == null || lim.verify.test(fw.win))) {
+                    return won(fw.win); // solver-gaps-1104 (off = fw.win); unified-search-1106: verify
                 }
-                if (!seenDominated(fw.node)) {
+                if (fw.win != null) {
+                    st.refutedWins++; // unified-search-1106: another library world refuted it
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                }
+                if (fw.node != null && !seenDominated(fw.node)) {
                     // review #11: while the REPEAT node is searched, its parent link keeps the DFS child's copy too
                     final long held = fw.node.g != a.child.g ? a.child.cards : 0;
                     pathCards += held;
@@ -2452,12 +2501,14 @@ final class ForcedWinEngine {
         }
 
         /**
-         * solver-gaps-1104 (engineTriggerTargets; false = off, the classic three-way order): every legal target class
+         * kill-line-1106 (engineTriggerTargets; false = off, the classic three-way order): every legal target class
          * (see {@link #wideCandidates}), at most {@link #cap}; a forced ref "C<id>+F<colour>" floats that mana source's
          * mana in response to the trigger (it resolves after: an untap of a source we just tapped for mana).
          */
         boolean wide;
         int cap = 8;
+        /** kill-line-1106: the forced float of a "+F" ref could not be played (the move fails: no silent change). */
+        boolean floatFailed;
 
         /** Handle the forced trigger (played here); the rest go back to Forge AI. */
         List<SpellAbility> apply(Game g, Player me, List<SpellAbility> abilities) {
@@ -2520,17 +2571,6 @@ final class ForcedWinEngine {
             return rest;
         }
 
-        /** solver-gaps-1104: the forced float of a "+F" ref could not be played (the move fails: no silent change). */
-        boolean floatFailed;
-
-        /**
-         * solver-gaps-1104: the trigger's target classes, mana valued. Cards equal by controller, name and tapped state
-         * are one class (the same outcome), represented by the first. Order: our tapped permanents with a non-mana tap
-         * ability (re-enabling an engine); for an untap effect our untapped mana sources with their mana floated first,
-         * one class per colour our cards need that the source makes (else its first colour); our tapped mana sources;
-         * the opponent's permanents; our others. At most {@link #cap}. Engine primitives only (mana abilities, the
-         * trigger's effect kind, tapped state, mana costs): no card is named.
-         */
         List<String> wideCandidates(Game g, Player me, SpellAbility sa, SpellAbility slot) {
             final boolean untap = untaps(sa);
             int needed = 0;
@@ -2730,6 +2770,7 @@ final class ForcedWinEngine {
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
+            copier.setStaleStatics(lim.staleStatics); // unified-search-1106
             copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
@@ -2826,6 +2867,8 @@ final class ForcedWinEngine {
             return null;
         } catch (RuntimeException | StackOverflowError ex) {
             lastError = String.valueOf(ex);
+            st.moveErrors++; // unified-search-1106 (report only)
+            st.lastMoveError = lastError.length() > 80 ? lastError.substring(0, 80) : lastError;
             if (TRACE) {
                 ex.printStackTrace();
             }

@@ -345,4 +345,27 @@ public class StaticEffect {
         makeMappedCopy(map).remove(Maps.newHashMap());
     }
 
+    /**
+     * {@link #removeMapped(IEntityMap)} for a game whose hidden cards were swapped after its effects were computed (a belief
+     * world): cards no longer in the game (per {@code present}) have nothing to undo. With no such card it does the same.
+     */
+    public void removeMapped(IEntityMap map, java.util.function.Predicate<Card> present) {
+        final CardCollection kept = new CardCollection();
+        for (final Card c : this.affectedCards) {
+            if (present.test(c)) {
+                kept.add(map.map(c));
+            }
+        }
+        if (!present.test(this.source) && kept.isEmpty()) {
+            return;
+        }
+        final StaticEffect copy = new StaticEffect(present.test(this.source) ? map.map(this.source) : this.source);
+        copy.ability = this.ability;
+        copy.affectedCards = kept;
+        copy.affectedPlayers = map.mapList(this.affectedPlayers);
+        copy.timestamp = this.timestamp;
+        copy.mapParams = this.mapParams;
+        copy.remove(Maps.newHashMap());
+    }
+
 }

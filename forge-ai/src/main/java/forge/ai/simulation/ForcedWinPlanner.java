@@ -61,6 +61,10 @@ public final class ForcedWinPlanner {
         /** FLOAT of a plain source (a land before a return cost): the colour index; -1 otherwise. */
         final int floatColor;
         boolean phyrexianLife;
+        /** kill-line-1106 (followPay): the follower pays this step's Phyrexian pips with life. */
+        boolean forceLife;
+        /** kill-line-1106 (planDiscard; null = none): this step's forced discard tokens ({@link ForcedWinChoices}). */
+        List<String> cac;
         /** ENGINE steps: the recorded targets, "link:ref" (ref = "C" + card id or "P" + player id). */
         final List<String> targetRefs = new ArrayList<>();
         /** ENGINE steps: the forced target of the first targeting trigger of ours this step causes (null = Forge AI's). */
@@ -132,6 +136,8 @@ public final class ForcedWinPlanner {
             s.picks.addAll(picks);
             s.putBack.addAll(putBack);
             s.phyrexianLife = phyrexianLife;
+            s.forceLife = forceLife;
+            s.cac = cac == null ? null : new ArrayList<>(cac);
             s.targetRefs.addAll(targetRefs);
             s.engineSpell = engineSpell;
             s.byName = byName;
@@ -316,10 +322,7 @@ public final class ForcedWinPlanner {
         /** 1: this turn only; 2: this turn and our next turn. */
         int horizon = 2;
         int classes = 14;
-        /**
-         * POST-FREEZE 5: a wall-time budget (ms); late-game positions with large graveyards made keys slow.
-         * bvw-step1-build-1024: a negative value is no wall time (budget=counter: the nodes alone bound the search).
-         */
+
         long ms = 1500;
         /**
          * solver-gaps-1015 (payment search, off by default): how many payment orders each cast is tried with. 1 = the
@@ -559,6 +562,7 @@ public final class ForcedWinPlanner {
         dfs(s, 0);
         rank();
         result.nodes = nodes;
+        result.exhausted |= nodes >= lim.nodes; // kill-line-1106: a stop at the node limit counts as exhausted (report only)
         for (Line l : result.lines) {
             l.knownTop = pos.knownTop.size();
         }
@@ -1407,6 +1411,47 @@ public final class ForcedWinPlanner {
             return out;
         }
         combos(distinct, n, 0, new ArrayList<>(), out, 6);
+        return out;
+    }
+
+    /** Record a choice token on the step being resolved (kill-line-1106). */
+    private static void token(S n, String tok) {
+        if (n.steps.isEmpty()) {
+            return;
+        }
+        final Step st = n.steps.get(n.steps.size() - 1);
+        if (st.cac == null) {
+            st.cac = new ArrayList<>();
+        }
+        st.cac.add(tok);
+    }
+
+    /** kill-line-1106 (port of labeller-v2 (c)): the discard choices of {@code n} cards: distinct classes, least useful first. */
+    private List<List<Integer>> discardChoices(S s, int n) {
+        final List<Integer> hand = new ArrayList<>(s.hand);
+        hand.sort(Comparator.comparingInt((Integer h) -> -cards.get(h).order()).thenComparingInt(h -> cards.get(h).id));
+        final List<Integer> distinct = new ArrayList<>();
+        final Map<String, Integer> perName = new HashMap<>();
+        for (int h : hand) {
+            final int k = perName.merge(cards.get(h).name, 1, Integer::sum);
+            if (k <= n) {
+                distinct.add(h);
+            }
+        }
+        final List<List<Integer>> raw = new ArrayList<>();
+        combos(distinct, n, 0, new ArrayList<>(), raw, lim.classes * 4);
+        final List<List<Integer>> out = new ArrayList<>();
+        final Set<String> seenNames = new HashSet<>();
+        for (List<Integer> c : raw) {
+            final List<String> names = new ArrayList<>();
+            for (int x : c) {
+                names.add(cards.get(x).name);
+            }
+            java.util.Collections.sort(names);
+            if (seenNames.add(names.toString()) && out.size() < lim.classes) {
+                out.add(c);
+            }
+        }
         return out;
     }
 
