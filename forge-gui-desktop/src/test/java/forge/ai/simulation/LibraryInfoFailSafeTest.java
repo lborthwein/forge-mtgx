@@ -77,7 +77,7 @@ public class LibraryInfoFailSafeTest extends forge.ai.AITest {
         final Game c = new GameCopier(g, true).makeCopy();
         final Player cm = c.getPlayer(me(g).getId());
         InfoStates.keepOwnLibrary(null, me(g), cm, new Random(3));
-        Assert.assertNull(InfoStates.oppPins(null, me(g), KnownLibTest.opp(g), c));
+        Assert.assertTrue(InfoStates.oppPins(null, me(g), KnownLibTest.opp(g), c).isEmpty()); // the live line's form of "nothing known"
         LookaheadSearch.resample(g, me(g), c, cm, new Random(4), null);
         Assert.assertEquals(cm.getCardsIn(ZoneType.Library).size(), me(g).getCardsIn(ZoneType.Library).size());
     }
