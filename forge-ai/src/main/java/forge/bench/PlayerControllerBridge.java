@@ -273,6 +273,16 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         observeReveal(cards, zone, own);
     }
 
+    /**
+     * Lane bvw-decision-log-1027: the AI tape's forced replay of this seat's scry / surveil / ordered move: the look its
+     * arranging method reports first ({@link #observeLook}), then PlayerControllerAi's.
+     */
+    @Override
+    public void witnessLook(final List<Card> cards, final ZoneType destination) {
+        observeLook(cards, destination);
+        super.witnessLook(cards, destination);
+    }
+
     private void observeLook(final Iterable<Card> cards, final ZoneType destination) {
         final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
         if (o == null || !isLiveGame() || cards == null) {
@@ -926,6 +936,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        // r2-choose-a-card-1029: the bridge's own answer (fallbacks through PlayerControllerAi not hooked), then
+        // the choose-a-card hook once on it; no hook = exactly the bridge's answer
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return chooseSpellAbilityToPlayBridged();
+        }
+        final List<SpellAbility> def;
+        cacSuppressed = true;
+        try {
+            def = chooseSpellAbilityToPlayBridged();
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.PRIORITY, "chooseSpellAbilityToPlay", null, null, -1, -1, def);
+    }
+
+    private List<SpellAbility> chooseSpellAbilityToPlayBridged() {
         count("chooseSpellAbilityToPlay");
         if (!bridged()) {
             return super.chooseSpellAbilityToPlay();
@@ -2047,6 +2075,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      */
     @Override
     public CardCollectionView tuckCardsViaMulligan(final CardCollectionView hand, final int cardsToReturn) {
+        // r2-choose-a-card-1029: the bridge's own answer (fallbacks through PlayerControllerAi not hooked), then
+        // the choose-a-card hook once on it; no hook = exactly the bridge's answer
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return tuckCardsViaMulliganBridged(hand, cardsToReturn);
+        }
+        final CardCollectionView def;
+        cacSuppressed = true;
+        try {
+            def = tuckCardsViaMulliganBridged(hand, cardsToReturn);
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.SELECT, "tuckCardsViaMulligan", null, hand, cardsToReturn, cardsToReturn, def, hand, cardsToReturn);
+    }
+
+    private CardCollectionView tuckCardsViaMulliganBridged(final CardCollectionView hand, final int cardsToReturn) {
         count("tuckCardsViaMulligan");
         if (!bridged() || cardsToReturn <= 0) {
             return forgeTuck(hand, cardsToReturn);
@@ -2509,6 +2555,25 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(final FCollectionView<T> optionList,
             final int min, final int max, final DelayedReveal delayedReveal, final SpellAbility sa,
             final String title, final Player relatedPlayer, final Map<String, Object> params) {
+        // r2-choose-a-card-1029: as the other hooked asks (a Dig pick only; no hook = the bridge's answer)
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return chooseEntitiesForEffectBridged(optionList, min, max, delayedReveal, sa, title, relatedPlayer, params);
+        }
+        final List<T> def;
+        cacSuppressed = true;
+        try {
+            def = chooseEntitiesForEffectBridged(optionList, min, max, delayedReveal, sa, title, relatedPlayer, params);
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.SELECT, "chooseEntitiesForEffect", sa, optionList, min, max, def, optionList, min, max);
+    }
+
+    private <T extends GameEntity> List<T> chooseEntitiesForEffectBridged(final FCollectionView<T> optionList,
+            final int min, final int max, final DelayedReveal delayedReveal, final SpellAbility sa,
+            final String title, final Player relatedPlayer, final Map<String, Object> params) {
         count("chooseEntitiesForEffect");
         if (!bridged() || optionList == null || optionList.isEmpty()) {
             return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
@@ -2664,6 +2729,25 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public boolean confirmAction(final SpellAbility sa, final PlayerActionConfirmMode mode0, final String message,
             final List<String> options, final Card cardToShow, final Map<String, Object> params) {
+        // r2-choose-a-card-1029: the bridge's own answer (fallbacks through PlayerControllerAi not hooked), then
+        // the choose-a-card hook once on it; no hook = exactly the bridge's answer
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return confirmActionBridged(sa, mode0, message, options, cardToShow, params);
+        }
+        final boolean def;
+        cacSuppressed = true;
+        try {
+            def = confirmActionBridged(sa, mode0, message, options, cardToShow, params);
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.CHOICE, "confirmAction", sa, null, 1, 1, def, mode0, message);
+    }
+
+    private boolean confirmActionBridged(final SpellAbility sa, final PlayerActionConfirmMode mode0, final String message,
+            final List<String> options, final Card cardToShow, final Map<String, Object> params) {
         count("confirmAction");
         if (!bridged()) {
             return super.confirmAction(sa, mode0, message, options, cardToShow, params);
@@ -2734,6 +2818,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(final CardCollection topN) {
+        // r2-choose-a-card-1029: the bridge's own answer (fallbacks through PlayerControllerAi not hooked), then
+        // the choose-a-card hook once on it; no hook = exactly the bridge's answer
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return arrangeForScryBridged(topN);
+        }
+        final ImmutablePair<CardCollection, CardCollection> def;
+        cacSuppressed = true;
+        try {
+            def = arrangeForScryBridged(topN);
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.ARRANGE, "arrangeForScry", null, topN, -1, -1, def, topN);
+    }
+
+    private ImmutablePair<CardCollection, CardCollection> arrangeForScryBridged(final CardCollection topN) {
         count("arrangeForScry");
         observeLook(topN, ZoneType.Library);
         if (!bridged() || topN == null || topN.isEmpty()) {
@@ -3013,6 +3115,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) { count("notifyOfValue"); super.notifyOfValue(saSource, realtedTarget, value); }
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+        // r2-choose-a-card-1029: the bridge's own answer (fallbacks through PlayerControllerAi not hooked), then
+        // the choose-a-card hook once on it; no hook = exactly the bridge's answer
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return arrangeForSurveilBridged(topN);
+        }
+        final ImmutablePair<CardCollection, CardCollection> def;
+        cacSuppressed = true;
+        try {
+            def = arrangeForSurveilBridged(topN);
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.ARRANGE, "arrangeForSurveil", null, topN, -1, -1, def, topN);
+    }
+
+    private ImmutablePair<CardCollection, CardCollection> arrangeForSurveilBridged(CardCollection topN) {
         count("arrangeForSurveil");
         observeLook(topN, ZoneType.Library);
         if (planHook != null && bridged()) {
@@ -3027,6 +3147,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return bridgedWillPutCardOnTop(c); }
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
+        // r2-choose-a-card-1029: the bridge's own answer (fallbacks through PlayerControllerAi not hooked), then
+        // the choose-a-card hook once on it; no hook = exactly the bridge's answer
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return orderMoveToZoneListBridged(cards, destinationZone, source);
+        }
+        final CardCollectionView def;
+        cacSuppressed = true;
+        try {
+            def = orderMoveToZoneListBridged(cards, destinationZone, source);
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.ARRANGE, "orderMoveToZoneList", source, cards, -1, -1, def, cards, destinationZone);
+    }
+
+    private CardCollectionView orderMoveToZoneListBridged(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
         count("orderMoveToZoneList");
         observeLook(cards, destinationZone);
         if (planHook != null && bridged()) {
@@ -3039,6 +3177,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     }
     @Override
     public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
+        // r2-choose-a-card-1029: the bridge's own answer (fallbacks through PlayerControllerAi not hooked), then
+        // the choose-a-card hook once on it; no hook = exactly the bridge's answer
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return chooseCardsToDiscardFromBridged(playerDiscard, sa, validCards, min, max, visibleToChooser);
+        }
+        final CardCollection def;
+        cacSuppressed = true;
+        try {
+            def = chooseCardsToDiscardFromBridged(playerDiscard, sa, validCards, min, max, visibleToChooser);
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.SELECT, "chooseCardsToDiscardFrom", sa, validCards, min, max, def, playerDiscard, validCards, min, max);
+    }
+
+    private CardCollection chooseCardsToDiscardFromBridged(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
         count("chooseCardsToDiscardFrom");
         if (planHook != null && bridged()) {
             final CardCollection h = planHook.discard(playerDiscard, sa, validCards, min, max, visibleToChooser);
@@ -3183,6 +3339,26 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      */
     @Override
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+            CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
+            Player decider) {
+        // r2-choose-a-card-1029: the bridge's own answer (fallbacks through PlayerControllerAi not hooked), then
+        // the choose-a-card hook once on it; no hook = exactly the bridge's answer
+        final forge.ai.CacHook h = getCacHook();
+        if (h == null) {
+            return chooseSingleCardForZoneChangeBridged(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider);
+        }
+        final Card def;
+        cacSuppressed = true;
+        try {
+            def = chooseSingleCardForZoneChangeBridged(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider);
+        } finally {
+            cacSuppressed = false;
+        }
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.SELECT, "chooseSingleCardForZoneChange", sa, fetchList, isOptional ? 0 : 1, 1, def, destination, origin, fetchList, isOptional, decider);
+    }
+
+    private Card chooseSingleCardForZoneChangeBridged(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
             CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
             Player decider) {
         count("chooseSingleCardForZoneChange");

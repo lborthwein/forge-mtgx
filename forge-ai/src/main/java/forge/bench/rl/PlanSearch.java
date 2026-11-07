@@ -460,6 +460,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     final List<Double> defendMs = new ArrayList<>();
 
     // counters
+    /** rollout-budget-1101: plan points whose solver proposal hit its Forge AI work cap. */
+    int solverCaps;
     int planPoints, solverRuns, provenLinesTaken, lineCands, sampledPlans, recordings, recordFails, planDecisions,
             planDepartures, lineDepartures, policyPlanDepartures, provenPicks, liveSteps, liveBreaks, liveDone, lineHookActs;
     final List<Double> proposeMs = new ArrayList<>();
@@ -624,6 +626,54 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 return m;
             } catch (java.io.IOException | RuntimeException e) {
                 throw new IllegalArgumentException("plans.defendCfg.prior: " + k + ": " + e, e);
+            }
+        });
+    }
+
+    private static final Map<String, Map<String, Map<String, Double>>> SYN_PINNED = new java.util.HashMap<>();
+
+    /**
+     * bvw-step2-fork-1027 (S2T, belief "codraft"): the co-draft table at {@code path} ({@code classpath:} = a jar
+     * resource), refused (IllegalArgumentException) unless its bytes hash to {@code sha256}; loaded once per path and pin.
+     */
+    public static synchronized Map<String, Map<String, Double>> loadSynPinned(final String path, final String sha256) {
+        if (path == null || sha256 == null || !sha256.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("refused: a co-draft prior needs its path and a sha256 pin");
+        }
+        return SYN_PINNED.computeIfAbsent(path + "@" + sha256, k -> {
+            try {
+                final byte[] raw;
+                if (path.startsWith("classpath:")) {
+                    try (java.io.InputStream in = PlanSearch.class.getResourceAsStream(path.substring("classpath:".length()))) {
+                        if (in == null) {
+                            throw new java.io.IOException("no resource " + path);
+                        }
+                        raw = in.readAllBytes();
+                    }
+                } else {
+                    raw = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path));
+                }
+                final StringBuilder hex = new StringBuilder();
+                for (byte b : java.security.MessageDigest.getInstance("SHA-256").digest(raw)) {
+                    hex.append(String.format("%02x", b & 0xff));
+                }
+                if (!hex.toString().equals(sha256)) {
+                    throw new IllegalArgumentException("refused: the co-draft prior " + path + " hashes to " + hex
+                            + ", the spec pins " + sha256);
+                }
+                final JsonObject o = com.google.gson.JsonParser.parseString(new String(raw, java.nio.charset.StandardCharsets.UTF_8))
+                        .getAsJsonObject().getAsJsonObject("syn");
+                final Map<String, Map<String, Double>> m = new java.util.HashMap<>();
+                for (Map.Entry<String, com.google.gson.JsonElement> e : o.entrySet()) {
+                    final Map<String, Double> row = new java.util.HashMap<>();
+                    for (Map.Entry<String, com.google.gson.JsonElement> f : e.getValue().getAsJsonObject().entrySet()) {
+                        row.put(f.getKey(), f.getValue().getAsDouble());
+                    }
+                    m.put(e.getKey(), row);
+                }
+                return java.util.Collections.unmodifiableMap(m);
+            } catch (java.io.IOException | java.security.NoSuchAlgorithmException e) {
+                throw new IllegalArgumentException("search.beliefPrior: " + path + ": " + e, e);
             }
         });
     }
@@ -817,6 +867,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             final long a = System.nanoTime();
             final List<ForcedWinSolver.Proposal> props = driver.probe(() -> solver.propose(g));
             solverRuns++;
+            if (solver.lastCap() != null) {
+                // rollout-budget-1101 (review #160 S2-2): the proposal hit its Forge AI work cap (it proposes nothing)
+                solverCaps++;
+                st.note = solver.lastCap();
+            }
             solverMs.add((System.nanoTime() - a) / 1e6);
             ForcedWinSolver.Proposal proven = null;
             for (ForcedWinSolver.Proposal pr : props) {
@@ -866,7 +921,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             final long a = System.nanoTime();
             // J0 (block-search-1019): both clocks go through WallClock, so a "Continue from here" rebuild unbinds them
             // (unchanged live)
-            final long deadline = Math.min(a + forge.ai.WallClock.budgetMs(spec.recordMs) * 1_000_000L,
+            // bvw-step1-build-1024: with the solver on budget=counter the recordings read no wall clock either (their
+            // play-outs stop at the look-ahead's step caps); recordMs and the decision budget bind only on the ms path
+            final long deadline = followCfg.counter ? a + Long.MAX_VALUE / 4
+                    : Math.min(a + forge.ai.WallClock.budgetMs(spec.recordMs) * 1_000_000L,
                     t0 + Math.max(1000L, forge.ai.WallClock.budgetMs(rs.budgetMs()) / 2) * 1_000_000L);
             final List<Object> recs = new ArrayList<>();
             final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps);
@@ -1100,6 +1158,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("planPoints", planPoints);
         o.addProperty("solverRuns", solverRuns);
         o.addProperty("provenLinesTaken", provenLinesTaken);
+        if (solverCaps > 0) {
+            o.addProperty("solverCaps", solverCaps); // rollout-budget-1101
+        }
         o.addProperty("lineCands", lineCands);
         o.addProperty("sampledPlans", sampledPlans);
         o.addProperty("recordings", recordings);

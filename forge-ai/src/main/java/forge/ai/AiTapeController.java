@@ -89,9 +89,105 @@ import java.util.function.Supplier;
  * Everything that is not a decision (reveals, notifications, the AI's state, the cost decision maker itself) is the
  * inner controller's in both modes. Without a tape this class is never created.
  */
-public final class AiTapeController extends PlayerControllerAi implements AiCostDecision.PaymentDecisions {
+public class AiTapeController extends PlayerControllerAi implements AiCostDecision.PaymentDecisions {
     private final PlayerControllerAi inner;
     private final AiTape tape;
+
+    /**
+     * r1-assembly-bank-1029 (research only; empty = every existing path unchanged): a probe of a FORCED replay game. It is
+     * shown each forced choice of a taped seat ({@link #seen}) and may divert one ({@link #divert}): the probe's answer is
+     * returned in place of the record's and the game's tapes are detached, so from then on both seats decide live.
+     */
+    public interface Probe {
+        /** Not handled: the record's answer (or, after a divert, the inner controller's live answer). */
+        Object NONE = new Object();
+
+        /** Before the record's answer is taken; {@code ordinal}: this seat's forced choices so far. Return NONE or the answer. */
+        Object divert(AiTapeController c, String method, Object[] args, int ordinal);
+
+        /** After a forced choice was answered from the record ({@code value} the decoded answer). */
+        void seen(AiTapeController c, String method, Object[] args, int ordinal, Object value);
+
+        /** After a divert: a choice the probe may script (return NONE to let the inner controller answer live). */
+        Object scripted(AiTapeController c, String method, Object[] args);
+    }
+
+    public static final java.util.Map<Game, Probe> PROBES = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * dump-menus-1105 (research only; empty = every existing path unchanged): a reader of a FORCED replay game's menus.
+     * It is shown each forced choice of a taped seat whose arguments the call passes (the choose-a-card asks, targets,
+     * modes, optional triggers; and {@link AiTape}'s forced target configs), after the record's answer was decoded and
+     * before the engine applies it. It never answers and never moves the forced-choice ordinal {@link Probe}s see.
+     */
+    public interface MenuProbe {
+        /**
+         * @param method the controller method (or {@code cfg:<where>} for an SA's forced targets)
+         * @param args the call's arguments (the cfg form: {@code {sa}})
+         * @param entry the record's entry (its answer {@code a}, its sync {@code post})
+         * @param forcedOrd the {@link Probe} ordinal of this choice (its choice frame's choice_ord), or -1
+         * @param value the decoded answer (null for a cfg)
+         */
+        void seen(Player p, String method, Object[] args, JsonObject entry, int forcedOrd, Object value);
+    }
+
+    public static final java.util.Map<Game, MenuProbe> MENU_PROBES = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** dump-menus-1105: a forced choice's menu to its game's menu probe, if any (callers check MENU_PROBES first). */
+    static void menuSeen(final Game g, final Player p, final String m, final Object[] args, final JsonObject e,
+            final int forcedOrd, final Object v) {
+        final MenuProbe mp = MENU_PROBES.get(g);
+        if (mp != null) {
+            mp.seen(p, m, args, e, forcedOrd, v);
+        }
+    }
+
+    /** This seat's forced choices so far (r1-assembly-bank-1029; counted only while a probe watches the game). */
+    private int forcedOrdinal = 0;
+
+    public AiTape tape() {
+        return tape;
+    }
+
+    private static final ThreadLocal<Object[]> ARGS = new ThreadLocal<>();
+
+    /** A choice with its arguments visible to a bank probe (r1-assembly-bank-1029; no probe: exactly {@link #choice}). */
+    @SuppressWarnings("unchecked")
+    private <T> T probed(final Object[] args, final String m, final Runnable witness, final Supplier<T> live,
+            final Function<T, JsonElement> enc, final Function<JsonElement, T> dec) {
+        final Probe pr = PROBES.isEmpty() ? null : PROBES.get(g());
+        if (pr == null) {
+            return choice(m, args, -1, witness, live, enc, dec);
+        }
+        // N8 (lane n8-tower-1030): a probe's answer replaces the decision, not the look. The seat still saw the cards
+        // it arranges (scry, surveil, an ordered move), so its observers (RlKnowledge: the u_lib_known tokens and their
+        // lib_pos) get the witness first, exactly as a recorded or live answer does; without it the post-option frames of
+        // every scripted order / scry option were identical (no known-position tokens) and every value function tied.
+        if (tape.isDetached()) {
+            final Object s = pr.scripted(this, m, args);
+            if (s != Probe.NONE) {
+                if (witness != null) {
+                    witness.run();
+                }
+                return (T) s;
+            }
+            return live.get();
+        }
+        if (!tape.controllerHere() || tape.recordsNow("m", m)) {
+            return choice(m, args, -1, witness, live, enc, dec);
+        }
+        final int ord = forcedOrdinal++;
+        final Object d = pr.divert(this, m, args, ord);
+        if (d != Probe.NONE) {
+            if (witness != null) {
+                witness.run();
+            }
+            return (T) d;
+        }
+        final T v = choice(m, args, ord, witness, live, enc, dec);
+        pr.seen(this, m, args, ord, v);
+        return v;
+    }
 
     public AiTapeController(final PlayerControllerAi inner, final AiTape tape) {
         super(inner.getGame(), inner.getPlayer(), inner.getLobbyPlayer());
@@ -104,6 +200,15 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
         return inner;
     }
 
+    /**
+     * Lane bvw-decision-log-1027: the taping controller for {@code inner}: a cube combo seat (the bench's HonestForcedWin
+     * generator seats) keeps answering as one ({@link AiTapeCubeComboController}: CubeComboAi reads its policy through
+     * {@code controller instanceof CubeComboSeat}); every other seat gets this class.
+     */
+    public static AiTapeController wrap(final PlayerControllerAi inner, final AiTape tape) {
+        return inner instanceof CubeComboSeat ? new AiTapeCubeComboController(inner, tape) : new AiTapeController(inner, tape);
+    }
+
     private Game g() {
         return getGame();
     }
@@ -113,6 +218,29 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     /** A choice: recorded with its answer, or (forced) answered from the record without asking the inner controller. */
     private <T> T choice(final String m, final Supplier<T> live, final Function<T, JsonElement> enc,
             final Function<JsonElement, T> dec) {
+        return choice(m, null, -1, null, live, enc, dec);
+    }
+
+    private <T> T choice(final String m, final Runnable witness, final Supplier<T> live, final Function<T, JsonElement> enc,
+            final Function<JsonElement, T> dec) {
+        return choice(m, null, -1, witness, live, enc, dec);
+    }
+
+    /** dump-menus-1105: a choice whose arguments a {@link MenuProbe} may read (args null: none). */
+    private <T> T menuChoice(final String m, final Object[] args, final Supplier<T> live, final Function<T, JsonElement> enc,
+            final Function<JsonElement, T> dec) {
+        return choice(m, args, -1, null, live, enc, dec);
+    }
+
+    /**
+     * {@code witness} (bvw-decision-log-1027; null = none): what the inner controller shows its observers when it makes
+     * this decision live (a delayed reveal; the cards it looks at to arrange them: the bench seat's knowledge, the
+     * review's knowledge hook, Forge AI's card memory). A forced replay runs it where the record's decision was, so the
+     * seat's observers see what they saw live; the decision itself is still the record's.
+     */
+    private <T> T choice(final String m, final Object[] args, final int forcedOrd, final Runnable witness,
+            final Supplier<T> live, final Function<T, JsonElement> enc, final Function<JsonElement, T> dec) {
+        tape.refuseAfterDivergence();
         if (!tape.controllerHere()) {
             return live.get();
         }
@@ -147,6 +275,9 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
             // the script is the live seat's; no other seat implements it
             o.beforeForcedChoice(m);
         }
+        if (witness != null) {
+            witness.run();
+        }
         final T v;
         try {
             // decoding only checks and looks up (legality, candidates): whatever it builds takes scoped ids, never the
@@ -158,6 +289,9 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
             throw tape.diverge(m + ": " + x.getMessage());
         }
         tape.done(e);
+        if (args != null && !MENU_PROBES.isEmpty()) {
+            menuSeen(g(), getPlayer(), m, args, e, forcedOrd, v); // dump-menus-1105 (reads only)
+        }
         return v;
     }
 
@@ -168,6 +302,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
      */
     private <T> T exec(final String m, final Supplier<T> live, final Supplier<T> forced, final Function<T, JsonElement> enc,
             final Function<JsonElement, T> shortcut) {
+        tape.refuseAfterDivergence();
         if (!tape.controllerHere()) {
             return live.get();
         }
@@ -187,7 +322,9 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
         final JsonElement a = e.get("a");
         try {
             AiTapeCodec.checkEncodable(a);
-            if (shortcut != null) {
+            // bvw-decision-log-1027: a recorded result the replay need not run, unless the live run decided something
+            // (a declined trigger whose preparation asked another seat): then it runs, as live
+            if (shortcut != null && !AiTape.hasDecisions(e)) {
                 final T s = shortcut.apply(a);
                 if (s != null) {
                     tape.applyLazySub(e);
@@ -213,9 +350,12 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
             // the record forced a state the execution could not take: that decision's divergence, never a raw failure
             throw tape.diverge(m + " could not run as recorded: " + x.getClass().getSimpleName());
         } finally {
-            if (!ok) {
+            if (!ok && !tape.isDetached()) {
                 tape.abandon(e);
             }
+        }
+        if (tape.isDetached()) {
+            return v; // r1-assembly-bank-1029: a bank probe diverted inside this execution; the record no longer applies
         }
         tape.leave(e);
         final JsonElement got;
@@ -233,14 +373,30 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
 
     /** A choice of one of {@code options}, recorded by position (the options are copied first: some AI code reorders them). */
     private <T> T oneOf(final String m, final List<T> options, final Supplier<T> live) {
+        return oneOf(m, options, null, live);
+    }
+
+    /** As above; {@code args} (dump-menus-1105): what a {@link MenuProbe} reads ({@code args[0]}: the options copy). */
+    private <T> T oneOf(final String m, final List<T> options, final Object[] args, final Supplier<T> live) {
         final List<T> snap = options == null ? new ArrayList<>() : new ArrayList<>(options);
-        return choice(m, live, v -> AiTapeCodec.index(snap, v), e -> AiTapeCodec.pickOne(snap, e));
+        if (args != null) {
+            args[0] = snap;
+        }
+        return choice(m, args, -1, null, live, v -> AiTapeCodec.index(snap, v), e -> AiTapeCodec.pickOne(snap, e));
     }
 
     /** A choice of several of {@code options} in order, recorded by position (the options copied first). */
     private <T> List<T> manyOf(final String m, final List<T> options, final Supplier<List<T>> live) {
+        return manyOf(m, options, null, live);
+    }
+
+    /** As above; {@code args} (dump-menus-1105): what a {@link MenuProbe} reads ({@code args[0]}: the options copy). */
+    private <T> List<T> manyOf(final String m, final List<T> options, final Object[] args, final Supplier<List<T>> live) {
         final List<T> snap = options == null ? new ArrayList<>() : new ArrayList<>(options);
-        return choice(m, live, v -> AiTapeCodec.indices(snap, v), e -> AiTapeCodec.pick(snap, e));
+        if (args != null) {
+            args[0] = snap;
+        }
+        return choice(m, args, -1, null, live, v -> AiTapeCodec.indices(snap, v), e -> AiTapeCodec.pick(snap, e));
     }
 
     private static JsonElement bool(final Boolean b) {
@@ -309,7 +465,14 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
         return l;
     }
 
+    /** bvw-decision-log-1027: a choice's delayed reveal as its forced witness (PlayerControllerAi reveals it first). */
+    private Runnable revealOf(final DelayedReveal delayedReveal) {
+        return delayedReveal == null ? null : () -> inner.reveal(delayedReveal);
+    }
+
     // ------------------------------------------------------------------ not decisions: always the inner controller's
+
+    @Override public void witnessLook(final List<Card> cards, final ZoneType destination) { inner.witnessLook(cards, destination); }
 
     @Override public boolean isAI() { return inner.isAI(); }
     @Override public AiController getAi() { return inner.getAi(); }
@@ -348,7 +511,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        return choice("chooseSpellAbilityToPlay", inner::chooseSpellAbilityToPlay, sas -> {
+        return probed(new Object[0], "chooseSpellAbilityToPlay", null, inner::chooseSpellAbilityToPlay, sas -> {
             if (sas == null) {
                 return JsonNull.INSTANCE;
             }
@@ -364,7 +527,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
             }
             final List<SpellAbility> out = new ArrayList<>();
             for (JsonElement x : e.getAsJsonArray()) {
-                out.add(AiTapePlays.decode(g(), getPlayer(), x.getAsJsonObject(), tape.aheadOn("saIds")));
+                out.add(AiTapePlays.decode(g(), getPlayer(), x.getAsJsonObject(), tape.aheadOn("saIds"), tape::noteIdShift));
             }
             return out;
         });
@@ -549,7 +712,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
 
     @Override
     public boolean chooseTargetsFor(final SpellAbility currentAbility) {
-        return choice("chooseTargetsFor", () -> inner.chooseTargetsFor(currentAbility), r -> {
+        return menuChoice("chooseTargetsFor", new Object[] {currentAbility}, () -> inner.chooseTargetsFor(currentAbility), r -> {
             final JsonObject o = new JsonObject();
             o.addProperty("r", r);
             o.add("cfg", AiTapeCodec.config(g(), getPlayer(), currentAbility));
@@ -580,7 +743,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     @Override
     public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(final SpellAbility saSrc,
             final List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) {
-        return oneOf("chooseTarget", allTargets, () -> inner.chooseTarget(saSrc, allTargets));
+        return oneOf("chooseTarget", allTargets, new Object[] {null, saSrc}, () -> inner.chooseTarget(saSrc, allTargets));
     }
 
     @Override
@@ -613,7 +776,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     @Override
     public CardCollectionView chooseCardsForEffect(final CardCollectionView sourceList, final SpellAbility sa, final String title,
             final int min, final int max, final boolean isOptional, final Map<String, Object> params) {
-        return choice("chooseCardsForEffect", () -> inner.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params),
+        return probed(new Object[] {sourceList, sa, title, min, max, isOptional}, "chooseCardsForEffect", null, () -> inner.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params),
                 this::cards, e -> amongCards(sourceList, e));
     }
 
@@ -647,7 +810,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     @Override
     public <T extends GameEntity> T chooseSingleEntityForEffect(final FCollectionView<T> optionList, final DelayedReveal delayedReveal,
             final SpellAbility sa, final String title, final boolean isOptional, final Player targetedPlayer, final Map<String, Object> params) {
-        return choice("chooseSingleEntityForEffect",
+        return choice("chooseSingleEntityForEffect", new Object[] {listOf(optionList), sa, isOptional}, -1, revealOf(delayedReveal),
                 () -> inner.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, targetedPlayer, params),
                 this::one, e -> amongOne(listOf(optionList), e));
     }
@@ -656,7 +819,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(final FCollectionView<T> optionList, final int min, final int max,
             final DelayedReveal delayedReveal, final SpellAbility sa, final String title, final Player targetedPlayer,
             final Map<String, Object> params) {
-        return choice("chooseEntitiesForEffect",
+        return choice("chooseEntitiesForEffect", new Object[] {listOf(optionList), sa, min, max}, -1, revealOf(delayedReveal),
                 () -> inner.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title, targetedPlayer, params),
                 this::cards, e -> among(listOf(optionList), e));
     }
@@ -664,29 +827,31 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     @Override
     public List<SpellAbility> chooseSpellAbilitiesForEffect(final List<SpellAbility> spells, final SpellAbility sa, final String title,
             final int num, final Map<String, Object> params) {
-        return manyOf("chooseSpellAbilitiesForEffect", spells, () -> inner.chooseSpellAbilitiesForEffect(spells, sa, title, num, params));
+        return manyOf("chooseSpellAbilitiesForEffect", spells, new Object[] {null, sa, num}, () -> inner.chooseSpellAbilitiesForEffect(spells, sa, title, num, params));
     }
 
     @Override
     public SpellAbility chooseSingleSpellForEffect(final List<SpellAbility> spells, final SpellAbility sa, final String title,
             final Map<String, Object> params) {
-        return oneOf("chooseSingleSpellForEffect", spells, () -> inner.chooseSingleSpellForEffect(spells, sa, title, params));
+        return oneOf("chooseSingleSpellForEffect", spells, new Object[] {null, sa}, () -> inner.chooseSingleSpellForEffect(spells, sa, title, params));
     }
 
     @Override
     public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone, final SpellAbility source) {
-        return choice("orderMoveToZoneList", () -> inner.orderMoveToZoneList(cards, destinationZone, source), this::cards,
-                e -> amongCards(cards, e));
+        return probed(new Object[] {cards, destinationZone, source}, "orderMoveToZoneList", () -> inner.witnessLook(cards == null ? null : listOf(cards), destinationZone),
+                () -> inner.orderMoveToZoneList(cards, destinationZone, source), this::cards, e -> amongCards(cards, e));
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(final CardCollection topN) {
-        return choice("arrangeForScry", () -> inner.arrangeForScry(topN), this::pile2, e -> unpile2(topN, e));
+        return probed(new Object[] {topN}, "arrangeForScry", () -> inner.witnessLook(topN == null ? null : listOf(topN), ZoneType.Library),
+                () -> inner.arrangeForScry(topN), this::pile2, e -> unpile2(topN, e));
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(final CardCollection topN) {
-        return choice("arrangeForSurveil", () -> inner.arrangeForSurveil(topN), this::pile2, e -> unpile2(topN, e));
+        return probed(new Object[] {topN}, "arrangeForSurveil", () -> inner.witnessLook(topN == null ? null : listOf(topN), ZoneType.Library),
+                () -> inner.arrangeForSurveil(topN), this::pile2, e -> unpile2(topN, e));
     }
 
     private JsonElement pile2(final ImmutablePair<CardCollection, CardCollection> p) {
@@ -716,7 +881,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     @Override
     public CardCollection chooseCardsToDiscardFrom(final Player p, final SpellAbility sa, final CardCollection validCards, final int min,
             final int max, final CardCollectionView visibleToChooser) {
-        return choice("chooseCardsToDiscardFrom", () -> inner.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser),
+        return probed(new Object[] {p, sa, validCards, min, max}, "chooseCardsToDiscardFrom", null, () -> inner.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser),
                 this::cards, e -> amongCards(validCards, e));
     }
 
@@ -729,7 +894,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
 
     @Override
     public CardCollectionView chooseCardsToDiscardToMaximumHandSize(final int numDiscard) {
-        return choice("chooseCardsToDiscardToMaximumHandSize", () -> inner.chooseCardsToDiscardToMaximumHandSize(numDiscard),
+        return probed(new Object[] {numDiscard}, "chooseCardsToDiscardToMaximumHandSize", null, () -> inner.chooseCardsToDiscardToMaximumHandSize(numDiscard),
                 this::cards, e -> amongCards(getPlayer().getCardsIn(ZoneType.Hand), e));
     }
 
@@ -803,12 +968,12 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(final CardCollectionView hand, final int cardsToReturn) {
-        return choice("tuckCardsViaMulligan", () -> inner.tuckCardsViaMulligan(hand, cardsToReturn), this::cards, e -> amongCards(hand, e));
+        return probed(new Object[] {hand, cardsToReturn}, "tuckCardsViaMulligan", null, () -> inner.tuckCardsViaMulligan(hand, cardsToReturn), this::cards, e -> amongCards(hand, e));
     }
 
     @Override
     public boolean mulliganKeepHand(final Player firstPlayer, final int cardsToReturn) {
-        return choice("mulliganKeepHand", () -> inner.mulliganKeepHand(firstPlayer, cardsToReturn), AiTapeController::bool,
+        return probed(new Object[] {firstPlayer, cardsToReturn}, "mulliganKeepHand", null, () -> inner.mulliganKeepHand(firstPlayer, cardsToReturn), AiTapeController::bool,
                 AiTapeController::bool);
     }
 
@@ -823,7 +988,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     public Card chooseSingleCardForZoneChange(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
             final CardCollection fetchList, final DelayedReveal delayedReveal, final String selectPrompt, final boolean isOptional,
             final Player decider) {
-        return choice("chooseSingleCardForZoneChange",
+        return probed(new Object[] {destination, origin, sa, fetchList, isOptional, decider}, "chooseSingleCardForZoneChange", revealOf(delayedReveal),
                 () -> inner.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider),
                 this::one, e -> amongOne(listOf(fetchList), e));
     }
@@ -832,7 +997,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     public List<Card> chooseCardsForZoneChange(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
             final CardCollection fetchList, final int min, final int max, final DelayedReveal delayedReveal, final String selectPrompt,
             final Player decider) {
-        return choice("chooseCardsForZoneChange",
+        return probed(new Object[] {destination, origin, sa, fetchList, min, max, decider}, "chooseCardsForZoneChange", null,
                 () -> inner.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max, delayedReveal, selectPrompt, decider),
                 this::cards, e -> among(listOf(fetchList), e));
     }
@@ -842,7 +1007,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     @Override
     public boolean confirmAction(final SpellAbility sa, final PlayerActionConfirmMode mode, final String message, final List<String> options,
             final Card cardToShow, final Map<String, Object> params) {
-        return choice("confirmAction", () -> inner.confirmAction(sa, mode, message, options, cardToShow, params), AiTapeController::bool,
+        return probed(new Object[] {sa, mode, message, options, cardToShow}, "confirmAction", null, () -> inner.confirmAction(sa, mode, message, options, cardToShow, params), AiTapeController::bool,
                 AiTapeController::bool);
     }
 
@@ -861,7 +1026,8 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
 
     @Override
     public boolean confirmTrigger(final WrappedAbility wrapper) {
-        return choice("confirmTrigger", () -> inner.confirmTrigger(wrapper), AiTapeController::bool, AiTapeController::bool);
+        return menuChoice("confirmTrigger", new Object[] {wrapper}, () -> inner.confirmTrigger(wrapper), AiTapeController::bool,
+                AiTapeController::bool);
     }
 
     @Override
@@ -927,7 +1093,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     public List<AbilitySub> chooseModeForAbility(final SpellAbility sa, final List<AbilitySub> possible, final int min, final int num,
             final boolean allowRepeat) {
         final List<AbilitySub> offered = possible == null ? new ArrayList<>() : new ArrayList<>(possible);
-        return choice("chooseModeForAbility", () -> inner.chooseModeForAbility(sa, possible, min, num, allowRepeat), v -> {
+        return menuChoice("chooseModeForAbility", new Object[] {offered, sa, min, num}, () -> inner.chooseModeForAbility(sa, possible, min, num, allowRepeat), v -> {
             if (v == null) {
                 return JsonNull.INSTANCE;
             }
@@ -963,6 +1129,12 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
             final List<AbilitySub> out = new ArrayList<>();
             for (JsonElement x : o.getAsJsonArray("i")) {
                 out.add(offered.get(x.getAsInt()));
+            }
+            if (sa != null) {
+                // review #124 S1: live, PlayerControllerAi answers with sa.getChosenList() (CharmAi set it while it
+                // deliberated, or doTrigger here); the forced answer sets it too, so the charm's chosen modes are on the
+                // ability as live (the observation's stack MODE facts read them; charm triggers too, via forcedPrepare)
+                sa.setChosenList(new ArrayList<>(out));
             }
             return out;
         });
@@ -1226,8 +1398,37 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
             inner.orderAndPlaySimultaneousSa(activePlayerSAs);
             return Boolean.TRUE;
         }, () -> {
+            // bvw-decision-log-1027: a trigger the seat's policy played itself before the native order (the forced-win
+            // solver's forced trigger target: its playStack's "s" checkpoint is the first thing the record has), played
+            // first again, in the policy's own id scope as live
+            final List<SpellAbility> rest = new ArrayList<>(activePlayerSAs);
+            for (JsonObject n = tape.peekChild(); n != null && "cfg".equals(AiTape.str(n, "k")) && "s".equals(AiTape.str(n, "m"));
+                 n = tape.peekChild()) {
+                final JsonObject cfg = n.getAsJsonObject("a");
+                final int h = cfg.get("h").getAsInt();
+                // review #124 S2-1: the record's own trigger: by its ability id when the record has it (format 2), and
+                // never one of several look-alikes of that host
+                final List<SpellAbility> like = new ArrayList<>();
+                for (SpellAbility sa : rest) {
+                    if (sa != null && sa.isTrigger() && !sa.isCopied() && sa.getHostCard() != null && sa.getHostCard().getId() == h
+                            && (!cfg.has("id") || sa.getId() == cfg.get("id").getAsInt())) {
+                        like.add(sa);
+                    }
+                }
+                if (like.size() != 1) {
+                    throw tape.diverge("orderAndPlaySimultaneousSa: the record played card " + h + "'s trigger"
+                            + (cfg.has("id") ? " " + cfg.get("id").getAsInt() : "") + " first; " + like.size() + " match");
+                }
+                final SpellAbility direct = like.get(0);
+                rest.remove(direct);
+                final SpellAbility d = direct;
+                CubeComboAi.probeIds(getPlayer(), () -> {
+                    ComputerUtil.playStack(d, getPlayer(), getGame());
+                    return null;
+                });
+            }
             // PlayerControllerAi.orderAndPlaySimultaneousSa: the order and every trigger's targets are the record's
-            final List<SpellAbility> order = activePlayerSAs.size() > 1 ? inner.orderSimultaneousSa(activePlayerSAs) : activePlayerSAs;
+            final List<SpellAbility> order = rest.size() > 1 ? inner.orderSimultaneousSa(rest) : rest;
             for (final SpellAbility sa : order) {
                 if (sa.isTrigger() && !sa.isCopied()) {
                     if (forcedPrepare(sa.getHostCard(), sa)) {

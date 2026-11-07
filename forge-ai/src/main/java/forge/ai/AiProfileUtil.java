@@ -105,6 +105,31 @@ public class AiProfileUtil {
      */
     public static final String CUBE_COMBO_SOLVER_PROFILE = "CubeComboSolver";
     public static final String FORCED_WIN_PROFILE = "ForcedWin";
+    /** BVW research-only generator; existing profiles retain their prior behavior. */
+    public static final String HONEST_FORCED_WIN_PROFILE = "HonestForcedWin";
+    /**
+     * bvw-step1-build-1024: the BVW generator of the step-1 lineage: HonestForcedWin on host-independent counter budgets
+     * (no wall clock; caps calibrated on the step-0 pilot games, where the ms budgets bound 3 of 7,447 decisions on the
+     * Studio: engine steps max 4,457 and copied cards max 57,186 per search, play-out steps max 1,216 per evaluating
+     * decision; enginePathCards is the memory guard) with adoptAttack (an adopted line whose first step is our attack is declared). HonestForcedWin is unchanged.
+     * engineSteps and engineCards are per engine search, while the engine's node cap counts nodes over the solver's life
+     * (one solver per seat and game, as HonestForcedWin: after its first search the same-turn pass gets no nodes; metered
+     * apart as engine_lifetime_stops). It refuses to run unless forge.bench.sequentialAi is set and the game's AI timeout
+     * is at least 600 s (Forge AI's own clocks).
+     */
+    public static final String HONEST_FORCED_WIN_COUNTED_PROFILE = "HonestForcedWinCounted";
+    /** bvw-step1-build-1024: the counted generator's solver spec (FORCED_WIN_SPEC). */
+    public static final String HONEST_FORCED_WIN_COUNTED_SPEC = "hideOwnLibrary=true,defense=false,worlds=8,cycles=true,"
+            + "threshold=1.0,budget=counter,engineSteps=6000,evalSteps=1750,engineCards=60000,enginePathCards=20000,"
+            + "adoptAttack=true";
+    /**
+     * solver-cap12-1030 (CAP-2, PREDECLARATION-solver-cap12): the counted generator with engineNodesPerSearch (each
+     * engine search gets its own engineNodes; HonestForcedWinCounted compares the solver's lifetime node count, so its
+     * same-turn engine pass gets no nodes after the seat's first searches and it misses kills a label proves). A NEW
+     * generator version; predeclared rule (not enforced by the bench): never mixed with HonestForcedWinCounted tapes. HonestForcedWinCounted is unchanged.
+     */
+    public static final String HONEST_FORCED_WIN_COUNTED2_PROFILE = "HonestForcedWinCounted2";
+    public static final String HONEST_FORCED_WIN_COUNTED2_SPEC = HONEST_FORCED_WIN_COUNTED_SPEC + ",engineNodesPerSearch=true";
     /** mtgx (lane solver-gaps-1015, Part B): Forge AI with likely-win lines alone (no forced-win search or defense). */
     public static final String LIKELY_WIN_PROFILE = "LikelyWin";
 
@@ -134,6 +159,34 @@ public class AiProfileUtil {
             likely.put(AiProps.CUBE_COMBO_LINEAGE, "false");
             likely.put(AiProps.LIKELY_WIN_LINES, "true");
             loadedProfiles.put(LIKELY_WIN_PROFILE, likely);
+        }
+        if (base != null && !loadedProfiles.containsKey(HONEST_FORCED_WIN_PROFILE)) {
+            final Map<AiProps, String> honest = new HashMap<>(base);
+            honest.put(AiProps.CUBE_COMBO_PLANS, "true");
+            honest.put(AiProps.CUBE_COMBO_LINEAGE, "false");
+            honest.put(AiProps.FORCED_WIN_SOLVER, "true");
+            honest.put(AiProps.FORCED_WIN_HONEST, "true");
+            honest.put(AiProps.FORCED_WIN_SPEC,
+                    "hideOwnLibrary=true,defense=false,worlds=8,cycles=true,threshold=1.0");
+            loadedProfiles.put(HONEST_FORCED_WIN_PROFILE, honest);
+        }
+        if (base != null && !loadedProfiles.containsKey(HONEST_FORCED_WIN_COUNTED_PROFILE)) {
+            final Map<AiProps, String> counted = new HashMap<>(base);
+            counted.put(AiProps.CUBE_COMBO_PLANS, "true");
+            counted.put(AiProps.CUBE_COMBO_LINEAGE, "false");
+            counted.put(AiProps.FORCED_WIN_SOLVER, "true");
+            counted.put(AiProps.FORCED_WIN_HONEST, "true");
+            counted.put(AiProps.FORCED_WIN_SPEC, HONEST_FORCED_WIN_COUNTED_SPEC);
+            loadedProfiles.put(HONEST_FORCED_WIN_COUNTED_PROFILE, counted);
+        }
+        if (base != null && !loadedProfiles.containsKey(HONEST_FORCED_WIN_COUNTED2_PROFILE)) {
+            final Map<AiProps, String> counted2 = new HashMap<>(base);
+            counted2.put(AiProps.CUBE_COMBO_PLANS, "true");
+            counted2.put(AiProps.CUBE_COMBO_LINEAGE, "false");
+            counted2.put(AiProps.FORCED_WIN_SOLVER, "true");
+            counted2.put(AiProps.FORCED_WIN_HONEST, "true");
+            counted2.put(AiProps.FORCED_WIN_SPEC, HONEST_FORCED_WIN_COUNTED2_SPEC);
+            loadedProfiles.put(HONEST_FORCED_WIN_COUNTED2_PROFILE, counted2);
         }
     }
 
