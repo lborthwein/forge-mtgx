@@ -164,6 +164,8 @@ final class ForcedWinEngine {
 
     static final class Limits {
         int nodes = 250;
+        /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
+        boolean staleStatics = false;
         /**
          * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
          * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
@@ -1155,6 +1157,7 @@ final class ForcedWinEngine {
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
+            copier.setStaleStatics(lim.staleStatics); // unified-search-1106
             copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
