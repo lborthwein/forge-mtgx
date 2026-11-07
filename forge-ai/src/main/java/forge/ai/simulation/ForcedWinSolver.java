@@ -155,6 +155,8 @@ public final class ForcedWinSolver {
          * over every legal target class, at most triggerVariants of them, mana valued (ForcedWinEngine.TriggerTargets#wide).
          */
         public boolean engineTriggerTargets = false;
+        /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
+        public boolean staleStatics = false;
         /**
          * kill-line-1106 (off by default): the follower pays as the line recorded. A step the planner paid with life pays
          * its Phyrexian pips with life, not with a mana source Forge AI's payment would pick first.
@@ -272,6 +274,7 @@ public final class ForcedWinSolver {
             c.engineRerun = "true".equals(get.apply("engineRerun")); // choice-search-1105
             c.engineNodesPerSearch = "true".equals(get.apply("engineNodesPerSearch")); // choice-search-1105 (CAP-2)
             c.engineTriggerTargets = "true".equals(get.apply("engineTriggerTargets")); // kill-line-1106
+            c.staleStatics = "true".equals(get.apply("staleStatics")); // unified-search-1106
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
@@ -1524,6 +1527,7 @@ public final class ForcedWinSolver {
         el.nodes = cfg.engineNodes;
         el.perSearchNodes = cfg.engineNodesPerSearch;
         el.triggerTargets = cfg.engineTriggerTargets; // kill-line-1106
+        el.staleStatics = cfg.staleStatics; // unified-search-1106
         el.triggerVariants = cfg.triggerVariants;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {

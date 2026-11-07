@@ -50,9 +50,13 @@ final class ForcedWinEngine {
         long nanos;
         /** search-bones-1015 (c): nodes pruned by the progress table, loops found, body repetitions applied. */
         int pruned, loops, loopReps, loopWins;
+        /** unified-search-1106 (report only): moves that threw, and the last error. */
+        int moveErrors;
+        String lastMoveError = "";
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
+                    + (moveErrors > 0 ? " moveErrors=" + moveErrors + " lastMoveError=" + lastMoveError : "")
                     + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "")
                     + (loops > 0 || pruned > 0 ? " pruned=" + pruned + " loops=" + loops + " loopReps=" + loopReps
                             + " loopWins=" + loopWins : "");
@@ -164,6 +168,8 @@ final class ForcedWinEngine {
 
     static final class Limits {
         int nodes = 250;
+        /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
+        boolean staleStatics = false;
         /**
          * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
          * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
@@ -1296,6 +1302,7 @@ final class ForcedWinEngine {
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
+            copier.setStaleStatics(lim.staleStatics); // unified-search-1106
             copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
@@ -1354,6 +1361,8 @@ final class ForcedWinEngine {
             return null;
         } catch (RuntimeException | StackOverflowError ex) {
             lastError = String.valueOf(ex);
+            st.moveErrors++; // unified-search-1106 (report only)
+            st.lastMoveError = lastError.length() > 80 ? lastError.substring(0, 80) : lastError;
             if (TRACE) {
                 ex.printStackTrace();
             }
