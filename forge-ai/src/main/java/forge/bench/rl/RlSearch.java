@@ -141,6 +141,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * as on a wall cut, and the decision row says {@code wall_cap}.
          */
         public boolean workUnits = false;
+        /**
+         * work-units-1107 (false = off, the default, unrecorded): block search's sampled declarations are seeded from the
+         * game's seed instead of the per-run game uid (the service seeds a sample by uid, seat and dec_idx).
+         */
+        public boolean blockSampleSeed = false;
         public double workScale = 1.0;
         public long workWallMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
@@ -311,7 +316,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "workUnits", "workScale", "workWallMs"));
+                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "workUnits", "workScale", "workWallMs", "blockSampleSeed"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -345,6 +350,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("policySha") && !o.get("policySha").isJsonNull()) c.policySha = o.get("policySha").getAsString();
             if (o.has("budgetMs")) c.budgetMs = o.get("budgetMs").getAsLong();
             if (o.has("workUnits")) c.workUnits = o.get("workUnits").getAsBoolean(); // work-units-1107
+            if (o.has("blockSampleSeed")) c.blockSampleSeed = o.get("blockSampleSeed").getAsBoolean();
             if (o.has("workScale")) c.workScale = o.get("workScale").getAsDouble();
             if (o.has("workWallMs")) c.workWallMs = o.get("workWallMs").getAsLong();
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
@@ -548,6 +554,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (budgetMs > 0) {
                 // live-sc-1009: only when set, so a bench spec's JSON is unchanged
                 o.addProperty("budgetMs", budgetMs);
+            }
+            if (blockSampleSeed) {
+                o.addProperty("blockSampleSeed", true); // work-units-1107: only when on
             }
             if (workUnits) {
                 // work-units-1107: only when on, so every other spec's JSON is unchanged
@@ -1894,8 +1903,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final long uid0 = frame.gameUid;
             try {
                 for (int j = 0; j < cfg.blockSamples; j++) {
-                    // the service seeds a sampled DECISION by (game uid, seat, dec_idx): one uid per sample
-                    frame.gameUid = splitmix(uid0 ^ (0xb10c0000L + j));
+                    // the service seeds a sampled DECISION by (game uid, seat, dec_idx): one uid per sample.
+                    // work-units-1107 (blockSampleSeed, off): the uid comes from the game's seed, not the per-run game
+                    // uid, so the same game samples the same declarations on any run
+                    frame.gameUid = splitmix((cfg.blockSampleSeed ? splitmix(gameSeed ^ 0xb10c5eedL) : uid0) ^ (0xb10c0000L + j));
                     final RlWire.Decision d = client().decide(RlWire.encodeDecide(frame), true);
                     if (d.status != RlWire.ST_OK || d.steps == null || m.validate(d.steps) != null) {
                         continue;

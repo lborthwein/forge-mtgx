@@ -228,6 +228,12 @@ public final class ForcedWinSolver {
         /** strong-opp-1020: the defense's opponent reader is the JVM-wide shared one ({@link #sharedOppReader}). */
         public boolean sharedReader = false;
         /**
+         * work-units-1107 (false = off, the default, unrecorded, and then nothing changes; read with sharedReader): the
+         * defender's opponent reader starts from the jar's affordance cache in each solver (one per seat and game) instead
+         * of the JVM-wide reader, so what one game's probes learn never reaches another game in timing order.
+         */
+        public boolean readerPerGame = false;
+        /**
          * strong-opp-1020 (review S2-4; off by default): the defense may HOLD, i.e. pass priority to keep its counter
          * when a bigger threat is likely still to come. Off: a "hold" verdict only declines to counter (no opinion), so
          * the seat's other responses stay its own.
@@ -650,6 +656,7 @@ public final class ForcedWinSolver {
             c.tieBreakTurns = intOr(get.apply("tieBreakTurns"), c.tieBreakTurns);
             c.defendMs = intOr(get.apply("defendMs"), (int) c.defendMs);
             c.sharedReader = "true".equals(get.apply("sharedReader"));
+            c.readerPerGame = "true".equals(get.apply("readerPerGame")); // work-units-1107
             c.hold = "true".equals(get.apply("hold"));
             c.deckBelief = "true".equals(get.apply("deckBelief")); // deck-belief-1105
             c.deckWorlds = intOr(get.apply("deckWorlds"), c.deckWorlds);
@@ -1153,7 +1160,9 @@ public final class ForcedWinSolver {
         this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
         // labeller-v2 (c): a planScry solver learns scry / surveil (own template keys); never the shared v1 reader
-        this.oppReader = cfg.sharedReader && !cfg.planScry ? sharedOppReader() : new ForcedWinModel.Reader();
+        // work-units-1107: readerPerGame gives this solver its own reader preloaded as the shared one starts
+        this.oppReader = cfg.sharedReader && !cfg.planScry ? (cfg.readerPerGame ? load() : sharedOppReader())
+                : new ForcedWinModel.Reader();
         if (cfg.planScry) {
             this.reader.planScry = true;
             this.oppReader.planScry = true;

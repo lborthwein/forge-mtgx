@@ -86,8 +86,9 @@ public class AiBlockController {
         // must-block test walks them all); no budget open = a no-op
         final long work = AiWork.current() == null ? 0 : 1L + combat.getAttackers().size();
 
-        // work-units-1107: the same charge on the work clock (no clock = no-op)
-        final long clockWork = forge.game.WorkClock.active() ? 1L + combat.getAttackers().size() : 0;
+        // work-units-1107: one work unit per (attacker, blocker) pair (no clock = no-op). AMEND-2: the 1 + attackers charge
+        // overweighted wide boards (block prediction 63-74 % of a capped decision's span, real time about half of it)
+        final long clockWork = forge.game.WorkClock.active() ? 1L : 0;
         for (final Card blocker : blockersLeft) {
             if (work > 0) {
                 AiWork.tick("getPossibleBlockers", work);

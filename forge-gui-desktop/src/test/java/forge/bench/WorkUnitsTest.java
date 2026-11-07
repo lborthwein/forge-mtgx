@@ -146,6 +146,17 @@ public class WorkUnitsTest {
         rec.addProperty("server", "127.0.0.1:1"); // the recorded spec leaves the host out
         Assert.assertEquals(RlSearch.Config.parse(rec).workScale, 0.8, "the recorded spec parses back");
         Assert.assertThrows(IllegalArgumentException.class, () -> RlSearch.Config.parse(spec(",\"workScale\":0.8")));
+        // AMEND-2 keys: blockSampleSeed (search) and readerPerGame (solver), off and unrecorded by default
+        Assert.assertFalse(off.blockSampleSeed);
+        Assert.assertFalse(off.toJson().has("blockSampleSeed"));
+        final RlSearch.Config bs = RlSearch.Config.parse(spec(",\"blockSampleSeed\":true"));
+        Assert.assertTrue(bs.blockSampleSeed);
+        Assert.assertTrue(bs.toJson().get("blockSampleSeed").getAsBoolean());
+        final java.util.Map<String, String> kv = new java.util.HashMap<>();
+        Assert.assertFalse(forge.ai.simulation.ForcedWinSolver.Config.fromProps(kv::get).readerPerGame);
+        kv.put("sharedReader", "true");
+        kv.put("readerPerGame", "true");
+        Assert.assertTrue(forge.ai.simulation.ForcedWinSolver.Config.fromProps(kv::get).readerPerGame);
         Assert.assertThrows(IllegalArgumentException.class,
                 () -> RlSearch.Config.parse(spec(",\"workUnits\":true,\"workScale\":0")));
     }
