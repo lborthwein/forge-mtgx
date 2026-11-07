@@ -215,6 +215,11 @@ public final class ChoiceScorer {
             }
 
             @Override
+            public void onOrder(final Object ctx, final Game g, final Player me, final List<Card> cards) {
+                ((RlFeaturizer) ctx).knowledge().onLook(g, me, cards, ZoneType.Library);
+            }
+
+            @Override
             public forge.ai.simulation.ForcedWinSolver.Screen screen(final Object ctx, final Game g, final Player me) {
                 if (cfg.screenNodes <= 0 || cfg.solverCfg == null) {
                     return null;

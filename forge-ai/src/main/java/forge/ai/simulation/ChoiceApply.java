@@ -32,6 +32,10 @@ public final class ChoiceApply {
 
         byte[] capture(Object ctx, Game g, Player me);
 
+        /** The seat arranged these cards going to its library (what the live bridge reports as a look). */
+        default void onOrder(Object ctx, Game g, Player me, List<Card> cards) {
+        }
+
         /** At the leaf too: the planner screen of this position, or null (off). */
         default ForcedWinSolver.Screen screen(Object ctx, Game g, Player me) {
             return null;
@@ -84,6 +88,7 @@ public final class ChoiceApply {
         int next = 0;
         /** Top first: the answer to the library order ask of this resolution, or null. */
         List<Integer> order;
+        java.util.function.Consumer<List<Card>> looked;
         final Runnable leaf;
         boolean missed = false;
         int tail = 0;
@@ -153,6 +158,9 @@ public final class ChoiceApply {
         public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone,
                 final SpellAbility source) {
             if (order != null && destinationZone == ZoneType.Library) {
+                if (looked != null) {
+                    looked.accept(new ArrayList<>(new CardCollection(cards)));
+                }
                 final CardCollection top = new CardCollection();
                 for (int id : order) {
                     for (Card c : cards) {
@@ -310,6 +318,7 @@ public final class ChoiceApply {
             };
             final Forced sc = new Forced(g, me, me.getController().getLobbyPlayer(), picks, leaf);
             sc.order = order;
+            sc.looked = cs -> frames.onOrder(ctx, g, me, cs);
             me.dangerouslySetController(sc);
             for (Player o : g.getPlayers()) {
                 if (o != me) {
