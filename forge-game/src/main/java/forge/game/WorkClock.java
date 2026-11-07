@@ -102,6 +102,8 @@ public final class WorkClock {
         private final AtomicLong joined = new AtomicLong();
         /** Counts per site: this clock's own plus its joined lanes' (metering only). */
         private final AtomicLongArray counts = new AtomicLongArray(SITES.length);
+        /** Counts per site on the critical path: this clock's own plus, at each join, the latest lane's (calibration). */
+        private final AtomicLongArray pathCounts = new AtomicLongArray(SITES.length);
         /** Weighted work of joined lanes (metering only: total work, not span). */
         private final AtomicLong laneWork = new AtomicLong();
         /** The armed safety wall (System.nanoTime), 0 = none. */
@@ -156,6 +158,7 @@ public final class WorkClock {
 
         void charge(final Site s, final long n) {
             counts.addAndGet(s.ordinal(), n);
+            pathCounts.addAndGet(s.ordinal(), n);
             work.addAndGet(n * weights[s.ordinal()]);
         }
 
@@ -173,6 +176,15 @@ public final class WorkClock {
             return c;
         }
 
+        /** Critical-path counts per site so far (the work whose weighted sum is this clock's virtual span). */
+        public long[] pathCounts() {
+            final long[] c = new long[SITES.length];
+            for (int i = 0; i < c.length; i++) {
+                c[i] = pathCounts.get(i);
+            }
+            return c;
+        }
+
         /** A lane of this clock: starts at this clock's virtual now, same scale and safety wall. */
         public Clock fork() {
             final Clock c = new Clock(rawNow(), scale);
@@ -185,12 +197,17 @@ public final class WorkClock {
         public void join(final Clock[] lanes) {
             long end = Long.MIN_VALUE;
             boolean hit = false;
+            Clock latest = null;
             for (Clock l : lanes) {
                 if (l == null) {
                     continue;
                 }
                 hit |= l.wallHit;
-                end = Math.max(end, l.wallHit ? l.rawNow() : l.now());
+                final long e = l.rawNow(); // raw: a lane read past the wall would join FAR
+                if (e > end) {
+                    end = e;
+                    latest = l;
+                }
                 for (int i = 0; i < SITES.length; i++) {
                     counts.addAndGet(i, l.counts.get(i));
                 }
@@ -203,6 +220,9 @@ public final class WorkClock {
                 final long cur = origin + (long) (work.get() / scale) + joined.get();
                 if (end > cur) {
                     joined.addAndGet(end - cur);
+                    for (int i = 0; i < SITES.length; i++) {
+                        pathCounts.addAndGet(i, latest.pathCounts.get(i));
+                    }
                 }
             }
         }
@@ -272,6 +292,7 @@ public final class WorkClock {
         final boolean armed;
         final long work0;
         final long[] counts0;
+        final long[] path0;
         final long v0;
 
         Span(final Clock clock, final boolean armed) {
@@ -279,6 +300,7 @@ public final class WorkClock {
             this.armed = armed;
             this.work0 = clock.totalWork();
             this.counts0 = clock.counts();
+            this.path0 = clock.pathCounts();
             this.v0 = clock.rawNow();
         }
 
@@ -292,6 +314,15 @@ public final class WorkClock {
             final long[] c = clock.counts();
             for (int i = 0; i < c.length; i++) {
                 c[i] -= counts0[i];
+            }
+            return c;
+        }
+
+        /** Critical-path counts per site since begin (calibration: their weighted sum is the span). */
+        public long[] pathCounts() {
+            final long[] c = clock.pathCounts();
+            for (int i = 0; i < c.length; i++) {
+                c[i] -= path0[i];
             }
             return c;
         }

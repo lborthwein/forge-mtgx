@@ -1186,6 +1186,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 wc.add(x);
             }
             row.add("work_counts", wc);
+            final JsonArray wp = new JsonArray();
+            for (long x : sp.pathCounts()) {
+                wp.add(x);
+            }
+            row.add("work_path_counts", wp);
             row.addProperty("wall_cap", sp.wallHit());
             row.addProperty("work_span_ms", Math.round(sp.spanMs() * 10) / 10.0);
             row.addProperty("work_cpu_ms", Math.round((gameCpuMs() - workCpu0) * 10) / 10.0);
