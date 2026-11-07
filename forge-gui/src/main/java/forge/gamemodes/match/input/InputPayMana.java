@@ -602,7 +602,7 @@ public abstract class InputPayMana extends InputSyncronizedBase {
                     && Integer.bitCount(producibleColours(chosen) & 0xFF) > 1 ? offered : 0;
         } else {
             // A one-colour ability Forge chose because only its colour can pay what is left, on a
-            // source whose abilities offered more (a Tropical Island paying a {U}).
+            // source whose abilities offered more (a dual land paying a {U}).
             final byte made = cardColours != 0 ? producibleColours(chosen) : 0;
             forcedColour = Integer.bitCount(made & 0xFF) == 1 && Integer.bitCount(cardColours & 0xFF) > 1 ? made : 0;
         }
