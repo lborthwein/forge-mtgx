@@ -52,10 +52,13 @@ final class ForcedWinEngine {
         int pruned, loops, loopReps, loopWins;
         /** unified-search-1106 (report only): moves that threw, and the last error. */
         int moveErrors;
+        /** unified-search-1106 (report only): found wins another library world refuted. */
+        int refutedWins;
         String lastMoveError = "";
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
+                    + (refutedWins > 0 ? " refutedWins=" + refutedWins : "")
                     + (moveErrors > 0 ? " moveErrors=" + moveErrors + " lastMoveError=" + lastMoveError : "")
                     + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "")
                     + (loops > 0 || pruned > 0 ? " pruned=" + pruned + " loops=" + loops + " loopReps=" + loopReps
@@ -170,6 +173,12 @@ final class ForcedWinEngine {
         int nodes = 250;
         /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
         boolean staleStatics = false;
+        /**
+         * unified-search-1106 (null = off): a found win must also win here (a play-out in another world of our library), or the
+         * search goes on; and at each node the moves that drew from our library are searched after the others, so a line
+         * that needs no luck is found first.
+         */
+        java.util.function.Predicate<List<Step>> verify;
         /**
          * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
          * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
@@ -616,6 +625,8 @@ final class ForcedWinEngine {
         }
         int tried = 0;
         final Set<Step> variants = new HashSet<>();
+        final List<Applied> luck = lim.verify != null ? new ArrayList<>() : null; // unified-search-1106
+        final int libHere = node.me.getCardsIn(ZoneType.Library).size();
         for (int mi = 0; mi < moves.size(); mi++) {
             final Step mv = moves.get(mi);
             // solver-gaps-1015: the branching cap counts distinct moves only; the forced-answer variants of a move (its
@@ -668,7 +679,12 @@ final class ForcedWinEngine {
             if (a.won) {
                 final List<Step> path = new ArrayList<>(node.path);
                 path.add(mv);
-                return path;
+                if (lim.verify == null || lim.verify.test(path)) {
+                    return path;
+                }
+                st.refutedWins++;
+                forge.util.IdScope.install(cloneScope(node.ids));
+                continue;
             }
             if (collect != null && a.child != null && !node.passed && !mv.pass && a.child.turn == startTurn) {
                 // Part B: a this-turn position, valued statically
@@ -699,9 +715,13 @@ final class ForcedWinEngine {
                 if (body != null) {
                     final Forward fw = fastForward(a.child, body);
                     if (fw.win != null) {
-                        return fw.win;
+                        if (lim.verify == null || lim.verify.test(fw.win)) {
+                            return fw.win;
+                        }
+                        st.refutedWins++;
+                        forge.util.IdScope.install(cloneScope(node.ids));
                     }
-                    if (!seenDominated(fw.node)) {
+                    if (fw.node != null && !seenDominated(fw.node)) {
                         final List<Step> r = dfs(fw.node, depth + 1);
                         if (r != null) {
                             return r;
@@ -718,9 +738,24 @@ final class ForcedWinEngine {
             } else if (!seen.add(a.key)) {
                 continue;
             }
+            if (luck != null && a.child.me.getCardsIn(ZoneType.Library).size() < libHere) {
+                luck.add(a); // unified-search-1106: this move drew from our library: after the moves that did not
+                continue;
+            }
             final List<Step> r = dfs(a.child, depth + 1);
             if (r != null) {
                 return r;
+            }
+        }
+        if (luck != null) {
+            for (Applied a : luck) {
+                if (out()) {
+                    break;
+                }
+                final List<Step> r = dfs(a.child, depth + 1);
+                if (r != null) {
+                    return r;
+                }
             }
         }
         return null;
