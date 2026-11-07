@@ -210,6 +210,14 @@ final class ForcedWinEngine {
          * our hand holds at least the ancestor's cards (draws are kept, the library may shrink), with progress.
          */
         boolean looseCycles = false;
+        // M3 engine-reach-1107: frontier
+        /**
+         * engine-reach-1107 (0 = off): the share of the time, in percent, the depth-first search keeps; the rest goes to a frontier
+         * search, each pick alternating between the best state delta and the oldest node.
+         */
+        int frontierAfterPct = 0;
+        /** engine-reach-1107: the most nodes the frontier holds. */
+        int frontierMax = 96;
         /**
          * unified-search-1106 (null = off): a found win must also win here (a play-out in another world of our library), or the
          * search goes on; and at each node the moves that drew from our library are searched after the others, so a line
@@ -278,6 +286,9 @@ final class ForcedWinEngine {
             return coarse;
         }
         long[] pv;
+        /** engine-reach-1107: the frontier's order. */
+        double score;
+        boolean taken;
     }
 
     // ------------------------------------------------------------------ (c) cycles with progress (search-bones-1015)
@@ -835,7 +846,12 @@ final class ForcedWinEngine {
             if (lim.perSearchNodes) {
                 lim.nodes += st.nodes; // choice-search-1105 (CAP-2): this pass's share from here, not from the solver's birth
             }
-            List<Step> win = e.dfs(root, 0);
+            List<Step> win;
+            if (lim.frontierAfterPct > 0) {
+                win = e.staged(root); // engine-reach-1107
+            } else {
+                win = e.dfs(root, 0);
+            }
             if (win == null && twoTurns && System.nanoTime() < deadline) {
                 lim.passTurn = true;
                 lim.nodes = st.nodes + nodeCap / 2;
@@ -885,11 +901,199 @@ final class ForcedWinEngine {
         return b;
     }
 
+    /** engine-reach-1107: a stage's own end (System.nanoTime(); 0 = none), inside the search's deadline. */
+    private long stageEnd;
+
     private boolean out() {
-        return st.nodes >= lim.nodes || System.nanoTime() > deadline;
+        return st.nodes >= lim.nodes || System.nanoTime() > deadline || stageEnd != 0 && System.nanoTime() > stageEnd;
     }
 
 
+    /** engine-reach-1107 ({@link Limits#frontierAfterPct}): depth-first for its share of the time left, then the frontier. */
+    private List<Step> staged(Node root) {
+        final long t = System.nanoTime();
+        stageEnd = t + (deadline - t) / 100 * lim.frontierAfterPct;
+        List<Step> win = null;
+        try {
+            win = dfs(root, 0);
+            stageEnd = 0;
+            if (win == null && System.nanoTime() < deadline) {
+                table.clear();
+                seen.clear();
+                win = frontier(root);
+            }
+        } finally {
+            stageEnd = 0;
+        }
+        return win;
+    }
+
+    /** A state's delta value: what a line still has to work with, and what it has done. Search order only. */
+    private double delta(Node n, Node parent) {
+        final long[] v = progress(n.g, n.me);
+        double s = v[0] + 0.25 * v[1] + v[2] * 0.25 + 2 * v[3] + v[4] + v[5] + v[7] + 2 * v[8];
+        for (Card c : n.me.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isTapped() && !c.getManaAbilities().isEmpty()) {
+                s += 1;
+            } else if (!c.isLand() && c.getManaAbilities().isEmpty()) {
+                s += 1;
+            }
+        }
+        if (parent != null && n.me.getCardsIn(ZoneType.Library).size() < parent.me.getCardsIn(ZoneType.Library).size()) {
+            s -= 1; // a line that needs no luck first
+        }
+        return s - 0.25 * n.path.size();
+    }
+
+    private List<Step> frontier(Node root) {
+        final java.util.PriorityQueue<Node> best = new java.util.PriorityQueue<>((a, b) -> Double.compare(b.score, a.score));
+        final java.util.ArrayDeque<Node> old = new java.util.ArrayDeque<>();
+        root.score = 0;
+        root.taken = false;
+        best.add(root);
+        old.add(root);
+        int pick = 0;
+        while (!out()) {
+            final java.util.Queue<Node> q = pick++ % 2 == 0 ? best : old;
+            Node n = q.poll();
+            while (n != null && n.taken) {
+                n = q.poll();
+            }
+            if (n == null) {
+                if (best.isEmpty() && old.isEmpty()) {
+                    return null;
+                }
+                continue;
+            }
+            n.taken = true;
+            final List<Node> kids = new ArrayList<>();
+            final List<Step> win = expand(n, kids, 0);
+            if (win != null) {
+                return win;
+            }
+            best.addAll(kids);
+            old.addAll(kids);
+            while (best.size() > lim.frontierMax) {
+                final Node worst = java.util.Collections.min(best, (a, b) -> Double.compare(a.score, b.score));
+                best.remove(worst);
+                worst.taken = true;
+            }
+        }
+        return null;
+    }
+
+    /** One node of the frontier: its moves, as {@link #dfs} plays them, the children queued. A win (verified) is returned. */
+    private List<Step> expand(Node node, List<Node> kids, int depth) {
+        st.nodes++;
+        forge.util.IdScope.install(cloneScope(node.ids));
+        LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
+        final List<Step> moves = moves(node);
+        if (outletSkip != null) {
+            final Set<String> skip = outletSkip;
+            outletSkip = null; // first ply only
+            moves.removeIf(m -> skip.contains(m.kind + "|" + m.hostId + "|" + m.desc));
+        }
+        if (TRACE) {
+            ForcedWinSolver.receipt("FW_ENGINE frontier score=" + node.score + " path=" + node.path + " moves=" + moves);
+        }
+        int tried = 0;
+        final Set<Step> variants = new HashSet<>();
+        for (int mi = 0; mi < moves.size(); mi++) {
+            final Step mv = moves.get(mi);
+            if (out()) {
+                break;
+            }
+            if (!variants.contains(mv) && tried >= lim.branching) {
+                continue;
+            }
+            if (!variants.contains(mv)) {
+                tried++;
+            }
+            st.moves++;
+            final Applied a = apply(node, mv);
+            if (a == null) {
+                continue;
+            }
+            if (mv.pickName == null && !a.pickCandidates.isEmpty()) {
+                int k = 0;
+                for (String name : a.pickCandidates) {
+                    if (k++ >= lim.targetVariants) {
+                        break;
+                    }
+                    final Step v = mv.copy();
+                    v.pickName = name;
+                    moves.add(mi + k, v);
+                    variants.add(v);
+                }
+            }
+            if (mv.triggerRef == null && !a.triggerCandidates.isEmpty()) {
+                int k = 0;
+                for (String ref : a.triggerCandidates) {
+                    if (k++ >= (lim.triggerTargets ? lim.triggerVariants : lim.targetVariants)) {
+                        break;
+                    }
+                    final Step v = mv.copy();
+                    v.triggerRef = ref;
+                    moves.add(mi + k, v);
+                    variants.add(v);
+                }
+            }
+            if (a.won) {
+                final List<Step> path = new ArrayList<>(node.path);
+                path.add(mv);
+                if (lim.verify == null || lim.verify.test(path)) {
+                    return path;
+                }
+                st.refutedWins++;
+                forge.util.IdScope.install(cloneScope(node.ids));
+                continue;
+            }
+            if (a.child == null) {
+                continue;
+            }
+            a.child.path.addAll(node.path);
+            a.child.path.add(mv);
+            a.child.passed = node.passed || mv.pass;
+            a.child.parent = node;
+            a.child.pv = progress(a.child.g, a.child.me);
+            List<Step> body = loopBody(a.child, lim.longLoops);
+            int played = 2;
+            if (body == null && lim.longLoops) {
+                body = cycleBody(a.child);
+                played = 1;
+            }
+            if (body == null && lim.looseCycles) {
+                body = looseCycleBody(a.child);
+                played = 1;
+            }
+            Node next = a.child;
+            if (body != null && inOutlet) {
+                st.pruned++;
+                continue;
+            }
+            if (body != null) {
+                final Forward fw = fastForward(a.child, body, played);
+                if (fw.win != null) {
+                    if (lim.verify == null || lim.verify.test(fw.win)) {
+                        return fw.win;
+                    }
+                    st.refutedWins++;
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                }
+                next = fw.node;
+                if (next == null) {
+                    continue;
+                }
+            }
+            if (seenDominated(next)) {
+                st.pruned++;
+                continue;
+            }
+            next.score = delta(next, node) + (body != null ? 1000 : 0);
+            kids.add(next);
+        }
+        return null;
+    }
 
     private List<Step> dfs(Node node, int depth) {
         if (out() || depth >= lim.depth) {
