@@ -59,6 +59,7 @@ final class DecisionLog {
     private DecisionLog(final Mode mode, final JsonObject log) {
         this.mode = mode;
         this.log = log;
+        AiTape.EXTENDED = true; // unified-jar-1106: a log in this JVM records format 2; a live JVM never makes one
     }
 
     static DecisionLog record() {

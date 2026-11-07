@@ -75,7 +75,7 @@ final class AiTapePlays {
             sid.add(s.getId());
         }
         o.add("sid", sid);
-        if (sa.getCopyRoot() != 0) {
+        if (AiTape.EXTENDED && sa.getCopyRoot() != 0) {
             // bvw-decision-log-1027: a copy the AI made (the forced-win solver's line steps): the original it copies,
             // and per chain link what such a copy may carry that the original does not (reads only)
             o.addProperty("cp", sa.getCopyRoot());
