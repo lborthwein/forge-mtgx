@@ -237,6 +237,15 @@ final class ForcedWinEngine {
         final List<Step> path = new ArrayList<>();
         /** search-bones-1015 (c): the node this one was reached from, and this node's progress vector. */
         Node parent;
+        /** unified-search-1106: {@link #coarseKey}, cached before this node's game is given up. */
+        private String coarse;
+
+        String coarse() {
+            if (coarse == null) {
+                coarse = coarseKey(g, me);
+            }
+            return coarse;
+        }
         long[] pv;
     }
 
@@ -395,6 +404,26 @@ final class ForcedWinEngine {
         return null;
     }
 
+    /**
+     * unified-search-1106 ({@link Limits#longLoops}): the moves back to an ancestor with the same position apart from monotone
+     * counters and tokens, with progress over it. One round is enough, and its moves need not look alike. Null when there is none.
+     */
+    private static List<Step> cycleBody(Node child) {
+        final List<Step> p = child.path;
+        final String key = child.coarse();
+        Node a = child.parent;
+        for (int len = 1; a != null && len <= p.size(); len++, a = a.parent) {
+            final Step st = p.get(p.size() - len);
+            if (st.pass || st.kind == AbilKind.ATTACK || st.kind == AbilKind.REPEAT) {
+                return null;
+            }
+            if (a.pv != null && key.equals(a.coarse()) && progressed(child.pv, a.pv)) {
+                return new ArrayList<>(p.subList(p.size() - len, p.size()));
+            }
+        }
+        return null;
+    }
+
     /** The result of fast-forwarding a loop: a win (its path), or the node after the last repetition that progressed. */
     static final class Forward {
         List<Step> win;
@@ -406,15 +435,15 @@ final class ForcedWinEngine {
      * a body step cannot be played or the game would end otherwise, a repetition makes no progress, the cap, or the
      * budget. The path becomes prefix + REPEAT(body, repetitions) (+ the steps of a winning partial repetition).
      */
-    private Forward fastForward(Node from, List<Step> body) {
+    private Forward fastForward(Node from, List<Step> body, int played) {
         st.loops++;
         final int len = body.size();
-        final List<Step> prefix = new ArrayList<>(from.path.subList(0, from.path.size() - 2 * len));
-        int reps = 2;
+        final List<Step> prefix = new ArrayList<>(from.path.subList(0, from.path.size() - played * len));
+        int reps = played;
         Node cur = from;
         final Forward f = new Forward();
         if (lim.longLoops) {
-            return fastForwardChunks(from, body, prefix, f); // unified-search-1106
+            return fastForwardChunks(from, body, prefix, f, played); // unified-search-1106
         }
         while (reps < lim.repeatCap && !out()) {
             Node next = cur;
@@ -480,10 +509,10 @@ final class ForcedWinEngine {
      * chunk doubling while nothing fails. A chunk that fails is dropped: the search goes on from the last whole chunk with
      * a chunk of one. The count stops where the goal is met at the body's measured rate, or at the budget.
      */
-    private Forward fastForwardChunks(Node from, List<Step> body, List<Step> prefix, Forward f) {
+    private Forward fastForwardChunks(Node from, List<Step> body, List<Step> prefix, Forward f, int played) {
         final int len = body.size();
         final Node a1 = ancestor(from, len);
-        int reps = 2;
+        int reps = played;
         Node cur = from;
         int chunk = 1;
         int cap = goalCap(from.pv, a1 == null ? null : a1.pv, reps);
@@ -824,9 +853,14 @@ final class ForcedWinEngine {
                 // search-bones-1015 (c): the progress table instead of the exact-key set, and loops fast-forwarded
                 a.child.parent = node;
                 a.child.pv = progress(a.child.g, a.child.me);
-                final List<Step> body = loopBody(a.child, lim.longLoops);
+                List<Step> body = loopBody(a.child, lim.longLoops);
+                int played = 2;
+                if (body == null && lim.longLoops) {
+                    body = cycleBody(a.child); // unified-search-1106: back at an ancestor's position, with progress
+                    played = 1;
+                }
                 if (body != null) {
-                    final Forward fw = fastForward(a.child, body);
+                    final Forward fw = fastForward(a.child, body, played);
                     if (fw.win != null) {
                         if (lim.verify == null || lim.verify.test(fw.win)) {
                             return fw.win;
