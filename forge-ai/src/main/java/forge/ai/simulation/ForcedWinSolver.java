@@ -1821,6 +1821,16 @@ public final class ForcedWinSolver {
         return out;
     }
 
+    /** choice-scorer-1106: an affordance reader shared by the solvers of one decision's copies (its probes are cached). */
+    public static Object newSharedReader() {
+        return new ForcedWinModel.Reader();
+    }
+
+    /** choice-scorer-1106: a solver over a shared reader ({@link #newSharedReader}). */
+    public static ForcedWinSolver withReader(final Player me, final Config cfg, final Object reader) {
+        return new ForcedWinSolver(me, cfg, (ForcedWinModel.Reader) reader);
+    }
+
     /** choice-scorer-1106: what the cheap width search finds from a position, unverified. */
     public static final class Screen {
         public int lines, nodes, bestTurn = -1, bestSteps = -1;

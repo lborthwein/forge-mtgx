@@ -165,6 +165,7 @@ public final class ChoiceScorer {
     static final int MULL_FRAMES = 120;
 
     private boolean guardSwap = false;
+    private Object screenReader;
     private int pileSeen = 0;
     /** The chosen pile of the resolution in progress (top first), and the picks already given; null when none. */
     private List<Integer> pilePlan;
@@ -233,7 +234,11 @@ public final class ChoiceScorer {
                     }
                     top.add(c.getId());
                 }
-                return new forge.ai.simulation.ForcedWinSolver(me, cfg.solverCfg).screen(g, top, cfg.screenNodes, cfg.screenMs);
+                if (screenReader == null) {
+                    screenReader = forge.ai.simulation.ForcedWinSolver.newSharedReader();
+                }
+                return forge.ai.simulation.ForcedWinSolver.withReader(me, cfg.solverCfg, screenReader).screen(g, top,
+                        cfg.screenNodes, cfg.screenMs);
             }
         };
     }
@@ -270,6 +275,7 @@ public final class ChoiceScorer {
             final RlKnowledge know, final long seed, final SpellAbility askSa) {
         final Scored s = new Scored();
         final long t0 = System.nanoTime();
+        screenReader = null; // one reader per ask: its probes are of this position's copies
         final int seat = g.getRegisteredPlayers().indexOf(me);
         final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
         final long deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : Long.MAX_VALUE;
