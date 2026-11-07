@@ -193,6 +193,11 @@ public final class ForcedWinSolver {
          * coloured mana, so a mill or a floated colour is not answered by an old "no line".
          */
         public boolean positionKeyFull = false;
+        /**
+         * unified-search-1106 (off by default): a followed line's own steps are not cut by the play-out loop breaker. A line is
+         * finite; a REPEAT longer than the breaker's window stopped mid-way in verification and read as no win.
+         */
+        public boolean lineUncapped = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -305,6 +310,7 @@ public final class ForcedWinSolver {
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.unknownWorlds = "true".equals(get.apply("unknownWorlds")); // unified-search-1106
             c.positionKeyFull = "true".equals(get.apply("positionKeyFull")); // unified-search-1106
+            c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -2262,6 +2268,7 @@ public final class ForcedWinSolver {
                 lineAi.startTurn = g.getPhaseHandler().getTurn();
                 lineAi.replanner = old -> replanIn(g, cm, old); // kill-line-1106
             }
+            lineAi.uncapped = cfg.lineUncapped; // unified-search-1106
             cm.dangerouslySetController(lineAi);
             AdversaryAi adv = null;
             for (Player o : g.getPlayers()) {
@@ -3078,6 +3085,12 @@ public final class ForcedWinSolver {
         String protectedBy;
         /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
         boolean continueAfter;
+        /** unified-search-1106 ({@link Config#lineUncapped}). */
+        boolean uncapped;
+
+        List<SpellAbility> lineAction(SpellAbility sa) {
+            return uncapped ? List.of(sa) : capped(List.of(sa));
+        }
 
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
@@ -3095,7 +3108,7 @@ public final class ForcedWinSolver {
             if (!f.done && !f.broken) {
                 final Follower.Next n = f.next(g, getPlayer());
                 if (n.action != null) {
-                    return capped(List.of(n.action));
+                    return lineAction(n.action);
                 }
                 if (n.waiting) {
                     return null;
