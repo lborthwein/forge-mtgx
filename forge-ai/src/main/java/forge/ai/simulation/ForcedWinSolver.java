@@ -3630,7 +3630,7 @@ public final class ForcedWinSolver {
     }
 
     /** wu-reads-1107: one planner search ({@link #plan}), within the hard deadline when windowCap is on (unchanged otherwise). */
-    private ForcedWinPlanner.Result planCapped(Position pos, ForcedWinPlanner.Limits lim) {
+    ForcedWinPlanner.Result planCapped(Position pos, ForcedWinPlanner.Limits lim) {
         if (!windowCap || hardDeadline == 0) {
             return plan(pos, lim);
         }
