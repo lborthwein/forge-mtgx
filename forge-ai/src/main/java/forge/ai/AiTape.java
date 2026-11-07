@@ -64,6 +64,12 @@ public final class AiTape {
      */
     public static final int FORMAT = 2;
     /**
+     * unified-jar-1106: the research decision log's extra record fields and format 2. Off (a live tape, whose bytes stay
+     * format 1), unless a {@code DecisionLog} is made in this JVM or {@code -Dforge.aiTape.extended=true}. Decoding reads
+     * both formats.
+     */
+    public static volatile boolean EXTENDED = Boolean.getBoolean("forge.aiTape.extended");
+    /**
      * Lane bvw-decision-log-1027: the first id of a decode's detached scope. A bench game's own ids start at 1e9 (its
      * IdScope) and a cube combo seat's probe ids at 1.1e9, so "built by this decode" is this range, not "id >= 1e9".
      */
@@ -371,7 +377,7 @@ public final class AiTape {
             forge.game.card.LazyTraits.install(LAZY_TAP);
         }
         final JsonObject o = new JsonObject();
-        o.addProperty("format", FORMAT);
+        o.addProperty("format", EXTENDED ? FORMAT : 1);
         o.addProperty("mode", resume ? (strict ? "restore" : "resume") : mode == Mode.RECORD ? "record" : "forced");
         o.addProperty("seat", seatIndex);
         if (tape != null) {
@@ -1380,7 +1386,7 @@ public final class AiTape {
             final Object r = begin("cfg", where, false);
             end(r, safe(() -> {
                 final JsonElement c = AiTapeCodec.config(game, seat, sa);
-                if (c.isJsonObject()) {
+                if (EXTENDED && c.isJsonObject()) {
                     // review #124 S2-1: the ability's id, so a forced replay finds the record's own trigger, not a look-alike
                     c.getAsJsonObject().addProperty("id", sa.getId());
                 }
@@ -1436,7 +1442,7 @@ public final class AiTape {
      */
     static JsonElement orderAnswer(final List<SpellAbility> offered, final List<SpellAbility> chosen) {
         final JsonElement a = AiTapeCodec.indices(offered, chosen);
-        if (a.isJsonObject() && chosen != null) {
+        if (EXTENDED && a.isJsonObject() && chosen != null) {
             final JsonArray ids = new JsonArray();
             for (SpellAbility sa : chosen) {
                 ids.add(sa == null ? -1 : sa.getId());
