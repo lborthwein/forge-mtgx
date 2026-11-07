@@ -2096,6 +2096,22 @@ public final class ForcedWinSolver {
     /** kill-line-1106 (report only): planner searches stopped by their limit; engine lines taken after planner lines failed. */
     public int plannerExhausted, planFailEngineTakes;
 
+    /**
+     * unified-search-1106 (unknownWorlds): a gated position (no planner line) is cached as having no line, unless the key
+     * is on and the engine's line there had no verified world (unknown, not refuted). Key off: always cached.
+     */
+    static boolean cachesGated(final Config cfg, final boolean engineUnverified) {
+        return !(cfg.unknownWorlds && engineUnverified);
+    }
+
+    /**
+     * unified-search-1106 (unknownWorlds): a declined position is cached as having no line, unless the key is on and its
+     * best line had no verified world (unknown, not refuted). Key off: always cached.
+     */
+    static boolean cachesDeclined(final Config cfg, final Eval best) {
+        return !(cfg.unknownWorlds && best != null && best.unverified());
+    }
+
     private Line offense0(Game live, String key) {
         decisions++;
         final int index = decisionIndex++;
@@ -2180,7 +2196,7 @@ public final class ForcedWinSolver {
                 return engine;
             }
             gated++;
-            if (!(cfg.unknownWorlds && engineUnverified)) {
+            if (cachesGated(cfg, engineUnverified)) {
                 noLineKey = key;
             }
             receipt("FORCED_WIN gate" + tag() + " turn=" + pos.turn + " none " + res.summary() + " probes=" + reader.probeStats.summary());
@@ -2219,7 +2235,7 @@ public final class ForcedWinSolver {
                 }
                 lastOutcome = "declined";
             }
-            if (!(cfg.unknownWorlds && best != null && best.unverified())) {
+            if (cachesDeclined(cfg, best)) {
                 noLineKey = key;
             }
             if (best == null) {
