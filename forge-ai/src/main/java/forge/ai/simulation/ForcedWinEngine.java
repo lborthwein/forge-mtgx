@@ -1363,6 +1363,7 @@ final class ForcedWinEngine {
             return null;
         }
         st.nodes++;
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.ENGINE_NODE); // work-units-1107 (no clock = no-op)
         forge.util.IdScope.install(cloneScope(node.ids));
         // a node is our priority with an empty stack (the copy was taken just after we passed it)
         LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
@@ -1492,6 +1493,7 @@ final class ForcedWinEngine {
             return null;
         }
         st.nodes++;
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.ENGINE_NODE); // work-units-1107 (no clock = no-op)
         forge.util.IdScope.install(cloneScope(node.ids));
         LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
         final List<Step> moves = moves(node);

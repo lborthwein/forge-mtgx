@@ -24,7 +24,8 @@ public final class WorkClock {
     public enum Site {
         STEP("mainLoopStep"), SBA("checkStateEffects"), COPY("makeCopy"), COPY_CARD("copyCard"), LEAK("copyLeakWalk"),
         AI_PLAY("canPlayAndPayFor"), AI_EVAL("evaluateBoardPosition"), AI_BLOCK("getPossibleBlockers"),
-        SVC("serviceRequest"), SVC_ITEM("serviceItem");
+        SVC("serviceRequest"), SVC_ITEM("serviceItem"), PLAN_NODE("plannerNode"), ENGINE_NODE("engineNode"),
+        OPP_NODE("oppMinNode");
 
         public final String key;
 
@@ -41,8 +42,9 @@ public final class WorkClock {
      * CONTRACT: changing a weight changes where budgets bind; record the weights with every read.
      */
     static final long[] DEFAULT_WEIGHTS = {
-        // STEP, SBA, COPY, COPY_CARD, LEAK, AI_PLAY, AI_EVAL, AI_BLOCK, SVC, SVC_ITEM
-        20_000L, 10_000L, 300_000L, 20_000L, 200L, 20_000L, 20_000L, 2_000L, 1_000_000L, 200_000L};
+        // STEP, SBA, COPY, COPY_CARD, LEAK, AI_PLAY, AI_EVAL, AI_BLOCK, SVC, SVC_ITEM, PLAN_NODE, ENGINE_NODE, OPP_NODE
+        20_000L, 10_000L, 300_000L, 20_000L, 200L, 20_000L, 20_000L, 2_000L, 1_000_000L, 200_000L, 20_000L, 100_000L,
+        100_000L};
 
     private static volatile long[] weights = parseWeights(System.getProperty("forge.workClock.weights"));
 

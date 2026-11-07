@@ -589,6 +589,7 @@ public final class ForcedWinPlanner {
             return;
         }
         nodes++;
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.PLAN_NODE); // work-units-1107 (no clock = no-op)
         result.visited++;
         if (!seen.add(s.key())) {
             return;
