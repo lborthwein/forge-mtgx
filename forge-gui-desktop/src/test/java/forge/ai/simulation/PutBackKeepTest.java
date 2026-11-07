@@ -43,7 +43,7 @@ public class PutBackKeepTest extends SimulationTest {
         final Game g = initAndCreateGame();
         final Player me = g.getPlayers().get(0);
         g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
-        final Card brainstorm = addCardToZone("Brainstorm", me, ZoneType.Stack);
+        final Card brainstorm = addCardToZone("Brainstorm", me, ZoneType.Graveyard);
         final Card oracle = addCardToZone("Thassa's Oracle", me, ZoneType.Hand);
         final Card petal = addCardToZone("Lotus Petal", me, ZoneType.Hand);
         final Card island = addCardToZone("Island", me, ZoneType.Hand);
