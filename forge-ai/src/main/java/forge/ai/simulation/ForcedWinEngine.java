@@ -2569,6 +2569,14 @@ final class ForcedWinEngine {
             return rest;
         }
 
+        /**
+         * solver-gaps-1104: the trigger's target classes, mana valued. Cards equal by controller, name and tapped state
+         * are one class (the same outcome), represented by the first. Order: our tapped permanents with a non-mana tap
+         * ability (re-enabling an engine); for an untap effect our untapped mana sources with their mana floated first,
+         * one class per colour our cards need that the source makes (else its first colour); our tapped mana sources;
+         * the opponent's permanents; our others. At most {@link #cap}. Engine primitives only (mana abilities, the
+         * trigger's effect kind, tapped state, mana costs): no card is named.
+         */
         List<String> wideCandidates(Game g, Player me, SpellAbility sa, SpellAbility slot) {
             final boolean untap = untaps(sa);
             int needed = 0;
