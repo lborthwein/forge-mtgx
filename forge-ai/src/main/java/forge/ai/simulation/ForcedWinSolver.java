@@ -181,6 +181,11 @@ public final class ForcedWinSolver {
         /** kill-line-1106 (off by default): the planner branches over a discard's hand classes; the line records the choice. */
         public boolean planDiscard = false;
         public int triggerVariants = 8;
+        /**
+         * unified-search-1106 (off by default): a line that won unopposed with no belief world verified before the deadline is
+         * unknown, not refuted: the position is not cached as having no line, so a later ask can verify it.
+         */
+        public boolean unknownWorlds = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -290,6 +295,7 @@ public final class ForcedWinSolver {
             c.verifyReplan = "true".equals(get.apply("verifyReplan")); // kill-line-1106
             c.planDiscard = "true".equals(get.apply("planDiscard")); // kill-line-1106
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
+            c.unknownWorlds = "true".equals(get.apply("unknownWorlds")); // unified-search-1106
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -718,6 +724,8 @@ public final class ForcedWinSolver {
     }
 
     private String lastOutcome = "?";
+    /** unified-search-1106 (unknownWorlds): the engine's line this decision had no verified world. */
+    private boolean engineUnverified;
     private int lastPlannerNodes;
     /** kill-line-1106 (report only): planner searches stopped by their limit; engine lines taken after planner lines failed. */
     public int plannerExhausted, planFailEngineTakes;
@@ -780,6 +788,7 @@ public final class ForcedWinSolver {
                 }
             }
         }
+        engineUnverified = false;
         if (res.lines.isEmpty()) {
             lastOutcome = "gate";
             final Line engine = engineFallback(live, pos, index, t0);
@@ -790,7 +799,9 @@ public final class ForcedWinSolver {
                 return engine;
             }
             gated++;
-            noLineKey = key;
+            if (!(cfg.unknownWorlds && engineUnverified)) {
+                noLineKey = key;
+            }
             receipt("FORCED_WIN gate" + tag() + " turn=" + pos.turn + " none " + res.summary() + " probes=" + reader.probeStats.summary());
             return null;
         }
@@ -816,7 +827,9 @@ public final class ForcedWinSolver {
                 }
             }
             lastOutcome = "declined";
-            noLineKey = key;
+            if (!(cfg.unknownWorlds && best != null && best.unverified())) {
+                noLineKey = key;
+            }
             if (best == null) {
                 // diagnostics (solver-gaps-1015): a width-model mismatch, with the position the width search saw
                 receipt("FORCED_WIN mismatch" + tag() + " turn=" + pos.turn + " phase=" + live.getPhaseHandler().getPhase()
@@ -1596,6 +1609,7 @@ public final class ForcedWinSolver {
         if (evalSink != null) {
             evalSink.add(e);
         }
+        engineUnverified = e.unverified();
         if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold) {
             if (likelyCands != null) {
                 // not forced: a likely-win candidate like the others (Part B)
@@ -1997,6 +2011,11 @@ public final class ForcedWinSolver {
 
         Eval(Line line) {
             this.line = line;
+        }
+
+        /** Won unopposed, and no belief world was verified: P(belief) here is unknown, not 0 (unified-search-1106). */
+        boolean unverified() {
+            return pUnopposed >= 1.0 && worldsRun == 0;
         }
 
         @Override

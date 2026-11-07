@@ -126,9 +126,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
         public boolean lineKeep = false;
 
+        /** unified-search-1106 (off by default): a sampled plan's steps keep the announced X they were recorded with. */
+        public boolean planX = false;
+
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified"));
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -159,6 +162,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineFloorAlways")) s.lineFloorAlways = o.get("lineFloorAlways").getAsBoolean();
             if (o.has("lineDuel")) s.lineDuel = o.get("lineDuel").getAsBoolean();
             if (o.has("unified")) s.unified = o.get("unified").getAsBoolean();
+            if (o.has("planX")) s.planX = o.get("planX").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -227,8 +231,15 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final boolean land;
         final String phase;
         final String label;
+        /** unified-search-1106 (plans.planX): the announced X this step was played with; -1 = none recorded. */
+        final int x;
 
         PStep(final SpellAbility sa, final String phase) {
+            this(sa, phase, -1);
+        }
+
+        PStep(final SpellAbility sa, final String phase, final int x) {
+            this.x = x;
             this.pass = sa == null;
             this.hostId = sa == null || sa.getHostCard() == null ? -1 : sa.getHostCard().getId();
             this.desc = sa == null ? "" : sa.getDescription();
@@ -238,7 +249,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
 
         String key() {
-            return phase + ":" + (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc);
+            return phase + ":" + (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc) + (x >= 0 ? "|x" + x : "");
         }
 
         boolean matches(final SpellAbility sa) {
@@ -352,6 +363,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     /** The menu candidate of a step (the first one: X variants of one entry play its first variant), or -1. */
     static int match(final RlCandidates.Menu m, final List<SpellAbility> objs, final PStep st) {
+        int first = -1;
         for (int c = 0; c < m.C(); c++) {
             if (m.cands.get(c).kind <= 0) {
                 continue;
@@ -361,10 +373,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 continue;
             }
             if (st.matches(ch == 0 ? null : objs.get(ch - 1))) {
-                return c;
+                if (st.x < 0) {
+                    return c;
+                }
+                if (first < 0) {
+                    first = c;
+                }
+                final com.google.gson.JsonElement f = m.cands.get(c).frag;
+                if (f != null && f.isJsonObject() && f.getAsJsonObject().has("x") && f.getAsJsonObject().get("x").getAsInt() == st.x) {
+                    return c; // unified-search-1106: the same X the plan was recorded with
+                }
             }
         }
-        return -1;
+        return first;
     }
 
     /**
@@ -378,6 +399,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final boolean sampled;
         final int maxSteps;
         final List<PStep> steps = new ArrayList<>();
+        /** unified-search-1106 (plans.planX). */
+        boolean recordX;
         Player seatPlayer;
 
         Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps) {
@@ -405,6 +428,16 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 return;
             }
             steps.add(new PStep(choice == 0 ? null : objs.get(choice - 1), String.valueOf(g.getPhaseHandler().getPhase())));
+        }
+
+        @Override
+        public void answered(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
+                final int choice, final int x) {
+            if (!recordX || x < 0) {
+                answered(g, p, m, objs, choice);
+            } else if (inPlan(g, p) && choice >= 0 && choice <= objs.size()) {
+                steps.add(new PStep(choice == 0 ? null : objs.get(choice - 1), String.valueOf(g.getPhaseHandler().getPhase()), x));
+            }
         }
 
         /** A sampled answer from the policy's probabilities over the frame's candidates. */
@@ -888,11 +921,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     t0 + Math.max(1000L, forge.ai.WallClock.budgetMs(rs.budgetMs()) / 2) * 1_000_000L);
             final List<Object> recs = new ArrayList<>();
             final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps);
+            greedy.recordX = spec.planX;
             recs.add(greedy);
             final long seed0 = rs.ls().nextWorld0Seed();
             for (int i = 0; i < spec.samples; i++) {
-                recs.add(new Recorder(ph.getTurn(), RlSearch.splitmix(seed0 ^ (0x5a3L + i)), spec.temperature, true,
-                        spec.maxSteps));
+                final Recorder sampled = new Recorder(ph.getTurn(), RlSearch.splitmix(seed0 ^ (0x5a3L + i)), spec.temperature, true,
+                        spec.maxSteps);
+                sampled.recordX = spec.planX;
+                recs.add(sampled);
             }
             final boolean[] ok = rs.ls().recordPlans(g, p, recs, st.knownTop, deadline);
             recordings += recs.size();

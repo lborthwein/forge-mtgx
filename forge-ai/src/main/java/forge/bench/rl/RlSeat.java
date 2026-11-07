@@ -240,6 +240,11 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
 
     public interface PriorityTrace {
         void answered(Game g, Player p, RlCandidates.Menu m, List<SpellAbility> menuObjs, int choice);
+
+        /** unified-search-1106: the same, with the answer's announced X (-1 = none). */
+        default void answered(Game g, Player p, RlCandidates.Menu m, List<SpellAbility> menuObjs, int choice, int x) {
+            answered(g, p, m, menuObjs, choice);
+        }
     }
 
     /** S1: the forced first priority answer of a play-out seat. */
@@ -524,7 +529,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 lastFamily.put(method, RlSchema.F_PRIORITY);
                 ok(method);
                 if (priorityTrace != null) {
-                    priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt());
+                    priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt(), ans.has("x") ? ans.get("x").getAsInt() : -1);
                 }
                 return ans;
             }
@@ -778,7 +783,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             // search-bones-1015 (S-b proposals): the recorder sees the answer played
             @SuppressWarnings("unchecked")
             final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
-            priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt());
+            priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt(), ans.has("x") ? ans.get("x").getAsInt() : -1);
         }
         if (family == RlSchema.F_PRIORITY && ans.get("choice").getAsInt() > 0) {
             final int turn = g.getPhaseHandler().getTurn();
