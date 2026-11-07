@@ -65,9 +65,19 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     public static final String SCHEMA_R3 = "mtgx-bvw-value/4";
     static final byte[] MAGIC = {'M', 'X', 'L', '1'};
 
+    /**
+     * unified-jar-1106 ({@code -Dforge.bench.label.flushRows=true}; off = nothing new is written): each row also goes to
+     * {@code partial-<pid>.mxl.gz} and {@code partial-index-<pid>.jsonl} as soon as it is computed, so a killed attempt
+     * keeps its rows. The usual files still get a finished game's rows; a reader takes partial rows only for games with
+     * no games row. A partial row's game was never digest-checked: it holds only positions a forced replay reached.
+     */
+    public static final boolean FLUSH_ROWS = Boolean.getBoolean("forge.bench.label.flushRows");
+    private static volatile Sink rowSink;
+
     /** Shared by the replay threads of one JVM. */
     public static final class Sink {
         private final Path labels, index, games;
+        private Path partialLabels, partialIndex;
         /**
          * Lane lki-fix-port-1027: set by the replay stall watchdog ({@code forge.bench.ReplayStallWatchdog}) when it
          * voids the unfinished games; a game that finishes after it writes nothing (its games row is the watchdog's
@@ -83,6 +93,28 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             this.labels = dir.resolve("labels-" + pid + ".mxl.gz");
             this.index = dir.resolve("index-" + pid + ".jsonl");
             this.games = dir.resolve("games-" + pid + ".jsonl");
+            this.partialLabels = dir.resolve("partial-" + pid + ".mxl.gz");
+            this.partialIndex = dir.resolve("partial-index-" + pid + ".jsonl");
+            if (FLUSH_ROWS) {
+                rowSink = this;
+            }
+        }
+
+        /** unified-jar-1106: one row now (see {@link #FLUSH_ROWS}). A failure is reported and never stops the label. */
+        synchronized void writePartial(final byte[] record, final JsonObject idxRow) {
+            try {
+                final ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                try (GZIPOutputStream gz = new GZIPOutputStream(bo)) {
+                    gz.write(record);
+                }
+                try (OutputStream o = new FileOutputStream(partialLabels.toFile(), true)) {
+                    o.write(bo.toByteArray());
+                }
+                Files.write(partialIndex, (RlWire.canonicalString(idxRow) + "\n").getBytes(StandardCharsets.UTF_8),
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            } catch (IOException e) {
+                System.err.println("[bvw-label] partial row not written: " + e);
+            }
         }
 
         synchronized void write(final byte[] member, final List<JsonObject> idx, final JsonObject game)
@@ -543,10 +575,16 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             dm.add("by_kind", mj);
             h.add("dp_meter", dm);
         }
-        records.add(record(h, payload));
+        final byte[] rec = record(h, payload);
+        records.add(rec);
         headers.add(h);
         labels.merge(r.label, 1, Integer::sum);
-        idx.add(indexRow(h));
+        final JsonObject ir = indexRow(h);
+        idx.add(ir);
+        final Sink rs = rowSink;
+        if (FLUSH_ROWS && rs != null) {
+            rs.writePartial(rec, ir);
+        }
     }
 
     /**
