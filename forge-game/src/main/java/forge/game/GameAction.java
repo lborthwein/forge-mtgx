@@ -1399,6 +1399,7 @@ public class GameAction {
     }
     public boolean checkStateEffects(final boolean runEvents, final Set<Card> affectedCards) {
         forge.game.WorkMeter.tick("checkStateEffects"); // void-causes-1104: hang watchdog unit (no meter = no-op)
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.SBA); // work-units-1107 (no clock = no-op)
         // check game over early for win conditions such as Platinum Angel + Hurricane lethal for both players
         checkGameOverCondition();
         if (game.isGameOver()) {

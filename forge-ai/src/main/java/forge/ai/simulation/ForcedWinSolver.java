@@ -1827,7 +1827,7 @@ public final class ForcedWinSolver {
      * gives each sequence), never Long.MAX_VALUE (which overflows where the evaluation adds its grace).
      */
     Eval evaluateBudgeted(Game live, Line line, long seed) {
-        return evaluate(live, line, seed, deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
+        return evaluate(live, line, seed, deadlineAt(forge.game.WorkClock.nanoTime() + budgetMs() * 1_000_000L));
     }
 
     public LibExact libExact(Game live, Proposal p, int seqCap) {
@@ -1868,7 +1868,7 @@ public final class ForcedWinSolver {
             Eval e = null;
             try {
                 e = evaluate(live, line, mix(mix(cfg.seed, key), 0x9B800L + s),
-                        deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
+                        deadlineAt(forge.game.WorkClock.nanoTime() + budgetMs() * 1_000_000L));
             } catch (RuntimeException ex) {
                 x.why = "error:" + ex.getClass().getSimpleName();
             } finally {
@@ -1926,7 +1926,7 @@ public final class ForcedWinSolver {
         try {
             libAllWorlds = true;
             e = evaluate(live, (Line) p.line, mix(mix(cfg.seed, key), 0x5A3B1EL),
-                    deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
+                    deadlineAt(forge.game.WorkClock.nanoTime() + budgetMs() * 1_000_000L));
         } catch (RuntimeException ex) {
             x.why = "error:" + ex.getClass().getSimpleName();
         } finally {
@@ -1997,7 +1997,7 @@ public final class ForcedWinSolver {
             }
             return null;
         }
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         final int copies0 = copies + engineStats.copies, probes0 = reader.probeStats.probes, eng0 = engineStats.nodes;
         lastOutcome = "?";
         lastPlannerNodes = 0;
@@ -2025,7 +2025,7 @@ public final class ForcedWinSolver {
         }
         if (work != null && forge.ai.AiWork.TRACE) {
             System.err.println("AIWORK used=" + work.used() + " cap=" + workCap + " spent=" + work.spent() + tag() + " turn="
-                    + live.getPhaseHandler().getTurn() + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+                    + live.getPhaseHandler().getTurn() + " ms=" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000);
         }
         if (work != null && work.spent()) {
             // a cap hit, never a proof: no line is taken or proposed, whatever was found before the cap
@@ -2042,7 +2042,7 @@ public final class ForcedWinSolver {
                     + live.getPhaseHandler().getPhase() + " used=" + work.used() + " cap=" + workCap + " at=" + work.spentAt());
         }
         receipt("FORCED_WIN cost" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase=" + live.getPhaseHandler().getPhase()
-                + " outcome=" + lastOutcome + " ms=" + (System.nanoTime() - t0) / 1_000_000 + " plannerNodes="
+                + " outcome=" + lastOutcome + " ms=" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000 + " plannerNodes="
                 + lastPlannerNodes + " engineNodes=" + (engineStats.nodes - eng0) + " copies="
                 + (copies + engineStats.copies - copies0) + " probes=" + (reader.probeStats.probes - probes0)
                 + (work != null ? " aiWork=" + work.used() : ""));
@@ -2050,7 +2050,7 @@ public final class ForcedWinSolver {
             // bvw-step1-build-1024: the decision's work in counter units (diagnostics only; budget calibration)
             System.err.println("FORCED_WIN meter" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase="
                     + live.getPhaseHandler().getPhase() + " outcome=" + lastOutcome + " budget="
-                    + (cfg.counter ? "counter" : "ms") + " ms=" + (System.nanoTime() - t0) / 1_000_000 + " "
+                    + (cfg.counter ? "counter" : "ms") + " ms=" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000 + " "
                     + meter.since(m0).toJson());
         }
         return l;
@@ -2115,7 +2115,7 @@ public final class ForcedWinSolver {
     private Line offense0(Game live, String key) {
         decisions++;
         final int index = decisionIndex++;
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         // bvw-step1-build-1024: budget=counter reads no wall clock (0 = no wall)
         decisionWall = cfg.counter ? 0L : t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
         decisionStart = t0;
@@ -2173,7 +2173,7 @@ public final class ForcedWinSolver {
                 payOnly = true;
             }
         }
-        plannerNanos += System.nanoTime() - t0;
+        plannerNanos += forge.game.WorkClock.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
         if (res.exhausted) {
             plannerExhausted++; // kill-line-1106 (report only): the planner's node or time limit stopped this search
@@ -2208,9 +2208,9 @@ public final class ForcedWinSolver {
         if (ForcedWinEngine.TRACE) {
             receipt("FW_POSITION " + pos.describe());
         }
-        final long t1 = System.nanoTime();
-        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : System.nanoTime());
-        engineNanos += System.nanoTime() - t1;
+        final long t1 = forge.game.WorkClock.nanoTime();
+        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : forge.game.WorkClock.nanoTime());
+        engineNanos += forge.game.WorkClock.nanoTime() - t1;
         if (cfg.engineAfterPlanFail && evalSink != null && (best == null || best.pUnopposed < 1.0 || best.pBelief < 1.0
                 || best.worldsRun < cfg.worlds)) {
             // R2-4 (b), a label's proposals: no planner line verified as forced (every world): the engine searches the
@@ -2244,10 +2244,10 @@ public final class ForcedWinSolver {
                         + " pos=" + pos.describe());
             }
             receipt("FORCED_WIN declined" + tag() + " turn=" + pos.turn + " best=" + (best == null ? "none" : best)
-                    + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+                    + " ms=" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000);
             return null;
         }
-        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + best + " ms=" + (System.nanoTime() - t0) / 1_000_000
+        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + best + " ms=" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000
                 + " copies=" + copies + (payOnly ? " paySearch" : ""));
         lastOutcome = "take";
         return best.line;
@@ -2427,7 +2427,7 @@ public final class ForcedWinSolver {
         if (redraw != null) {
             return threatHonest(live, opp, pending, without, revealed, worlds);
         }
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         threatChecks++;
         final Threat t = new Threat();
         final Position base = oppReader.read(live, opp, null, true, revealed ? opp : me, pending);
@@ -2478,7 +2478,7 @@ public final class ForcedWinSolver {
         }
         t.worlds = n;
         t.p = (double) wins / n;
-        plannerNanos += System.nanoTime() - t0;
+        plannerNanos += forge.game.WorkClock.nanoTime() - t0;
         return t;
     }
 
@@ -2496,7 +2496,7 @@ public final class ForcedWinSolver {
     public int defendCuts;
 
     private boolean pastDeadline() {
-        if (defendDeadline != 0 && System.nanoTime() > defendDeadline) {
+        if (defendDeadline != 0 && forge.game.WorkClock.nanoTime() > defendDeadline) {
             defendCut = true;
             return true;
         }
@@ -2504,7 +2504,7 @@ public final class ForcedWinSolver {
     }
 
     private Threat threatHonest(Game live, Player opp, Card pending, List<Card> without, boolean revealed, int worlds) {
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         threatChecks++;
         final Threat t = new Threat();
         final PhaseHandler ph = live.getPhaseHandler();
@@ -2561,7 +2561,7 @@ public final class ForcedWinSolver {
             lim.ms = cfg.planMs;
             if (defendDeadline != 0) {
                 // review S3-1: a world's width search never runs past the defense's wall
-                lim.ms = Math.max(1, Math.min(lim.ms, (defendDeadline - System.nanoTime()) / 1_000_000L));
+                lim.ms = Math.max(1, Math.min(lim.ms, (defendDeadline - forge.game.WorkClock.nanoTime()) / 1_000_000L));
             }
             final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
             ran++;
@@ -2574,7 +2574,7 @@ public final class ForcedWinSolver {
         }
         t.worlds = ran;
         t.p = ran == 0 ? 0 : (double) wins / ran;
-        plannerNanos += System.nanoTime() - t0;
+        plannerNanos += forge.game.WorkClock.nanoTime() - t0;
         return t;
     }
 
@@ -2630,7 +2630,7 @@ public final class ForcedWinSolver {
             return Decision.NONE;
         }
         defendedStackId = si.getId();
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         final Player opp = top.getActivatingPlayer();
         // their forced-win chance if it resolves, and if it is countered (the spell gone)
         final Threat resolves = threat(live, opp, top.getHostCard(), null, false, cfg.defenseWorlds);
@@ -2644,7 +2644,7 @@ public final class ForcedWinSolver {
         final String verdict = delta >= cfg.counterDelta ? "counter" : countered.p >= cfg.counterDelta ? "hold" : "native";
         receipt("FORCED_WIN defense" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " spell=" + top.getHostCard().getName()
                 + " resolves=" + resolves + " countered=" + countered + " -> " + verdict + " with=" + counter.getHostCard().getName()
-                + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+                + " ms=" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000);
         if ("counter".equals(verdict)) {
             threats++;
             counters++;
@@ -2716,7 +2716,7 @@ public final class ForcedWinSolver {
         } catch (Throwable e) {
             return null;
         }
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         startDeadline();
         try {
             final Game live = me.getGame();
@@ -2764,7 +2764,7 @@ public final class ForcedWinSolver {
             }
             receipt("FORCED_WIN discardP turn=" + live.getPhaseHandler().getTurn() + " now=" + nowT + " tried=" + tried
                     + " take=" + (best == null ? "-" : best.getName()) + (defendCut ? " CUT" : "") + " ms="
-                    + (System.nanoTime() - t0) / 1_000_000);
+                    + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000);
             if (defendCut) {
                 defendCuts++;
                 return null;
@@ -2859,7 +2859,7 @@ public final class ForcedWinSolver {
 
     private void startDeadline() {
         defendCut = false;
-        defendDeadline = cfg.defendMs > 0 ? System.nanoTime() + forge.ai.WallClock.budgetMs(cfg.defendMs) * 1_000_000L : 0;
+        defendDeadline = cfg.defendMs > 0 ? forge.game.WorkClock.nanoTime() + forge.ai.WallClock.budgetMs(cfg.defendMs) * 1_000_000L : 0;
     }
 
     private SpellAbility counterFor(Game g, SpellAbility top) {
@@ -2894,7 +2894,7 @@ public final class ForcedWinSolver {
                 || valid.isEmpty() || max != 1) {
             return null;
         }
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         try {
             final Game live = me.getGame();
             final Threat nowT = threat(live, p, null, null, true, 1);
@@ -2910,7 +2910,7 @@ public final class ForcedWinSolver {
                 tried.add(c.getName() + (after == null ? ":stops" : ":still"));
                 if (after == null) {
                     receipt("FORCED_WIN discard turn=" + live.getPhaseHandler().getTurn() + " take=" + c.getName()
-                            + " threat=" + now + " tried=" + tried + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+                            + " threat=" + now + " tried=" + tried + " ms=" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000);
                     final CardCollection out = new CardCollection();
                     out.add(c);
                     return out;
@@ -3132,7 +3132,7 @@ public final class ForcedWinSolver {
         el.xVariants = cfg.xVariants;
         el.stack = stackWindow;
         el.costChoice = cfg.engineCostChoice;
-        final long t1 = System.nanoTime();
+        final long t1 = forge.game.WorkClock.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
         long engineDeadline = deadlineAt(Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs),
                 budgetMs() - reserve) * 1_000_000L, t0 + (budgetMs() - reserve) * 1_000_000L));
@@ -3198,7 +3198,7 @@ public final class ForcedWinSolver {
                 }
             }
         }
-        engineNanos += System.nanoTime() - t1;
+        engineNanos += forge.game.WorkClock.nanoTime() - t1;
         meter.engineRuns++;
         meter.engineNodes += engineStats.nodes - en0;
         meter.engineSteps += engineStats.steps - es0;
@@ -3206,7 +3206,7 @@ public final class ForcedWinSolver {
         meter.enginePathPrunes += engineStats.pathPrunes - ep0;
         meter.cacApplies += engineStats.cacApplies - ca0;
         meter.engineLifetimeStops += engineStats.lifetimeStops - el0;
-        meter.engineNanos += System.nanoTime() - t1;
+        meter.engineNanos += forge.game.WorkClock.nanoTime() - t1;
         meter.engineWallCuts += engineStats.cut - ec0;
         meter.engineDeadlineStops += engineStats.deadlineStops - ed0;
         meter.engineCapStops += engineStats.capStops - ek0;
@@ -3223,7 +3223,7 @@ public final class ForcedWinSolver {
         }
         engineFound++;
         evaluated++;
-        final long evalDeadline = deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
+        final long evalDeadline = deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L, forge.game.WorkClock.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
         final boolean ownEval = cfg.engineEvalSteps > 0 && evalSink != null;
         if (ownEval) {
             engineEvalBudget = cfg.engineEvalSteps; // R3-2: label mode, the engine line's own eval-step budget
@@ -3243,7 +3243,7 @@ public final class ForcedWinSolver {
             int k = 0;
             for (Line alt : line.alternates) {
                 final Eval ea = evaluate(live, alt, mix(cfg.seed, index * 1000L + 999),
-                        deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
+                        deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L, forge.game.WorkClock.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
                 meter.altLines++;
                 receipt("FORCED_WIN eval engine-alt" + tag() + " " + (++k) + " " + ea);
                 if ((ea.pUnopposed >= 1.0 ? ea.pBelief : 0) > (e.pUnopposed >= 1.0 ? e.pBelief : 0)) {
@@ -3277,7 +3277,7 @@ public final class ForcedWinSolver {
             }
             return null;
         }
-        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms=" + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000);
         return taken;
     }
 
@@ -3317,7 +3317,7 @@ public final class ForcedWinSolver {
                 if (n == rep.times) {
                     ev = found;
                 } else {
-                    if (System.nanoTime() > deadline) {
+                    if (forge.game.WorkClock.nanoTime() > deadline) {
                         loopVariantCuts++;
                         curve.append(n).append(":cut ");
                         if (n > rep.times) {
@@ -3332,7 +3332,7 @@ public final class ForcedWinSolver {
                     v.knownTop = line.knownTop;
                     loopVariants++;
                     ev = evaluate(live, v, mix(cfg.seed, index * 1000L + 999), deadline); // the found line's worlds
-                    if (ev.pUnopposed >= 1.0 && ev.worldsRun < beliefWorlds(live) && System.nanoTime() > deadline) {
+                    if (ev.pUnopposed >= 1.0 && ev.worldsRun < beliefWorlds(live) && forge.game.WorkClock.nanoTime() > deadline) {
                         loopVariantCuts++; // cut by the deadline: unresolved
                         curve.append(n).append(":cut ");
                         if (n > rep.times) {
@@ -3425,7 +3425,7 @@ public final class ForcedWinSolver {
                     v.knownTop = line.knownTop;
                     ev = evaluate(live, v, mix(cfg.seed, index * 1000L + 999), // the same worlds as the found line
                             deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L,
-                                    System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
+                                    forge.game.WorkClock.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
                     capped = meter.evalCapStops != ec || meter.evalDeadlineStops != ed || meter.playoutStepCaps != sc
                             || meter.playoutCallCaps != cc || meter.playoutWallCuts != wc || meter.playoutAiWorkCuts != aw
                             || ev.pUnopposed >= 1.0 && ev.worldsRun < cfg.worlds; // a world-0 loss stops the worlds: resolved
@@ -3493,7 +3493,7 @@ public final class ForcedWinSolver {
     /** deck-belief-1105: stop starting work on an unprovable line past {@link Config#unprovenMs} (off: never). */
     private boolean unprovenStop(boolean unproven) {
         final int ms = cfg.capMs > 0 ? (cfg.unprovenMs > 0 ? Math.min(cfg.unprovenMs, cfg.capMs) : cfg.capMs) : cfg.unprovenMs;
-        if (ms <= 0 || !unproven || System.nanoTime() <= decisionStart + ms * 1_000_000L) {
+        if (ms <= 0 || !unproven || forge.game.WorkClock.nanoTime() <= decisionStart + ms * 1_000_000L) {
             return false;
         }
         unprovenStops++;
@@ -3511,7 +3511,7 @@ public final class ForcedWinSolver {
         if (cands == null || cands.isEmpty()) {
             return null;
         }
-        final long l0 = System.nanoTime();
+        final long l0 = forge.game.WorkClock.nanoTime();
         // stop the rollouts half a second before the decision's budget: measured at the full budget, Part B decisions
         // ended at 8.0-8.4 s (a rollout in flight, the line's set-up)
         final long deadline = t0 + (budgetMs() - 500) * 1_000_000L;
@@ -3526,7 +3526,7 @@ public final class ForcedWinSolver {
         double alt = 0;
         int worlds = 0;
         for (int w = 1; w <= cfg.likelyWorlds; w++) {
-            if (System.nanoTime() > deadline) {
+            if (forge.game.WorkClock.nanoTime() > deadline) {
                 break;
             }
             final long ws = mix(cfg.seed, index * 1000L + 500 + w);
@@ -3562,7 +3562,7 @@ public final class ForcedWinSolver {
         final boolean take = pBest > pAlt + 1e-9;
         receipt("FORCED_WIN likely" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " worlds=" + worlds
                 + String.format(" P(own play)=%.2f P(best)=%.2f", pAlt, pBest) + " -> " + (take ? "take #" + best : "keep own play")
-                + " ms=" + (System.nanoTime() - l0) / 1_000_000 + sb);
+                + " ms=" + (forge.game.WorkClock.nanoTime() - l0) / 1_000_000 + sb);
         if (!take) {
             return null;
         }
@@ -3633,7 +3633,7 @@ public final class ForcedWinSolver {
             while (!g.isGameOver() && ph.getTurn() <= last && steps < 20 * cfg.maxSteps) {
                 ph.mainLoopStep();
                 steps++;
-                if ((steps & 31) == 0 && System.nanoTime() > deadline) {
+                if ((steps & 31) == 0 && forge.game.WorkClock.nanoTime() > deadline) {
                     return -1; // out of budget: the world is dropped
                 }
             }
@@ -3721,7 +3721,7 @@ public final class ForcedWinSolver {
      */
     public Screen screen(final Game g, final List<Integer> knownTop, final int nodes, final long ms) {
         final Screen s = new Screen();
-        final long t0 = System.nanoTime();
+        final long t0 = forge.game.WorkClock.nanoTime();
         try {
             final Position pos = readPosition(g, knownTop);
             if (pos == null) {
@@ -3754,7 +3754,7 @@ public final class ForcedWinSolver {
             s.failed = true;
             s.best = String.valueOf(e);
         } finally {
-            s.nanos = System.nanoTime() - t0;
+            s.nanos = forge.game.WorkClock.nanoTime() - t0;
         }
         return s;
     }
@@ -3832,7 +3832,7 @@ public final class ForcedWinSolver {
 
     /** Engine-evaluate up to {@code cfg.top} distinct candidates; the best, or null. */
     Eval evaluateTop(Game live, List<Line> lines, int index) {
-        return evaluateTop(live, lines, index, System.nanoTime());
+        return evaluateTop(live, lines, index, forge.game.WorkClock.nanoTime());
     }
 
     /** As above; the evaluation's budget counts from {@code from} (the decision's start with the payment search on). */
@@ -3851,7 +3851,7 @@ public final class ForcedWinSolver {
         }
         Eval best = null;
         for (int i = 0; i < picked.size(); i++) {
-            if (best != null && System.nanoTime() > deadline) {
+            if (best != null && forge.game.WorkClock.nanoTime() > deadline) {
                 meter.evalDeadlineStops++;
                 break;
             }
@@ -3931,7 +3931,7 @@ public final class ForcedWinSolver {
         final Set<String> prot = new HashSet<>();
         final int nWorlds = beliefWorlds(live); // deck-belief-1105 (cfg.worlds when off)
         for (int w = 1; w <= nWorlds; w++) {
-            if (n > 0 && System.nanoTime() > deadline) {
+            if (n > 0 && forge.game.WorkClock.nanoTime() > deadline) {
                 meter.evalDeadlineStops++;
                 break;
             }
@@ -4004,7 +4004,7 @@ public final class ForcedWinSolver {
                 }
             }
             for (int j = 0; j < spells && worst.won; j++) {
-                if (wall != 0 && System.nanoTime() > wall) {
+                if (wall != 0 && forge.game.WorkClock.nanoTime() > wall) {
                     worst = new Outcome();
                     worst.why = "wall";
                     libCut = true;

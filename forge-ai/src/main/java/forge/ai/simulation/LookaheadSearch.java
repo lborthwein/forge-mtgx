@@ -1868,9 +1868,12 @@ public final class LookaheadSearch {
             this.deadline = deadline;
         }
 
-        /** Past the deadline, or stopped by the wall. */
+        /**
+         * Past the deadline, or stopped by the wall. work-units-1107: the deadline is on {@link forge.game.WorkClock}'s
+         * time (a play-out reads its lane's clock; without a clock it is System.nanoTime, as before).
+         */
         public boolean over() {
-            return stopped || System.nanoTime() - deadline > 0;
+            return stopped || forge.game.WorkClock.nanoTime() - deadline > 0;
         }
 
         void stop() {
@@ -1929,9 +1932,11 @@ public final class LookaheadSearch {
         }
 
         final long t0 = System.nanoTime();
+        // work-units-1107: the budget's start on the work clock (no clock: t0, as before)
+        final long v0 = forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
         // lane forge-continue-1011: a "Continue from here" rebuild (forge.ai.WallClock) stretches the deadline so it never
         // binds; the budgeted/unbudgeted test here and every failure path stay the configured ones
-        budget = cfg.budgetMs > 0 ? new Budget(t0 + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
+        budget = cfg.budgetMs > 0 ? new Budget(v0 + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         try {
             return decideSearched(ctrl, def, live, me, index, onStack, ph, turn, t0);
         } catch (RuntimeException e) {
@@ -2855,7 +2860,9 @@ public final class LookaheadSearch {
         forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
         // lane forge-continue-1011: as in decide, a rebuild's deadline never binds (forge.ai.WallClock); the test is unchanged
         // search-bones-1015: S-b's proposal stage spent part of the decision's budget before this call (0 = none)
-        final long start = decisionStartNanos != 0L ? decisionStartNanos : t0;
+        // work-units-1107: decisionStartNanos is on the work clock when one is installed; the own start too
+        final long start = decisionStartNanos != 0L ? decisionStartNanos
+                : forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
         final Budget b = cfg.budgetMs > 0 ? new Budget(start + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         budget = b;
         boolean searched = false;
@@ -4624,6 +4631,9 @@ public final class LookaheadSearch {
             }
             return true;
         }
+        if (forge.game.WorkClock.active()) {
+            return runLanes(tasks, wall); // work-units-1107: a work clock on the deciding thread
+        }
         List<Future<?>> fs = new ArrayList<>();
         final java.util.concurrent.atomic.AtomicLong[] acc = poolCpu == null ? null : forge.ai.CpuAccount.get();
         // the wall only: how many tasks are running (to count the stragglers at a cut)
@@ -4688,6 +4698,91 @@ public final class LookaheadSearch {
                 throw new RuntimeException("look-ahead worker failed", e);
             }
         }
+        return true;
+    }
+
+    /**
+     * work-units-1107 (a work clock on the deciding thread; never without one): the tasks on fixed virtual lanes. Task
+     * i runs on lane i mod L (L = the configured threads, 8 when auto, so the lanes never depend on the host), each lane
+     * runs its tasks in order on one pool thread under a fork of the deciding thread's clock, which starts at the
+     * decision's virtual now; a play-out's budget reads its lane's clock. Which play-outs a budget cuts is then a
+     * function of their work, not of the host's speed or the pool's scheduling. After the join the deciding clock is at
+     * the latest lane's end. The hard wall is the clock's real-time safety wall (none armed: the plain wait) plus
+     * {@link #WALL_GRACE_MS}; a cut there is a safety-wall hit (nondeterministic, counted), as in {@link #runAll}.
+     */
+    private boolean runLanes(List<Runnable> tasks, Budget wall) {
+        final forge.game.WorkClock.Clock parent = forge.game.WorkClock.current();
+        final int lanesCfg = cfg.threads > 0 ? cfg.threads : 8;
+        final int nl = Math.max(1, Math.min(lanesCfg, tasks.size()));
+        final forge.game.WorkClock.Clock[] lanes = new forge.game.WorkClock.Clock[nl];
+        final List<List<Runnable>> per = new ArrayList<>();
+        for (int i = 0; i < nl; i++) {
+            lanes[i] = parent.fork();
+            per.add(new ArrayList<>());
+        }
+        for (int i = 0; i < tasks.size(); i++) {
+            per.get(i % nl).add(tasks.get(i));
+        }
+        final java.util.concurrent.atomic.AtomicLong[] acc = poolCpu == null ? null : forge.ai.CpuAccount.get();
+        final AtomicInteger running = new AtomicInteger();
+        final List<Future<?>> fs = new ArrayList<>();
+        for (int i = 0; i < nl; i++) {
+            final forge.game.WorkClock.Clock lane = lanes[i];
+            final List<Runnable> mine = per.get(i);
+            fs.add(pool.submit(() -> {
+                final forge.game.WorkClock.Clock prev = forge.game.WorkClock.install(lane);
+                final long c0 = acc == null ? 0L : forge.ai.CpuAccount.now();
+                if (acc != null) {
+                    forge.ai.CpuAccount.set(acc);
+                }
+                running.incrementAndGet();
+                try {
+                    for (Runnable r : mine) {
+                        r.run();
+                    }
+                } finally {
+                    running.decrementAndGet();
+                    if (acc != null) {
+                        forge.ai.CpuAccount.set(null);
+                        forge.ai.CpuAccount.charge(acc, forge.ai.CpuAccount.now() - c0);
+                    }
+                    forge.game.WorkClock.install(prev);
+                }
+            }));
+        }
+        final long safety = parent.safetyWall();
+        final boolean cutOk = wall != null && safety != 0;
+        final long cut = safety + WALL_GRACE_MS * 1_000_000L;
+        for (int i = 0; i < fs.size(); i++) {
+            try {
+                if (cutOk) {
+                    fs.get(i).get(Math.max(0L, cut - System.nanoTime()), TimeUnit.NANOSECONDS);
+                } else {
+                    fs.get(i).get();
+                }
+            } catch (TimeoutException e) {
+                wall.stop();
+                wall.wallCut = true;
+                for (int j = i; j < fs.size(); j++) {
+                    fs.get(j).cancel(false);
+                }
+                stats.wallCuts++;
+                stats.wallStragglers += running.get();
+                parent.markWallHit();
+                System.err.println("[lookahead] work-units safety wall: lanes ran " + WALL_GRACE_MS + " ms past it; "
+                        + running.get() + " still running were told to stop, the decision is capped");
+                return false;
+            } catch (Exception e) {
+                if (wall != null) {
+                    wall.stop();
+                }
+                for (int j = i + 1; j < fs.size(); j++) {
+                    fs.get(j).cancel(false);
+                }
+                throw new RuntimeException("look-ahead worker failed", e);
+            }
+        }
+        parent.join(lanes);
         return true;
     }
 
@@ -7000,7 +7095,9 @@ public final class LookaheadSearch {
         poolCpu = pc;
         final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
         forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
-        final long start = startNanos != 0L ? startNanos : t0;
+        // work-units-1107: startNanos is on the work clock when one is installed; the own start too
+        final long start = startNanos != 0L ? startNanos
+                : forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
         final Budget b = cfg.budgetMs > 0 ? new Budget(start + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         budget = b;
         boolean searched = false;

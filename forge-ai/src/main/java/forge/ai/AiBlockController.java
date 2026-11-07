@@ -86,9 +86,14 @@ public class AiBlockController {
         // must-block test walks them all); no budget open = a no-op
         final long work = AiWork.current() == null ? 0 : 1L + combat.getAttackers().size();
 
+        // work-units-1107: the same charge on the work clock (no clock = no-op)
+        final long clockWork = forge.game.WorkClock.active() ? 1L + combat.getAttackers().size() : 0;
         for (final Card blocker : blockersLeft) {
             if (work > 0) {
                 AiWork.tick("getPossibleBlockers", work);
+            }
+            if (clockWork > 0) {
+                forge.game.WorkClock.tick(forge.game.WorkClock.Site.AI_BLOCK, clockWork);
             }
             // if the blocker can block a creature with lure it can't block a creature without
             if (CombatUtil.canBlock(attacker, blocker, combat)) {
