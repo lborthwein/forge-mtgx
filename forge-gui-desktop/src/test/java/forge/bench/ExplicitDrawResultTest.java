@@ -62,4 +62,15 @@ public class ExplicitDrawResultTest {
         config.addProperty("honorDrawReason", true);
         Assert.assertTrue(configured(config));
     }
+
+    @Test
+    public void searchSpecReachesTheActorKey() throws Exception {
+        final JsonObject search = new JsonObject();
+        search.addProperty("server", "127.0.0.1:1");
+        final JsonObject config = new JsonObject();
+        config.add("search", search);
+        Assert.assertFalse(configured(config), "spec without the key: off");
+        search.addProperty("honorDrawReason", true);
+        Assert.assertTrue(configured(config), "spec with the key: on");
+    }
 }

@@ -219,6 +219,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * Attaching is per game: a second seat of that game with infoState on reads it too.
          */
         public boolean infoAttach = false;
+        /** Default off: an explicit draw reason is reported as a draw, read by the actor from this spec. */
+        public boolean honorDrawReason = false;
         /** honest-belief-1020: the cube list file ({@code mtgx-belief-cube/1}; {@code classpath:} = a jar resource) and its pin. */
         public String beliefCube;
         public String beliefCubeSha256;
@@ -244,7 +246,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "honorDrawReason", "beliefDeck", "choiceScorer"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -300,6 +302,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("belief")) c.belief = o.get("belief").getAsString();
             if (o.has("infoState")) c.infoState = o.get("infoState").getAsBoolean();
             if (o.has("infoAttach")) c.infoAttach = o.get("infoAttach").getAsBoolean();
+            if (o.has("honorDrawReason")) c.honorDrawReason = o.get("honorDrawReason").getAsBoolean();
             armInfoState(c);
             if (o.has("beliefCube") && !o.get("beliefCube").isJsonNull()) c.beliefCube = o.get("beliefCube").getAsString();
             if (o.has("beliefCubeSha256") && !o.get("beliefCubeSha256").isJsonNull()) {

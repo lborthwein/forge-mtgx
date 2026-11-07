@@ -207,6 +207,7 @@ public final class RlActorBench {
         }
         if (o.has("search") && o.get("search").isJsonObject()) {
             c.search = RlSearch.Config.parse(o.getAsJsonObject("search"));
+            if (c.search.honorDrawReason) c.honorDrawReason = true; // the baseline spec can reach the actor key
             if (o.has("searchAlt") && o.get("searchAlt").isJsonObject()) {
                 // choice-search-1105: the alt spec over the game's spec (the harness keys it omits, server, policySha,
                 // the logs, come from the game's spec); its decision log is the game's with an "-alt" suffix
