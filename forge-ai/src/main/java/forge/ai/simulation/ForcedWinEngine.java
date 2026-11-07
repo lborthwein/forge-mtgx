@@ -179,6 +179,8 @@ final class ForcedWinEngine {
          * chunks doubling, not once per step. More budget plays longer loops.
          */
         boolean longLoops = false;
+        /** engine-reach-1107 (false = off): node copies keep this turn's may-play and activation counts ({@link GameCopier#setTurnLimits}). */
+        boolean turnLimits = false;
         /**
          * unified-search-1106 (null = off): a found win must also win here (a play-out in another world of our library), or the
          * search goes on; and at each node the moves that drew from our library are searched after the others, so a line
@@ -590,6 +592,7 @@ final class ForcedWinEngine {
         return f;
     }
 
+
     /** The repetitions at which the opponent's life, library or poison is done at this rate, past {@code reps}; else the cap. */
     private int goalCap(long[] now, long[] prev, int reps) {
         if (prev == null) {
@@ -670,6 +673,7 @@ final class ForcedWinEngine {
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
+                copier.setTurnLimits(lim.turnLimits); // engine-reach-1107
                 root.g = copier.makeCopy();
                 root.g.staleStatics = lim.staleStatics;
                 root.me = (Player) copier.find(liveMe);
@@ -752,6 +756,8 @@ final class ForcedWinEngine {
     private boolean out() {
         return st.nodes >= lim.nodes || System.nanoTime() > deadline;
     }
+
+
 
     private List<Step> dfs(Node node, int depth) {
         if (out() || depth >= lim.depth) {
@@ -1496,6 +1502,7 @@ final class ForcedWinEngine {
             } else {
                 final GameCopier copier = new GameCopier(node.g, true);
                 copier.setStaleStatics(lim.staleStatics); // unified-search-1106
+                copier.setTurnLimits(lim.turnLimits); // engine-reach-1107
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records

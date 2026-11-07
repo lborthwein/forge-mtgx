@@ -167,6 +167,11 @@ public final class ForcedWinSolver {
         /** unified-search-1106 (off by default): {@link ForcedWinEngine.Limits#longLoops}. */
         public boolean engineLongLoops = false;
         /**
+         * engine-reach-1107 (off by default): engine nodes and the solver's play-out copies keep this turn's may-play and
+         * activation counts ({@link GameCopier#setTurnLimits}).
+         */
+        public boolean turnLimits = false;
+        /**
          * kill-line-1106 (off by default): the follower pays as the line recorded. A step the planner paid with life pays
          * its Phyrexian pips with life, not with a mana source Forge AI's payment would pick first.
          */
@@ -302,6 +307,7 @@ public final class ForcedWinSolver {
             c.engineOpen = "true".equals(get.apply("engineOpen")); // unified-search-1106
             c.engineVerify = "true".equals(get.apply("engineVerify")); // unified-search-1106
             c.engineLongLoops = "true".equals(get.apply("engineLongLoops")); // unified-search-1106
+            c.turnLimits = "true".equals(get.apply("turnLimits")); // engine-reach-1107
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
@@ -1119,6 +1125,7 @@ public final class ForcedWinSolver {
                     final GameCopier copier = new GameCopier(live, true);
                     copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
+                    copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
                     g = copier.makeCopy();
                     g.staleStatics = cfg.staleStatics;
                     final Player cm = (Player) copier.find(me);
@@ -1585,6 +1592,7 @@ public final class ForcedWinSolver {
         el.triggerTargets = cfg.engineTriggerTargets; // kill-line-1106
         el.staleStatics = cfg.staleStatics; // unified-search-1106
         el.longLoops = cfg.engineLongLoops; // unified-search-1106
+        el.turnLimits = cfg.turnLimits; // engine-reach-1107
         if (cfg.engineVerify) {
             final int[] tries = {0};
             el.verify = path -> {
@@ -1863,6 +1871,7 @@ public final class ForcedWinSolver {
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1);
+                copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
                 cm = (Player) copier.find(me);
@@ -2236,6 +2245,7 @@ public final class ForcedWinSolver {
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
+                copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
                 cm = (Player) copier.find(me);
