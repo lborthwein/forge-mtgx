@@ -244,6 +244,19 @@ public class GameCopier {
                     }
                 }
             }
+            final boolean altFallback = base == null && orig.isSpell() && orig.getAlternativeCost() != null
+                    && forge.game.EngineFixes.copyAltCost();
+            if (altFallback) {
+                // loop-exec-1107 (forge.copyAltCost): an alternative cost a keyword grants only in another zone (escape from
+                // the graveyard) is not among the card's abilities on the stack: rebuild from the card's own spell of the
+                // same effect, and keep the alternative cost below.
+                for (SpellAbility cardSa : newHost.getAllSpellAbilities()) {
+                    if (cardSa.isSpell() && cardSa.getAlternativeCost() == null && cardSa.getApi() == orig.getApi()) {
+                        base = cardSa;
+                        break;
+                    }
+                }
+            }
             if (base == null) {
                 throw new IllegalStateException("stack copy: no ability '" + orig.getDescription() + "' on " + newHost);
             }
@@ -251,6 +264,9 @@ public class GameCopier {
             SpellAbility copy = SpellAbilityChoiceCopier.copyCastChoices(orig, base, activator);
             if (copy == null) {
                 throw new IllegalStateException("stack copy: modes of " + orig + " not found");
+            }
+            if (altFallback) {
+                copy.setAlternativeCost(orig.getAlternativeCost());
             }
             for (SpellAbility sub = copy; sub != null; sub = sub.getSubAbility()) {
                 if (sub.usesTargeting()) {
