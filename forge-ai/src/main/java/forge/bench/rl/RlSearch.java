@@ -680,6 +680,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the S-b solver's follower config (copies follow lines with it). */
+    /** kill-line-1106: plans.lineKeep. */
+    boolean lineKeepOn() {
+        return cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).lineKeep;
+    }
+
     /** choice-search-1105: plans.lineChoices=forge (line-consistent choice answers). */
     boolean lineChoicesForge() {
         for (PlanSearch ps1 : planSearches.values()) {
@@ -1005,7 +1010,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 expandLimit = order.size();
                 ex = this;
             }
-            r = stage != null ? ls.decideGivenPlans(g, me, given, cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat, ex)
+            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat, ex)
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
@@ -1029,7 +1034,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             searchCpuMs += r.cpuMs;
         }
         if (stage != null) {
-            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6);
+            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6, sc.valueObs);
             planRow(g, frame, stage, r, order, pa, t0);
             if (pa != -2) {
                 departures++;
@@ -2440,7 +2445,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (first.plan instanceof PlanSearch.LinePlan) {
             // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
             pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first,
-                    lineChoicesForge());
+                    lineChoicesForge(), lineKeepOn());
         }
         pc.forcedBlocks = first.block;
         return new LookaheadSearch.PlayoutSeat() {

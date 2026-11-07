@@ -170,6 +170,12 @@ final class ForcedWinEngine {
          * whole game gets no same-turn engine nodes after its first searches.
          */
         boolean perSearchNodes;
+        /**
+         * kill-line-1106 (port of solver-gaps-1104, engineTriggerTargets; false = off): {@link TriggerTargets#wide}, at
+         * most triggerVariants trigger targets per move.
+         */
+        boolean triggerTargets;
+        int triggerVariants = 8;
         int depth = 64;
         int branching = 8;
         int targetVariants = 3;
@@ -644,7 +650,7 @@ final class ForcedWinEngine {
                 // the move caused a targeting trigger of ours: try it again with each of a few forced targets next
                 int k = 0;
                 for (String ref : a.triggerCandidates) {
-                    if (k++ >= lim.targetVariants) {
+                    if (k++ >= (lim.triggerTargets ? lim.triggerVariants : lim.targetVariants)) {
                         break;
                     }
                     final Step v = mv.copy();
@@ -1028,6 +1034,16 @@ final class ForcedWinEngine {
             this.forced = forced;
         }
 
+        /**
+         * kill-line-1106 (engineTriggerTargets; false = off, the classic three-way order): every legal target class
+         * (see {@link #wideCandidates}), at most {@link #cap}; a forced ref "C<id>+F<colour>" floats that mana source's
+         * mana in response to the trigger (it resolves after: an untap of a source we just tapped for mana).
+         */
+        boolean wide;
+        int cap = 8;
+        /** kill-line-1106: the forced float of a "+F" ref could not be played (the move fails: no silent change). */
+        boolean floatFailed;
+
         /** Handle the forced trigger (played here); the rest go back to Forge AI. */
         List<SpellAbility> apply(Game g, Player me, List<SpellAbility> abilities) {
             if (seen) {
@@ -1059,7 +1075,7 @@ final class ForcedWinEngine {
                 final List<String> all = new ArrayList<>(ours);
                 all.addAll(mine);
                 all.addAll(theirs);
-                candidates = all;
+                candidates = wide ? wideCandidates(g, me, sa, slot) : all;
                 if (TRACE) {
                     final StringBuilder sb = new StringBuilder();
                     for (String r : all) {
@@ -1069,14 +1085,139 @@ final class ForcedWinEngine {
                     }
                     ForcedWinSolver.receipt("FW_ENGINE   trigger " + sa.getHostCard().getName() + " candidates " + sb);
                 }
-                if (forced != null && LookaheadSearch.applyTarget(slot, forced, g) && sa.isTargetNumberValid()) {
+                final int fl = forced == null ? -1 : forced.indexOf("+F");
+                final String ref = fl < 0 ? forced : forced.substring(0, fl);
+                if (forced != null && LookaheadSearch.applyTarget(slot, ref, g) && sa.isTargetNumberValid()) {
                     forcedHost = sa.getHostCard();
                     forge.ai.ComputerUtil.playStack(sa, me, g);
+                    if (fl >= 0) {
+                        // kill-line-1106: float the target source's mana now, with the trigger on the stack
+                        final SpellAbility m = floatSa(g, me, Integer.parseInt(ref.substring(1)),
+                                Integer.parseInt(forced.substring(fl + 2)));
+                        if (m == null || !forge.ai.ComputerUtil.handlePlayingSpellAbility(me, m, null)) {
+                            floatFailed = true;
+                        }
+                    }
                     continue;
                 }
                 rest.add(sa);
             }
             return rest;
+        }
+
+        /** kill-line-1106 (from research ChooseACard.floatSa): a source's mana ability that makes the colour, if playable. */
+        private static SpellAbility floatSa(final Game g, final Player me, final int id, final int col) {
+            final Card host = g.findById(id);
+            if (host == null) {
+                return null;
+            }
+            for (SpellAbility m : host.getManaAbilities()) {
+                final SpellAbility a = m.copy(me);
+                a.setActivatingPlayer(me);
+                if (a.getManaPart() == null || !a.canProduce(ForcedWinModel.SHORT[col])) {
+                    continue;
+                }
+                if (col < 5 && (a.getManaPart().isAnyMana() || a.getManaPart().isComboMana())) {
+                    a.setManaExpressChoice(forge.card.ColorSet.fromMask(ForcedWinModel.FORGE_COLOR[col]));
+                }
+                if (!a.canPlay() || !forge.ai.ComputerUtilCost.canPayCost(a, me, false)) {
+                    continue;
+                }
+                return a;
+            }
+            return null;
+        }
+
+        /**
+         * kill-line-1106: the trigger's target classes, mana valued. Cards equal by controller, name, tapped and sick state
+         * are one class (the same outcome), represented by the first. Order: our tapped permanents with a non-mana tap
+         * ability (re-enabling an engine); for an untap effect our untapped mana sources with their mana floated first,
+         * one class per colour our cards need that the source makes (else its first colour); our tapped mana sources;
+         * the opponent's permanents; our others. At most {@link #cap}. Engine primitives only (mana abilities, the
+         * trigger's effect kind, tapped state, mana costs): no card is named.
+         */
+        List<String> wideCandidates(Game g, Player me, SpellAbility sa, SpellAbility slot) {
+            final boolean untap = untaps(sa);
+            int needed = 0;
+            for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command}) {
+                for (Card c : me.getCardsIn(z)) {
+                    for (forge.card.mana.ManaCostShard sh : c.getManaCost()) {
+                        for (int i = 0; i < 5; i++) {
+                            if (sh.isColor(ForcedWinModel.FORGE_COLOR[i])) {
+                                needed |= 1 << i;
+                            }
+                        }
+                    }
+                }
+            }
+            final List<String> engine = new ArrayList<>(), floatUntapped = new ArrayList<>(), tappedMana = new ArrayList<>(),
+                    theirs = new ArrayList<>(), others = new ArrayList<>();
+            final Set<String> classes = new HashSet<>();
+            for (Card c : g.getCardsIn(ZoneType.Battlefield)) {
+                if (!slot.canTarget(c)) {
+                    continue;
+                }
+                final String ref = "C" + c.getId();
+                final boolean mine = c.getController() == me;
+                final String cls = (mine ? "me|" : "op|") + c.getName() + "|" + c.isTapped() + "|" + c.isSick();
+                if (!classes.add(cls)) {
+                    continue;
+                }
+                final int makes = mine ? manaMask(c, me) : 0;
+                if (mine && c.isTapped() && hasTapAbility(c)) {
+                    engine.add(ref);
+                } else if (mine && !c.isTapped() && untap && makes != 0) {
+                    boolean any = false;
+                    for (int i = 0; i < 6; i++) {
+                        if ((makes & needed & (1 << i)) != 0) {
+                            floatUntapped.add(ref + "+F" + i);
+                            any = true;
+                        }
+                    }
+                    if (!any) {
+                        floatUntapped.add(ref + "+F" + Integer.numberOfTrailingZeros(makes));
+                    }
+                    others.add(ref);
+                } else if (mine && c.isTapped() && makes != 0) {
+                    tappedMana.add(ref);
+                } else if (mine) {
+                    others.add(ref);
+                } else {
+                    theirs.add(ref);
+                }
+            }
+            final List<String> all = new ArrayList<>(engine);
+            all.addAll(floatUntapped);
+            all.addAll(tappedMana);
+            all.addAll(theirs);
+            all.addAll(others);
+            return all.size() > cap ? new ArrayList<>(all.subList(0, cap)) : all;
+        }
+
+        /** Whether the trigger can untap its target (an untap, or a tap-or-untap choice). */
+        private static boolean untaps(SpellAbility sa) {
+            for (SpellAbility x = sa; x != null; x = x.getSubAbility()) {
+                if (x.getApi() == forge.game.ability.ApiType.Untap || x.getApi() == forge.game.ability.ApiType.TapOrUntap) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** The colours (bit i = ForcedWinModel colour i, 5 = colourless) a permanent's tap-only mana abilities make. */
+        private static int manaMask(Card c, Player me) {
+            int mask = 0;
+            for (SpellAbility ma : c.getManaAbilities()) {
+                if (ma.getPayCosts() == null || !ma.getPayCosts().hasTapCost() || ma.getPayCosts().getCostParts().size() != 1) {
+                    continue;
+                }
+                for (int col = 0; col < 6; col++) {
+                    if (ma.canProduce(ForcedWinModel.SHORT[col])) {
+                        mask |= 1 << col;
+                    }
+                }
+            }
+            return mask;
         }
 
         private static boolean hasTapAbility(Card c) {
@@ -1162,6 +1303,10 @@ final class ForcedWinEngine {
             final Player me = (Player) copier.find(node.me);
             st.copies++;
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
+            if (lim.triggerTargets) {
+                ai.triggers.wide = true; // kill-line-1106
+                ai.triggers.cap = lim.triggerVariants;
+            }
             // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
             final long wall = lim.wall != 0 ? lim.wall : deadline;
             ai.bounded(wall);
@@ -1185,6 +1330,10 @@ final class ForcedWinEngine {
             a.triggerCandidates = ai.triggers.candidates;
             a.pickCandidates = ai.picks.candidates;
             a.won = me.hasWon() || me.getOpponents().stream().anyMatch(Player::hasLost);
+            if (ai.triggers.floatFailed && !a.won) {
+                a.why = "failed"; // kill-line-1106: a forced float in response that could not be played
+                return a;
+            }
             if (a.won || !ai.rest || g.isGameOver()) {
                 a.why = ai.failed ? "failed" : g.isGameOver() ? "over" : ph.getTurn() > lastTurn ? "turn" : "steps" + steps;
                 return a;
