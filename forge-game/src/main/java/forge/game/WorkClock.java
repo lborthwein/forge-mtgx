@@ -113,6 +113,11 @@ public final class WorkClock {
             this.scale = scale;
         }
 
+        /** Virtual now ignoring the safety wall (metering: the span a cut decision had reached). */
+        public long rawNow() {
+            return origin + (long) (work.get() / scale) + joined.get();
+        }
+
         /** Virtual now: origin + work / scale + joined span; past every deadline once the safety wall passed. */
         public long now() {
             final long w = wall;
@@ -156,8 +161,7 @@ public final class WorkClock {
 
         /** A lane of this clock: starts at this clock's virtual now, same scale and safety wall. */
         public Clock fork() {
-            final long n = now();
-            final Clock c = new Clock(n == FAR ? origin : n, scale);
+            final Clock c = new Clock(rawNow(), scale);
             c.wall = wall;
             c.wallHit = wallHit;
             return c;
@@ -172,7 +176,7 @@ public final class WorkClock {
                     continue;
                 }
                 hit |= l.wallHit;
-                end = Math.max(end, l.wallHit ? l.origin + (long) (l.work.get() / l.scale) + l.joined.get() : l.now());
+                end = Math.max(end, l.wallHit ? l.rawNow() : l.now());
                 for (int i = 0; i < SITES.length; i++) {
                     counts.addAndGet(i, l.counts.get(i));
                 }
@@ -261,7 +265,7 @@ public final class WorkClock {
             this.armed = armed;
             this.work0 = clock.totalWork();
             this.counts0 = clock.counts();
-            this.v0 = clock.now();
+            this.v0 = clock.rawNow();
         }
 
         /** Weighted work since begin, reference ms. */
@@ -278,10 +282,9 @@ public final class WorkClock {
             return c;
         }
 
-        /** Virtual ms since begin (what the budgets saw; NaN once past the safety wall). */
+        /** Virtual ms since begin (the work the budgets saw; past a safety-wall cut, the work done until the cut). */
         public double spanMs() {
-            final long n = clock.now();
-            return n >= FAR ? Double.NaN : (n - v0) / 1e6;
+            return (clock.rawNow() - v0) / 1e6;
         }
 
         /** The decision passed its safety wall. */
