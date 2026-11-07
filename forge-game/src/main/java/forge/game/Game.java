@@ -73,6 +73,13 @@ public class Game {
     public boolean copyBackFace = false;
     /** Default-off independent ability objects for copied stack entries. */
     public boolean stackAbilityCopies = false;
+    /** Default off: remap observed stack-history targets when knowledge is forked into a copy. */
+    public boolean stackHistory = false;
+    // IDs in the immediately preceding game -> IDs of this copy's actual stack entries.
+    // This mapping is rebuilt per copy, not inherited transitively. No live game objects are retained.
+    private Map<Integer, Integer> copiedStackIds = Collections.emptyMap();
+    public Map<Integer, Integer> getCopiedStackIds() { return copiedStackIds; }
+    public void setCopiedStackIds(Map<Integer, Integer> ids) { copiedStackIds = Map.copyOf(ids); }
 
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 

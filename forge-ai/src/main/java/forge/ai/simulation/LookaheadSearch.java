@@ -343,6 +343,7 @@ public final class LookaheadSearch {
         public boolean historyLki = false;
         public boolean copyBackFace = false;
         public boolean stackAbilityCopies = false;
+        public boolean stackHistory = false;
         /**
          * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
          * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
@@ -470,6 +471,7 @@ public final class LookaheadSearch {
             if (historyLki) o.addProperty("historyLki", true);
             if (copyBackFace) o.addProperty("copyBackFace", true);
             if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
+            if (stackHistory) o.addProperty("stackHistory", true);
             if (copyFidelity != 0) {
                 o.addProperty("copyFidelity", copyFidelity);
             }
@@ -5299,6 +5301,7 @@ public final class LookaheadSearch {
         if (cfg.historyLki) c.setHistoryLki(true);
         if (cfg.copyBackFace) c.setCopyBackFace(true);
         if (cfg.stackAbilityCopies) c.setStackAbilityCopies(true);
+        if (cfg.stackHistory) c.setStackHistory(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }

@@ -142,6 +142,9 @@ public class GameCopier {
     private boolean historyLki = false;
     private boolean copyBackFace = false;
     private boolean stackAbilityCopies = false;
+    private boolean stackHistory = false;
+
+    public void setStackHistory(boolean on) { this.stackHistory = on; }
 
     public void setStackAbilityCopies(boolean on) { this.stackAbilityCopies = on; }
 
@@ -308,10 +311,12 @@ public class GameCopier {
      * be rebuilt (callers treat that as a failed copy).
      */
     private void copyStackFaithfully(Game newGame) {
+        final Map<Integer, Integer> historyIds = stackHistory || origGame.stackHistory ? new java.util.HashMap<>() : null;
         final SpellAbility origTop = origGame.getStack().peekAbility();
         int skipped = 0;
         for (java.util.Iterator<SpellAbilityStackInstance> it = origGame.getStack().reverseIterator(); it.hasNext(); ) {
-            final SpellAbility orig = it.next().getSpellAbility();
+            final SpellAbilityStackInstance sourceEntry = it.next();
+            final SpellAbility orig = sourceEntry.getSpellAbility();
             if (skipResolvingTrigger && orig == origTop && orig.isWrapper() && origGame.getStack().isResolving()) {
                 skipped++;
                 continue;
@@ -383,11 +388,13 @@ public class GameCopier {
                 newHost.setCastFrom(((Player) find(castFrom.getPlayer())).getZone(castFrom.getZoneType()));
             }
             newGame.getStack().dangerouslyPushCopy(copy);
+            if (historyIds != null) historyIds.put(sourceEntry.getId(), newGame.getStack().peek().getId());
             stackSaMap.put(orig, copy);
         }
         if (newGame.getStack().size() != origGame.getStack().size() - skipped) {
             throw new IllegalStateException("stack copy: size " + newGame.getStack().size() + " != " + origGame.getStack().size());
         }
+        if (historyIds != null) newGame.setCopiedStackIds(historyIds);
     }
 
     public Game getOriginalGame() {
@@ -547,6 +554,7 @@ public class GameCopier {
         newGame.historyLki = historyLki || origGame.historyLki;
         newGame.copyBackFace = copyBackFace || origGame.copyBackFace;
         newGame.stackAbilityCopies = stackAbilityCopies || origGame.stackAbilityCopies;
+        newGame.stackHistory = stackHistory || origGame.stackHistory;
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
