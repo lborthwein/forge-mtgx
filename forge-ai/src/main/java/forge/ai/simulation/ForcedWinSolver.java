@@ -198,6 +198,12 @@ public final class ForcedWinSolver {
          * finite; a REPEAT longer than the breaker's window stopped mid-way in verification and read as no win.
          */
         public boolean lineUncapped = false;
+        /**
+         * next-turn-1107 (off by default): a followed step's put-back of cards the line did not name (cards unknown when it was
+         * planned, recorded as -1) puts back cards the rest of the line does not use. Off: Forge AI chooses, and may put back
+         * the line's own pieces (dd3 T5: a second Brainstorm-style put-back returned the line's Oracle and Lotus Petal).
+         */
+        public boolean putBackKeep = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -311,6 +317,7 @@ public final class ForcedWinSolver {
             c.unknownWorlds = "true".equals(get.apply("unknownWorlds")); // unified-search-1106
             c.positionKeyFull = "true".equals(get.apply("positionKeyFull")); // unified-search-1106
             c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
+            c.putBackKeep = "true".equals(get.apply("putBackKeep")); // next-turn-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -545,7 +552,7 @@ public final class ForcedWinSolver {
         if (line == null) {
             return Decision.NONE;
         }
-        active = new Follower(line);
+        active = follower(line);
         taken++;
         final Follower.Next n = active.next(live, me);
         if (n.action != null) {
@@ -940,7 +947,7 @@ public final class ForcedWinSolver {
 
     /** search-bones-1015: follow {@code line} (a {@link Proposal#line}) from the next priority on. */
     public void adopt(Object line) {
-        active = new Follower((Line) line);
+        active = follower((Line) line);
         taken++;
     }
 
@@ -1886,7 +1893,7 @@ public final class ForcedWinSolver {
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             if (line != null) {
-                final LineAi ai = new LineAi(g, cm, cm.getController().getLobbyPlayer(), new Follower(line));
+                final LineAi ai = new LineAi(g, cm, cm.getController().getLobbyPlayer(), follower(line));
                 ai.continueAfter = true;
                 ai.bounded(deadline);
                 cm.dangerouslySetController(ai);
@@ -2261,7 +2268,7 @@ public final class ForcedWinSolver {
                 }
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
-            final Follower f = new Follower(line);
+            final Follower f = follower(line);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
             lineAi.bounded(wall);
             if (cfg.verifyReplan && line.winTurn > 0) {
@@ -2717,6 +2724,13 @@ public final class ForcedWinSolver {
 
     // ------------------------------------------------------------------ the follower (live seat and play-outs)
 
+    /** A follower of {@code line} with this solver's follower keys (next-turn-1107: {@link Config#putBackKeep}). */
+    private Follower follower(Line line) {
+        final Follower f = new Follower(line);
+        f.putBackKeep = cfg.putBackKeep;
+        return f;
+    }
+
     /** Executes a line step by step in any game where its card ids exist. */
     static final class Follower {
         final Line line;
@@ -2727,6 +2741,10 @@ public final class ForcedWinSolver {
         /** Executed steps by host id: the choice asks of a resolving step are answered from it. */
         final Map<Integer, Step> executed = new HashMap<>();
         final Map<Integer, Integer> pilePicked = new HashMap<>();
+        /** next-turn-1107 ({@link Config#putBackKeep}): a put-back of cards the line did not name avoids the line's cards. */
+        boolean putBackKeep;
+        /** next-turn-1107 (report only): put-back picks answered from the unreserved cards. */
+        int putBackKept;
         /** kill-line-1106 (planDiscard): the current step's recorded choices. */
         ForcedWinChoices.Cursor choices = new ForcedWinChoices.Cursor(null);
         /** An ATTACK step is waiting for our declare-attackers step. */
@@ -2985,6 +3003,17 @@ public final class ForcedWinSolver {
                     }
                 }
             }
+            if (putBackKeep && st.pile.isEmpty() && st.picks.isEmpty() && want.contains(-1)) {
+                // next-turn-1107: the line put back cards it did not know; any card the rest of the line does not use will do
+                final Set<Integer> keep = reserved();
+                keep.addAll(want);
+                for (Card c : choices) {
+                    if (!keep.contains(c.getId())) {
+                        putBackKept++;
+                        return c;
+                    }
+                }
+            }
             return null;
         }
 
@@ -3125,7 +3154,9 @@ public final class ForcedWinSolver {
                     replanner = null;
                     final Line fresh = rp.apply(f.line);
                     if (fresh != null) {
+                        final boolean keep = f.putBackKeep;
                         f = new Follower(fresh);
+                        f.putBackKeep = keep; // next-turn-1107
                         final Follower.Next m = f.next(g, getPlayer());
                         return m.action != null ? capped(List.of(m.action)) : null;
                     }
