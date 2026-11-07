@@ -92,6 +92,8 @@ public class WorkUnitsTest {
         Assert.assertTrue(WorkClock.nanoTime() < deadline);
         Thread.sleep(60);
         Assert.assertTrue(WorkClock.nanoTime() > deadline, "past the safety wall, every deadline has passed");
+        final long later = WorkClock.nanoTime() + 600_000_000_000L; // a deadline set after the wall (10 min budget)
+        Assert.assertTrue(WorkClock.nanoTime() > later, "a deadline set past the wall has passed by the next read");
         Assert.assertTrue(s.wallHit());
         WorkClock.end(s);
         Assert.assertEquals(c.wallHits.get(), 1L);

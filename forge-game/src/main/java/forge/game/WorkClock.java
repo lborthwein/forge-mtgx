@@ -85,6 +85,10 @@ public final class WorkClock {
 
     /** A virtual time past every deadline (and far from overflow when deadlines are added to it). */
     static final long FAR = Long.MAX_VALUE / 4;
+    /** Past the wall, each read is this much later (~18 min: more than any budget a deadline adds). */
+    static final long POST_WALL_STEP = 1L << 40;
+    /** Reads past the wall before the time stops growing (keeps FAR + steps far below overflow). */
+    static final long POST_WALL_MAX = 2_000_000L;
 
     /** One thread's (or one lane's) work clock. */
     public static final class Clock {
@@ -120,14 +124,22 @@ public final class WorkClock {
             return origin + (long) (work.get() / scale) + joined.get();
         }
 
-        /** Virtual now: origin + work / scale + joined span; past every deadline once the safety wall passed. */
+        /** Reads past the safety wall: each moves virtual time on by {@link #POST_WALL_STEP}. */
+        private final AtomicLong postWall = new AtomicLong();
+
+        /**
+         * Virtual now: origin + work / scale + joined span. Past the safety wall every read is FAR plus one more
+         * {@link #POST_WALL_STEP} than the read before, so a deadline set after the wall (now + budget) has passed by the
+         * next read too, and every budget stops.
+         */
         public long now() {
             final long w = wall;
             if (w != 0 && System.nanoTime() - w > 0) {
                 if (!wallHit) {
                     wallHit = true;
                 }
-                return FAR;
+                final long k = postWall.incrementAndGet();
+                return k < POST_WALL_MAX ? FAR + k * POST_WALL_STEP : FAR + POST_WALL_MAX * POST_WALL_STEP;
             }
             return origin + (long) (work.get() / scale) + joined.get();
         }
