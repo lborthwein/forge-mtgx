@@ -309,7 +309,7 @@ public class InteractiveAiTapeTest extends AITest {
         final String[][] pins = {
                 {"public boolean playChosenSpellAbility(SpellAbility sa) {", "6801c55b72b6ae33"},
                 {"public void playSpellAbilityNoStack(SpellAbility effectSA, boolean canSetupTargets) {", "3f6ba6033e2beea2"},
-                {"public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {", "2e9a06ae128aec2c"},
+                {"public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {", "ba997ea4a1b78786"},
                 {"private boolean prepareSingleSaUntaped(final Card host, SpellAbility sa, boolean isMandatory) {", "85e757ad9ace5d23"},
                 {"public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) {", "b54fb880090478a0"},
                 {"public boolean playSaFromPlayEffect(SpellAbility tgtSA) {", "25ae78233882cdf1"},
