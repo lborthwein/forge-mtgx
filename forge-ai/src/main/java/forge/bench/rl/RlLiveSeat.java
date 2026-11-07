@@ -271,6 +271,7 @@ public final class RlLiveSeat {
                     case "beliefStatics": c.beliefStatics = LookaheadSearch.Config.infoStateKey(k, v); break;
                     case "beliefPlayerStatics": c.beliefPlayerStatics = LookaheadSearch.Config.infoStateKey(k, v); break;
                     case "copyTurnLimits": c.copyTurnLimits = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    case "offBattlefieldLimits": c.offBattlefieldLimits = LookaheadSearch.Config.infoStateKey(k, v); break;
                     default:
                         if (k.startsWith("plans.")) {
                             planKey(c, k, v); // sb-live-1018: S-b, flat keys

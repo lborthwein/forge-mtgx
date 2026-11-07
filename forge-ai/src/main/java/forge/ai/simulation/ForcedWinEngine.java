@@ -169,6 +169,7 @@ final class ForcedWinEngine {
         boolean stalePlayerStatics = false;
         /** Off by default: node copies keep this turn's may-play and activation counts ({@link GameCopier#setTurnLimits}). */
         boolean turnLimits = false;
+        boolean offBattlefieldLimits = false;
         /**
          * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
          * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
@@ -520,6 +521,7 @@ final class ForcedWinEngine {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 copier.setTurnLimits(lim.turnLimits);
+                copier.setOffBattlefieldLimits(lim.offBattlefieldLimits);
                 root.g = copier.makeCopy();
                 root.g.staleStatics = lim.staleStatics;
                 root.g.stalePlayerStatics = lim.stalePlayerStatics;
@@ -1310,6 +1312,7 @@ final class ForcedWinEngine {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
             copier.setTurnLimits(lim.turnLimits);
+            copier.setOffBattlefieldLimits(lim.offBattlefieldLimits);
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);
             st.copies++;
