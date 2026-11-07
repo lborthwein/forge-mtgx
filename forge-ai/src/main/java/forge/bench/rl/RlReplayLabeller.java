@@ -337,7 +337,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     public static void checkTrainTape(final JsonObject tape) {
         final String mode = tape.has("mode") && !tape.get("mode").isJsonNull()
                 ? tape.get("mode").getAsString() : null;
-        if (!"train".equals(mode) && !"record".equals(mode)) {
+        // unified-jar-1106: -Dforge.bench.allowEvalTapes=true (off) for a tooling smoke on R4-harness tapes; never for training
+        if (!"train".equals(mode) && !"record".equals(mode) && !Boolean.getBoolean("forge.bench.allowEvalTapes")) {
             throw new IllegalArgumentException("refused: value labels need a TRAIN tape (train/record), not " + mode);
         }
     }
