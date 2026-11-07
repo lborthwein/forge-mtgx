@@ -116,7 +116,7 @@ public final class ForcedWinModel {
 
     /** ENGINE: a step found by the engine search (any legal action, targets recorded); ATTACK: attack with everything. */
     /** REPEAT (search-bones-1015): a loop body found by the engine search's cycle table, repeated a number of times. */
-    enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK, REPEAT }
+    enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK, REPEAT, MAIN }
 
     /** One executable ability of a card: its printed cost and its observed effects. */
     static final class Abil {
@@ -521,6 +521,13 @@ public final class ForcedWinModel {
         int oppLibrary;
         boolean landDrop;
         boolean sorcerySpeed;
+        /**
+         * line-adoption-1107 (solverCfg anyWindow): the position is our turn before main phase 1 (upkeep or draw step); a
+         * MAIN step moves the plan to main phase 1 of this turn, drawing the draw step's card when {@link #preMainDraw}.
+         */
+        boolean preMain, preMainDraw;
+        /** line-adoption-1107 (anyWindow): the position is not in our main phase (lines planned here are Line.offMain). */
+        boolean offMain;
         int storm;
         final int[] pool = new int[6];
         final List<ACard> hand = new ArrayList<>();

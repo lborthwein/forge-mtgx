@@ -2215,6 +2215,18 @@ public final class LookaheadSearch {
     public void setRootP(double p) {
         this.rootP = p;
     }
+
+    /**
+     * line-adoption-1107 (plans.lineHorizon; 0 = none, the default): the absolute turn at whose start (with a value leaf:
+     * the seat's first priority in it) every play-out of the decision in progress ends, when later than now + horizon. Set
+     * by a plan point whose solver line wins past the search's horizon, so the line is scored by its own outcome and its
+     * alternatives by the same leaf, in the same worlds. Cleared when the decision ends.
+     */
+    private volatile int planHorizonTurn = 0;
+
+    public void setPlanHorizonTurn(int turn) {
+        this.planHorizonTurn = turn;
+    }
     /**
      * S-b: cards on top of our library the seat placed itself (pile memory, ForcedWinSolver.knownTopCount); every world
      * keeps them in place. 0 = S-c's worlds (only the cards we can see stay).
@@ -2259,6 +2271,7 @@ public final class LookaheadSearch {
             decisionStartNanos = 0L;
             oppCheck = null;
             rootP = Double.NaN;
+            planHorizonTurn = 0;
         }
     }
 
@@ -5473,8 +5486,8 @@ public final class LookaheadSearch {
                     setFirstPriority(ph, p.firstPriority);
                 }
             }
-            final TurnWatch watch = new TurnWatch(ph.getTurn() + (recording ? 1 : cfg.horizonTurns),
-                    Boolean.TRUE.equals(wantFp) ? me : null);
+            final TurnWatch watch = new TurnWatch(recording ? ph.getTurn() + 1 : Math.max(ph.getTurn() + cfg.horizonTurns, planHorizonTurn),
+                    Boolean.TRUE.equals(wantFp) ? me : null); // line-adoption-1107: planHorizonTurn 0 unless plans.lineHorizon
             g.subscribeToEvents(watch);
             if (probe != null) {
                 probe.watch = watch;
