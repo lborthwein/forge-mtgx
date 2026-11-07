@@ -185,6 +185,16 @@ public final class ForcedWinSolver {
         public boolean engineLoopReach = false;
         /** engine-reach-1107: nodes of each outlet search under engineLoopReach ({@link ForcedWinEngine.Limits#outletNodes}). */
         public int engineOutletNodes = 6;
+        /**
+         * loop-exec-1107 (off by default, with engineLoopReach): a loop that fast-forwards with no win is tried again from
+         * each earlier node of its path ({@link ForcedWinEngine.Limits#loopHoist}).
+         */
+        public boolean engineLoopHoist = false;
+        /**
+         * loop-exec-1107 (off by default, with engineLoopReach): a loop's count is the smallest count whose outlet search
+         * wins, bisected between doublings ({@link ForcedWinEngine.Limits#loopBisect}).
+         */
+        public boolean engineLoopBisect = false;
         /** engine-reach-1107 (0 = off): {@link ForcedWinEngine.Limits#frontierAfterPct}. */
         public int engineFrontierPct = 0;
         /**
@@ -665,6 +675,8 @@ public final class ForcedWinSolver {
             c.engineMoves = "true".equals(get.apply("engineMoves")); // engine-reach-1107
             c.engineLoopReach = "true".equals(get.apply("engineLoopReach")); // engine-reach-1107
             c.engineOutletNodes = intOr(get.apply("engineOutletNodes"), c.engineOutletNodes); // engine-reach-1107
+            c.engineLoopHoist = "true".equals(get.apply("engineLoopHoist")); // loop-exec-1107
+            c.engineLoopBisect = "true".equals(get.apply("engineLoopBisect")); // loop-exec-1107
             c.engineFrontierPct = intOr(get.apply("engineFrontierPct"), c.engineFrontierPct); // engine-reach-1107
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
@@ -3156,6 +3168,8 @@ public final class ForcedWinSolver {
             el.loopOutlets = true; // engine-reach-1107
             el.looseCycles = true;
             el.outletNodes = cfg.engineOutletNodes;
+            el.loopHoist = cfg.engineLoopHoist; // loop-exec-1107
+            el.loopBisect = cfg.engineLoopBisect; // loop-exec-1107
         }
         el.frontierAfterPct = cfg.engineFrontierPct; // engine-reach-1107
         if (cfg.engineVerify) {

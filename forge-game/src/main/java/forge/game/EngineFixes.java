@@ -32,6 +32,23 @@ public final class EngineFixes {
         researchFixes = on;
     }
 
+    /**
+     * loop-exec-1107 ({@code -Dforge.copyAltCost=true}, off by default): a game copy rebuilds a spell cast for an alternative
+     * cost that a keyword grants only in another zone (escape from the graveyard, granted by a static) from the card's own
+     * spell, keeping the alternative cost. Without it the copy threw ("stack copy: no ability"), and every play-out of that
+     * position failed.
+     */
+    private static boolean copyAltCost = Boolean.getBoolean("forge.copyAltCost");
+
+    public static boolean copyAltCost() {
+        return copyAltCost;
+    }
+
+    /** For tests. */
+    public static void setCopyAltCostForTest(final boolean on) {
+        copyAltCost = on;
+    }
+
     /** For tests. */
     public static void setCopyRobustForTest(final boolean on) {
         copyRobust = on;

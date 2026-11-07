@@ -56,6 +56,8 @@ final class ForcedWinEngine {
         int moveErrors;
         /** unified-search-1106 (report only): found wins another library world refuted. */
         int refutedWins;
+        /** loop-exec-1107 (report only, printed when non-zero): hoisted fast-forwards tried and won, bisections run. */
+        int hoists, hoistWins, bisects;
         String lastMoveError = "";
         /**
          * bvw-step1-build-1024 (read-only): move steps played (mainLoopStep calls inside moves), searches stopped by the
@@ -91,6 +93,7 @@ final class ForcedWinEngine {
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
                     + (refutedWins > 0 ? " refutedWins=" + refutedWins : "")
+                    + (hoists > 0 || bisects > 0 ? " hoists=" + hoists + " hoistWins=" + hoistWins + " bisects=" + bisects : "")
                     + (moveErrors > 0 ? " moveErrors=" + moveErrors + " lastMoveError=" + lastMoveError : "")
                     + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "")
                     + (loops > 0 || pruned > 0 ? " pruned=" + pruned + " loops=" + loops + " loopReps=" + loopReps
@@ -265,6 +268,20 @@ final class ForcedWinEngine {
         boolean loopOutlets = false;
         /** engine-reach-1107: nodes of one such search. */
         int outletNodes = 6;
+        /**
+         * loop-exec-1107 (false = off, with loopOutlets): a loop that fast-forwards with no win is tried again from each
+         * earlier node of its path, root first, in each rotation of its body whose first step that node can play. The
+         * moves the path made before the loop (a payoff spent early) are then not yet made. The count stops at the first
+         * doubling whose outlet search wins; no win leaves the search as before.
+         */
+        boolean loopHoist = false;
+        /** loop-exec-1107: the most hoisted fast-forwards one search tries. */
+        int hoistMax = 12;
+        /**
+         * loop-exec-1107 (false = off, with loopOutlets): when an outlet search first wins at a doubling, the counts between
+         * the last losing doubling and it are bisected with the same outlet search; the line takes the smallest winning count.
+         */
+        boolean loopBisect = false;
         /**
          * engine-reach-1107 (false = off, with longLoops): a round back to an ancestor is also a loop when the boards match and
          * our hand holds at least the ancestor's cards (draws are kept, the library may shrink), with progress.
@@ -1111,6 +1128,8 @@ final class ForcedWinEngine {
         Node cur = from;
         int chunk = 1;
         int cap = goalCap(from.pv, a1 == null ? null : a1.pv, reps);
+        Node lowNode = cur; // loop-exec-1107 (loopBisect): the last count whose outlet search found no win
+        int lowReps = reps;
         while (reps < cap && !out()) {
             Node next = cur;
             int done = 0;
@@ -1178,12 +1197,17 @@ final class ForcedWinEngine {
             reps += done;
             chunk *= 2;
             if (lim.loopOutlets && reps < cap) {
-                final List<Step> win = outletSearch(cur, from, prefix, body, reps);
+                List<Step> win = outletSearch(cur, from, prefix, body, reps);
                 if (win != null) {
+                    if (lim.loopBisect) {
+                        win = bisect(lowNode, lowReps, reps, win, from, prefix, body); // loop-exec-1107
+                    }
                     st.loopWins++;
                     f.win = win;
                     return f;
                 }
+                lowNode = cur;
+                lowReps = reps;
             }
         }
         final Node n = new Node();
@@ -1236,6 +1260,254 @@ final class ForcedWinEngine {
             table.putAll(keep);
             forge.util.IdScope.install(cloneScope(cur.ids));
         }
+    }
+
+    // ------------------------------------------------------------------ loop-exec-1107: loop counts by search
+
+    /**
+     * loop-exec-1107: {@code k} more repetitions of {@code body} from {@code start}, each with progress; the game of
+     * {@code start} is copied, not played on. Null when a step fails, ends the game, or a repetition makes no progress.
+     */
+    private Node advance(Node start, Node from, List<Step> body, int k) {
+        Node next = start;
+        long[] before = start.pv != null ? start.pv : progress(start.g, start.me);
+        for (int r = 0; r < k; r++) {
+            for (Step b : body) {
+                final Applied a = apply(next, b, next != start);
+                st.loopReps++;
+                if (a == null || a.won || a.child == null) {
+                    return null;
+                }
+                a.child.parent = from;
+                a.child.pv = progress(a.child.g, a.child.me);
+                a.child.passed = next.passed;
+                next = a.child;
+            }
+            if (!progressed(next.pv, before)) {
+                return null;
+            }
+            before = next.pv;
+        }
+        return next;
+    }
+
+    /**
+     * loop-exec-1107 ({@link Limits#loopBisect}): the outlet search found no win at {@code lo} repetitions (position
+     * {@code low}) and {@code hiWin} at {@code hi}. Bisect the counts between with the same outlet search; the smallest
+     * winning count's line, or {@code hiWin} when the budget or a step stops the bisection.
+     */
+    private List<Step> bisect(Node low, int lo, int hi, List<Step> hiWin, Node from, List<Step> prefix, List<Step> body) {
+        List<Step> best = hiWin;
+        Node base = low;
+        int baseReps = lo;
+        while (hi - lo > 1 && !out()) {
+            final int mid = (lo + hi) >>> 1;
+            final Node m = advance(base, from, body, mid - baseReps);
+            if (m == null) {
+                break;
+            }
+            st.bisects++;
+            final List<Step> w = outletSearch(m, from, prefix, body, mid);
+            if (w != null) {
+                hi = mid;
+                best = w;
+            } else {
+                lo = mid;
+                base = m;
+                baseReps = mid;
+            }
+        }
+        if (TRACE) {
+            ForcedWinSolver.receipt("FW_ENGINE bisect lo=" + lo + " hi=" + hi + " line=" + best);
+        }
+        return best;
+    }
+
+    /** loop-exec-1107 ({@link Limits#loopHoist}): (node, rotation) pairs a hoisted fast-forward has tried. */
+    private final Set<String> hoisted = new HashSet<>();
+
+    /**
+     * loop-exec-1107 ({@link Limits#loopHoist}): a loop found at {@code child} (its body, played {@code played} times on the
+     * path) that fast-forwarded with no win, tried from each earlier node of the path, root first. A node takes each
+     * rotation of the body whose first step it can play. Returns a winning line from the root, or null.
+     */
+    private List<Step> hoist(Node child, List<Step> body, int played) {
+        final Node start = ancestor(child, played * body.size());
+        if (start == null) {
+            return null;
+        }
+        final List<Node> chain = new ArrayList<>();
+        for (Node a = start.parent; a != null; a = a.parent) {
+            chain.add(0, a);
+        }
+        for (Node a : chain) {
+            if (a.g == null) {
+                continue;
+            }
+            for (int rot = 0; rot < body.size(); rot++) {
+                if (out() || st.hoists >= lim.hoistMax) {
+                    return null;
+                }
+                final List<Step> r = new ArrayList<>(body.subList(rot, body.size()));
+                r.addAll(body.subList(0, rot));
+                if (!hoisted.add(System.identityHashCode(a) + "@" + a.path.size() + "|" + Step.repeat(r, 1).loopKey())) {
+                    continue;
+                }
+                forge.util.IdScope.install(cloneScope(a.ids));
+                if (ForcedWinSolver.Follower.locate(a.g, a.me, r.get(0)) == null) {
+                    continue;
+                }
+                for (List<Step> v : triggerVariants(a, r)) {
+                    if (out() || st.hoists >= lim.hoistMax) {
+                        return null;
+                    }
+                    st.hoists++;
+                    final List<Step> win = hoistForward(a, v);
+                    if (TRACE) {
+                        ForcedWinSolver.receipt("FW_ENGINE hoist at=" + a.path + " body=" + v + " win=" + (win != null));
+                    }
+                    if (win != null) {
+                        st.hoistWins++;
+                        return win;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * loop-exec-1107: the body as found, then the body with forced targets for the targeting triggers its steps cause from
+     * {@code a} (one repetition played on a copy: each step's trigger candidates, at most {@link Limits#triggerVariants}
+     * variants in all). A body found after its trigger was already set elsewhere on the path keeps its own targets.
+     */
+    private List<List<Step>> triggerVariants(Node a, List<Step> body) {
+        final List<List<Step>> out = new ArrayList<>();
+        out.add(body);
+        final List<List<String>> cands = new ArrayList<>();
+        Node next = a;
+        for (Step b : body) {
+            final Applied ap = apply(next, b, next != a);
+            st.loopReps++;
+            if (ap == null || ap.won || ap.child == null) {
+                break;
+            }
+            cands.add(b.triggerRef == null ? ap.triggerCandidates : List.of());
+            next = ap.child;
+        }
+        forge.util.IdScope.install(cloneScope(a.ids));
+        final int cap = Math.max(1, lim.triggerVariants);
+        List<List<Step>> partial = new ArrayList<>();
+        partial.add(new ArrayList<>());
+        boolean any = false;
+        for (int i = 0; i < body.size(); i++) {
+            final List<String> cs = i < cands.size() ? cands.get(i) : List.of();
+            final List<List<Step>> grown = new ArrayList<>();
+            for (List<Step> p : partial) {
+                if (cs.isEmpty()) {
+                    final List<Step> q = new ArrayList<>(p);
+                    q.add(body.get(i));
+                    grown.add(q);
+                    continue;
+                }
+                for (String ref : cs) {
+                    if (grown.size() >= cap) {
+                        break;
+                    }
+                    final Step v = body.get(i).copy();
+                    v.triggerRef = ref;
+                    final List<Step> q = new ArrayList<>(p);
+                    q.add(v);
+                    grown.add(q);
+                    any = true;
+                }
+            }
+            partial = grown;
+        }
+        if (any) {
+            out.addAll(partial);
+        }
+        return out;
+    }
+
+    /**
+     * loop-exec-1107: {@code body} repeated from {@code a} in doubling chunks, each repetition with progress, an outlet search
+     * at each doubling (bisected under {@link Limits#loopBisect}). A win, or null at the cap, the budget or a failed step.
+     */
+    private List<Step> hoistForward(Node a, List<Step> body) {
+        final List<Step> prefix = new ArrayList<>(a.path);
+        Node cur = a;
+        if (cur.pv == null) {
+            cur.pv = progress(cur.g, cur.me);
+        }
+        Node lowNode = cur;
+        int lowReps = 0, reps = 0, chunk = 1;
+        while (reps < lim.repeatCap && !out()) {
+            final int want = Math.min(chunk, lim.repeatCap - reps);
+            Node next = cur;
+            long[] before = cur.pv;
+            int done = 0;
+            boolean failed = false;
+            chunkLoop:
+            for (int r = 0; r < want; r++) {
+                final List<Step> partial = new ArrayList<>();
+                for (Step b : body) {
+                    final Applied ap = apply(next, b, next != cur);
+                    st.loopReps++;
+                    if (ap == null) {
+                        failed = true;
+                        break chunkLoop;
+                    }
+                    partial.add(b);
+                    if (ap.won) {
+                        final List<Step> win = new ArrayList<>(prefix);
+                        if (reps + done > 0) {
+                            win.add(Step.repeat(body, reps + done));
+                        }
+                        win.addAll(partial);
+                        return lim.verify == null || lim.verify.test(win) ? win : null;
+                    }
+                    if (ap.child == null) {
+                        failed = true;
+                        break chunkLoop;
+                    }
+                    ap.child.parent = a;
+                    ap.child.pv = progress(ap.child.g, ap.child.me);
+                    ap.child.passed = next.passed;
+                    next = ap.child;
+                }
+                if (!progressed(next.pv, before)) {
+                    failed = true;
+                    break;
+                }
+                before = next.pv;
+                done++;
+            }
+            if (TRACE) {
+                ForcedWinSolver.receipt("FW_ENGINE hoist chunk reps=" + reps + " want=" + want + " done=" + done + " failed=" + failed
+                        + " err=" + lastError + " pv=" + java.util.Arrays.toString(next.pv));
+            }
+            if (failed) {
+                if (chunk == 1) {
+                    break;
+                }
+                chunk = 1;
+                continue;
+            }
+            cur = next;
+            reps += done;
+            chunk *= 2;
+            List<Step> win = outletSearch(cur, a, prefix, body, reps);
+            if (win != null) {
+                if (lim.loopBisect) {
+                    win = bisect(lowNode, lowReps, reps, win, a, prefix, body);
+                }
+                return win;
+            }
+            lowNode = cur;
+            lowReps = reps;
+        }
+        return null;
     }
 
     /** engine-reach-1107: the moves a {@link #outletSearch} leaves out at its first ply (null = none). */
@@ -2304,6 +2576,12 @@ final class ForcedWinEngine {
                     final List<Step> w = wonVerified(fw.win, node); // solver-gaps-1104 (off = fw.win)
                     if (w != null || lim.verify == null) {
                         return w;
+                    }
+                } else if (lim.loopHoist && lim.loopOutlets && !inOutlet) {
+                    final List<Step> hw = hoist(a.child, body, played); // loop-exec-1107
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                    if (hw != null) {
+                        return hw;
                     }
                 }
                 if (fw.node != null && !seenDominated(fw.node)) {
