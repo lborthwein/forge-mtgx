@@ -128,10 +128,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
         /** unified-search-1106 (off by default): a sampled plan's steps keep the announced X they were recorded with. */
         public boolean planX = false;
+        /**
+         * line-adoption-1107 (off by default): at a plan point whose solver line wins on a later turn than the search's
+         * horizon reaches, every candidate's play-out runs to the start of the turn after the line's win turn (with a value
+         * leaf: the seat's first priority in it). The line is then valued by its own outcome in each world and the
+         * alternatives by the same later leaf, in the same worlds and under the same departZ gate, instead of the line
+         * being cut at the leaf before its kill.
+         */
+        public boolean lineHorizon = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX"));
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX",
+                "lineHorizon"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -163,6 +172,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineDuel")) s.lineDuel = o.get("lineDuel").getAsBoolean();
             if (o.has("unified")) s.unified = o.get("unified").getAsBoolean();
             if (o.has("planX")) s.planX = o.get("planX").getAsBoolean();
+            if (o.has("lineHorizon")) s.lineHorizon = o.get("lineHorizon").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -799,6 +809,36 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return driver.forgeCosts();
     }
 
+    /** line-adoption-1107 (plans.lineHorizon; report only): plan points whose play-outs ran past the search's horizon. */
+    int horizonExtends;
+
+    /**
+     * line-adoption-1107: the turn after the latest win turn of the plan's solver lines, when that is later than the
+     * search's horizon (now + horizonTurns); else 0. A line's win turn counts our turns from this one (0 = this turn):
+     * from our turn T it is T + 2w, from theirs T + 2w - 1.
+     */
+    static int lineHorizonTurn(final Game g, final Player me, final List<Object> plans, final int horizonTurns) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        final int turn = ph.getTurn();
+        final boolean ours = ph.isPlayerTurn(me);
+        int out = 0;
+        for (Object pl : plans) {
+            if (!(pl instanceof LinePlan)) {
+                continue;
+            }
+            final int w = ((LinePlan) pl).proposal.winTurn;
+            if (w <= 0) {
+                continue;
+            }
+            out = Math.max(out, winAbs(turn, w, ours) + 1);
+        }
+        return out > turn + horizonTurns ? out : 0;
+    }
+
+    static int winAbs(final int turn, final int winTurn, final boolean ourTurn) {
+        return turn + 2 * winTurn - (ourTurn ? 0 : 1);
+    }
+
     /** kill-line-1106 (plans.lineFloor; report only): lines adopted by the floor. */
     int lineFloorTakes;
     /** kill-line-1106 (plans.lineDuel; report only): points scored as default against the line. */
@@ -848,13 +888,21 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     /** A plan point: our main phase (or their end step, solver lines only), empty stack, once per phase or after a plan. */
     boolean planPoint(final Game g) {
+        return planPoint(g, null);
+    }
+
+    /**
+     * As above; with solverCfg anyWindow (line-adoption-1107), also any other window of ours with an empty stack where the
+     * menu {@code objs} holds an action that is not a mana ability (solver lines only).
+     */
+    boolean planPoint(final Game g, final List<SpellAbility> objs) {
         if (!g.getStack().isEmpty() || live != null || !driver.solver().lineDone()) {
             return false;
         }
         final PhaseHandler ph = g.getPhaseHandler();
         final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
         final boolean theirEnd = spec.solver && !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
-        if (!ourMain && !theirEnd) {
+        if (!ourMain && !theirEnd && !(anyWindow() && canAct(objs))) {
             return false;
         }
         final String phase = String.valueOf(ph.getPhase());
@@ -869,8 +917,32 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         lastPointPhase = phase;
         pointAgain = false;
         lastPointIds = mine;
+        if (!ourMain && !theirEnd) {
+            windowPoints++; // line-adoption-1107
+        }
         return true;
     }
+
+    /** line-adoption-1107: solverCfg anyWindow is on (the solver proposes at any window of ours). */
+    boolean anyWindow() {
+        return spec.solver && spec.solverCfg.has("anyWindow") && "true".equals(spec.solverCfg.get("anyWindow").getAsString());
+    }
+
+    /** line-adoption-1107: the menu holds an action that is not a mana ability. */
+    static boolean canAct(final List<SpellAbility> objs) {
+        if (objs == null) {
+            return false;
+        }
+        for (SpellAbility sa : objs) {
+            if (sa != null && !sa.isManaAbility()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** line-adoption-1107 (report only): plan points opened by anyWindow outside our main phases and their end step. */
+    int windowPoints;
 
     /** choice-search-1105 (replanOnEntry): our nonland permanents' ids at the last plan point, and the replans counted. */
     private java.util.Set<Integer> lastPointIds;
@@ -898,6 +970,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         int knownTop;
         double ms;
         String note = "";
+        /** line-adoption-1107 (plans.lineHorizon): the absolute turn the play-outs run to, 0 = the search's own horizon. */
+        int horizonTurn;
     }
 
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
@@ -956,6 +1030,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 n++;
                 lineCands++;
             }
+            if (spec.lineHorizon) {
+                st.horizonTurn = lineHorizonTurn(g, me, st.plans, rs.horizonTurns());
+                if (st.horizonTurn > 0) {
+                    horizonExtends++;
+                }
+            }
             if (duel != null) {
                 st.duel = true;
                 lineDuels++;
@@ -968,7 +1048,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             }
         }
         final PhaseHandler ph = g.getPhaseHandler();
-        if (spec.samples > 0 && ph.isPlayerTurn(p)) {
+        final boolean offMain = !(ph.isPlayerTurn(p) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)));
+        if (spec.samples > 0 && ph.isPlayerTurn(p) && !(anyWindow() && offMain)) {
             final long a = System.nanoTime();
             // J0 (block-search-1019): both clocks go through WallClock, so a "Continue from here" rebuild unbinds them
             // (unchanged live)
@@ -1265,6 +1346,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
         if (lineFloorTakes != 0) {
             o.addProperty("lineFloorTakes", lineFloorTakes); // kill-line-1106
+        }
+        if (spec.lineHorizon) {
+            o.addProperty("horizonExtends", horizonExtends); // line-adoption-1107 (only when on)
+        }
+        if (anyWindow()) {
+            o.addProperty("windowPoints", windowPoints); // line-adoption-1107 (only when on)
         }
         o.addProperty("policyPlanDepartures", policyPlanDepartures);
         o.addProperty("provenPicks", provenPicks);

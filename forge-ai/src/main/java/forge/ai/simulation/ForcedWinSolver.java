@@ -229,6 +229,27 @@ public final class ForcedWinSolver {
          * finite; a REPEAT longer than the breaker's window stopped mid-way in verification and read as no win.
          */
         public boolean lineUncapped = false;
+        /**
+         * next-turn-1107 (off by default): a followed step's put-back of cards the line did not name (cards unknown when it was
+         * planned, recorded as -1) puts back cards the rest of the line does not use. Off: Forge AI chooses, and may put back
+         * the line's own pieces (dd3 T5: a second Brainstorm-style put-back returned the line's Oracle and Lotus Petal).
+         */
+        public boolean putBackKeep = false;
+        /**
+         * next-turn-1107 (off by default): the lines verified per decision are distinct in their steps (cards and abilities),
+         * not only in pile filler; and a card a failed verification lost during the opponent's turn (a step of ours after the
+         * pass found it gone) rules out the remaining candidates that use it after their pass. Off: the first cfg.top
+         * distinct shapes (dd2 T9: three lines differing only in the pile's protection card, all tapping Urborg next turn).
+         */
+        public boolean evalAvoidLost = false;
+        /**
+         * line-adoption-1107 (off by default): the solver proposes at any priority window of ours with an empty stack, not only
+         * our main phases and their end step (the caller decides which windows; PlanSearch asks only where the menu has an
+         * action). From our upkeep or draw step the planner's MAIN step goes on to this turn's main phase, and a line planned
+         * outside our main phases plays its steps before its first PASS or MAIN in the window it was taken in. The engine
+         * search still runs only in our main phases.
+         */
+        public boolean anyWindow = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -687,6 +708,9 @@ public final class ForcedWinSolver {
             c.unknownWorlds = "true".equals(get.apply("unknownWorlds")); // unified-search-1106
             c.positionKeyFull = "true".equals(get.apply("positionKeyFull")); // unified-search-1106
             c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
+            c.putBackKeep = "true".equals(get.apply("putBackKeep")); // next-turn-1107
+            c.evalAvoidLost = "true".equals(get.apply("evalAvoidLost")); // next-turn-1107
+            c.anyWindow = "true".equals(get.apply("anyWindow")); // line-adoption-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1290,7 +1314,7 @@ public final class ForcedWinSolver {
         if (line == null) {
             return Decision.NONE;
         }
-        active = new Follower(line);
+        active = follower(line);
         taken++;
         final Follower.Next n = active.next(live, me);
         if (n.action != null) {
@@ -2179,6 +2203,9 @@ public final class ForcedWinSolver {
             lastOutcome = "stack";
             return engineFallback(live, pos, index, t0, true);
         }
+        if (cfg.anyWindow) {
+            markWindow(pos, live.getPhaseHandler()); // line-adoption-1107
+        }
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.nodes = cfg.nodes;
         // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
@@ -2250,6 +2277,8 @@ public final class ForcedWinSolver {
             return null;
         }
         evaluated++;
+        avoidPos = pos; // next-turn-1107 (evalAvoidLost): a re-plan without the lost cards
+        avoidLim = lim;
         receipt("FORCED_WIN candidates" + tag() + " turn=" + pos.turn + " " + res.summary() + " probes=" + reader.probeStats.summary()
                 + " best=" + res.lines.get(0));
         if (ForcedWinEngine.TRACE) {
@@ -2368,7 +2397,7 @@ public final class ForcedWinSolver {
         final boolean response = cfg.engineStack && !live.getStack().isEmpty()
                 && live.getStack().peek().getActivatingPlayer() != me && GameCopier.stackUnsupported(live) == null; // R3-5
         final boolean every = cfg.engineEveryWindow && cfg.engineAnyWindow; // endstep-rows-1103: any empty-stack window
-        if (!response && (!live.getStack().isEmpty() || !ourMain && !theirEnd && !every) || lineActive()) {
+        if (!response && (!live.getStack().isEmpty() || !ourMain && !theirEnd && !every && !cfg.anyWindow) || lineActive()) {
             return out;
         }
         evalSink = new ArrayList<>();
@@ -2392,7 +2421,7 @@ public final class ForcedWinSolver {
 
     /** search-bones-1015: follow {@code line} (a {@link Proposal#line}) from the next priority on. */
     public void adopt(Object line) {
-        active = new Follower((Line) line);
+        active = follower((Line) line);
         taken++;
     }
 
@@ -3709,7 +3738,7 @@ public final class ForcedWinSolver {
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             if (line != null) {
-                final LineAi ai = new LineAi(g, cm, cm.getController().getLobbyPlayer(), Follower.of(line, cfg));
+                final LineAi ai = new LineAi(g, cm, cm.getController().getLobbyPlayer(), follower(line));
                 ai.continueAfter = true;
                 ai.bounded(deadline);
                 cm.dangerouslySetController(ai);
@@ -3854,6 +3883,18 @@ public final class ForcedWinSolver {
         return s;
     }
 
+    /**
+     * line-adoption-1107 (anyWindow): where in the turn the position is. Before main phase 1 of our turn (untap, upkeep, draw
+     * step) the plan reaches this turn's main phase by a MAIN step, drawing the draw step's card from the upkeep.
+     */
+    void markWindow(Position pos, PhaseHandler ph) {
+        final boolean ours = ph.isPlayerTurn(me);
+        // their end step keeps its old follower (steps wait for our main phase): only the windows this key opens change
+        pos.offMain = !(ours && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)) || !ours && ph.is(PhaseType.END_OF_TURN));
+        pos.preMain = ours && (ph.is(PhaseType.UNTAP) || ph.is(PhaseType.UPKEEP) || ph.is(PhaseType.DRAW));
+        pos.preMainDraw = pos.preMain && !ph.is(PhaseType.DRAW) && ph.getTurn() > 1;
+    }
+
     Position readPosition(Game live, List<Integer> knownOrder) {
         if (cfg.honestProbes) {
             return forge.bench.PlayerControllerBridge.isolated(live, () -> forge.util.IdScope.detached(() -> {
@@ -3907,6 +3948,8 @@ public final class ForcedWinSolver {
         int hiddenTakes;
         /** Exact-draw evaluations: a play-out read a hidden card outside the arranged slots (the enumeration misses it). */
         boolean libUncovered;
+        /** next-turn-1107: the card id a step of ours after the pass found gone in the unopposed play-out (-1: none). */
+        int lostHost = -1;
 
         Eval(Line line) {
             this.line = line;
@@ -3933,6 +3976,9 @@ public final class ForcedWinSolver {
     /** As above; the evaluation's budget counts from {@code from} (the decision's start with the payment search on). */
     Eval evaluateTop(Game live, List<Line> lines, int index, long from) {
         final long deadline = deadlineAt(from + budgetMs() * 1_000_000L);
+        if (cfg.evalAvoidLost) {
+            return evaluateAvoidLost(live, lines, index, deadline);
+        }
         final List<Line> picked = new ArrayList<>();
         final Set<String> shapes = new HashSet<>();
         for (Line l : lines) {
@@ -3962,6 +4008,120 @@ public final class ForcedWinSolver {
             }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
             receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e);
+            if (evalSink != null) {
+                evalSink.add(e);
+            }
+            if (e.pUnopposed < 1.0) {
+                continue;
+            }
+            if (best == null || e.pBelief > best.pBelief + 1e-9) {
+                best = e;
+            }
+            if (best.pBelief >= 1.0) {
+                break;
+            }
+        }
+        return best;
+    }
+
+    /** next-turn-1107 ({@link Config#evalAvoidLost}): a line's steps without pile, pick or protection filler. */
+    static String skeleton(Line l) {
+        final StringBuilder sb = new StringBuilder().append(l.winTurn);
+        for (Step st : l.steps) {
+            sb.append('|').append(st.pass ? "PASS" : st.kind + ":" + st.hostId + ":" + st.desc + ":" + st.floatColor);
+        }
+        return sb.toString();
+    }
+
+    /** next-turn-1107: the card ids {@code l} uses after its pass. */
+    static Set<Integer> usedAfterPass(Line l) {
+        final Set<Integer> out = new HashSet<>();
+        boolean passed = false;
+        for (Step st : l.steps) {
+            if (st.pass) {
+                passed = true;
+            } else if (passed) {
+                out.add(st.hostId);
+                if (st.body != null) {
+                    for (Step b : st.body) {
+                        out.add(b.hostId);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /** next-turn-1107 (report only): candidates skipped as using a lost card; re-plans without lost cards, and their lines. */
+    int avoidSkipped, avoidReplans, avoidReplanLines;
+    /** next-turn-1107: the position and limits of the planner call whose lines are being evaluated. */
+    private Position avoidPos;
+    private ForcedWinPlanner.Limits avoidLim;
+
+    /** next-turn-1107 ({@link Config#evalAvoidLost}): as {@link #evaluateTop}, the candidates chosen as the evaluations go. */
+    private Eval evaluateAvoidLost(Game live, List<Line> lines0, int index, long deadline) {
+        final Set<String> skeletons = new HashSet<>();
+        final Set<Integer> lost = new HashSet<>();
+        Eval best = null;
+        int i = 0;
+        List<Line> lines = lines0;
+        boolean replanned = false;
+        final int skipped0 = avoidSkipped;
+        for (int li = 0;; li++) {
+            if (li >= lines.size()) {
+                // every candidate left uses a lost card: plan once more with the lost cards gone after our pass
+                if (replanned || best != null || lost.isEmpty() || avoidSkipped == skipped0 || avoidPos == null
+                        || i >= cfg.top || System.nanoTime() > deadline) {
+                    break;
+                }
+                replanned = true;
+                avoidReplans++;
+                final ForcedWinPlanner.Limits lim2 = new ForcedWinPlanner.Limits();
+                lim2.nodes = avoidLim.nodes;
+                lim2.ms = avoidLim.ms;
+                lim2.payPolicies = avoidLim.payPolicies;
+                lim2.planDiscard = avoidLim.planDiscard;
+                lim2.horizon = avoidLim.horizon;
+                lim2.goneAtPass = new HashSet<>(lost);
+                final ForcedWinPlanner.Result r2 = ForcedWinPlanner.plan(avoidPos, lim2);
+                if (cfg.followPay) {
+                    for (Line l2 : r2.lines) {
+                        for (Step st : l2.steps) {
+                            st.forceLife = st.phyrexianLife;
+                        }
+                    }
+                }
+                avoidReplanLines += r2.lines.size();
+                receipt("FORCED_WIN avoid-replan" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " gone=" + lost + " "
+                        + r2.summary() + (r2.lines.isEmpty() ? "" : " best=" + r2.lines.get(0)));
+                lines = r2.lines;
+                li = -1;
+                continue;
+            }
+            final Line l = lines.get(li);
+            if (i >= cfg.top) {
+                break;
+            }
+            if (System.nanoTime() > deadline && best != null) {
+                break;
+            }
+            if (best != null && unprovenStop(!(best.pUnopposed >= 1.0 && best.pBelief >= 1.0))) {
+                break; // deck-belief-1105
+            }
+            if (!lost.isEmpty() && l.winTurn > 0 && !java.util.Collections.disjoint(usedAfterPass(l), lost)) {
+                avoidSkipped++;
+                continue;
+            }
+            if (!skeletons.add(skeleton(l))) {
+                continue;
+            }
+            final Eval e = evaluate(live, l, mix(cfg.seed, index * 1000L + i), deadline);
+            receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e
+                    + (e.lostHost >= 0 ? " lost=" + e.lostHost : "") + " skipped=" + avoidSkipped);
+            i++;
+            if (e.lostHost >= 0) {
+                lost.add(e.lostHost);
+            }
             if (evalSink != null) {
                 evalSink.add(e);
             }
@@ -4013,6 +4173,7 @@ public final class ForcedWinSolver {
         e.endTurn = u.endTurn;
         if (!u.won && !libAllWorlds) {
             e.failures = "unopposed:" + u.why;
+            e.lostHost = u.lostHost;
             return e;
         }
         int spells = 0;
@@ -4130,6 +4291,8 @@ public final class ForcedWinSolver {
 
     /** One play-out's result. */
     static final class Outcome {
+        /** next-turn-1107: a step of ours after the line's pass found its card gone: that card's id (-1: none). */
+        int lostHost = -1;
         boolean won;
         boolean oppHasCounter;
         String why = "";
@@ -4322,7 +4485,7 @@ public final class ForcedWinSolver {
                 g.subscribeToEvents(hw);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
-            final Follower f = Follower.of(line, cfg);
+            final Follower f = follower(line);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
             lineAi.hw = hw;
             // bvw-step1-build-1024: budget=counter: each seat's calls in the play-out are capped (the wall's stand-in)
@@ -4397,6 +4560,7 @@ public final class ForcedWinSolver {
                         + " " + f.why + " life=" + cm.getLife() + sb + " stormCast=" + g.getStack().getSpellsCastThisTurn().size());
             }
             if (!out.won) {
+                out.lostHost = f.broken && f.passTurn >= 0 ? f.missingHost : -1; // next-turn-1107
                 out.why = f.broken ? "broken@" + f.cursor + ":" + f.why
                         : adv != null && adv.countered != null ? "countered:" + adv.countered
                         : g.isGameOver() ? "lost" : steps >= cfg.maxSteps ? "steps" : "no-win@" + f.cursor;
@@ -4565,6 +4729,16 @@ public final class ForcedWinSolver {
      * check refuses the ability, and the width model's expected hand and library top before the step against the
      * game's. Never changes the game (read-only checks on a copy of the ability).
      */
+    /** next-turn-1107: card {@code id} is no longer ours to use: gone, in a graveyard or exile, or another player's. */
+    static boolean gone(Game g, Player me, int id) {
+        final Card c = g.findById(id);
+        if (c == null) {
+            return true;
+        }
+        final ZoneType z = c.getZone() == null ? null : c.getZone().getZoneType();
+        return z == null || z == ZoneType.Graveyard || z == ZoneType.Exile || z == ZoneType.Battlefield && c.getController() != me;
+    }
+
     static String diagnose(Game g, Player me, Step st) {
         final StringBuilder sb = new StringBuilder();
         try {
@@ -4828,6 +5002,11 @@ public final class ForcedWinSolver {
 
     // ------------------------------------------------------------------ the follower (live seat and play-outs)
 
+    /** A follower of {@code line} with this solver's follower keys (next-turn-1107: {@link Config#putBackKeep}). */
+    private Follower follower(Line line) {
+        return Follower.of(line, cfg); // consolidate-1107: one place sets the follower's keys
+    }
+
     /** Executes a line step by step in any game where its card ids exist. */
     static final class Follower {
         final Line line;
@@ -4838,6 +5017,12 @@ public final class ForcedWinSolver {
         /** Executed steps by host id: the choice asks of a resolving step are answered from it. */
         final Map<Integer, Step> executed = new HashMap<>();
         final Map<Integer, Integer> pilePicked = new HashMap<>();
+        /** next-turn-1107 ({@link Config#putBackKeep}): a put-back of cards the line did not name avoids the line's cards. */
+        boolean putBackKeep;
+        /** next-turn-1107: the card id of the step found missing when the line broke (-1: none). */
+        int missingHost = -1;
+        /** next-turn-1107 (report only): put-back picks answered from the unreserved cards. */
+        int putBackKept;
         /** kill-line-1106 (planDiscard): the current step's recorded choices. */
         ForcedWinChoices.Cursor choices = new ForcedWinChoices.Cursor(null);
         /** An ATTACK step is waiting for our declare-attackers step. */
@@ -4867,6 +5052,7 @@ public final class ForcedWinSolver {
             fo.payRecord = cfg.payRecord;
             fo.uncapped = cfg.loopMacro && cfg.loopMacro3; // review #154 S2: its own key
             fo.costLine = cfg.engineCostChoice;
+            fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
             return fo;
         }
 
@@ -4902,6 +5088,28 @@ public final class ForcedWinSolver {
 
         /** search-bones-1015 (c): the position inside the current REPEAT step (repetition, body index). */
         int repIter, repPos;
+        /** line-adoption-1107: an offMain line has reached its first PASS or MAIN. */
+        boolean offMainDone;
+
+        /** line-adoption-1107: play one plain step now (any window), as the main-phase path does. */
+        private Next play(Game g, Player me, Next n, Step st) {
+            final SpellAbility sa = locate(g, me, st);
+            if (sa == null) {
+                broken = true;
+                missingHost = gone(g, me, st.hostId) ? st.hostId : -1;
+                why = "missing:" + st + " {" + diagnose(g, me, st) + "}";
+                n.broken = true;
+                n.why = why;
+                return n;
+            }
+            cursor++;
+            executed.put(st.hostId, st);
+            choices = new ForcedWinChoices.Cursor(st.cac);
+            triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
+            picks = new ForcedWinEngine.LibraryPicks(st.pickName);
+            n.action = sa;
+            return n;
+        }
 
         Next next(Game g, Player me) {
             final Next n = new Next();
@@ -4912,6 +5120,23 @@ public final class ForcedWinSolver {
                 return n;
             }
             final PhaseHandler ph = g.getPhaseHandler();
+            if (line.offMain && !offMainDone) {
+                // line-adoption-1107 (anyWindow): a line planned outside our main phases plays its steps before its first
+                // PASS or MAIN in the window it was taken in; MAIN waits for this turn's main phase 1
+                final Step c0 = cursor < line.steps.size() ? line.steps.get(cursor) : null;
+                if (c0 != null && c0.kind == AbilKind.MAIN) {
+                    if (!(ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)))) {
+                        n.waiting = true;
+                        return n;
+                    }
+                    cursor++;
+                    offMainDone = true;
+                } else if (c0 != null && !c0.pass && c0.kind != AbilKind.ATTACK && c0.kind != AbilKind.REPEAT) {
+                    return play(g, me, n, c0);
+                } else {
+                    offMainDone = true;
+                }
+            }
             if (passTurn < 0 && cursor < line.steps.size() && line.steps.get(cursor).pass) {
                 // solver-gaps-1015: a PASS ends the turn it is reached in, ours or theirs (a line taken at their end step
                 // starts with PASS: it means "to our next turn", not "skip our next turn")
@@ -4968,6 +5193,10 @@ public final class ForcedWinSolver {
             // search-bones-1015 (c): a REPEAT step plays its body steps in order, its number of times
             final boolean inRepeat = st0.kind == AbilKind.REPEAT;
             final Step st = inRepeat ? st0.body.get(repPos) : st0;
+            if (st.kind == AbilKind.MAIN) {
+                cursor++; // line-adoption-1107: already in a main phase of ours
+                return next(g, me);
+            }
             if (st.kind == AbilKind.ATTACK) {
                 if (!ph.is(PhaseType.MAIN1)) {
                     // the attack happened (or its chance passed): go on with the line in main phase 2
@@ -4996,6 +5225,7 @@ public final class ForcedWinSolver {
             final SpellAbility sa = locate(g, me, st);
             if (sa == null) {
                 broken = true;
+                missingHost = gone(g, me, st.hostId) ? st.hostId : -1; // next-turn-1107
                 why = "missing:" + st + " {" + diagnose(g, me, st) + "}";
                 n.broken = true;
                 n.why = why;
@@ -5191,6 +5421,17 @@ public final class ForcedWinSolver {
                     }
                 }
             }
+            if (putBackKeep && st.pile.isEmpty() && st.picks.isEmpty() && want.contains(-1)) {
+                // next-turn-1107: the line put back cards it did not know; any card the rest of the line does not use will do
+                final Set<Integer> keep = reserved();
+                keep.addAll(want);
+                for (Card c : choices) {
+                    if (!keep.contains(c.getId())) {
+                        putBackKept++;
+                        return c;
+                    }
+                }
+            }
             return null;
         }
 
@@ -5360,7 +5601,9 @@ public final class ForcedWinSolver {
                     replanner = null;
                     final Line fresh = rp.apply(f.line);
                     if (fresh != null) {
+                        final boolean keep = f.putBackKeep;
                         f = new Follower(fresh);
+                        f.putBackKeep = keep; // next-turn-1107
                         final Follower.Next m = f.next(g, getPlayer());
                         return m.action != null ? capped(List.of(m.action)) : null;
                     }
