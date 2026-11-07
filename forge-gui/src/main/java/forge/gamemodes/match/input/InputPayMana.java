@@ -422,6 +422,9 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         }
 
         final SpellAbility chosen;
+        // The browser seat: the colours the source's mana abilities offered before they were
+        // narrowed to the ones that can pay (0 when no narrowing happened).
+        byte cardColours = 0;
 
         if (chosenAbility == null) {
             HashMap<SpellAbilityView, SpellAbility> abilitiesMap = new HashMap<>();
@@ -473,7 +476,30 @@ public abstract class InputPayMana extends InputSyncronizedBase {
             }
 
             boolean choice = true;
-            if (guessAbilityWithRequiredColors) {
+            // The browser seat (produced mana floats, so the cost never shrinks): Forge's narrowing
+            // kept only the abilities making a colour the whole cost names, and a Tropical Island
+            // paying {1}{G} made {G} with no question though its {U} pays the {1}. Keep the
+            // abilities that make a colour able to pay what is left once the floating mana is counted.
+            final byte payableLeft = guessAbilityWithRequiredColors ? coloursThatCanPayLeft(card) : 0;
+            if (payableLeft != 0) {
+                for (SpellAbility sa : abilitiesMap.values()) {
+                    cardColours |= producibleColours(sa);
+                }
+                final HashMap<SpellAbilityView, SpellAbility> colorMatches = new HashMap<>();
+                for (SpellAbility sa : abilitiesMap.values()) {
+                    if (sa.isManaAbilityFor(saPaidFor, payableLeft)) {
+                        colorMatches.put(sa.getView(), sa);
+                    }
+                }
+                if (colorMatches.isEmpty()) {
+                    choice = false;
+                } else if (colorMatches.size() < abilitiesMap.size()) {
+                    abilitiesMap = colorMatches;
+                }
+                if (colorMatches.isEmpty() || abilitiesMap.size() != 1) {
+                    cardColours = 0; // no colour was decided here: the seat is asked, or nothing pays
+                }
+            } else if (guessAbilityWithRequiredColors) {
                 // express Mana Choice
                 if (colorNeeded == 0) {
                     choice = false;
@@ -521,16 +547,31 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         // source took the express choice's first colour every time: Botanical Sanctum paying for
         // Oko ({1}{G}{U}) always made {U}, even after an Island had floated the {U} (owner report
         // 2026-10-06T00-39-37). Count the floating mana first; ask when colours remain.
-        // An any-colour source on this seat (owner, 2026-11-06T20-10-11): the seat is asked unless only
-        // one colour can pay what is left, and then the table is told which colour Forge took.
-        final byte anyColour = anyColourPayable(chosen);
-        final byte stillNeeded = anyColour != 0 ? anyColour : floatingPaymentColours(chosen, (byte) producedColorMask);
-        final boolean askColour = Integer.bitCount(stillNeeded & 0xFF) > 1 && chosen.getManaPart().isComboMana();
-        final boolean forcedAnyColour = anyColour != 0 && Integer.bitCount(anyColour & 0xFF) == 1;
-        if (anyColour != 0 || Integer.bitCount(stillNeeded & 0xFF) == 1) {
-            producedColorMask = stillNeeded;
+        // Any colour-choice source on this seat (owner, 2026-11-06T20-10-11 and 2026-11-07): an
+        // any-colour source, a dual land, "any combination". The seat is asked among the colours that
+        // can pay what is left, unless only one can, and then the table is told which colour Forge took.
+        final byte offered = colourChoiceOffer(chosen);
+        final int comboAmount = offered != 0 && chosen.getManaPart().isComboMana()
+                ? chosen.amountOfManaGenerated(false) : 0;
+        final boolean askColour = Integer.bitCount(offered & 0xFF) > 1 && comboAmount == 1;
+        final boolean askCombination = Integer.bitCount(offered & 0xFF) > 1 && comboAmount > 1;
+        final byte forcedColour;
+        if (offered != 0) {
+            producedColorMask = offered;
+            forcedColour = Integer.bitCount(offered & 0xFF) == 1
+                    && Integer.bitCount(producibleColours(chosen) & 0xFF) > 1 ? offered : 0;
+        } else {
+            // A one-colour ability Forge chose because only its colour can pay what is left, on a
+            // source whose abilities offered more (a Tropical Island paying a {U}).
+            final byte made = cardColours != 0 ? producibleColours(chosen) : 0;
+            forcedColour = Integer.bitCount(made & 0xFF) == 1 && Integer.bitCount(cardColours & 0xFF) > 1 ? made : 0;
         }
         chosen.setManaExpressChoice(ColorSet.fromMask(producedColorMask));
+        if (comboAmount > 1 && forcedColour != 0) {
+            // "Any combination" with one colour that can pay: every mana is that colour. ManaEffect
+            // reads the express choice by position, so the colour is written once per mana.
+            chosen.getManaPart().setExpressChoice(repeatColour(forcedColour, comboAmount));
+        }
 
         // System.out.println("Chosen sa=" + chosen + " of " + chosen.getHostCard() + " to pay mana");
 
@@ -541,10 +582,28 @@ public abstract class InputPayMana extends InputSyncronizedBase {
                 // question is asked here, on the game thread, as ManaEffect asks at priority.
                 final byte picked = getController().chooseColor(
                         Localizer.getInstance().getMessage("lblSelectManaProduce"), chosen,
-                        ColorSet.fromMask(stillNeeded));
+                        ColorSet.fromMask(offered));
                 if (picked != 0) {
                     chosen.setManaExpressChoice(ColorSet.fromMask(picked));
                 }
+            }
+            if (askCombination) {
+                // ManaEffect narrows "any combination" mana by position from the express choice, so
+                // the combination is asked here among the colours that can pay, as ManaEffect asks
+                // it at priority, and written back one colour per mana.
+                final Map<Byte, Integer> picked = getController().specifyManaCombo(chosen,
+                        ColorSet.fromMask(offered), comboAmount,
+                        chosen.getManaPart().getOrigProduced().contains("Different"));
+                final StringBuilder each = new StringBuilder();
+                if (picked != null) {
+                    for (final byte color : ManaAtom.MANATYPES) {
+                        final Integer count = picked.get(color);
+                        for (int i = 0; count != null && i < count; i++) {
+                            each.append(each.length() == 0 ? "" : " ").append(MagicColor.toShortString(color));
+                        }
+                    }
+                }
+                chosen.getManaPart().setExpressChoice(each.toString());
             }
             if (PlaySpellAbility.playSpellAbility(getController(), chosen.getActivatingPlayer(), chosen)) {
                 final List<AbilityManaPart> manaAbilities = chosen.getAllManaParts();
@@ -565,8 +624,8 @@ public abstract class InputPayMana extends InputSyncronizedBase {
                     updateButtons();
                     invalidateAutoPayManaSources();
                 }
-                if (forcedAnyColour) {
-                    getController().getGui().notifyManaColourForced(CardView.get(chosen.getHostCard()), anyColour);
+                if (forcedColour != 0) {
+                    getController().getGui().notifyManaColourForced(CardView.get(chosen.getHostCard()), forcedColour);
                 }
             } else {
                 // The activation was cancelled, usually while paying its own cost. The ability object
@@ -584,64 +643,75 @@ public abstract class InputPayMana extends InputSyncronizedBase {
 
     /**
      * For a seat whose produced mana floats ({@link FullControlFlag#NoPaymentFromManaAbility}), when
-     * {@code chosen} is a source that offers any colour (from its produced-mana options): the colours
-     * it may make, which are those that can pay what is left of the cost once the floating unrestricted
-     * mana is counted, or every colour when none can (it then only floats) or the spell cares what was
-     * spent. 0 when this is not such a source or not such a seat. {@code Combo Any} with an amount of
-     * two or more is "any combination" and keeps its own path.
+     * {@code chosen} is a colour-choice source (from its produced-mana options: any colour, a
+     * combination such as "{G} or {U}", or "any combination"): the colours to offer, which are those
+     * it makes that can pay what is left of the cost once the floating unrestricted mana is counted
+     * (a generic part counts). Every colour it makes when none can (it then only floats), when the
+     * spell cares what was spent, or when "any combination" makes more mana than is left to pay.
+     * 0 when this is not such a source or not such a seat.
      */
-    private byte anyColourPayable(final SpellAbility chosen) {
+    private byte colourChoiceOffer(final SpellAbility chosen) {
         if (!player.getController().isFullControl(FullControlFlag.NoPaymentFromManaAbility)) {
             return 0;
         }
         final AbilityManaPart part = chosen.getManaPart();
-        if (part == null || chosen.getAllManaParts().size() != 1) {
+        if (part == null || chosen.getAllManaParts().size() != 1 || chosen.hasParam("Each")
+                || !(part.isAnyMana() || part.isComboMana())) {
             return 0;
         }
-        final byte every = ColorSet.WUBRG.getColor();
-        for (final byte color : ManaAtom.MANATYPES) {
-            if ((every & color) != 0 && !chosen.canProduce(MagicColor.toShortString(color))) {
-                return 0;
-            }
-        }
-        if (!part.isAnyMana() && !(part.isComboMana() && chosen.amountOfManaGenerated(false) == 1)) {
+        final byte producible = producibleColours(chosen);
+        if (Integer.bitCount(producible & 0xFF) < 2) {
             return 0;
         }
-        final ManaPool pool = player.getManaPool();
-        final ManaCostBeingPaid left = new ManaCostBeingPaid(manaCost);
-        for (final Mana mana : Lists.newArrayList(pool)) {
-            if (!mana.isRestricted() && left.isNeeded(mana, pool)) {
-                left.payMana(mana, pool);
+        final int amount = chosen.amountOfManaGenerated(false);
+        if (amount < 1) {
+            return 0;
+        }
+        if (!part.meetsManaRestrictions(saPaidFor)) {
+            return producible;
+        }
+        final byte payable = (byte) (coloursThatCanPayLeft(chosen.getHostCard()) & producible);
+        if (payable == 0) {
+            return producible;
+        }
+        if (part.isComboMana() && amount > 1) {
+            // "Any combination": mana past what is left to pay only floats, so any colour may be it.
+            if (amount > leftAfterFloating().getConvertedManaCost()) {
+                return producible;
+            }
+            if (part.getOrigProduced().contains("Different") && Integer.bitCount(payable & 0xFF) < amount) {
+                return producible;
             }
         }
-        byte payable = 0;
-        if (part.meetsManaRestrictions(saPaidFor) && !saPaidFor.tracksManaSpent()) {
-            for (final byte color : ManaAtom.MANATYPES) {
-                if ((every & color) != 0 && left.isAnyPartPayableWith(color, pool)
-                        && saPaidFor.allowsPayingWithShard(chosen.getHostCard(), color)) {
-                    payable |= color;
-                }
-            }
-        }
-        return payable == 0 ? every : payable;
+        return payable;
     }
 
     /**
      * For a seat whose produced mana floats ({@link FullControlFlag#NoPaymentFromManaAbility}): the
-     * colours among {@code producible} that the cost still needs once the floating unrestricted mana
-     * is counted against it. 0 keeps Forge's own express choice: a seat that pays as it taps, a
-     * source that is not a one-mana colour choice ("{G} or {U}", "any colour"), or a cost whose
-     * coloured part the floating mana already covers.
+     * colours (WUBRG) that can pay some part of what is left of the cost once the floating
+     * unrestricted mana is counted, with mana from {@code source}. 0 for any other seat, when the
+     * spell cares what was spent, or when no colour can pay.
      */
-    private byte floatingPaymentColours(final SpellAbility chosen, final byte producible) {
-        if (!player.getController().isFullControl(FullControlFlag.NoPaymentFromManaAbility)) {
+    private byte coloursThatCanPayLeft(final Card source) {
+        if (!player.getController().isFullControl(FullControlFlag.NoPaymentFromManaAbility)
+                || saPaidFor.tracksManaSpent()) {
             return 0;
         }
-        final AbilityManaPart part = chosen.getManaPart();
-        if (part == null || chosen.getSubAbility() != null || chosen.hasParam("Each")
-                || !(part.isComboMana() || part.isAnyMana()) || chosen.amountOfManaGenerated(false) != 1) {
-            return 0;
+        final ManaPool pool = player.getManaPool();
+        final ManaCostBeingPaid left = leftAfterFloating();
+        final byte every = ColorSet.WUBRG.getColor();
+        byte payable = 0;
+        for (final byte color : ManaAtom.MANATYPES) {
+            if ((every & color) != 0 && left.isAnyPartPayableWith(color, pool)
+                    && saPaidFor.allowsPayingWithShard(source, color)) {
+                payable |= color;
+            }
         }
+        return payable;
+    }
+
+    /** The cost being paid less the floating unrestricted mana that can pay it. */
+    private ManaCostBeingPaid leftAfterFloating() {
         final ManaPool pool = player.getManaPool();
         final ManaCostBeingPaid left = new ManaCostBeingPaid(manaCost);
         for (final Mana mana : Lists.newArrayList(pool)) {
@@ -649,13 +719,27 @@ public abstract class InputPayMana extends InputSyncronizedBase {
                 left.payMana(mana, pool);
             }
         }
-        byte needed = 0;
+        return left;
+    }
+
+    /** The colours (WUBRG) {@code sa} can make, from its produced-mana options. */
+    private static byte producibleColours(final SpellAbility sa) {
+        final byte every = ColorSet.WUBRG.getColor();
+        byte made = 0;
         for (final byte color : ManaAtom.MANATYPES) {
-            if ((producible & color) != 0 && left.needsColor(color, pool)) {
-                needed |= color;
+            if ((every & color) != 0 && sa.canProduce(MagicColor.toShortString(color))) {
+                made |= color;
             }
         }
-        return needed;
+        return made;
+    }
+
+    private static String repeatColour(final byte colour, final int times) {
+        final StringBuilder each = new StringBuilder();
+        for (int i = 0; i < times; i++) {
+            each.append(i == 0 ? "" : " ").append(MagicColor.toShortString(colour));
+        }
+        return each.toString();
     }
 
     protected boolean isAlreadyPaid() {
