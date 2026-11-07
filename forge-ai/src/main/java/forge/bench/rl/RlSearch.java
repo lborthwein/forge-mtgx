@@ -1013,7 +1013,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final LookaheadSearch.GivenResult r;
         PlanSearch.Stage stage = null;
-        if (sb != null && sb.planPoint(g)) {
+        if (sb != null && sb.planPoint(g, menuObjs)) {
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
             stage = sb.propose(g, me, m, menuObjs, t0);
             if (stage.hook) {

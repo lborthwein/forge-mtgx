@@ -838,13 +838,21 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     /** A plan point: our main phase (or their end step, solver lines only), empty stack, once per phase or after a plan. */
     boolean planPoint(final Game g) {
+        return planPoint(g, null);
+    }
+
+    /**
+     * As above; with solverCfg anyWindow (line-adoption-1107), also any other window of ours with an empty stack where the
+     * menu {@code objs} holds an action that is not a mana ability (solver lines only).
+     */
+    boolean planPoint(final Game g, final List<SpellAbility> objs) {
         if (!g.getStack().isEmpty() || live != null || !driver.solver().lineDone()) {
             return false;
         }
         final PhaseHandler ph = g.getPhaseHandler();
         final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
         final boolean theirEnd = spec.solver && !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
-        if (!ourMain && !theirEnd) {
+        if (!ourMain && !theirEnd && !(anyWindow() && canAct(objs))) {
             return false;
         }
         final String phase = String.valueOf(ph.getPhase());
@@ -859,8 +867,32 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         lastPointPhase = phase;
         pointAgain = false;
         lastPointIds = mine;
+        if (!ourMain && !theirEnd) {
+            windowPoints++; // line-adoption-1107
+        }
         return true;
     }
+
+    /** line-adoption-1107: solverCfg anyWindow is on (the solver proposes at any window of ours). */
+    boolean anyWindow() {
+        return spec.solver && spec.solverCfg.has("anyWindow") && "true".equals(spec.solverCfg.get("anyWindow").getAsString());
+    }
+
+    /** line-adoption-1107: the menu holds an action that is not a mana ability. */
+    static boolean canAct(final List<SpellAbility> objs) {
+        if (objs == null) {
+            return false;
+        }
+        for (SpellAbility sa : objs) {
+            if (sa != null && !sa.isManaAbility()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** line-adoption-1107 (report only): plan points opened by anyWindow outside our main phases and their end step. */
+    int windowPoints;
 
     /** choice-search-1105 (replanOnEntry): our nonland permanents' ids at the last plan point, and the replans counted. */
     private java.util.Set<Integer> lastPointIds;
@@ -961,7 +993,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             }
         }
         final PhaseHandler ph = g.getPhaseHandler();
-        if (spec.samples > 0 && ph.isPlayerTurn(p)) {
+        final boolean offMain = !(ph.isPlayerTurn(p) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)));
+        if (spec.samples > 0 && ph.isPlayerTurn(p) && !(anyWindow() && offMain)) {
             final long a = System.nanoTime();
             // J0 (block-search-1019): both clocks go through WallClock, so a "Continue from here" rebuild unbinds them
             // (unchanged live)
@@ -1255,6 +1288,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
         if (spec.lineHorizon) {
             o.addProperty("horizonExtends", horizonExtends); // line-adoption-1107 (only when on)
+        }
+        if (anyWindow()) {
+            o.addProperty("windowPoints", windowPoints); // line-adoption-1107 (only when on)
         }
         o.addProperty("policyPlanDepartures", policyPlanDepartures);
         o.addProperty("provenPicks", provenPicks);

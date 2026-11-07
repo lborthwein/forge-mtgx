@@ -211,6 +211,14 @@ public final class ForcedWinSolver {
          * distinct shapes (dd2 T9: three lines differing only in the pile's protection card, all tapping Urborg next turn).
          */
         public boolean evalAvoidLost = false;
+        /**
+         * line-adoption-1107 (off by default): the solver proposes at any priority window of ours with an empty stack, not only
+         * our main phases and their end step (the caller decides which windows; PlanSearch asks only where the menu has an
+         * action). From our upkeep or draw step the planner's MAIN step goes on to this turn's main phase, and a line planned
+         * outside our main phases plays its steps before its first PASS or MAIN in the window it was taken in. The engine
+         * search still runs only in our main phases.
+         */
+        public boolean anyWindow = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -326,6 +334,7 @@ public final class ForcedWinSolver {
             c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
             c.putBackKeep = "true".equals(get.apply("putBackKeep")); // next-turn-1107
             c.evalAvoidLost = "true".equals(get.apply("evalAvoidLost")); // next-turn-1107
+            c.anyWindow = "true".equals(get.apply("anyWindow")); // line-adoption-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -782,6 +791,9 @@ public final class ForcedWinSolver {
             noLineKey = key;
             return null;
         }
+        if (cfg.anyWindow) {
+            markWindow(pos, live.getPhaseHandler()); // line-adoption-1107
+        }
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.nodes = cfg.nodes;
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
@@ -933,7 +945,7 @@ public final class ForcedWinSolver {
         final PhaseHandler ph = live.getPhaseHandler();
         final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
         final boolean theirEnd = !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
-        if (!live.getStack().isEmpty() || !ourMain && !theirEnd || lineActive()) {
+        if (!live.getStack().isEmpty() || !ourMain && !theirEnd && !cfg.anyWindow || lineActive()) {
             return out;
         }
         evalSink = new ArrayList<>();
@@ -2042,6 +2054,18 @@ public final class ForcedWinSolver {
         return s;
     }
 
+    /**
+     * line-adoption-1107 (anyWindow): where in the turn the position is. Before main phase 1 of our turn (untap, upkeep, draw
+     * step) the plan reaches this turn's main phase by a MAIN step, drawing the draw step's card from the upkeep.
+     */
+    void markWindow(Position pos, PhaseHandler ph) {
+        final boolean ours = ph.isPlayerTurn(me);
+        // their end step keeps its old follower (steps wait for our main phase): only the windows this key opens change
+        pos.offMain = !(ours && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)) || !ours && ph.is(PhaseType.END_OF_TURN));
+        pos.preMain = ours && (ph.is(PhaseType.UNTAP) || ph.is(PhaseType.UPKEEP) || ph.is(PhaseType.DRAW));
+        pos.preMainDraw = pos.preMain && !ph.is(PhaseType.DRAW) && ph.getTurn() > 1;
+    }
+
     Position readPosition(Game live, List<Integer> knownOrder) {
         final Position pos = reader.read(live, me, knownOrder, true);
         if (cfg.sourceOutput && pos != null) {
@@ -2926,6 +2950,28 @@ public final class ForcedWinSolver {
 
         /** search-bones-1015 (c): the position inside the current REPEAT step (repetition, body index). */
         int repIter, repPos;
+        /** line-adoption-1107: an offMain line has reached its first PASS or MAIN. */
+        boolean offMainDone;
+
+        /** line-adoption-1107: play one plain step now (any window), as the main-phase path does. */
+        private Next play(Game g, Player me, Next n, Step st) {
+            final SpellAbility sa = locate(g, me, st);
+            if (sa == null) {
+                broken = true;
+                missingHost = gone(g, me, st.hostId) ? st.hostId : -1;
+                why = "missing:" + st + " {" + diagnose(g, me, st) + "}";
+                n.broken = true;
+                n.why = why;
+                return n;
+            }
+            cursor++;
+            executed.put(st.hostId, st);
+            choices = new ForcedWinChoices.Cursor(st.cac);
+            triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
+            picks = new ForcedWinEngine.LibraryPicks(st.pickName);
+            n.action = sa;
+            return n;
+        }
 
         Next next(Game g, Player me) {
             final Next n = new Next();
@@ -2935,6 +2981,23 @@ public final class ForcedWinSolver {
                 return n;
             }
             final PhaseHandler ph = g.getPhaseHandler();
+            if (line.offMain && !offMainDone) {
+                // line-adoption-1107 (anyWindow): a line planned outside our main phases plays its steps before its first
+                // PASS or MAIN in the window it was taken in; MAIN waits for this turn's main phase 1
+                final Step c0 = cursor < line.steps.size() ? line.steps.get(cursor) : null;
+                if (c0 != null && c0.kind == AbilKind.MAIN) {
+                    if (!(ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)))) {
+                        n.waiting = true;
+                        return n;
+                    }
+                    cursor++;
+                    offMainDone = true;
+                } else if (c0 != null && !c0.pass && c0.kind != AbilKind.ATTACK && c0.kind != AbilKind.REPEAT) {
+                    return play(g, me, n, c0);
+                } else {
+                    offMainDone = true;
+                }
+            }
             if (passTurn < 0 && cursor < line.steps.size() && line.steps.get(cursor).pass) {
                 // solver-gaps-1015: a PASS ends the turn it is reached in, ours or theirs (a line taken at their end step
                 // starts with PASS: it means "to our next turn", not "skip our next turn")
@@ -2968,6 +3031,10 @@ public final class ForcedWinSolver {
             // search-bones-1015 (c): a REPEAT step plays its body steps in order, its number of times
             final boolean inRepeat = st0.kind == AbilKind.REPEAT;
             final Step st = inRepeat ? st0.body.get(repPos) : st0;
+            if (st.kind == AbilKind.MAIN) {
+                cursor++; // line-adoption-1107: already in a main phase of ours
+                return next(g, me);
+            }
             if (st.kind == AbilKind.ATTACK) {
                 if (!ph.is(PhaseType.MAIN1)) {
                     // the attack happened (or its chance passed): go on with the line in main phase 2
