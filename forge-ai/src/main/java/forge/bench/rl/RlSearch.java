@@ -212,6 +212,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * InfoStates ({@link LookaheadSearch.Config#infoState}). Live: only the policy spec's {@code infoState=on}.
          */
         public boolean infoState = false;
+        /**
+         * judge lane (off by default): a bench seat wired as live is. Without it, infoState on a bench seat reads no
+         * InfoStates (only RlLiveSeat.bind attaches one): every look-ahead world shuffles the seat's whole library. With it,
+         * {@link #attach} attaches one at game creation and the plan solver and the defender are armed as RlLiveSeat arms them.
+         * Attaching is per game: a second seat of that game with infoState on reads it too.
+         */
+        public boolean infoAttach = false;
         /** honest-belief-1020: the cube list file ({@code mtgx-belief-cube/1}; {@code classpath:} = a jar resource) and its pin. */
         public String beliefCube;
         public String beliefCubeSha256;
@@ -237,7 +244,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "choiceScorer"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -292,6 +299,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
             if (o.has("belief")) c.belief = o.get("belief").getAsString();
             if (o.has("infoState")) c.infoState = o.get("infoState").getAsBoolean();
+            if (o.has("infoAttach")) c.infoAttach = o.get("infoAttach").getAsBoolean();
+            armInfoState(c);
             if (o.has("beliefCube") && !o.get("beliefCube").isJsonNull()) c.beliefCube = o.get("beliefCube").getAsString();
             if (o.has("beliefCubeSha256") && !o.get("beliefCubeSha256").isJsonNull()) {
                 c.beliefCubeSha256 = o.get("beliefCubeSha256").getAsString();
@@ -493,7 +502,30 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * seat): the forced-win solver in front ({@code forcedWin}) and S-b ({@code plans}). A no-op unless one of the two
      * keys is set, so every other spec's game is unchanged.
      */
+    /** judge lane: {@link Config#infoAttach}. */
+    public static void attachInfoState(final Game g, final Config c) {
+        if (c.infoAttach && c.infoState) {
+            forge.ai.simulation.InfoStates.attach(g);
+        }
+    }
+
+    /** judge lane: {@link Config#infoAttach}: the solver keys RlLiveSeat.Spec.parse sets. */
+    static void armInfoState(final Config c) {
+        if (!c.infoAttach || !c.infoState || c.plans == null) {
+            return;
+        }
+        for (String sub : new String[] {"solverCfg", "defendCfg"}) {
+            if (sub.equals("solverCfg") || c.plans.has("defend") && c.plans.get("defend").getAsBoolean()) {
+                if (!c.plans.has(sub)) {
+                    c.plans.add(sub, new JsonObject());
+                }
+                c.plans.getAsJsonObject(sub).addProperty("infoState", "true");
+            }
+        }
+    }
+
     public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
+        attachInfoState(g, cfg);
         if (cfg.forcedWin == null && cfg.plans == null) {
             return;
         }
