@@ -738,43 +738,43 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> look(final CardCollection topN) {
-        return driver.look(topN);
+        return worked(() -> driver.look(topN)); // work-units-1107
     }
 
     @Override
     public List<SpellAbility> triggers(final List<SpellAbility> abilities) {
-        return driver.triggers(abilities);
+        return worked(() -> driver.triggers(abilities)); // work-units-1107
     }
 
     @Override
     public Card pick(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
             final CardCollection choices, final Player decider) {
-        return driver.pick(destination, origin, sa, choices, decider);
+        return worked(() -> driver.pick(destination, origin, sa, choices, decider)); // work-units-1107
     }
 
     @Override
     public CardCollectionView order(final CardCollectionView cards, final ZoneType destination, final SpellAbility source) {
-        return driver.order(cards, destination, source);
+        return worked(() -> driver.order(cards, destination, source)); // work-units-1107
     }
 
     @Override
     public Boolean confirm(final SpellAbility sa, final String message) {
-        return driver.confirm(sa, message);
+        return worked(() -> driver.confirm(sa, message)); // work-units-1107
     }
 
     @Override
     public boolean confirmTrigger(final WrappedAbility w) {
-        return driver.confirmTrigger(w);
+        return worked(() -> driver.confirmTrigger(w)); // work-units-1107
     }
 
     @Override
     public Boolean binary(final BinaryChoiceType kind, final Boolean defaultVal) {
-        return driver.binary(kind, defaultVal);
+        return worked(() -> driver.binary(kind, defaultVal)); // work-units-1107
     }
 
     @Override
     public boolean forgeCosts() {
-        return driver.forgeCosts();
+        return worked(() -> driver.forgeCosts()); // work-units-1107
     }
 
     /** kill-line-1106 (plans.lineFloor; report only): lines adopted by the floor. */
@@ -785,13 +785,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** kill-line-1106: plans.lineKeep. */
     @Override
     public CardCollection lineKeep(final CardCollection ordinary, final CardCollection valid) {
-        return driver.lineKeep(ordinary, valid);
+        return worked(() -> driver.lineKeep(ordinary, valid)); // work-units-1107
     }
 
     /** choice-search-1105: the live line's choice asks are its verifier's (plans.lineChoices=forge), as the driver says. */
     @Override
     public boolean forgeChoices() {
-        return driver.forgeChoices();
+        return worked(() -> driver.forgeChoices()); // work-units-1107
     }
 
     // ------------------------------------------------------------------ the decision (from RlSearch.decide)
