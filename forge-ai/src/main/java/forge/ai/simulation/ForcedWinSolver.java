@@ -1785,6 +1785,104 @@ public final class ForcedWinSolver {
     }
 
     /** Read the position; the library's affordances are learned only when something we hold could use them. */
+    /**
+     * choice-scorer-1106: the ordered library choices (PILE effects) of {@code hostId} in the planner's lines from
+     * {@code g}, top first, shortest win first; the cards are whatever the search drew to win. Never throws.
+     */
+    public List<List<Integer>> pileChoices(final Game g, final int hostId, final int nodes, final long ms, final int top) {
+        final List<List<Integer>> out = new ArrayList<>();
+        try {
+            final Position pos = readPosition(g, new ArrayList<>());
+            if (pos == null) {
+                return out;
+            }
+            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            lim.nodes = nodes;
+            lim.ms = ms;
+            lim.payPolicies = 1;
+            lim.horizon = cfg.horizon;
+            final List<Line> lines = new ArrayList<>(ForcedWinPlanner.plan(pos, lim).lines);
+            lines.sort((a, b) -> a.winTurn != b.winTurn ? Integer.compare(a.winTurn, b.winTurn)
+                    : Integer.compare(a.steps.size(), b.steps.size()));
+            final Set<List<Integer>> seen = new HashSet<>();
+            for (Line l : lines) {
+                for (Step st : l.steps) {
+                    if (st.hostId == hostId && !st.pile.isEmpty() && seen.add(new ArrayList<>(st.pile))) {
+                        out.add(new ArrayList<>(st.pile));
+                    }
+                }
+                if (out.size() >= top) {
+                    break;
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            receipt("pileChoices " + e);
+        }
+        return out;
+    }
+
+    /** choice-scorer-1106: an affordance reader shared by the solvers of one decision's copies (its probes are cached). */
+    public static Object newSharedReader() {
+        return new ForcedWinModel.Reader();
+    }
+
+    /** choice-scorer-1106: a solver over a shared reader ({@link #newSharedReader}). */
+    public static ForcedWinSolver withReader(final Player me, final Config cfg, final Object reader) {
+        return new ForcedWinSolver(me, cfg, (ForcedWinModel.Reader) reader);
+    }
+
+    /** choice-scorer-1106: what the cheap width search finds from a position, unverified. */
+    public static final class Screen {
+        public int lines, nodes, bestTurn = -1, bestSteps = -1;
+        public boolean exhausted, failed;
+        public long nanos;
+        public String best;
+    }
+
+    /**
+     * choice-scorer-1106: the planner alone (this turn, then by our next turn) from {@code g}, our library's known top as
+     * given (top first). No game copies, no opponent: a screen, never a proof. Never throws.
+     */
+    public Screen screen(final Game g, final List<Integer> knownTop, final int nodes, final long ms) {
+        final Screen s = new Screen();
+        final long t0 = System.nanoTime();
+        try {
+            final Position pos = readPosition(g, knownTop);
+            if (pos == null) {
+                s.failed = true;
+                return s;
+            }
+            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            lim.nodes = nodes;
+            lim.ms = ms;
+            lim.payPolicies = 1;
+            lim.horizon = 1;
+            ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
+            s.nodes = r.nodes;
+            s.exhausted = r.exhausted;
+            if (r.lines.isEmpty() && cfg.horizon >= 2) {
+                lim.horizon = cfg.horizon;
+                r = ForcedWinPlanner.plan(pos, lim);
+                s.nodes += r.nodes;
+                s.exhausted |= r.exhausted;
+            }
+            s.lines = r.lines.size();
+            for (Line l : r.lines) {
+                if (s.bestTurn < 0 || l.winTurn < s.bestTurn || l.winTurn == s.bestTurn && l.steps.size() < s.bestSteps) {
+                    s.bestTurn = l.winTurn;
+                    s.bestSteps = l.steps.size();
+                    s.best = String.valueOf(l);
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            s.failed = true;
+            s.best = String.valueOf(e);
+        } finally {
+            s.nanos = System.nanoTime() - t0;
+        }
+        return s;
+    }
+
     Position readPosition(Game live, List<Integer> knownOrder) {
         final Position pos = reader.read(live, me, knownOrder, true);
         return pos;

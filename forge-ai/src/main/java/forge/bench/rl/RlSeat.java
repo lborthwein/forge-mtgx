@@ -171,6 +171,19 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 Object objs) {
             return null;
         }
+
+        /**
+         * choice-scorer-1106: the spec's choice scorer answers this family ({@link #decideChoice}). Always false unless
+         * the spec's {@code choiceScorer} is set.
+         */
+        default boolean choiceAsk(int family) {
+            return false;
+        }
+
+        /** choice-scorer-1106: the steps to play instead of the policy's {@code greedy}, or null to keep them. */
+        default short[] decideChoice(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, short[] greedy) {
+            return null;
+        }
     }
 
     /**
@@ -658,6 +671,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                     d.steps = alt;
                     searchDepartures++;
                 }
+            }
+        }
+        if (search != null && d.status == RlWire.ST_OK && search.choiceAsk(family)) {
+            // choice-scorer-1106: the options applied on copies, one batched value pass (the policy's answer is the default)
+            final short[] alt = search.decideChoice(g, player, m, frame, d.steps);
+            if (alt != null && m.validate(alt) == null) {
+                d.steps = alt;
+                searchDepartures++;
             }
         }
         if (wAsk != null && !(d.status == RlWire.ST_OK && d.steps.length <= 1)) {

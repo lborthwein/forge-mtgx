@@ -7990,7 +7990,7 @@ public final class LookaheadSearch {
         return sb.length() > 1500 ? sb.substring(0, 1500) : sb.toString();
     }
 
-    static long mix(long a, long b) {
+    public static long mix(long a, long b) {
         long x = a * 0x9E3779B97F4A7C15L + b;
         x ^= (x >>> 30);
         x *= 0xBF58476D1CE4E5B9L;
