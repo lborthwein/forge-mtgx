@@ -1190,7 +1190,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("work_span_ms", Math.round(sp.spanMs() * 10) / 10.0);
             row.addProperty("work_cpu_ms", Math.round((gameCpuMs() - workCpu0) * 10) / 10.0);
         }
-        addRow(row);
+        rows.add(row);
     }
 
     @Override
