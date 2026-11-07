@@ -332,6 +332,8 @@ public final class LookaheadSearch {
         public int beliefBasics = 8;
         /** Default off: later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
         public boolean beliefStatics = false;
+        /** Default off: carry player-only stale-static repair into resampled look-ahead copies. */
+        public boolean beliefPlayerStatics = false;
         /**
          * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
          * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
@@ -505,6 +507,7 @@ public final class LookaheadSearch {
                 o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 o.addProperty("beliefBasics", beliefBasics);
                 if (beliefStatics) o.addProperty("beliefStatics", true);
+                if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 if (beliefPool != null) {
                     o.addProperty("beliefPoolSize", beliefPool.size());
                 }
@@ -7294,6 +7297,7 @@ public final class LookaheadSearch {
      */
     void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
         if (cfg.beliefStatics) g.staleStatics = true;
+        if (cfg.beliefPlayerStatics) g.stalePlayerStatics = true;
         if (beliefCube != null && !cfg.beliefShadow && cfg.beliefDeck) {
             // deck-belief-1105: the opponents' hidden cards from the deck posterior, then our own library as before
             redrawOpponentsDeck(live, liveMe, g, me, rng, DECK_PARAMS);
