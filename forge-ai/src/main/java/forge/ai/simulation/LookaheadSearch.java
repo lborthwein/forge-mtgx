@@ -8313,8 +8313,8 @@ public final class LookaheadSearch {
             for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
                 // review #123 S3-4: a face-down spell (a morph cast face down) or one we cannot see shows nothing
                 final Card sc = si.getSourceCard();
-                if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getPaperCard() != null && !sc.isFaceDown()
-                        && sc.getView().canBeShownTo(myView)) {
+                if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getPaperCard() != null
+                        && (!forge.game.EngineFixes.researchFixes() || !sc.isFaceDown() && sc.getView().canBeShownTo(myView))) {
                     shown.add(sc.getPaperCard().getName());
                 }
             }
@@ -8581,6 +8581,9 @@ public final class LookaheadSearch {
 
     /** Rebuild derived effects from the sampled zones, not discarded actual hidden-card objects. */
     private void refreshBeliefStatics(Game g) {
+        if (!forge.game.EngineFixes.researchFixes()) {
+            return; // unified-jar-1106: research's, keyed on this line
+        }
         // setCards does not update statics. Hidden CDAs (Pack Rat, Grist, ...) otherwise leave their old source in
         // StaticEffects, leaking a reference outside the sampled zones and breaking the next GameCopier mapping.
         // Recompute after all opponents are replaced, retaining effects of public and kept/revealed cards.

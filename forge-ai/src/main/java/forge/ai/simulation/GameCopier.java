@@ -257,7 +257,7 @@ public class GameCopier {
             if (host.getZone() == null || (spell && host.getZone().getZoneType() != ZoneType.Stack)) {
                 return "zone";
             }
-            if (g.findById(host.getId()) == null) {
+            if (forge.game.EngineFixes.researchFixes() && g.findById(host.getId()) == null) {
                 // void-causes-1104 (S2 label void 2989378278): an ability whose host no longer exists in any zone (a
                 // token sacrificed to pay for it); the copier maps a host by its card in the copy, so it cannot be
                 // rebuilt and copyStackFaithfully threw "Couldn't map". Unsupported, like the other gaps above.
@@ -664,7 +664,7 @@ public class GameCopier {
                 final Card nc = cardMap.get(c);
                 if (nc != null) {
                     fidelityLeftOut += nc.copyTurnStateFrom(c, m);
-                    if (c.getEffectSourceAbility() != null && nc.getEffectSourceAbility() == null
+                    if (forge.game.EngineFixes.researchFixes() && c.getEffectSourceAbility() != null && nc.getEffectSourceAbility() == null
                             && nc.getEffectSource() != null) {
                         // void-causes-1104 (S2 label NPE, game 2989384742): copyTurnStateFrom gives an effect card its
                         // source CARD; a static ability of the effect that reads the source ABILITY (its extra
@@ -1945,11 +1945,12 @@ public class GameCopier {
             }
             if (card.getCopiedPermanent() != null) {
                 // TODO would it be safe to simply reuse the prototype?
-                otherCard.setCopiedPermanent(copyPrototype(newGame, card.getCopiedPermanent()));
+                otherCard.setCopiedPermanent(forge.game.EngineFixes.researchFixes() ? copyPrototype(newGame, card.getCopiedPermanent())
+                        : new CardCopyService(card.getCopiedPermanent()).copyCard(false));
             }
             // TODO: Verify that the above relationships are preserved bi-directionally or not.
         }
-        ownTraitStates(newGame); // void-causes-1104: every copied trait's card state is a state of the copy
+        if (forge.game.EngineFixes.researchFixes()) ownTraitStates(newGame); // void-causes-1104: every copied trait's card state is a state of the copy
     }
 
     private static PaperCard hidden_info_card = new PaperCard(CardRules.fromScript(Lists.newArrayList("Name:hidden", "Types:Artifact", "Oracle:")), "", CardRarity.Common);

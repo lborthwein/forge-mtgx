@@ -156,6 +156,9 @@ public final class RlSearchClient implements Closeable {
 
     /** Read the chunked-LEAVES capability of a HELLO_ACK (absent = an older service: single frames only). */
     void leavesCaps(final JsonObject a) throws RlClient.ServerError {
+        if (!forge.game.EngineFixes.researchFixes()) {
+            return; // unified-jar-1106: research's split LEAVES, keyed on this line: off, a big batch throws as before
+        }
         try {
             final long version = a.has(ACK_LEAVES_CHUNKED) ? capLong(a, ACK_LEAVES_CHUNKED) : 0;
             if (version != 0 && version != 1) {
@@ -222,7 +225,7 @@ public final class RlSearchClient implements Closeable {
         final long t = System.nanoTime();
         final float[] v;
         final long bytes = leavesBytes(decidePayloads, 0, decidePayloads.size());
-        if (LEAVES_FRAME_OVERHEAD + bytes <= frameLimit
+        if (!forge.game.EngineFixes.researchFixes() || LEAVES_FRAME_OVERHEAD + bytes <= frameLimit
                 && decidePayloads.size() <= leavesMax && bytes <= leavesBytesMax) {
             v = new float[decidePayloads.size()];
             send(T_LEAVES, 0, encodeLeaves(decidePayloads));
