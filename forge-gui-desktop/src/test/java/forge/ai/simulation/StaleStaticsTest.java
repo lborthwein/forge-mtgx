@@ -84,4 +84,16 @@ public class StaleStaticsTest extends SimulationTest {
         final Card g = node.getPlayers().get(1).getCardsIn(ZoneType.Library).get(0);
         AssertJUnit.assertTrue("the static effect is reapplied in the copy", g.isCreature());
     }
+
+    /** The flag is inherited: a copy of a flagged world, and a copy of that, tolerate the swapped-out card. */
+    @Test
+    public void flagOnTheWorldCoversLaterCopies() {
+        final Game live = gameWithStaticInLibrary("Grist, the Hunger Tide");
+        final Game world = new GameCopier(live, true).makeCopy();
+        swapOutLibrary(world);
+        world.staleStatics = true;
+        final Game second = new GameCopier(world, true).makeCopy();
+        AssertJUnit.assertTrue(second.staleStatics);
+        AssertJUnit.assertNotNull(new GameCopier(second, true).makeCopy());
+    }
 }

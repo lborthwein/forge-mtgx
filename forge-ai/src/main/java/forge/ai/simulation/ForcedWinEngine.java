@@ -515,6 +515,7 @@ final class ForcedWinEngine {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 root.g = copier.makeCopy();
+                root.g.staleStatics = lim.staleStatics;
                 root.me = (Player) copier.find(liveMe);
                 st.copies++;
                 final Random rng = new Random(LookaheadSearch.mix(seed, 2));
