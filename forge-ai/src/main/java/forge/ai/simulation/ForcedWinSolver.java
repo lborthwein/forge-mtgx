@@ -158,6 +158,11 @@ public final class ForcedWinSolver {
         /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
         public boolean staleStatics = false;
         /**
+         * unified-search-1106 (off by default): the engine search is not gated on an unmodeled ability or board power, and runs
+         * in either main phase of ours, once per phase and again when a nonland permanent of ours entered.
+         */
+        public boolean engineOpen = false;
+        /**
          * kill-line-1106 (off by default): the follower pays as the line recorded. A step the planner paid with life pays
          * its Phyrexian pips with life, not with a mana source Forge AI's payment would pick first.
          */
@@ -275,6 +280,7 @@ public final class ForcedWinSolver {
             c.engineNodesPerSearch = "true".equals(get.apply("engineNodesPerSearch")); // choice-search-1105 (CAP-2)
             c.engineTriggerTargets = "true".equals(get.apply("engineTriggerTargets")); // kill-line-1106
             c.staleStatics = "true".equals(get.apply("staleStatics")); // unified-search-1106
+            c.engineOpen = "true".equals(get.apply("engineOpen")); // unified-search-1106
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
@@ -717,7 +723,7 @@ public final class ForcedWinSolver {
         decisions++;
         final int index = decisionIndex++;
         final long t0 = System.nanoTime();
-        decisionWall = t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
+        decisionWall = hardDeadline != 0 ? hardDeadline : t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
         decisionStart = t0;
         final Position pos = readPosition(live, knownTop(live));
         if (pos == null) {
@@ -792,7 +798,7 @@ public final class ForcedWinSolver {
             receipt("FW_POSITION " + pos.describe());
         }
         final long t1 = System.nanoTime();
-        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : System.nanoTime());
+        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch || hardDeadline != 0 ? t0 : System.nanoTime());
         engineNanos += System.nanoTime() - t1;
         if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0) {
             if (cfg.engineAfterPlanFail) {
@@ -1479,6 +1485,7 @@ public final class ForcedWinSolver {
     /** choice-search-1105 (engineRerun): our nonland permanents at the turn's last engine run, and the reruns. */
     private java.util.Set<Integer> engineBoard;
     public int engineReruns;
+    private PhaseType enginePhase;
 
     private java.util.Set<Integer> ourNonlandIds() {
         final java.util.Set<Integer> out = new java.util.HashSet<>();
@@ -1491,11 +1498,15 @@ public final class ForcedWinSolver {
     }
 
     private Line engineFallback(Game live, Position pos, int index, long t0) {
-        if (!cfg.engine || !live.getPhaseHandler().is(PhaseType.MAIN1)) {
+        final PhaseHandler eph = live.getPhaseHandler();
+        if (!cfg.engine || !(eph.is(PhaseType.MAIN1)
+                || cfg.engineOpen && eph.is(PhaseType.MAIN2) && eph.isPlayerTurn(me))) {
             return null;
         }
         final java.util.Set<Integer> board = cfg.engineRerun ? ourNonlandIds() : null;
-        if (engineTurn == pos.turn) {
+        final boolean newPhase = cfg.engineOpen && eph.getPhase() != enginePhase; // unified-search-1106
+        enginePhase = eph.getPhase();
+        if (engineTurn == pos.turn && !newPhase) {
             // choice-search-1105 (engineRerun): once per turn, unless a nonland permanent of ours entered since that run
             if (board == null || engineBoard == null || engineBoard.containsAll(board)) {
                 return null;
@@ -1514,7 +1525,7 @@ public final class ForcedWinSolver {
         for (Card c : me.getCreaturesInPlay()) {
             power += Math.max(0, c.getNetCombatDamage());
         }
-        if (!unmodeled && power < pos.oppLife) {
+        if (!unmodeled && power < pos.oppLife && !cfg.engineOpen) {
             return null;
         }
         if (!cfg.forced && !cfg.likely) {
@@ -1544,6 +1555,9 @@ public final class ForcedWinSolver {
             engineDeadline = Math.min(engineDeadline, t0 + cfg.capMs * 1_000_000L);
             el.wall = Math.min(el.wall, t0 + (cfg.capMs + 500L) * 1_000_000L);
         }
+        if (hardDeadline != 0) {
+            engineDeadline = Math.min(engineDeadline, hardDeadline - reserve * 1_000_000L); // unified-search-1106
+        }
         final List<Line> likelyCands = cfg.likely ? new ArrayList<>() : null;
         el.redraw = redraw;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
@@ -1559,7 +1573,10 @@ public final class ForcedWinSolver {
         }
         engineFound++;
         evaluated++;
-        final long evalDeadline = Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2);
+        long evalDeadline = Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2);
+        if (hardDeadline != 0) {
+            evalDeadline = Math.min(evalDeadline, hardDeadline); // unified-search-1106
+        }
         Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999), evalDeadline);
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
         if (cfg.loopMarginal && e.pUnopposed >= 1.0) {
@@ -1676,6 +1693,15 @@ public final class ForcedWinSolver {
     public int wallCuts;
     /** solver-gaps-1015: the current offense decision's hard wall (System.nanoTime()): its budget plus the grace. */
     private long decisionWall;
+    /**
+     * unified-search-1106 (plans.unified; 0 = off): the decision's one deadline. Nothing in the solver runs past it, a line
+     * that has won every world so far keeps verifying up to it, and a world not reached is unknown.
+     */
+    private long hardDeadline;
+
+    public void setHardDeadline(long nanos) {
+        this.hardDeadline = nanos;
+    }
     /** deck-belief-1105: the current offense decision's start (for {@link Config#unprovenMs}). */
     private long decisionStart;
     public int unprovenStops;
@@ -2025,7 +2051,7 @@ public final class ForcedWinSolver {
             return evaluateExact(live, line, seed, deadline);
         }
         final Eval e = new Eval(line);
-        final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        final long wall = hardDeadline != 0 ? hardDeadline : Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
         final Outcome u = playout(live, line, mix(seed, 0), 0, -1, wall);
         e.pUnopposed = u.won ? 1 : 0;
         if (!u.won) {
@@ -2044,7 +2070,12 @@ public final class ForcedWinSolver {
         final Set<String> prot = new HashSet<>();
         final int nWorlds = beliefWorlds(live); // deck-belief-1105 (cfg.worlds when off)
         for (int w = 1; w <= nWorlds; w++) {
-            if (System.nanoTime() > deadline && n > 0) {
+            if (hardDeadline != 0) {
+                // unified-search-1106: a line that has won every world so far keeps verifying to the decision's deadline
+                if (System.nanoTime() > (sum >= n ? hardDeadline : deadline)) {
+                    break;
+                }
+            } else if (System.nanoTime() > deadline && n > 0) {
                 break;
             }
             if (n > 0 && sum < n && unprovenStop(true)) {

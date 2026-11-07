@@ -97,6 +97,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int maxSteps = 5000;
         public int leafExtraSteps = 400;
         public double departZ = 1.645;
+        /** unified-search-1106 (off by default): {@link LookaheadSearch.Config#anytime}. */
+        public boolean anytime = false;
         public double margin = 0.0;
         /** static | value */
         public String leaf = "static";
@@ -237,7 +239,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "choiceScorer"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "choiceScorer", "anytime"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -253,6 +255,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("maxSteps")) c.maxSteps = o.get("maxSteps").getAsInt();
             if (o.has("leafExtraSteps")) c.leafExtraSteps = o.get("leafExtraSteps").getAsInt();
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
+            if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
             if (o.has("leaf")) c.leaf = o.get("leaf").getAsString();
             if (o.has("playout")) c.playout = o.get("playout").getAsString();
@@ -632,6 +635,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.seed = splitmix(gameSeed ^ splitmix(cfg.seedSalt));
         lc.threads = cfg.threads;
         lc.departZ = cfg.departZ;
+        lc.anytime = cfg.anytime;
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
@@ -692,6 +696,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the decision budget, ms (0 = none). */
+    double departZ() {
+        return cfg.departZ; // unified-search-1106
+    }
+
     long budgetMs() {
         return cfg.budgetMs;
     }
@@ -983,6 +991,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         armForce(mark());
+        if (cfg.anytime && "value".equals(cfg.leaf)) {
+            ls.setRootP((1 + sc.valueObs) / 2); // unified-search-1106
+        }
         if (sb != null) {
             // S-b: every searched decision has the proof flags; a plan point also has its plans (and its budget counts
             // from the decision's start, the proposals included)

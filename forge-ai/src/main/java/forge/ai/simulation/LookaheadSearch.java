@@ -111,6 +111,13 @@ public final class LookaheadSearch {
          */
         public double departZ = 0.0;
         /**
+         * unified-search-1106 (off by default; proof decisions only): one anytime comparison. Each candidate is compared with
+         * the default on the worlds both finished, by the departZ test on those paired differences. A failed or unfinished
+         * world drops that world, not the candidate or the decision; a default with no finished world is estimated by
+         * the root's value. With every world finished this chooses exactly as the plain gate.
+         */
+        public boolean anytime = false;
+        /**
          * Target variants (lane forge-ai-misplays-0928; 0 = off, the default: candidates unchanged). Up to this many
          * extra candidates per decision: a single-target spell or ability among the candidates played with a target
          * other than the one Forge AI would choose (or with none, when "up to one"), so the play-outs, not Forge AI's
@@ -2202,6 +2209,12 @@ public final class LookaheadSearch {
      * of its budget; 0 = the play-outs' own start (S-c).
      */
     private volatile long decisionStartNanos = 0L;
+    /** unified-search-1106 ({@link Config#anytime}): the root's P(win) from the value head, NaN = none. */
+    private volatile double rootP = Double.NaN;
+
+    public void setRootP(double p) {
+        this.rootP = p;
+    }
     /**
      * S-b: cards on top of our library the seat placed itself (pile memory, ForcedWinSolver.knownTopCount); every world
      * keeps them in place. 0 = S-c's worlds (only the cards we can see stay).
@@ -2245,6 +2258,7 @@ public final class LookaheadSearch {
             ownKnownTop = 0;
             decisionStartNanos = 0L;
             oppCheck = null;
+            rootP = Double.NaN;
         }
     }
 
@@ -2567,7 +2581,24 @@ public final class LookaheadSearch {
         } finally {
             forceFidelity = false;
         }
-        if (proof && aborted > 0) {
+        // unified-search-1106 (anytime): which play-outs finished; null = the plain path
+        final boolean[][] finished = proof && cfg.anytime ? finishedWorlds(outs, n, k) : null;
+        if (finished != null) {
+            int otherWorlds = 0;
+            for (int c = 0; c < n; c++) {
+                boolean any = false;
+                for (int w = 0; w < k; w++) {
+                    any |= finished[c][w];
+                    otherWorlds += c > 0 && finished[c][w] ? 1 : 0;
+                }
+                ok[c] = any;
+            }
+            if (aborted > 0 && otherWorlds > 0) {
+                aborted = 0;
+                stats.partialDecisions++;
+                res.partialWorlds = otherWorlds;
+            }
+        } else if (proof && aborted > 0) {
             // search-bones-1015 (S-b): anytime. Over the budget, the worlds every candidate finished in decide (common
             // random numbers kept), when there are at least two; otherwise the decision is capped as S-c's
             final List<Integer> full = new ArrayList<>();
@@ -2613,10 +2644,14 @@ public final class LookaheadSearch {
         final double[] ev = new double[n];
         for (int c = 0; c < n; c++) {
             double s = 0;
+            int kc = 0;
             for (int w = 0; w < k; w++) {
-                s += values[c][w];
+                if (finished == null || finished[c][w]) {
+                    s += values[c][w];
+                    kc++;
+                }
             }
-            ev[c] = ok[c] ? s / k : Double.NaN;
+            ev[c] = ok[c] ? s / kc : Double.NaN;
             if (!ok[c]) {
                 stats.candidatesDropped++;
                 res.failed++;
@@ -2646,11 +2681,15 @@ public final class LookaheadSearch {
         final boolean[] provenWin = new boolean[n], provenLoss = new boolean[n];
         final int[] planBroken = new int[n];
         int provenPick = -1;
-        if (proof && !overBudget && k >= Math.min(3, Math.max(1, cfg.worlds))) {
+        if (proof && !overBudget && (finished != null || k >= Math.min(3, Math.max(1, cfg.worlds)))) {
             for (int c = 0; c < n; c++) {
                 boolean win = ok[c], loss = ok[c];
                 for (int w = 0; w < k; w++) {
                     final Rollout r = outs[c][w];
+                    if (finished != null && !finished[c][w]) {
+                        loss = false; // unified-search-1106: a world not finished is not evidence for a win
+                        continue;
+                    }
                     if (r == null || !r.ok) {
                         win = false;
                         loss = false;
@@ -2690,9 +2729,11 @@ public final class LookaheadSearch {
             res.provenLoss = provenLoss;
             res.planBroken = planBroken;
         }
-        final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick : argmax(values, okArg, n, k);
+        final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick
+                : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP)
+                : argmax(values, okArg, n, k);
         int best = plainBest;
-        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0) {
+        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0 && finished == null) {
             final int medBest = argmaxMedian(values, okArg, n, k);
             if (medBest != plainBest) {
                 stats.departMedianChanged++;
@@ -3660,6 +3701,95 @@ public final class LookaheadSearch {
     }
 
     /** The search's choice from its values: the argmax, ties and a failed Forge answer to Forge's answer (index 0). */
+    private static boolean[][] finishedWorlds(Rollout[][] outs, int n, int k) {
+        final boolean[][] f = new boolean[n][k];
+        for (int c = 0; c < n; c++) {
+            for (int w = 0; w < k; w++) {
+                final Rollout r = outs[c][w];
+                f[c][w] = r != null && r.ok && !r.aborted;
+            }
+        }
+        return f;
+    }
+
+    /**
+     * unified-search-1106 ({@link Config#anytime}): the candidate with the largest mean gain over the default, among those
+     * whose gain passes the z test. Pairs are the worlds both finished; where the default has none, its mean, or with no
+     * finished world at all {@code rootP}. A candidate with fewer worlds than the decision's uses the larger of its own and
+     * the decision's pooled variance, so a thin sample carries the uncertainty the rest of the decision shows.
+     * With every world finished this is {@link #argmax}.
+     */
+    static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP) {
+        double defSum = 0;
+        int defN = 0;
+        for (int w = 0; w < k; w++) {
+            if (f[0][w]) {
+                defSum += v[0][w];
+                defN++;
+            }
+        }
+        final double defAll = defN > 0 ? defSum / defN : rootP;
+        if (Double.isNaN(defAll)) {
+            return 0;
+        }
+        final double[] mean = new double[n], var = new double[n];
+        final int[] kc = new int[n];
+        double poolSs = 0;
+        int poolDof = 0;
+        for (int c = 1; c < n; c++) {
+            if (!ok[c]) {
+                continue;
+            }
+            double sum = 0;
+            for (int w = 0; w < k; w++) {
+                if (f[c][w]) {
+                    sum += v[c][w] - (f[0][w] ? v[0][w] : defAll);
+                    kc[c]++;
+                }
+            }
+            if (kc[c] == 0) {
+                continue;
+            }
+            mean[c] = sum / kc[c];
+            double ss = 0;
+            for (int w = 0; w < k; w++) {
+                if (f[c][w]) {
+                    final double d = v[c][w] - (f[0][w] ? v[0][w] : defAll) - mean[c];
+                    ss += d * d;
+                }
+            }
+            var[c] = kc[c] > 1 ? ss / (kc[c] - 1) : Double.NaN;
+            poolSs += ss;
+            poolDof += Math.max(0, kc[c] - 1);
+        }
+        final double pooled = poolDof > 0 ? poolSs / poolDof : Double.NaN;
+        int best = 0;
+        double bestGain = margin;
+        for (int c = 1; c < n; c++) {
+            if (!ok[c] || kc[c] == 0 || !(mean[c] > 0)) {
+                continue;
+            }
+            if (z > 0 && k >= 2) {
+                final double s2;
+                if (kc[c] == k) {
+                    s2 = var[c];
+                } else if (Double.isNaN(pooled)) {
+                    continue; // nothing to measure a thin sample's uncertainty by
+                } else {
+                    s2 = Double.isNaN(var[c]) ? pooled : Math.max(var[c], pooled);
+                }
+                if (!(mean[c] > z * Math.sqrt(s2 / kc[c]))) {
+                    continue;
+                }
+            }
+            if (mean[c] > bestGain) {
+                best = c;
+                bestGain = mean[c];
+            }
+        }
+        return best;
+    }
+
     int argmax(double[][] values, boolean[] ok, int n, int k) {
         if (!ok[0]) {
             return 0;

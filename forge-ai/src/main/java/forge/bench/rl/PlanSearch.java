@@ -115,13 +115,20 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * solverCfg.budgetMs this reserves the rest of the decision for that comparison.
          */
         public boolean lineDuel = false;
+        /**
+         * unified-search-1106 (off by default): one deadline, no cliff. The solver runs under the decision's own deadline; a
+         * line that won every verified world (any number from one) is taken; a line with no verified world is unknown, not
+         * P = 0, and its point is asked again; lines are compared instead of sampling plans; a capped search compares the best
+         * line's posterior with the root's value at the search's departZ. Needs no lineFloor.
+         */
+        public boolean unified = false;
         public boolean lineFloorAlways = false;
         /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
         public boolean lineKeep = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel"));
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -151,6 +158,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineFloor")) s.lineFloor = o.get("lineFloor").getAsDouble();
             if (o.has("lineFloorAlways")) s.lineFloorAlways = o.get("lineFloorAlways").getAsBoolean();
             if (o.has("lineDuel")) s.lineDuel = o.get("lineDuel").getAsBoolean();
+            if (o.has("unified")) s.unified = o.get("unified").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -712,6 +720,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     int lineFloorTakes;
     /** kill-line-1106 (plans.lineDuel; report only): points scored as default against the line. */
     int lineDuels;
+    /** unified-search-1106 (report only): capped points adopted by the posterior, points with a line of no verified world. */
+    int lineCapTakes, lineUnknowns;
 
     /** kill-line-1106: plans.lineKeep. */
     @Override
@@ -815,12 +825,16 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         st.knownTop = driver.probe(() -> solver.knownTopCount(g));
         if (spec.solver) {
             final long a = System.nanoTime();
+            if (spec.unified) {
+                solver.setHardDeadline(t0 + forge.ai.WallClock.budgetMs(rs.budgetMs()) * 1_000_000L); // unified-search-1106
+            }
             final List<ForcedWinSolver.Proposal> props = driver.probe(() -> solver.propose(g));
+            solver.setHardDeadline(0L);
             solverRuns++;
             solverMs.add((System.nanoTime() - a) / 1e6);
             ForcedWinSolver.Proposal proven = null;
             for (ForcedWinSolver.Proposal pr : props) {
-                if (pr.proven(spec.minProvenWorlds) && (proven == null || pr.steps < proven.steps)) {
+                if (pr.proven(spec.unified ? 1 : spec.minProvenWorlds) && (proven == null || pr.steps < proven.steps)) {
                     proven = pr;
                 }
             }
@@ -859,6 +873,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 lineDuels++;
                 st.ms = (System.nanoTime() - t0) / 1e6;
                 return st; // kill-line-1106: default against the line; no plans sampled
+            }
+            if (spec.unified && n > 0) {
+                st.ms = (System.nanoTime() - t0) / 1e6;
+                return st; // unified-search-1106: the decision's time goes to comparing the lines, not to sampling plans
             }
         }
         final PhaseHandler ph = g.getPhaseHandler();
@@ -922,6 +940,38 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             provenPicks++;
         }
         if (r.chosen < givenSize) {
+            if (spec.unified && "capped".equals(r.outcome)) {
+                // unified-search-1106: no play-out verdict. The best verified line's posterior against the root's value,
+                // at the search's own z. A line with no verified world is unknown: this point is asked again.
+                LinePlan best = null;
+                boolean unknown = false;
+                for (Object pl : st.plans) {
+                    if (pl instanceof LinePlan) {
+                        final ForcedWinSolver.Proposal pr = ((LinePlan) pl).proposal;
+                        unknown |= pr.worldsRun == 0;
+                        if (pr.worldsRun > 0 && (best == null || pr.pBelief > best.proposal.pBelief)) {
+                            best = (LinePlan) pl;
+                        }
+                    }
+                }
+                if (best != null) {
+                    final int k = best.proposal.worldsRun;
+                    final double post = (best.proposal.pBelief * k + 1) / (k + 2);
+                    final double sd = Math.sqrt(post * (1 - post) / (k + 3));
+                    if (post - (1 + vRoot) / 2 > rs.departZ() * sd) {
+                        driver.solver().adopt(best.line);
+                        handoff = true;
+                        lineCapTakes++;
+                        lineTurns.add(g.getPhaseHandler().getTurn());
+                        return RlSeat.PrioritySearch.HOOK;
+                    }
+                }
+                if (unknown) {
+                    pointAgain = true;
+                    lineUnknowns++;
+                }
+                return -2;
+            }
             if (spec.lineFloor > 0 && ("capped".equals(r.outcome) || spec.lineFloorAlways && "kept".equals(r.outcome))) {
                 // kill-line-1106: the verified line's P(win) against the root's, where the search gave no verdict for it
                 LinePlan best = null;
@@ -1107,6 +1157,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("planDecisions", planDecisions);
         o.addProperty("planDepartures", planDepartures);
         o.addProperty("lineDepartures", lineDepartures);
+        if (lineCapTakes != 0) {
+            o.addProperty("lineCapTakes", lineCapTakes); // unified-search-1106
+        }
+        if (lineUnknowns != 0) {
+            o.addProperty("lineUnknowns", lineUnknowns); // unified-search-1106
+        }
         if (lineDuels != 0) {
             o.addProperty("lineDuels", lineDuels); // kill-line-1106
         }
