@@ -180,6 +180,8 @@ public final class ForcedWinSolver {
         /** judge lane (off by default): copies of a belief world skip static effects naming swapped-out cards. */
         public boolean staleStatics = false;
         public boolean stalePlayerStatics = false;
+        /** Off by default: engine nodes and the solver's play-out copies keep this turn's may-play and activation counts ({@link GameCopier#setTurnLimits}). */
+        public boolean turnLimits = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -289,6 +291,7 @@ public final class ForcedWinSolver {
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.staleStatics = "true".equals(get.apply("staleStatics")); // judge lane
             c.stalePlayerStatics = "true".equals(get.apply("stalePlayerStatics"));
+            c.turnLimits = "true".equals(get.apply("turnLimits"));
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1079,6 +1082,7 @@ public final class ForcedWinSolver {
                     final GameCopier copier = new GameCopier(live, true);
                     copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
+                    copier.setTurnLimits(cfg.turnLimits);
                     g = copier.makeCopy();
                     g.staleStatics = cfg.staleStatics;
                     g.stalePlayerStatics = cfg.stalePlayerStatics;
@@ -1542,6 +1546,7 @@ public final class ForcedWinSolver {
         el.triggerVariants = cfg.triggerVariants;
         el.staleStatics = cfg.staleStatics; // judge lane
         el.stalePlayerStatics = cfg.stalePlayerStatics;
+        el.turnLimits = cfg.turnLimits;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -1794,6 +1799,7 @@ public final class ForcedWinSolver {
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1);
+                copier.setTurnLimits(cfg.turnLimits);
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
                 g.stalePlayerStatics = cfg.stalePlayerStatics;
@@ -2158,6 +2164,7 @@ public final class ForcedWinSolver {
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
+                copier.setTurnLimits(cfg.turnLimits);
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
                 g.stalePlayerStatics = cfg.stalePlayerStatics;
