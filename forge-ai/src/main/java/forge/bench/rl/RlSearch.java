@@ -1121,6 +1121,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** This seat's work clock: installed on the deciding thread only inside its decisions (another seat never sees it). */
     private forge.game.WorkClock.Clock workClock;
     private forge.game.WorkClock.Clock workPrev;
+    /** The outer decision's game CPU (ms) at its begin (calibration: work_ms against cpu_ms). */
+    private double workCpu0;
 
     /** The real-time safety wall per decision (ms). */
     long workWallMs() {
@@ -1145,6 +1147,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final forge.game.WorkClock.Span sp = forge.game.WorkClock.begin(workWallMs());
         if (outer == null) {
             workSpan = sp;
+            workCpu0 = gameCpuMs();
         }
         return sp;
     }
@@ -1184,6 +1187,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             row.add("work_counts", wc);
             row.addProperty("wall_cap", sp.wallHit());
+            row.addProperty("work_span_ms", Math.round(sp.spanMs() * 10) / 10.0);
+            row.addProperty("cpu_ms", Math.round((gameCpuMs() - workCpu0) * 10) / 10.0);
         }
         addRow(row);
     }
@@ -1829,6 +1834,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return null;
         }
         final long t0 = System.nanoTime();
+        final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
         blockAsks++;
         lastProposeMs = -1;
         if (m.family != RlSchema.F_BLOCK || greedy == null || greedy.length != m.S() || m.S() == 0
@@ -1906,7 +1912,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lastForced = false;
         lastForcedMiss = false;
         armForce(mark());
-        final LookaheadSearch.GivenResult r = ls.decideBlocks(g, me, plans, decls, t0);
+        final LookaheadSearch.GivenResult r = ls.decideBlocks(g, me, plans, decls, bt0); // work-units-1107: bt0
         tookForce(r);
         if (r.givenIndex.length > 0) {
             blockSearched++;

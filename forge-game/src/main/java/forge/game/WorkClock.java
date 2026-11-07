@@ -278,6 +278,12 @@ public final class WorkClock {
             return c;
         }
 
+        /** Virtual ms since begin (what the budgets saw; NaN once past the safety wall). */
+        public double spanMs() {
+            final long n = clock.now();
+            return n >= FAR ? Double.NaN : (n - v0) / 1e6;
+        }
+
         /** The decision passed its safety wall. */
         public boolean wallHit() {
             return clock.wallHit;
