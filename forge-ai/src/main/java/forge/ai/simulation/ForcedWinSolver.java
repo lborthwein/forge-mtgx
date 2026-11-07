@@ -172,6 +172,8 @@ public final class ForcedWinSolver {
         /** kill-line-1106 (off by default): the planner branches over a discard's hand classes; the line records the choice. */
         public boolean planDiscard = false;
         public int triggerVariants = 8;
+        /** judge lane (off by default): copies of a belief world skip static effects naming swapped-out cards. */
+        public boolean staleStatics = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -278,6 +280,7 @@ public final class ForcedWinSolver {
             c.verifyReplan = "true".equals(get.apply("verifyReplan")); // kill-line-1106
             c.planDiscard = "true".equals(get.apply("planDiscard")); // kill-line-1106
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
+            c.staleStatics = "true".equals(get.apply("staleStatics")); // judge lane
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1525,6 +1528,7 @@ public final class ForcedWinSolver {
         el.perSearchNodes = cfg.engineNodesPerSearch;
         el.triggerTargets = cfg.engineTriggerTargets; // kill-line-1106
         el.triggerVariants = cfg.triggerVariants;
+        el.staleStatics = cfg.staleStatics; // judge lane
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
