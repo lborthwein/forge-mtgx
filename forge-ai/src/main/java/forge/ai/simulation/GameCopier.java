@@ -450,7 +450,8 @@ public class GameCopier {
                         if (o instanceof Card && ((Card)o).getZone() == null) {
                            continue;
                         }
-                        if (copyFidelity > 0 && o instanceof Card && !cardMap.containsKey(o)) {
+                        if ((copyFidelity > 0 || forge.game.EngineFixes.copyRobust()) && o instanceof Card
+                                && !cardMap.containsKey(o)) {
                             // Lane copy-fidelity-1010: a stale object of a card that has since changed zones (its zone
                             // pointer still set, census unit sc-off 25: "Couldn't map Boo"): the copy's card of the same id,
                             // or nothing, instead of failing the whole copy.
@@ -1936,7 +1937,10 @@ public class GameCopier {
                 result.setImageKey(c.getImageKey());
                 new CardCopyService(c).copyTransformingFaces(result);
             } else {
-                result = new TokenInfo(c).makeOneToken(newOwner, c.getId());
+                // A token copy of a card with an SVar-reading keyword threw here before any SVar was set, and every
+                // later copy of this game with it (lane chaos-bugs-1106).
+                result = new TokenInfo(c).makeOneToken(newOwner, c.getId(),
+                        forge.game.EngineFixes.copyRobust() ? c.getSVars() : null);
                 new CardCopyService(c).copyCopiableCharacteristics(result, null, null);
             }
             // copyCopiableCharacteristics clones each ability WITH its current targets, and those

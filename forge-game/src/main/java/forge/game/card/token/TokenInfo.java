@@ -276,11 +276,18 @@ public class TokenInfo {
         return makeOneToken(controller, controller.getGame().nextCardId());
     }
     public Card makeOneToken(final Player controller, int id) {
+        return makeOneToken(controller, id, null);
+    }
+    /** With {@code svars} set before the keywords, for a keyword whose trait reads an SVar (ETBReplacement). */
+    public Card makeOneToken(final Player controller, int id, final java.util.Map<String, String> svars) {
         final Game game = controller.getGame();
         final Card c = toCard(game, id);
 
         c.setOwner(controller);
         c.setGamePieceType(GamePieceType.TOKEN);
+        if (svars != null) {
+            c.setSVars(svars);
+        }
         CardFactoryUtil.setupKeywordedAbilities(c);
         // add them later to prevent setupKeywords from adding them multiple times
         for (final String kw : intrinsicKeywords) {
