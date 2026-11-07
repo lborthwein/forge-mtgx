@@ -171,6 +171,11 @@ public final class ForcedWinSolver {
         public boolean verifyReplan = false;
         /** kill-line-1106 (off by default): the planner branches over a discard's hand classes; the line records the choice. */
         public boolean planDiscard = false;
+        /**
+         * judge lane (off by default): a followed line's own steps are not cut by the play-out loop breaker. A line is
+         * finite; a REPEAT longer than the breaker's window stopped mid-way in verification and read as no win.
+         */
+        public boolean lineUncapped = false;
         public int triggerVariants = 8;
         /** judge lane (off by default): copies of a belief world skip static effects naming swapped-out cards. */
         public boolean staleStatics = false;
@@ -279,6 +284,7 @@ public final class ForcedWinSolver {
             c.sourceOutput = "true".equals(get.apply("sourceOutput")); // kill-line-1106
             c.verifyReplan = "true".equals(get.apply("verifyReplan")); // kill-line-1106
             c.planDiscard = "true".equals(get.apply("planDiscard")); // kill-line-1106
+            c.lineUncapped = "true".equals(get.apply("lineUncapped")); // judge lane
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.staleStatics = "true".equals(get.apply("staleStatics")); // judge lane
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
@@ -2175,6 +2181,7 @@ public final class ForcedWinSolver {
             final Follower f = new Follower(line);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
             lineAi.bounded(wall);
+            lineAi.uncapped = cfg.lineUncapped; // judge lane
             if (cfg.verifyReplan && line.winTurn > 0) {
                 lineAi.startTurn = g.getPhaseHandler().getTurn();
                 lineAi.replanner = old -> replanIn(g, cm, old); // kill-line-1106
@@ -2996,6 +3003,13 @@ public final class ForcedWinSolver {
         /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
         boolean continueAfter;
 
+        /** judge lane ({@link Config#lineUncapped}). */
+        boolean uncapped;
+
+        List<SpellAbility> lineAction(SpellAbility sa) {
+            return uncapped ? List.of(sa) : capped(List.of(sa));
+        }
+
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
             this.f = f;
@@ -3012,7 +3026,7 @@ public final class ForcedWinSolver {
             if (!f.done && !f.broken) {
                 final Follower.Next n = f.next(g, getPlayer());
                 if (n.action != null) {
-                    return capped(List.of(n.action));
+                    return lineAction(n.action);
                 }
                 if (n.waiting) {
                     return null;
