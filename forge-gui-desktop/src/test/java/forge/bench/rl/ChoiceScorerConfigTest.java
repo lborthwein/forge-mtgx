@@ -10,14 +10,14 @@ import com.google.gson.JsonParser;
 public class ChoiceScorerConfigTest {
     @Test
     public void offByDefaultAndAbsentFromTheSpec() {
-        final RlSearch.Config c = RlSearch.Config.parse(new JsonObject());
+        final RlSearch.Config c = RlSearch.Config.parse(JsonParser.parseString("{\"server\":\"h:1\"}").getAsJsonObject());
         Assert.assertNull(c.choiceScorer);
         Assert.assertFalse(c.toJson().has("choiceScorer"));
     }
 
     @Test
     public void parsesItsKeysAndKeepsThemInTheSpec() {
-        final JsonObject o = JsonParser.parseString("{\"choiceScorer\":{\"families\":\"CARDS,MULLIGAN\",\"pile\":true,"
+        final JsonObject o = JsonParser.parseString("{\"server\":\"h:1\",\"choiceScorer\":{\"families\":\"CARDS,MULLIGAN\",\"pile\":true,"
                 + "\"screenNodes\":2000}}").getAsJsonObject();
         final RlSearch.Config c = RlSearch.Config.parse(o);
         Assert.assertTrue(c.toJson().has("choiceScorer"));
@@ -30,7 +30,7 @@ public class ChoiceScorerConfigTest {
 
     @Test(expectedExceptions = IllegalArgumentException.class)
     public void unknownKeyFails() {
-        RlSearch.Config.parse(JsonParser.parseString("{\"choiceScorer\":{\"nope\":1}}").getAsJsonObject());
+        RlSearch.Config.parse(JsonParser.parseString("{\"server\":\"h:1\",\"choiceScorer\":{\"nope\":1}}").getAsJsonObject());
     }
 
     @Test(expectedExceptions = IllegalArgumentException.class)
