@@ -2230,11 +2230,11 @@ public final class ForcedWinSolver {
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
         // before it reaches one); lines that pass the turn only when this turn has none
         lim.horizon = 1;
-        ForcedWinPlanner.Result res = cfg.forced ? plan(pos, lim) : new ForcedWinPlanner.Result();
+        ForcedWinPlanner.Result res = cfg.forced ? planCapped(pos, lim) : new ForcedWinPlanner.Result();
         if (res.lines.isEmpty() && cfg.horizon >= 2 && cfg.forced) {
             final int first = res.nodes;
             lim.horizon = cfg.horizon;
-            res = plan(pos, lim);
+            res = planCapped(pos, lim);
             res.nodes += first;
         }
         if (res.lines.isEmpty() && cfg.forced && cfg.paySearch) {
@@ -2243,11 +2243,11 @@ public final class ForcedWinSolver {
             final int before = res.nodes;
             lim.payPolicies = ForcedWinPlanner.PAY_POLICIES;
             lim.horizon = 1;
-            res = plan(pos, lim);
+            res = planCapped(pos, lim);
             if (res.lines.isEmpty() && cfg.horizon >= 2) {
                 final int first = res.nodes;
                 lim.horizon = cfg.horizon;
-                res = plan(pos, lim);
+                res = planCapped(pos, lim);
                 res.nodes += first;
             }
             res.nodes += before;
@@ -3617,6 +3617,37 @@ public final class ForcedWinSolver {
 
     public void setHardDeadline(long nanos) {
         this.hardDeadline = nanos;
+    }
+
+    /**
+     * wu-reads-1107 (solverCfg windowWorkMs; set by PlanSearch only at a window point with the key on, else false): the
+     * planner's searches also stop at the hard deadline (each gets at most what is left of it, none when nothing is).
+     */
+    private boolean windowCap;
+
+    public void setWindowCap(boolean on) {
+        this.windowCap = on;
+    }
+
+    /** wu-reads-1107: one planner search ({@link #plan}), within the hard deadline when windowCap is on (unchanged otherwise). */
+    private ForcedWinPlanner.Result planCapped(Position pos, ForcedWinPlanner.Limits lim) {
+        if (!windowCap || hardDeadline == 0) {
+            return plan(pos, lim);
+        }
+        final long left = (hardDeadline - forge.game.WorkClock.nanoTime()) / 1_000_000L;
+        if (left <= 0) {
+            final ForcedWinPlanner.Result r = new ForcedWinPlanner.Result();
+            r.exhausted = true;
+            r.stoppedBy = "time";
+            return r;
+        }
+        final long ms0 = lim.ms;
+        lim.ms = ms0 < 0 ? left : Math.min(ms0, left);
+        try {
+            return plan(pos, lim);
+        } finally {
+            lim.ms = ms0;
+        }
     }
     /** deck-belief-1105: the current offense decision's start (for {@link Config#unprovenMs}). */
     private long decisionStart;

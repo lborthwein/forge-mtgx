@@ -963,6 +963,31 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** line-adoption-1107 (report only): plan points opened by anyWindow outside our main phases and their end step. */
     int windowPoints;
 
+    /**
+     * wu-reads-1107 (solverCfg windowWorkMs; 0 = off, the default, and then nothing changes): the solver's budget at a plan
+     * point anyWindow opened (outside our main phases and their end step), in ms on the budget clock. With workUnits that
+     * is work at the same unit costs as every other budget, so a window point costs at most this much solver work. The
+     * solver's one deadline there is the earlier of the decision's and {@code b0 + windowWorkMs}, and its planner runs
+     * within it.
+     */
+    long windowWorkMs() {
+        if (!spec.solver || !spec.solverCfg.has("windowWorkMs")) {
+            return 0L;
+        }
+        return Math.max(0L, spec.solverCfg.get("windowWorkMs").getAsLong());
+    }
+
+    /** wu-reads-1107 (report only): window plan points whose solver ran on the window budget. */
+    int windowBudgeted;
+
+    /** wu-reads-1107: a window of ours that anyWindow opens (not our main phases, not their end step). */
+    boolean offWindow(final Game g) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
+        final boolean theirEnd = !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
+        return !ourMain && !theirEnd;
+    }
+
     /** choice-search-1105 (replanOnEntry): our nonland permanents' ids at the last plan point, and the replans counted. */
     private java.util.Set<Integer> lastPointIds;
     int entryReplans;
@@ -1010,12 +1035,23 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         st.knownTop = driver.probe(() -> solver.knownTopCount(g));
         if (spec.solver) {
             final long a = System.nanoTime();
-            if (spec.unified) {
-                // unified-search-1106; consolidate-1107 (as wu-reads-1107 5d6b0ac985e): from b0, the budget clock (t0 off)
-                solver.setHardDeadline(b0 + forge.ai.WallClock.budgetMs(rs.budgetMs()) * 1_000_000L);
+            // unified-search-1106; wu-reads-1107: from b0, the decision's start on the budget clock (t0 when workUnits is
+            // off), so with workUnits the one deadline is on the work clock like every deadline the solver compares it with
+            long hard = spec.unified ? b0 + forge.ai.WallClock.budgetMs(rs.budgetMs()) * 1_000_000L : 0L;
+            final long wms = windowWorkMs();
+            final boolean windowed = wms > 0 && anyWindow() && offWindow(g);
+            if (windowed) {
+                final long w = b0 + wms * 1_000_000L; // wu-reads-1107 (solverCfg windowWorkMs)
+                hard = hard == 0L ? w : Math.min(hard, w);
+                windowBudgeted++;
             }
+            if (hard != 0L) {
+                solver.setHardDeadline(hard);
+            }
+            solver.setWindowCap(windowed);
             final List<ForcedWinSolver.Proposal> props = driver.probe(() -> solver.propose(g));
             solver.setHardDeadline(0L);
+            solver.setWindowCap(false);
             solverRuns++;
             if (solver.lastCap() != null) {
                 // rollout-budget-1101 (review #160 S2-2): the proposal hit its Forge AI work cap (it proposes nothing)
@@ -1382,6 +1418,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
         if (anyWindow()) {
             o.addProperty("windowPoints", windowPoints); // line-adoption-1107 (only when on)
+        }
+        if (windowWorkMs() > 0) {
+            o.addProperty("windowBudgeted", windowBudgeted); // wu-reads-1107 (only when on)
         }
         o.addProperty("policyPlanDepartures", policyPlanDepartures);
         o.addProperty("provenPicks", provenPicks);
