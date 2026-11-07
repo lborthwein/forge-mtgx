@@ -847,6 +847,8 @@ public final class ForcedWinSolver {
             return null;
         }
         evaluated++;
+        avoidPos = pos; // next-turn-1107 (evalAvoidLost): a re-plan without the lost cards
+        avoidLim = lim;
         receipt("FORCED_WIN candidates" + tag() + " turn=" + pos.turn + " " + res.summary() + " probes=" + reader.probeStats.summary()
                 + " best=" + res.lines.get(0));
         if (ForcedWinEngine.TRACE) {
@@ -2152,16 +2154,53 @@ public final class ForcedWinSolver {
         return out;
     }
 
-    /** next-turn-1107 (report only): candidates skipped as using a lost card, and evaluations made, per call. */
-    int avoidSkipped;
+    /** next-turn-1107 (report only): candidates skipped as using a lost card; re-plans without lost cards, and their lines. */
+    int avoidSkipped, avoidReplans, avoidReplanLines;
+    /** next-turn-1107: the position and limits of the planner call whose lines are being evaluated. */
+    private Position avoidPos;
+    private ForcedWinPlanner.Limits avoidLim;
 
     /** next-turn-1107 ({@link Config#evalAvoidLost}): as {@link #evaluateTop}, the candidates chosen as the evaluations go. */
-    private Eval evaluateAvoidLost(Game live, List<Line> lines, int index, long deadline) {
+    private Eval evaluateAvoidLost(Game live, List<Line> lines0, int index, long deadline) {
         final Set<String> skeletons = new HashSet<>();
         final Set<Integer> lost = new HashSet<>();
         Eval best = null;
         int i = 0;
-        for (Line l : lines) {
+        List<Line> lines = lines0;
+        boolean replanned = false;
+        final int skipped0 = avoidSkipped;
+        for (int li = 0;; li++) {
+            if (li >= lines.size()) {
+                // every candidate left uses a lost card: plan once more with the lost cards gone after our pass
+                if (replanned || best != null || lost.isEmpty() || avoidSkipped == skipped0 || avoidPos == null
+                        || i >= cfg.top || System.nanoTime() > deadline) {
+                    break;
+                }
+                replanned = true;
+                avoidReplans++;
+                final ForcedWinPlanner.Limits lim2 = new ForcedWinPlanner.Limits();
+                lim2.nodes = avoidLim.nodes;
+                lim2.ms = avoidLim.ms;
+                lim2.payPolicies = avoidLim.payPolicies;
+                lim2.planDiscard = avoidLim.planDiscard;
+                lim2.horizon = avoidLim.horizon;
+                lim2.goneAtPass = new HashSet<>(lost);
+                final ForcedWinPlanner.Result r2 = ForcedWinPlanner.plan(avoidPos, lim2);
+                if (cfg.followPay) {
+                    for (Line l2 : r2.lines) {
+                        for (Step st : l2.steps) {
+                            st.forceLife = st.phyrexianLife;
+                        }
+                    }
+                }
+                avoidReplanLines += r2.lines.size();
+                receipt("FORCED_WIN avoid-replan" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " gone=" + lost + " "
+                        + r2.summary() + (r2.lines.isEmpty() ? "" : " best=" + r2.lines.get(0)));
+                lines = r2.lines;
+                li = -1;
+                continue;
+            }
+            final Line l = lines.get(li);
             if (i >= cfg.top) {
                 break;
             }

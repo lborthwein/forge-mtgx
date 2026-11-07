@@ -271,6 +271,8 @@ public final class ForcedWinPlanner {
          * sources first, keep each colour, Phyrexian pips with life.
          */
         int payPolicies = 1;
+        /** next-turn-1107 (evalAvoidLost): card ids of ours that are gone once we pass the turn (lost in a verification). */
+        Set<Integer> goneAtPass = Set.of();
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -801,6 +803,10 @@ public final class ForcedWinPlanner {
             s.how = "opponent-decked";
             out.add(s);
             return out;
+        }
+        if (!lim.goneAtPass.isEmpty()) {
+            // next-turn-1107: permanents a verification world lost in the opponent's turn are not there on our next turn
+            s.bf.removeIf(p -> lim.goneAtPass.contains(cards.get(p.card).id));
         }
         s.turnIdx++;
         s.sorcery = true;
