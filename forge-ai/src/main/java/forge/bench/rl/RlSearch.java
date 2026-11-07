@@ -224,6 +224,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * cards from {@link forge.ai.simulation.DeckBelief} ({@link LookaheadSearch.Config#beliefDeck}); needs a belief.
          */
         public boolean beliefDeck = false;
+        /** choice-scorer-1106 (null = off, the default, and then absent from the JSON): {@link ChoiceScorer.Config}. */
+        public JsonObject choiceScorer = null;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -235,7 +237,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "beliefDeck", "choiceScorer"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -281,6 +283,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
             if (o.has("forcedWin") && !o.get("forcedWin").isJsonNull()) c.forcedWin = o.getAsJsonObject("forcedWin");
             if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
+            if (o.has("choiceScorer") && !o.get("choiceScorer").isJsonNull()) {
+                c.choiceScorer = o.getAsJsonObject("choiceScorer");
+                ChoiceScorer.Config.parse(c.choiceScorer); // a bad key fails at parse, not at the first ask
+            }
             if (o.has("blocks")) c.blocks = o.get("blocks").getAsInt();
             if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
@@ -411,6 +417,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (plans != null) {
                 o.add("plans", plans);
+            }
+            if (choiceScorer != null) {
+                o.add("choiceScorer", choiceScorer); // choice-scorer-1106: only when on
             }
             if (blocks > 0) {
                 // block-search-1019: only when on, so every other spec's JSON is unchanged
@@ -1251,6 +1260,80 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     private int blockAsks = 0, blockSearched = 0, blockDepartures = 0, blockCapped = 0, blockForgeMissing = 0,
             blockSampleFailures = 0;
+
+    private ChoiceScorer scorer;
+
+    private ChoiceScorer scorer() {
+        if (scorer == null) {
+            scorer = new ChoiceScorer(ChoiceScorer.Config.parse(cfg.choiceScorer), index, obsVersion, uid);
+            final ChoiceScorer.Config sc = scorer.config();
+            if (sc.screenNodes > 0 || sc.pile) {
+                sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();
+            }
+        }
+        return scorer;
+    }
+
+    /** choice-scorer-1106: searched-to-top cards stay known for this search's seats, from before the first card moves. */
+    public void bindChoiceScorer(final int seats) {
+        if (cfg.choiceScorer != null && liveKnow != null && scorer().config().searchedTop) {
+            liveKnow.setSearchedTopSeats(liveKnow.searchedTopSeats() | seats);
+        }
+    }
+
+    @Override
+    public boolean choiceAsk(final int family) {
+        return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
+                || family == RlSchema.F_ORDER && scorer().config().pile);
+    }
+
+    @Override
+    public short[] decideChoice(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final long t0 = System.nanoTime();
+        final ChoiceScorer sc = scorer();
+        if (sc.pileActive(g)) {
+            return sc.pileAnswer(g, m);
+        }
+        if (m.family == RlSchema.F_ORDER) {
+            return null;
+        }
+        final long seed = LookaheadSearch.mix(LookaheadSearch.mix(gameSeed, 0xC401CEL), frame.decIdx);
+        final String src = ChoiceScorer.srcOf(g);
+        final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed, null);
+        final List<byte[]> ps = sc.payloads(s);
+        double[] v = null;
+        if (s.unsupported == null) {
+            if (ps.isEmpty()) {
+                v = new double[0];
+            } else {
+                v = leafValues(new ArrayList<Object>(ps));
+            }
+        }
+        short[] alt = v == null ? null : sc.choose(s, v, greedy);
+        final boolean scored = v != null;
+        if (sc.config().shadow) {
+            alt = null;
+        }
+        if (alt != null && s.chosen != null && s.chosen.pileIds != null) {
+            sc.adoptPile(g, s.chosen);
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = sc.row(s, src);
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("turn", g.getPhaseHandler().getTurn());
+            row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+            row.addProperty("kind", "choice");
+            row.addProperty("family", RlSchema.familyName(m.family));
+            row.addProperty("scored", scored);
+            row.addProperty("departed", alt != null);
+            row.addProperty("total_ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
+            rows.add(row);
+        }
+        return alt;
+    }
+
 
     /**
      * Lane block-search-1019 (spec key {@code blocks}; off = null at once, nothing else runs): the look-ahead over the
