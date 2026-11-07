@@ -28,6 +28,16 @@ public class ChoiceScorerConfigTest {
         Assert.assertTrue(s.guard);
     }
 
+    @Test
+    public void alwaysKeepIsOffByDefaultAndKeptInTheSpec() {
+        final RlSearch.Config off = RlSearch.Config.parse(JsonParser.parseString("{\"server\":\"h:1\"}").getAsJsonObject());
+        Assert.assertFalse(off.alwaysKeep);
+        Assert.assertFalse(off.toJson().has("alwaysKeep"));
+        final RlSearch.Config on = RlSearch.Config.parse(
+                JsonParser.parseString("{\"server\":\"h:1\",\"alwaysKeep\":true}").getAsJsonObject());
+        Assert.assertTrue(on.toJson().get("alwaysKeep").getAsBoolean());
+    }
+
     @Test(expectedExceptions = IllegalArgumentException.class)
     public void unknownKeyFails() {
         RlSearch.Config.parse(JsonParser.parseString("{\"server\":\"h:1\",\"choiceScorer\":{\"nope\":1}}").getAsJsonObject());
