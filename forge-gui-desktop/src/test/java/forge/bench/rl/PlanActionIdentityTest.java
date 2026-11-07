@@ -15,7 +15,10 @@ import forge.game.spellability.SpellAbility;
 public class PlanActionIdentityTest {
     @BeforeClass
     public void setup() {
-        forge.util.Localizer.getInstance().initialize("en-US", "res/languages/");
+        final java.nio.file.Path local = java.nio.file.Path.of("res/languages");
+        final java.nio.file.Path languages = java.nio.file.Files.isDirectory(local) ? local
+                : java.nio.file.Path.of("../forge-gui/res/languages");
+        forge.util.Localizer.getInstance().initialize("en-US", languages.toString());
     }
 
     private static RlCandidates.Menu menu(int... xs) {
