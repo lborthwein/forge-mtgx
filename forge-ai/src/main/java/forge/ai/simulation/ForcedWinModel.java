@@ -573,6 +573,42 @@ public final class ForcedWinModel {
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
         long seed = 20261012L;
 
+        /**
+         * kill-line-1106 (sourceOutput): each mana source's output read from the position, over the template learned at
+         * the first position that saw the card's name. A source that makes nothing now is no source. Same order as read().
+         */
+        static void readSourceOutputs(Position p, Player me) {
+            int i = 0;
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isFaceDown()) {
+                    continue;
+                }
+                if (i >= p.battlefield.size()) {
+                    return;
+                }
+                final ACard a = p.battlefield.get(i++);
+                if (a.sourceColors == 0) {
+                    continue;
+                }
+                int amount = 0;
+                for (SpellAbility original : c.getManaAbilities()) {
+                    final SpellAbility m = original.copy(me);
+                    if (m.getManaPart() == null) {
+                        continue;
+                    }
+                    try {
+                        amount = Math.max(amount, m.amountOfManaGenerated(true));
+                    } catch (RuntimeException e) {
+                        amount = Math.max(amount, 1);
+                    }
+                }
+                a.sourceAmount = amount;
+                if (amount == 0) {
+                    a.sourceColors = 0;
+                }
+            }
+        }
+
         /** strong-opp-1020: the learned templates as JSON (card name -> template), for a precomputed cache. */
         synchronized String exportJson() {
             return new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(templates);

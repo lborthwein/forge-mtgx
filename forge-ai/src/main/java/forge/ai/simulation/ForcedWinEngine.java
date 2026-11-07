@@ -230,6 +230,12 @@ final class ForcedWinEngine {
          * whole game gets no same-turn engine nodes after its first searches.
          */
         boolean perSearchNodes;
+        /**
+         * kill-line-1106 (port of solver-gaps-1104, engineTriggerTargets; false = off): {@link TriggerTargets#wide}, at
+         * most triggerVariants trigger targets per move.
+         */
+        boolean triggerTargets;
+        int triggerVariants = 8;
         int depth = 64;
         int branching = 8;
         int targetVariants = 3;
@@ -312,8 +318,6 @@ final class ForcedWinEngine {
          */
         int altLines;
         /** solver-gaps-1104 (engineTriggerTargets; false = off): {@link TriggerTargets#wide}, at most triggerVariants. */
-        boolean triggerTargets;
-        int triggerVariants = 8;
         int loopWindow = 8;
         int loopCap = 128;
         /**
@@ -2452,12 +2456,14 @@ final class ForcedWinEngine {
         }
 
         /**
-         * solver-gaps-1104 (engineTriggerTargets; false = off, the classic three-way order): every legal target class
+         * kill-line-1106 (engineTriggerTargets; false = off, the classic three-way order): every legal target class
          * (see {@link #wideCandidates}), at most {@link #cap}; a forced ref "C<id>+F<colour>" floats that mana source's
          * mana in response to the trigger (it resolves after: an untap of a source we just tapped for mana).
          */
         boolean wide;
         int cap = 8;
+        /** kill-line-1106: the forced float of a "+F" ref could not be played (the move fails: no silent change). */
+        boolean floatFailed;
 
         /** Handle the forced trigger (played here); the rest go back to Forge AI. */
         List<SpellAbility> apply(Game g, Player me, List<SpellAbility> abilities) {
@@ -2519,9 +2525,6 @@ final class ForcedWinEngine {
             }
             return rest;
         }
-
-        /** solver-gaps-1104: the forced float of a "+F" ref could not be played (the move fails: no silent change). */
-        boolean floatFailed;
 
         /**
          * solver-gaps-1104: the trigger's target classes, mana valued. Cards equal by controller, name and tapped state

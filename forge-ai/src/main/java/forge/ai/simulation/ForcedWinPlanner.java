@@ -61,6 +61,10 @@ public final class ForcedWinPlanner {
         /** FLOAT of a plain source (a land before a return cost): the colour index; -1 otherwise. */
         final int floatColor;
         boolean phyrexianLife;
+        /** kill-line-1106 (followPay): the follower pays this step's Phyrexian pips with life. */
+        boolean forceLife;
+        /** kill-line-1106 (planDiscard; null = none): this step's forced discard tokens ({@link ForcedWinChoices}). */
+        List<String> cac;
         /** ENGINE steps: the recorded targets, "link:ref" (ref = "C" + card id or "P" + player id). */
         final List<String> targetRefs = new ArrayList<>();
         /** ENGINE steps: the forced target of the first targeting trigger of ours this step causes (null = Forge AI's). */
@@ -71,7 +75,6 @@ public final class ForcedWinPlanner {
          * labeller-v2 (a)/(c) (null = none, v1): the forced choice tokens of this step's window ({@link ForcedWinChoices}):
          * the engine's variant identity, or the planner's scry / surveil / discard answers.
          */
-        List<String> cac;
         /** labeller-v2 (a): every choice token the engine's move played (forced and Forge AI's), for the line; null = none. */
         List<String> cacPlayed;
         /** labeller-v2 (e) (null = Forge AI pays): the sources this step floats first, as FLOAT steps (a payment variant). */
@@ -132,6 +135,8 @@ public final class ForcedWinPlanner {
             s.picks.addAll(picks);
             s.putBack.addAll(putBack);
             s.phyrexianLife = phyrexianLife;
+            s.forceLife = forceLife;
+            s.cac = cac == null ? null : new ArrayList<>(cac);
             s.targetRefs.addAll(targetRefs);
             s.engineSpell = engineSpell;
             s.byName = byName;
@@ -144,7 +149,6 @@ public final class ForcedWinPlanner {
             s.expHand = expHand;
             s.expLib = expLib;
             s.anyColors.addAll(anyColors);
-            s.cac = cac == null ? null : new ArrayList<>(cac);
             s.cacPlayed = cacPlayed == null ? null : new ArrayList<>(cacPlayed);
             s.payFloats = payFloats == null ? null : new ArrayList<>(payFloats);
             if (body != null) {
@@ -316,10 +320,7 @@ public final class ForcedWinPlanner {
         /** 1: this turn only; 2: this turn and our next turn. */
         int horizon = 2;
         int classes = 14;
-        /**
-         * POST-FREEZE 5: a wall-time budget (ms); late-game positions with large graveyards made keys slow.
-         * bvw-step1-build-1024: a negative value is no wall time (budget=counter: the nodes alone bound the search).
-         */
+
         long ms = 1500;
         /**
          * solver-gaps-1015 (payment search, off by default): how many payment orders each cast is tried with. 1 = the
@@ -559,6 +560,7 @@ public final class ForcedWinPlanner {
         dfs(s, 0);
         rank();
         result.nodes = nodes;
+        result.exhausted |= nodes >= lim.nodes; // kill-line-1106: a stop at the node limit counts as exhausted (report only)
         for (Line l : result.lines) {
             l.knownTop = pos.knownTop.size();
         }
@@ -1410,6 +1412,7 @@ public final class ForcedWinPlanner {
         return out;
     }
 
+    /** Record a choice token on the step being resolved (kill-line-1106). */
     private static void combos(List<Integer> xs, int n, int from, List<Integer> cur, List<List<Integer>> out, int cap) {
         if (out.size() >= cap) {
             return;
