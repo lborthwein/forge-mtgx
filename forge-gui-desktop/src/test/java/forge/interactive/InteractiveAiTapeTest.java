@@ -309,13 +309,13 @@ public class InteractiveAiTapeTest extends AITest {
         final String[][] pins = {
                 {"public boolean playChosenSpellAbility(SpellAbility sa) {", "6801c55b72b6ae33"},
                 {"public void playSpellAbilityNoStack(SpellAbility effectSA, boolean canSetupTargets) {", "3f6ba6033e2beea2"},
-                {"public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {", "2e9a06ae128aec2c"},
+                {"public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {", "ba997ea4a1b78786"},
                 {"private boolean prepareSingleSaUntaped(final Card host, SpellAbility sa, boolean isMandatory) {", "85e757ad9ace5d23"},
                 {"public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) {", "b54fb880090478a0"},
                 {"public boolean playSaFromPlayEffect(SpellAbility tgtSA) {", "25ae78233882cdf1"},
-                {"public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {", "2cd61af1a041ca66"},
+                {"public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {", "c2094dfcafbfacf0"},
                 {"public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt /* ai needs hints as well */, ManaConversionMatrix matrix, boolean effect) {", "03d7956e2f68a1d2"},
-                {"public boolean payCombatCost(Card c, Cost cost, SpellAbility sa, String prompt) {", "f2ed41ad7866bd19"},
+                {"public boolean payCombatCost(Card c, Cost cost, SpellAbility sa, String prompt) {", "273a17bf0ba40f8e"},
         };
         for (String[] pin : pins) {
             final int i = src.indexOf(pin[0]);

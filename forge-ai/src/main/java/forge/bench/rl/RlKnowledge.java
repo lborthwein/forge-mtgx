@@ -156,8 +156,21 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     /** knowledge-searched-top-1105: per card id, the seats it was revealed to during the current resolution. */
     private final Map<Integer, Set<Integer>> revealedInResolution = new HashMap<>();
 
+    /**
+     * knowledge-settle-1104 (research; -Dforge.bench.rl.knowledgeSettle=fixed, default off = every path unchanged): the
+     * settle schedule of the pending sightings. Off, a query ({@link #knows}, {@link #seenOpponentIds}, ...) settles them
+     * against the card's visibility at that moment, so what a frame shows depends on when earlier frames were taken
+     * (lane outcome-arm-1104). Fixed: queries never settle; the tracker settles at fixed game points only, every spell
+     * resolution (as before) and every priority decision of either seat (a {@link forge.game.PriorityDecisionListener}
+     * added by {@link #attach}, ahead of any listener added after it). Then the state at any moment is a function of the
+     * game alone, whoever queries it and whenever. Read at construction; tests set {@link #FIXED_SETTLE}.
+     */
+    public static volatile boolean FIXED_SETTLE = "fixed".equals(System.getProperty("forge.bench.rl.knowledgeSettle"));
+    private final boolean fixedSettle;
+
     public RlKnowledge(final Game game) {
         this.game = game;
+        this.fixedSettle = FIXED_SETTLE;
         this.searchedTopSeats = SEARCHED_TOP ? 3 : 0;
         this.searchedTop = searchedTopSeats != 0;
     }
@@ -177,9 +190,34 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         searchedTop = mask != 0;
     }
 
+    /** knowledge-settle-1104: whether this tracker settles on the fixed schedule (see {@link #FIXED_SETTLE}). */
+    public boolean fixedSettle() {
+        return fixedSettle;
+    }
+
     /** Subscribe to the game's events (call once, after the game is created). */
     public void attach() {
         game.subscribeToEvents(this);
+        if (fixedSettle) {
+            // knowledge-settle-1104: settle at every priority decision, before anyone observes it
+            game.addPriorityDecisionListener(new forge.game.PriorityDecisionListener() {
+                @Override
+                public void beforeDecision(final Player p) {
+                    settle();
+                }
+
+                @Override
+                public void afterDecision(final Player p, final List<forge.game.spellability.SpellAbility> chosen) {
+                }
+            });
+        }
+    }
+
+    /** A query's settle: the old schedule (settle now) unless this tracker settles on the fixed one. */
+    private void querySettle() {
+        if (!fixedSettle) {
+            settle();
+        }
     }
 
     /**
@@ -221,6 +259,160 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     public Game game() {
         return game;
     }
+
+    /**
+     * frame-score-1105 (read-only; used only by {@link RlFrameObs}): this tracker's whole state as JSON
+     * ({@code mtgx-rl-knowledge/1}), card ids written through {@code refOf} (a frame-independent card reference). Reads
+     * the fields only (no settle). A stack-item target ref is written as the raw stack id (a frame has no stack ids).
+     */
+    public com.google.gson.JsonObject snapshot(final java.util.function.IntFunction<String> refOf) {
+        final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+        o.addProperty("schema", "mtgx-rl-knowledge/1");
+        o.addProperty("v2", v2);
+        o.addProperty("clock", clock);
+        o.addProperty("fixed_settle", fixedSettle);
+        final com.google.gson.JsonArray kn = new com.google.gson.JsonArray(), si = new com.google.gson.JsonArray(),
+                so = new com.google.gson.JsonArray();
+        for (int s = 0; s < 2; s++) {
+            final com.google.gson.JsonArray a = new com.google.gson.JsonArray();
+            for (Map.Entry<Integer, Long> e : new java.util.TreeMap<>(known[s]).entrySet()) {
+                final com.google.gson.JsonArray x = new com.google.gson.JsonArray();
+                x.add(refOf.apply(e.getKey()));
+                x.add(e.getValue());
+                a.add(x);
+            }
+            kn.add(a);
+            final com.google.gson.JsonArray b = new com.google.gson.JsonArray();
+            for (Map.Entry<Integer, String[]> e : seenIds[s].entrySet()) {
+                final com.google.gson.JsonArray x = new com.google.gson.JsonArray();
+                x.add(refOf.apply(e.getKey()));
+                x.add(e.getValue()[0]);
+                x.add(e.getValue()[1]);
+                b.add(x);
+            }
+            si.add(b);
+            final com.google.gson.JsonArray c = new com.google.gson.JsonArray();
+            for (String n : seenOpp[s]) {
+                c.add(n);
+            }
+            so.add(c);
+        }
+        o.add("known", kn);
+        o.add("seen_ids", si);
+        o.add("seen_opp", so);
+        final com.google.gson.JsonArray tl = new com.google.gson.JsonArray();
+        for (StackEvent e : tail) {
+            final com.google.gson.JsonObject x = new com.google.gson.JsonObject();
+            x.addProperty("name", e.name);
+            x.addProperty("full", e.fullName);
+            x.addProperty("fd", e.faceDown);
+            x.addProperty("ab", e.ability);
+            x.addProperty("seat", e.controllerSeat);
+            final com.google.gson.JsonArray f = new com.google.gson.JsonArray();
+            for (int v : e.facts) {
+                f.add(v);
+            }
+            x.add("facts", f);
+            final com.google.gson.JsonArray tg = new com.google.gson.JsonArray();
+            for (int[] t : e.targets) {
+                final com.google.gson.JsonArray y = new com.google.gson.JsonArray();
+                y.add(t[0]);
+                if (t[0] == RlStackFacts.T_CARD) {
+                    y.add(refOf.apply(t[1]));
+                } else {
+                    y.add(t[1]);
+                }
+                y.add(t[2]);
+                y.add(t[3]);
+                tg.add(y);
+            }
+            x.add("targets", tg);
+            tl.add(x);
+        }
+        o.add("tail", tl);
+        final com.google.gson.JsonArray ar = new com.google.gson.JsonArray();
+        for (Integer id : new java.util.TreeSet<>(arranged)) {
+            ar.add(refOf.apply(id));
+        }
+        o.add("arranged", ar);
+        final com.google.gson.JsonArray pe = new com.google.gson.JsonArray();
+        for (Pending p : pending) {
+            final com.google.gson.JsonObject x = new com.google.gson.JsonObject();
+            x.addProperty("seat", p.seat);
+            x.addProperty("card", refOf.apply(p.cardId));
+            x.addProperty("name", p.name);
+            x.addProperty("hand_owner", p.handOwner == null ? -1 : seatOf(p.handOwner));
+            x.addProperty("at", p.at);
+            x.addProperty("id_added", p.idAdded);
+            pe.add(x);
+        }
+        o.add("pending", pe);
+        return o;
+    }
+
+    /**
+     * frame-score-1105: a tracker of {@code g} holding a {@link #snapshot}'s state, card refs resolved by {@code idOf}
+     * (a ref the frame cannot place gets an id no card of {@code g} has). NOT attached: call {@link #attach} to follow
+     * the game from here. Its settle schedule is this JVM's ({@link #FIXED_SETTLE}).
+     */
+    public static RlKnowledge restore(final Game g, final com.google.gson.JsonObject o,
+            final java.util.function.ToIntFunction<String> idOf) {
+        if (!"mtgx-rl-knowledge/1".equals(o.get("schema").getAsString())) {
+            throw new IllegalArgumentException("knowledge snapshot schema " + o.get("schema"));
+        }
+        final RlKnowledge k = new RlKnowledge(g);
+        k.v2 = o.get("v2").getAsBoolean();
+        k.clock = o.get("clock").getAsLong();
+        for (int s = 0; s < 2; s++) {
+            for (com.google.gson.JsonElement e : o.getAsJsonArray("known").get(s).getAsJsonArray()) {
+                final com.google.gson.JsonArray x = e.getAsJsonArray();
+                k.known[s].put(idOf.applyAsInt(x.get(0).getAsString()), x.get(1).getAsLong());
+            }
+            for (com.google.gson.JsonElement e : o.getAsJsonArray("seen_ids").get(s).getAsJsonArray()) {
+                final com.google.gson.JsonArray x = e.getAsJsonArray();
+                k.seenIds[s].put(idOf.applyAsInt(x.get(0).getAsString()), new String[] {str(x.get(1)), str(x.get(2))});
+            }
+            for (com.google.gson.JsonElement e : o.getAsJsonArray("seen_opp").get(s).getAsJsonArray()) {
+                k.seenOpp[s].add(e.getAsString());
+            }
+        }
+        for (com.google.gson.JsonElement e : o.getAsJsonArray("tail")) {
+            final com.google.gson.JsonObject x = e.getAsJsonObject();
+            final StackEvent ev = new StackEvent(str(x.get("name")), str(x.get("full")), x.get("fd").getAsBoolean(),
+                    x.get("ab").getAsBoolean(), x.get("seat").getAsInt());
+            final com.google.gson.JsonArray f = x.getAsJsonArray("facts");
+            ev.facts = new int[f.size()];
+            for (int i = 0; i < f.size(); i++) {
+                ev.facts[i] = f.get(i).getAsInt();
+            }
+            final List<int[]> tg = new ArrayList<>();
+            for (com.google.gson.JsonElement t : x.getAsJsonArray("targets")) {
+                final com.google.gson.JsonArray y = t.getAsJsonArray();
+                final int kind = y.get(0).getAsInt();
+                final int ref = kind == RlStackFacts.T_CARD ? idOf.applyAsInt(y.get(1).getAsString()) : y.get(1).getAsInt();
+                tg.add(new int[] {kind, ref, y.get(2).getAsInt(), y.get(3).getAsInt()});
+            }
+            ev.targets = tg.isEmpty() ? Collections.emptyList() : tg;
+            k.tail.addLast(ev);
+        }
+        for (com.google.gson.JsonElement e : o.getAsJsonArray("arranged")) {
+            k.arranged.add(idOf.applyAsInt(e.getAsString()));
+        }
+        for (com.google.gson.JsonElement e : o.getAsJsonArray("pending")) {
+            final com.google.gson.JsonObject x = e.getAsJsonObject();
+            final int ho = x.get("hand_owner").getAsInt();
+            final Pending p = new Pending(x.get("seat").getAsInt(), idOf.applyAsInt(x.get("card").getAsString()),
+                    str(x.get("name")), ho < 0 ? null : k.seatPlayer(ho), x.get("at").getAsLong());
+            p.idAdded = x.get("id_added").getAsBoolean();
+            k.pending.add(p);
+        }
+        return k;
+    }
+
+    private static String str(final com.google.gson.JsonElement e) {
+        return e == null || e.isJsonNull() ? null : e.getAsString();
+    }
+
 
     int seatOf(final Player p) {
         return p == null ? -1 : game.getRegisteredPlayers().indexOf(p);
@@ -333,13 +525,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
 
     /** Does seat {@code s} know this hidden card's identity (zone 16 / 17 / 18)? */
     public boolean knows(final int s, final Card c) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 && c != null && known[s].containsKey(c.getId());
     }
 
     /** The opponent cards seat {@code s} has seen this game, by name, first seen first. */
     public List<String> seenOpponentNames(final int s) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 ? Collections.unmodifiableList(new ArrayList<>(seenOpp[s])) : Collections.emptyList();
     }
 
@@ -353,20 +545,20 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
      * {name, full name} as seen. The o_seen zone holds those not shown in the frame by other tokens.
      */
     public Map<Integer, String[]> seenOpponentIds(final int s) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 ? Collections.unmodifiableMap(new java.util.LinkedHashMap<>(seenIds[s]))
                 : Collections.emptyMap();
     }
 
     /** The last {@link #TAIL} stack events, newest first. */
     public List<StackEvent> tail() {
-        settle();
+        querySettle();
         return new ArrayList<>(tail);
     }
 
     /** Number of known hidden cards (diagnostics). */
     public int knownCount(final int s) {
-        settle();
+        querySettle();
         return known[s].size();
     }
 

@@ -472,6 +472,12 @@ public final class InfoStates implements LibraryInfoListener {
         }
     }
 
+    /** Review #172 S1 (research's listener hook; the game caught a throw from {@link #onLibraryInfo}): fail closed. */
+    @Override
+    public synchronized void onListenerFailure(final RuntimeException failure) {
+        failClosed(failure);
+    }
+
     /** A consumer's read failed: fail closed (synchronized, as every state change). */
     synchronized void failClosedRead(final RuntimeException e) {
         failClosed(e);
@@ -1102,12 +1108,12 @@ public final class InfoStates implements LibraryInfoListener {
     // ------------------------------------------------------------------ belief worlds (the infoState consumers)
 
     /**
-     * The game's state for a consumer key that is on: the attached one, or one attached now (late: it knows what the
-     * statics show from now on, and nothing earlier).
+     * The game's state for a consumer key that is on: the attached one, or null.
      */
     public static InfoStates forConsumer(final Game live) {
-        final InfoStates s = find(live);
-        return s != null ? s : attach(live);
+        // review #172 S2: a consumer never attaches (a search worker would mutate the game's listener list while the game
+        // thread fires it): absent = it knows nothing beyond what Forge shows. Attach at game creation / bind only.
+        return find(live);
     }
 
     /**

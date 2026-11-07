@@ -436,7 +436,8 @@ public class LookaheadBeliefTest extends SimulationTest {
             new LookaheadSearch(bad);
             AssertJUnit.fail("an unknown belief must be refused");
         } catch (IllegalStateException expected) {
-            AssertJUnit.assertTrue(expected.getMessage().contains("off, human or uniform"));
+            // bvw-step2-fork-1027: S2T's codraft joined the belief modes
+            AssertJUnit.assertTrue(expected.getMessage().contains("off, human, uniform or codraft"));
         }
         Card unused = null;
         AssertJUnit.assertNull(unused);

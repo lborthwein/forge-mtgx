@@ -192,6 +192,7 @@ public final class InteractiveMain {
             rules.setAISideboardingEnabled(false);
             rules.setSideboardForAI(false);
             rules.setAllowCheatShuffle(false);
+            forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "InteractiveMain"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
             // Desktop deck-advice modal, not a rules failure or human choice.
             // Its opponent-card list is inappropriate for a hidden-information game.
             rules.setWarnAboutAICards(false);
@@ -388,6 +389,7 @@ public final class InteractiveMain {
             rules.setAISideboardingEnabled(false);
             rules.setSideboardForAI(false);
             rules.setAllowCheatShuffle(false);
+            forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "InteractiveMain"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
             rules.setWarnAboutAICards(false);
             if (config.startingChooser() >= 0) {
                 rules.setStartingChooser(registered.get(config.startingChooser()), config.gameNumber() == 1);
@@ -973,6 +975,7 @@ public final class InteractiveMain {
             switch (p[0].trim()) {
                 case "worlds": c.worlds = Integer.parseInt(p[1].trim()); break;
                 case "breadth": c.breadth = Integer.parseInt(p[1].trim()); break;
+                case "offTurnBreadth": c.offTurnBreadth = Integer.parseInt(p[1].trim()); break; // endstep-rows-1103
                 case "horizon": c.horizonTurns = Integer.parseInt(p[1].trim()); break;
                 case "threads": c.threads = Integer.parseInt(p[1].trim()); break;
                 case "dedup": c.dedup = !"0".equals(p[1].trim()); break;

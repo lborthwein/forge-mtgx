@@ -1903,6 +1903,25 @@ public final class CubeComboAi {
         return true;
     }
 
+    /** r3-labelsearch-1030 (E1, owner ruling 10-30): the route pieces of {@code player}'s deck for the R3 label
+     * search's "hold the piece" candidates: {@link #protectedPieceNames} and the card-based families' gate pieces
+     * ({@code AiCostDecision.CUBE_GATE_PIECES}), restricted to the names of the seat's own cards in any zone (its deck
+     * composition; no order is read). A name list, not the full route catalog (the app's src/draft/combo.ts). */
+    public static java.util.Set<String> routePieceNames(Player player) {
+        final java.util.Set<String> cand = new java.util.TreeSet<>(AiCostDecision.CUBE_GATE_PIECES);
+        try {
+            cand.addAll(protectedPieceNames(player));
+        } catch (RuntimeException e) {
+            // a plan predicate that cannot read this game: the literal pieces only
+            cand.addAll(java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
+                    "Restoration Angel", "Zealous Conscripts", "Splinter Twin"));
+        }
+        final java.util.Set<String> own = new java.util.HashSet<>();
+        for (Card c : player.getAllCards()) own.add(c.getName());
+        cand.retainAll(own);
+        return cand;
+    }
+
     /** Every name a cost must not be allowed to eat: the Breach and Storm gates'
      * current completing pieces, the Kiki halves and partners, and the thopter
      * family's one missing piece. Own-visible reads only. */

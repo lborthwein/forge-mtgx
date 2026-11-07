@@ -59,7 +59,9 @@ public final class ForcedWinModel {
     enum EffKind {
         DRAW, MANA, PUTBACK, MILL, MILL_OPP, LIFE, DRAIN, DISCARD, PILE, TUTOR, TUTOR_TOP, WIN, SHUFFLE,
         /** solver-gaps-1015: our whole hand / graveyard goes into our library (Timetwister, Echo of Eons); our hand is exiled (Memory Jar). */
-        HAND_TO_LIBRARY, GRAVEYARD_TO_LIBRARY, EXILE_HAND
+        HAND_TO_LIBRARY, GRAVEYARD_TO_LIBRARY, EXILE_HAND,
+        /** labeller-v2 (c): scry n / surveil n of our library (observed only by a planScry reader). */
+        SCRY, SURVEIL
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
@@ -571,6 +573,42 @@ public final class ForcedWinModel {
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
         long seed = 20261012L;
 
+        /**
+         * kill-line-1106 (sourceOutput): each mana source's output read from the position, over the template learned at
+         * the first position that saw the card's name. A source that makes nothing now is no source. Same order as read().
+         */
+        static void readSourceOutputs(Position p, Player me) {
+            int i = 0;
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isFaceDown()) {
+                    continue;
+                }
+                if (i >= p.battlefield.size()) {
+                    return;
+                }
+                final ACard a = p.battlefield.get(i++);
+                if (a.sourceColors == 0) {
+                    continue;
+                }
+                int amount = 0;
+                for (SpellAbility original : c.getManaAbilities()) {
+                    final SpellAbility m = original.copy(me);
+                    if (m.getManaPart() == null) {
+                        continue;
+                    }
+                    try {
+                        amount = Math.max(amount, m.amountOfManaGenerated(true));
+                    } catch (RuntimeException e) {
+                        amount = Math.max(amount, 1);
+                    }
+                }
+                a.sourceAmount = amount;
+                if (amount == 0) {
+                    a.sourceColors = 0;
+                }
+            }
+        }
+
         /** strong-opp-1020: the learned templates as JSON (card name -> template), for a precomputed cache. */
         synchronized String exportJson() {
             return new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(templates);
@@ -596,13 +634,26 @@ public final class ForcedWinModel {
 
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         synchronized ACard card(Game live, Player me, Card c) {
-            ACard t = templates.get(c.getName());
+            // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
+            final String key = planScry ? "scry|" + c.getName() : c.getName();
+            ACard t = templates.get(key);
             if (t == null) {
-                t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
-                templates.put(c.getName(), t);
+                final boolean prev = ForcedWinProbe.PLAN_SCRY.get();
+                ForcedWinProbe.PLAN_SCRY.set(planScry);
+                try {
+                    t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
+                } finally {
+                    ForcedWinProbe.PLAN_SCRY.set(prev);
+                }
+                if (!forge.ai.AiWork.spent()) {
+                    templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                }
             }
             return t.instance(c.getId());
         }
+
+        /** labeller-v2 (c): observe scry / surveil as SCRY / SURVEIL effects (false = v1). */
+        boolean planScry;
 
         /**
          * Read the seat's position; null when it is outside the model (more than one opponent). The library and
