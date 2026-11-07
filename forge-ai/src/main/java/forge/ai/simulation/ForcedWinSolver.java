@@ -190,6 +190,11 @@ public final class ForcedWinSolver {
          * wins, bisected between doublings ({@link ForcedWinEngine.Limits#loopBisect}).
          */
         public boolean engineLoopBisect = false;
+        /**
+         * loop-exec-1107 (0 = off: hoists inline): the percent of each engine pass kept for hoists, run after the plain
+         * depth-first pass ({@link ForcedWinEngine.Limits#hoistShare}).
+         */
+        public int engineHoistShare = 0;
         /** engine-reach-1107 (0 = off): {@link ForcedWinEngine.Limits#frontierAfterPct}. */
         public int engineFrontierPct = 0;
         /**
@@ -334,6 +339,7 @@ public final class ForcedWinSolver {
             c.engineOutletNodes = intOr(get.apply("engineOutletNodes"), c.engineOutletNodes); // engine-reach-1107
             c.engineLoopHoist = "true".equals(get.apply("engineLoopHoist")); // loop-exec-1107
             c.engineLoopBisect = "true".equals(get.apply("engineLoopBisect")); // loop-exec-1107
+            c.engineHoistShare = intOr(get.apply("engineHoistShare"), c.engineHoistShare); // loop-exec-1107
             c.engineFrontierPct = intOr(get.apply("engineFrontierPct"), c.engineFrontierPct); // engine-reach-1107
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
@@ -1632,6 +1638,7 @@ public final class ForcedWinSolver {
             el.outletNodes = cfg.engineOutletNodes;
             el.loopHoist = cfg.engineLoopHoist; // loop-exec-1107
             el.loopBisect = cfg.engineLoopBisect; // loop-exec-1107
+            el.hoistShare = cfg.engineHoistShare; // loop-exec-1107
         }
         el.frontierAfterPct = cfg.engineFrontierPct; // engine-reach-1107
         if (cfg.engineVerify) {

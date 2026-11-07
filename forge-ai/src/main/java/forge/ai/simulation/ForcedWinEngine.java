@@ -218,6 +218,12 @@ final class ForcedWinEngine {
         /** loop-exec-1107: the most hoisted fast-forwards one search tries. */
         int hoistMax = 12;
         /**
+         * loop-exec-1107 (0 = off: hoists run inline, as soon as a loop fast-forwards with no win): the percent of each
+         * search pass's time (and of its node share) kept for hoists. The plain depth-first pass runs alone until its share
+         * (100 - hoistShare percent) is used or its tree is done; the queued hoists then run in what is left of that pass.
+         */
+        int hoistShare = 0;
+        /**
          * loop-exec-1107 (false = off, with loopOutlets): when an outlet search first wins at a doubling, the counts between
          * the last losing doubling and it are bisected with the same outlet search; the line takes the smallest winning count.
          */
@@ -816,6 +822,57 @@ final class ForcedWinEngine {
         return best;
     }
 
+    /** loop-exec-1107 ({@link Limits#hoistShare}): loops queued for a hoist after the plain pass (child, body, played). */
+    private final List<Object[]> hoistQueue = new ArrayList<>();
+
+    /**
+     * One depth-first pass from the root, as before up to the search's deadline. With {@link Limits#hoistShare} > 0, the
+     * plain pass runs alone for (100 - hoistShare) percent of the time left and of this pass's nodes ({@code passNodes}),
+     * then the loops it queued are hoisted in the rest. Off, as before: one dfs.
+     */
+    private List<Step> pass(Node root, int passNodes) {
+        if (!(lim.loopHoist && lim.loopOutlets && lim.hoistShare > 0)) {
+            return dfs(root, 0);
+        }
+        final long t = System.nanoTime();
+        final long passEnd = deadline;
+        final int nodesEnd = lim.nodes;
+        hoistQueue.clear();
+        stageEnd = t + (passEnd - t) / 100 * (100 - lim.hoistShare);
+        final int plainNodes = nodesEnd - passNodes * lim.hoistShare / 100;
+        lim.nodes = Math.max(st.nodes + 1, plainNodes);
+        List<Step> win;
+        try {
+            win = dfs(root, 0);
+        } finally {
+            stageEnd = 0;
+            lim.nodes = nodesEnd;
+        }
+        if (win != null || hoistQueue.isEmpty()) {
+            return win;
+        }
+        stageEnd = passEnd;
+        lim.nodes = Math.max(nodesEnd, st.nodes + passNodes * lim.hoistShare / 100);
+        try {
+            for (Object[] q : hoistQueue) {
+                if (out() || st.hoists >= lim.hoistMax) {
+                    break;
+                }
+                @SuppressWarnings("unchecked")
+                final List<Step> body = (List<Step>) q[1];
+                win = hoist((Node) q[0], body, (Integer) q[2]);
+                if (win != null) {
+                    return win;
+                }
+            }
+            return null;
+        } finally {
+            stageEnd = 0;
+            lim.nodes = nodesEnd;
+            hoistQueue.clear();
+        }
+    }
+
     /** loop-exec-1107 ({@link Limits#loopHoist}): (node, rotation) pairs a hoisted fast-forward has tried. */
     private final Set<String> hoisted = new HashSet<>();
 
@@ -1122,14 +1179,14 @@ final class ForcedWinEngine {
             if (lim.frontierAfterPct > 0) {
                 win = e.staged(root); // engine-reach-1107
             } else {
-                win = e.dfs(root, 0);
+                win = e.pass(root, twoTurns ? nodeCap / 2 : nodeCap);
             }
             if (win == null && twoTurns && System.nanoTime() < deadline) {
                 lim.passTurn = true;
                 lim.nodes = st.nodes + nodeCap / 2;
                 e.seen.clear();
                 e.table.clear();
-                win = e.dfs(root, 0);
+                win = e.pass(root, nodeCap / 2);
             }
             lim.passTurn = twoTurns;
             lim.nodes = nodeCap;
@@ -1495,10 +1552,14 @@ final class ForcedWinEngine {
                         st.refutedWins++;
                         forge.util.IdScope.install(cloneScope(node.ids));
                     } else if (lim.loopHoist && lim.loopOutlets && !inOutlet) {
-                        final List<Step> hw = hoist(a.child, body, played); // loop-exec-1107
-                        forge.util.IdScope.install(cloneScope(node.ids));
-                        if (hw != null) {
-                            return hw;
+                        if (lim.hoistShare > 0) {
+                            hoistQueue.add(new Object[] {a.child, body, played}); // loop-exec-1107: after the plain pass
+                        } else {
+                            final List<Step> hw = hoist(a.child, body, played); // loop-exec-1107
+                            forge.util.IdScope.install(cloneScope(node.ids));
+                            if (hw != null) {
+                                return hw;
+                            }
                         }
                     }
                     if (fw.node != null && !seenDominated(fw.node)) {
