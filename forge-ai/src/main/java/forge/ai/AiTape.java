@@ -390,7 +390,6 @@ public final class AiTape {
     }
 
     /** The game's own id scope (see {@link #bindGameThread}); null in a one-game process. */
-    private volatile Object gameScope;
 
     public void uninstall() {
         synchronized (installed) {
@@ -1045,7 +1044,7 @@ public final class AiTape {
             if (here != gameScope) {
                 // inside the AI's look-ahead: built on scoped ids (bvw-decision-log-1027: a scope other than the game's own)
                 put(r, "sc", new JsonPrimitive(1));
-                if (here != null) {
+                if (here != null && gameScope != null) { // unified-jar-1106: a scoped game only, a lone JVM's tape is unchanged
                     // bvw-decision-log-1027: and where that scope's counters stood (a cube combo seat's probe scope lives
                     // all game, from 1.1e9): the replay builds the trait on the same ids, never on a fresh scope's
                     // 1e9 + n, which a bench game's own scope hands out too

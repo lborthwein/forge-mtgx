@@ -1348,20 +1348,6 @@ public final class ForcedWinSolver {
         return out.isEmpty() ? null : out;
     }
 
-    /** order-memory-1102 (infoState): the pinned ids in {@code p}'s library (a copy keeps the ids); empty when none. */
-    Set<Integer> pinnedIn(Player p) {
-        if (isPinned.isEmpty()) {
-            return Collections.emptySet();
-        }
-        final Set<Integer> out = new HashSet<>();
-        for (Card c : p.getCardsIn(ZoneType.Library)) {
-            if (isPinned.contains(c.getId())) {
-                out.add(c.getId());
-            }
-        }
-        return out;
-    }
-
     private int placedCount(Player p) {
         int n = 0;
         for (Card c : p.getCardsIn(ZoneType.Library)) {
@@ -3274,7 +3260,6 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ endstep-rows-1103: loop count by marginal value
 
     /** endstep-rows-1103 (loopMarginal; diagnostics): the last curve, "n:p n:p ..." and the n taken. */
-    public String lastLoopCurve;
 
     /**
      * Owner ruling 11-03: the first REPEAT step's count is chosen by marginal value. Variants at n = 1, 2, 4, ... (to
@@ -4315,35 +4300,6 @@ public final class ForcedWinSolver {
         int r = 0;
         for (int i = k; i < lib.size(); i++) {
             out.add(pinned != null && pinned.contains(lib.get(i).getId()) ? lib.get(i) : rest.get(r++));
-        }
-        me.getZone(ZoneType.Library).setCards(out);
-    }
-
-    /**
-     * order-memory-1102 (infoState): as {@link #shuffleUnknownOwnLibrary(Player, int, Random)}, the {@code pinned} cards
-     * below the known top kept at their index too; with {@code canonical} the unknown cards are put in id order before the
-     * shuffle, so a play-out world never depends on the true order of what the seat does not know.
-     */
-    static void shuffleUnknownOwnLibrary(Player me, int knownTop, Set<Integer> pinned, Random rng, boolean canonical) {
-        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
-        final int k = Math.min(knownTop, lib.size());
-        if (k >= lib.size()) {
-            return;
-        }
-        final List<Card> rest = new ArrayList<>();
-        for (int i = k; i < lib.size(); i++) {
-            if (!pinned.contains(lib.get(i).getId())) {
-                rest.add(lib.get(i));
-            }
-        }
-        if (canonical) {
-            rest.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
-        }
-        Collections.shuffle(rest, rng);
-        final List<Card> out = new ArrayList<>(lib.subList(0, k));
-        int r = 0;
-        for (int i = k; i < lib.size(); i++) {
-            out.add(pinned.contains(lib.get(i).getId()) ? lib.get(i) : rest.get(r++));
         }
         me.getZone(ZoneType.Library).setCards(out);
     }

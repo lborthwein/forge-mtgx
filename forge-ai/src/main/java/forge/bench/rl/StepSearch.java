@@ -171,7 +171,7 @@ public final class StepSearch {
             }
             if ("deck".equals(c.belief)) {
                 // belief-n11-1030 (N11): the learned deck model's pin is checked at the start (refused: exit 2)
-                forge.ai.simulation.DeckBeliefModel.loadPinned(c.beliefDeck, c.beliefDeckSha256);
+                forge.ai.simulation.DeckBeliefModel.loadPinned(c.beliefDeckModel, c.beliefDeckSha256);
             }
             // review #15: the search's belief pool is the proof check's
             if (!c.beliefCube.equals(label.beliefCube) || !java.util.Objects.equals(c.beliefCubeSha256, label.beliefCubeSha256)
