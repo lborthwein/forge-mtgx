@@ -168,10 +168,13 @@ public final class RlActorBench {
          * repeats the pair until {@link #maxDecisions} voids the game; live, the guard answers yes after K cycles.
          */
         int loopGuard = 0;
+        /** Report explicit game draws as draws even when surviving players have win bits. Off preserves receipts. */
+        boolean honorDrawReason = false;
     }
 
     static Cfg parse(final JsonObject o) {
         final Cfg c = new Cfg();
+        if (o.has("honorDrawReason")) c.honorDrawReason = o.get("honorDrawReason").getAsBoolean();
         if (o.has("mode")) c.mode = o.get("mode").getAsString();
         if (o.has("server") && !o.get("server").isJsonNull()) c.server = o.get("server").getAsString();
         if (o.has("actorId")) c.actorId = o.get("actorId").getAsString();
@@ -800,7 +803,7 @@ public final class RlActorBench {
         }
         final int[] result = {0, 0};
         String reason = voidReason == null ? "draw" : voidReason;
-        if (voidReason == null && game != null && game.getOutcome() != null && !game.getOutcome().isDraw()) {
+        if (voidReason == null && game != null && game.getOutcome() != null && !game.getOutcome().isDraw(cfg.honorDrawReason)) {
             final LobbyPlayer w = game.getOutcome().getWinningLobbyPlayer();
             int ws = -1; // the seat whose lobby player won (a bridge's getSeat() is its index; the K8 seat has none)
             for (int s = 0; s < 2; s++) {
