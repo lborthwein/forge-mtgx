@@ -204,6 +204,13 @@ public final class ForcedWinSolver {
          * the line's own pieces (dd3 T5: a second Brainstorm-style put-back returned the line's Oracle and Lotus Petal).
          */
         public boolean putBackKeep = false;
+        /**
+         * next-turn-1107 (off by default): the lines verified per decision are distinct in their steps (cards and abilities),
+         * not only in pile filler; and a card a failed verification lost during the opponent's turn (a step of ours after the
+         * pass found it gone) rules out the remaining candidates that use it after their pass. Off: the first cfg.top
+         * distinct shapes (dd2 T9: three lines differing only in the pile's protection card, all tapping Urborg next turn).
+         */
+        public boolean evalAvoidLost = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -318,6 +325,7 @@ public final class ForcedWinSolver {
             c.positionKeyFull = "true".equals(get.apply("positionKeyFull")); // unified-search-1106
             c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
             c.putBackKeep = "true".equals(get.apply("putBackKeep")); // next-turn-1107
+            c.evalAvoidLost = "true".equals(get.apply("evalAvoidLost")); // next-turn-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -2048,6 +2056,8 @@ public final class ForcedWinSolver {
         int worldsRun;
         String protection = "";
         String failures = "";
+        /** next-turn-1107: the card id a step of ours after the pass found gone in the unopposed play-out (-1: none). */
+        int lostHost = -1;
 
         Eval(Line line) {
             this.line = line;
@@ -2074,6 +2084,9 @@ public final class ForcedWinSolver {
     /** As above; the evaluation's budget counts from {@code from} (the decision's start with the payment search on). */
     Eval evaluateTop(Game live, List<Line> lines, int index, long from) {
         final long deadline = from + budgetMs() * 1_000_000L;
+        if (cfg.evalAvoidLost) {
+            return evaluateAvoidLost(live, lines, index, deadline);
+        }
         final List<Line> picked = new ArrayList<>();
         final Set<String> shapes = new HashSet<>();
         for (Line l : lines) {
@@ -2111,6 +2124,83 @@ public final class ForcedWinSolver {
         return best;
     }
 
+    /** next-turn-1107 ({@link Config#evalAvoidLost}): a line's steps without pile, pick or protection filler. */
+    static String skeleton(Line l) {
+        final StringBuilder sb = new StringBuilder().append(l.winTurn);
+        for (Step st : l.steps) {
+            sb.append('|').append(st.pass ? "PASS" : st.kind + ":" + st.hostId + ":" + st.desc + ":" + st.floatColor);
+        }
+        return sb.toString();
+    }
+
+    /** next-turn-1107: the card ids {@code l} uses after its pass. */
+    static Set<Integer> usedAfterPass(Line l) {
+        final Set<Integer> out = new HashSet<>();
+        boolean passed = false;
+        for (Step st : l.steps) {
+            if (st.pass) {
+                passed = true;
+            } else if (passed) {
+                out.add(st.hostId);
+                if (st.body != null) {
+                    for (Step b : st.body) {
+                        out.add(b.hostId);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /** next-turn-1107 (report only): candidates skipped as using a lost card, and evaluations made, per call. */
+    int avoidSkipped;
+
+    /** next-turn-1107 ({@link Config#evalAvoidLost}): as {@link #evaluateTop}, the candidates chosen as the evaluations go. */
+    private Eval evaluateAvoidLost(Game live, List<Line> lines, int index, long deadline) {
+        final Set<String> skeletons = new HashSet<>();
+        final Set<Integer> lost = new HashSet<>();
+        Eval best = null;
+        int i = 0;
+        for (Line l : lines) {
+            if (i >= cfg.top) {
+                break;
+            }
+            if (System.nanoTime() > deadline && best != null) {
+                break;
+            }
+            if (best != null && unprovenStop(!(best.pUnopposed >= 1.0 && best.pBelief >= 1.0))) {
+                break; // deck-belief-1105
+            }
+            if (!lost.isEmpty() && l.winTurn > 0 && !java.util.Collections.disjoint(usedAfterPass(l), lost)) {
+                avoidSkipped++;
+                continue;
+            }
+            if (!skeletons.add(skeleton(l))) {
+                continue;
+            }
+            final Eval e = evaluate(live, l, mix(cfg.seed, index * 1000L + i), deadline);
+            receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e
+                    + (e.lostHost >= 0 ? " lost=" + e.lostHost : "") + " skipped=" + avoidSkipped);
+            i++;
+            if (e.lostHost >= 0) {
+                lost.add(e.lostHost);
+            }
+            if (evalSink != null) {
+                evalSink.add(e);
+            }
+            if (e.pUnopposed < 1.0) {
+                continue;
+            }
+            if (best == null || e.pBelief > best.pBelief + 1e-9) {
+                best = e;
+            }
+            if (best.pBelief >= 1.0) {
+                break;
+            }
+        }
+        return best;
+    }
+
     /**
      * P(win | unopposed) and P(win | belief worlds, adversarial counters) of one line. {@code deadline} stops new worlds;
      * a play-out already running is cut only at the wall (the decision's, and at least the deadline plus the grace).
@@ -2125,6 +2215,7 @@ public final class ForcedWinSolver {
         e.pUnopposed = u.won ? 1 : 0;
         if (!u.won) {
             e.failures = "unopposed:" + u.why;
+            e.lostHost = u.lostHost;
             return e;
         }
         int spells = 0;
@@ -2215,6 +2306,8 @@ public final class ForcedWinSolver {
 
     /** One play-out's result. */
     static final class Outcome {
+        /** next-turn-1107: a step of ours after the line's pass found its card gone: that card's id (-1: none). */
+        int lostHost = -1;
         boolean won;
         boolean oppHasCounter;
         String why = "";
@@ -2309,6 +2402,7 @@ public final class ForcedWinSolver {
                         + " " + f.why + " life=" + cm.getLife() + sb + " stormCast=" + g.getStack().getSpellsCastThisTurn().size());
             }
             if (!out.won) {
+                out.lostHost = f.broken && f.passTurn >= 0 ? f.missingHost : -1; // next-turn-1107
                 out.why = f.broken ? "broken@" + f.cursor + ":" + f.why
                         : adv != null && adv.countered != null ? "countered:" + adv.countered
                         : g.isGameOver() ? "lost" : steps >= cfg.maxSteps ? "steps" : "no-win@" + f.cursor;
@@ -2461,6 +2555,16 @@ public final class ForcedWinSolver {
      * check refuses the ability, and the width model's expected hand and library top before the step against the
      * game's. Never changes the game (read-only checks on a copy of the ability).
      */
+    /** next-turn-1107: card {@code id} is no longer ours to use: gone, in a graveyard or exile, or another player's. */
+    static boolean gone(Game g, Player me, int id) {
+        final Card c = g.findById(id);
+        if (c == null) {
+            return true;
+        }
+        final ZoneType z = c.getZone() == null ? null : c.getZone().getZoneType();
+        return z == null || z == ZoneType.Graveyard || z == ZoneType.Exile || z == ZoneType.Battlefield && c.getController() != me;
+    }
+
     static String diagnose(Game g, Player me, Step st) {
         final StringBuilder sb = new StringBuilder();
         try {
@@ -2743,6 +2847,8 @@ public final class ForcedWinSolver {
         final Map<Integer, Integer> pilePicked = new HashMap<>();
         /** next-turn-1107 ({@link Config#putBackKeep}): a put-back of cards the line did not name avoids the line's cards. */
         boolean putBackKeep;
+        /** next-turn-1107: the card id of the step found missing when the line broke (-1: none). */
+        int missingHost = -1;
         /** next-turn-1107 (report only): put-back picks answered from the unreserved cards. */
         int putBackKept;
         /** kill-line-1106 (planDiscard): the current step's recorded choices. */
@@ -2837,6 +2943,7 @@ public final class ForcedWinSolver {
             final SpellAbility sa = locate(g, me, st);
             if (sa == null) {
                 broken = true;
+                missingHost = gone(g, me, st.hostId) ? st.hostId : -1; // next-turn-1107
                 why = "missing:" + st + " {" + diagnose(g, me, st) + "}";
                 n.broken = true;
                 n.why = why;
