@@ -179,6 +179,7 @@ public final class ForcedWinSolver {
         public int triggerVariants = 8;
         /** judge lane (off by default): copies of a belief world skip static effects naming swapped-out cards. */
         public boolean staleStatics = false;
+        public boolean stalePlayerStatics = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -287,6 +288,7 @@ public final class ForcedWinSolver {
             c.lineUncapped = "true".equals(get.apply("lineUncapped")); // judge lane
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.staleStatics = "true".equals(get.apply("staleStatics")); // judge lane
+            c.stalePlayerStatics = "true".equals(get.apply("stalePlayerStatics"));
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1079,6 +1081,7 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                     g = copier.makeCopy();
                     g.staleStatics = cfg.staleStatics;
+                    g.stalePlayerStatics = cfg.stalePlayerStatics;
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -1538,6 +1541,7 @@ public final class ForcedWinSolver {
         el.triggerTargets = cfg.engineTriggerTargets; // kill-line-1106
         el.triggerVariants = cfg.triggerVariants;
         el.staleStatics = cfg.staleStatics; // judge lane
+        el.stalePlayerStatics = cfg.stalePlayerStatics;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -1792,6 +1796,7 @@ public final class ForcedWinSolver {
                 copier.setCopyFidelity(1);
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
+                g.stalePlayerStatics = cfg.stalePlayerStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -2155,6 +2160,7 @@ public final class ForcedWinSolver {
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
+                g.stalePlayerStatics = cfg.stalePlayerStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));

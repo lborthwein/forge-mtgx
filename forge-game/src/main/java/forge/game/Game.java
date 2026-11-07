@@ -63,6 +63,8 @@ import java.util.function.Predicate;
 public class Game {
     /** Off by default: copies of this game skip static effects naming cards with no copy (a belief world swapped them out). Inherited by copies. */
     public boolean staleStatics = false;
+    /** Default-off extension: undo stale player-only static effects in belief copies. */
+    public boolean stalePlayerStatics = false;
 
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 
