@@ -693,7 +693,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** Attach {@code g}'s InfoStates when {@link #wantsInfoStates}; returns it (or null). Call on the game's thread. */
     public static forge.ai.simulation.InfoStates attachInfoStates(final Config c, final Game g) {
-        return g != null && wantsInfoStates(c) ? forge.ai.simulation.InfoStates.attach(g) : null;
+        // unified-jar-1106: research attaches here; a live-line bench seat doesn't (ledger row 26), so it's keyed
+        return g != null && forge.game.EngineFixes.researchFixes() && wantsInfoStates(c) ? forge.ai.simulation.InfoStates.attach(g) : null;
     }
 
     /** unified-search-1106: {@link Config#infoAttach}. */

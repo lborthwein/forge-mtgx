@@ -1398,6 +1398,9 @@ public final class AiTape {
             throw diverge("targets of " + AiTapeCodec.saWhat(sa) + ": " + x.getMessage());
         }
         done(e);
+        if (!AiTapeController.MENU_PROBES.isEmpty()) {
+            AiTapeController.menuSeen(game, seat, "cfg:" + where, new Object[] {sa}, e, -1, null); // dump-menus-1105
+        }
     }
 
     /** The order the seat plays simultaneous abilities in. */
