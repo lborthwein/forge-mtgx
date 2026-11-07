@@ -180,13 +180,6 @@ final class ForcedWinEngine {
          */
         boolean longLoops = false;
         /**
-         * unified-search-1106 (false = off): limited discrepancy search. Passes with a growing allowance: taking the i-th move
-         * at a node costs i of the allowance, so a pass follows the move order and departs from it a bounded number of times.
-         * No branching cap and no node cap: the clock ends it, and more clock reaches moves further down. Each allowance tries
-         * this turn, then passing the turn. Moves order: a land drop, then what just changed (new permanents, new attachments).
-         */
-        boolean lds = false;
-        /**
          * unified-search-1106 (null = off): a found win must also win here (a play-out in another world of our library), or the
          * search goes on; and at each node the moves that drew from our library are searched after the others, so a line
          * that needs no luck is found first.
@@ -670,9 +663,6 @@ final class ForcedWinEngine {
                 root.pv = progress(root.g, root.me);
             }
             // this turn first (same-turn wins are preferred and cheaper); then lines that pass the turn once
-            if (lim.lds) {
-                return e.searchLds(root);
-            }
             final boolean twoTurns = lim.passTurn;
             lim.passTurn = false;
             final int nodeCap = lim.nodes;
@@ -719,40 +709,6 @@ final class ForcedWinEngine {
         }
     }
 
-    /** unified-search-1106 ({@link Limits#lds}): the passes, until a win, the clock, or a pass that cut nothing both ways. */
-    private Line searchLds(Node root) {
-        final boolean twoTurns = lim.passTurn;
-        final int nodeCap = lim.nodes;
-        lim.nodes = Integer.MAX_VALUE;
-        lim.perSearchNodes = false;
-        try {
-            int k = 0;
-            while (!out()) {
-                boolean cut = false;
-                for (int pass = 0; pass < (twoTurns ? 2 : 1) && !out(); pass++) {
-                    lim.passTurn = pass == 1;
-                    seen.clear();
-                    table.clear();
-                    disc = k;
-                    discCut = false;
-                    final List<Step> win = dfs(root, 0);
-                    if (win != null) {
-                        return new Line(win, List.of(), win.contains(Step.PASS) ? 1 : 0, root.me.getLife(), 0, 0, List.of(), "engine");
-                    }
-                    cut |= discCut;
-                }
-                if (!cut) {
-                    break;
-                }
-                k = k < 4 ? k + 1 : k + k / 2;
-            }
-            return null;
-        } finally {
-            lim.passTurn = twoTurns;
-            lim.nodes = nodeCap;
-        }
-    }
-
     static Object cloneScope(Object captured) {
         if (!(captured instanceof AtomicInteger[] a)) {
             return captured;
@@ -767,10 +723,6 @@ final class ForcedWinEngine {
     private boolean out() {
         return st.nodes >= lim.nodes || System.nanoTime() > deadline;
     }
-
-    /** unified-search-1106 ({@link Limits#lds}): this pass's remaining allowance, and whether a pass cut any move. */
-    private int disc;
-    private boolean discCut;
 
     private List<Step> dfs(Node node, int depth) {
         if (out() || depth >= lim.depth) {
@@ -787,23 +739,13 @@ final class ForcedWinEngine {
         int tried = 0;
         final Set<Step> variants = new HashSet<>();
         final List<Applied> luck = lim.verify != null ? new ArrayList<>() : null; // unified-search-1106
-        final List<Integer> luckCost = new ArrayList<>();
         final int libHere = node.me.getCardsIn(ZoneType.Library).size();
         for (int mi = 0; mi < moves.size(); mi++) {
             final Step mv = moves.get(mi);
             // solver-gaps-1015: the branching cap counts distinct moves only; the forced-answer variants of a move (its
             // picks, its trigger targets) have their own cap and no longer crowd the other moves out (Natural Order's
             // variants used every branch, so casting Llanowar Elves first was never tried)
-            final int costHere = tried - (variants.contains(mv) && tried > 0 ? 1 : 0);
-            if (lim.lds) {
-                if (out()) {
-                    break;
-                }
-                if (costHere > disc) {
-                    discCut = true;
-                    continue;
-                }
-            } else if (out() || !variants.contains(mv) && tried >= lim.branching) {
+            if (out() || !variants.contains(mv) && tried >= lim.branching) {
                 if (out()) {
                     break;
                 }
@@ -893,7 +835,7 @@ final class ForcedWinEngine {
                         forge.util.IdScope.install(cloneScope(node.ids));
                     }
                     if (fw.node != null && !seenDominated(fw.node)) {
-                        final List<Step> r = spend(fw.node, depth + 1, costHere);
+                        final List<Step> r = dfs(fw.node, depth + 1);
                         if (r != null) {
                             return r;
                         }
@@ -911,38 +853,25 @@ final class ForcedWinEngine {
             }
             if (luck != null && a.child.me.getCardsIn(ZoneType.Library).size() < libHere) {
                 luck.add(a); // unified-search-1106: this move drew from our library: after the moves that did not
-                luckCost.add(costHere);
                 continue;
             }
-            final List<Step> r = spend(a.child, depth + 1, costHere);
+            final List<Step> r = dfs(a.child, depth + 1);
             if (r != null) {
                 return r;
             }
         }
         if (luck != null) {
-            for (int li = 0; li < luck.size(); li++) {
+            for (Applied a : luck) {
                 if (out()) {
                     break;
                 }
-                final List<Step> r = spend(luck.get(li).child, depth + 1, luckCost.get(li));
+                final List<Step> r = dfs(a.child, depth + 1);
                 if (r != null) {
                     return r;
                 }
             }
         }
         return null;
-    }
-
-    private List<Step> spend(Node child, int depth, int cost) {
-        if (!lim.lds) {
-            return dfs(child, depth);
-        }
-        disc -= cost;
-        try {
-            return dfs(child, depth);
-        } finally {
-            disc += cost;
-        }
     }
 
     /** Our legal moves at a node, best first: the previous move's ability, permanents' abilities, spells, lands, attack. */
@@ -1038,28 +967,10 @@ final class ForcedWinEngine {
             }
         }
         final List<Step> out = new ArrayList<>(rep);
-        if (lim.lds) {
-            // unified-search-1106: a land drop, then what just changed, then the rest
-            final Set<Integer> fresh = freshHosts(node);
-            out.addAll(lands);
-            for (Step s : act) {
-                if (fresh.contains(s.hostId)) {
-                    out.add(s);
-                }
-            }
-            for (Step s : act) {
-                if (!fresh.contains(s.hostId)) {
-                    out.add(s);
-                }
-            }
-            out.addAll(spells);
-            out.addAll(floats);
-        } else {
-            out.addAll(act);
-            out.addAll(spells);
-            out.addAll(floats);
-            out.addAll(lands);
-        }
+        out.addAll(act);
+        out.addAll(spells);
+        out.addAll(floats);
+        out.addAll(lands);
         if (!node.passed && lim.cycles && oppDecked(me)) {
             // (c): an opponent with no library loses at their draw: passing is the first move, in the this-turn
             // phase too (a mill loop's kill is the pass; the engine still plays their turn up to the draw)
@@ -1073,25 +984,6 @@ final class ForcedWinEngine {
                 out.add(0, atk);
             } else {
                 out.add(atk);
-            }
-        }
-        return out;
-    }
-
-    /** Our permanents that entered or gained an attachment since the parent node. */
-    private static Set<Integer> freshHosts(Node node) {
-        final Set<Integer> out = new HashSet<>();
-        if (node.parent == null || node.parent.me == null) {
-            return out;
-        }
-        final java.util.Map<Integer, Integer> before = new java.util.HashMap<>();
-        for (Card c : node.parent.me.getCardsIn(ZoneType.Battlefield)) {
-            before.put(c.getId(), c.getAttachedCards().size());
-        }
-        for (Card c : node.me.getCardsIn(ZoneType.Battlefield)) {
-            final Integer b = before.get(c.getId());
-            if (b == null || c.getAttachedCards().size() > b) {
-                out.add(c.getId());
             }
         }
         return out;
