@@ -669,6 +669,8 @@ public final class ForcedWinSolver {
         public long offenses;
         /** Width-search nodes visited; width searches cut at their wall time (planMs). */
         public long plannerNodes, plannerTimeouts;
+        /** kill-line-1106: width searches stopped at their node limit (a cap, not "no line"); reported only when non-zero. */
+        public long plannerNodeLimits;
         /** Engine searches; their nodes and move steps; searches stopped by the deadline, by a node or step cap. */
         public long engineRuns, engineNodes, engineSteps, engineDeadlineStops, engineCapStops;
         /** Cards in the engine's game copies; the engine's wall time (diagnostics: the ms-to-counter mapping). */
@@ -768,6 +770,7 @@ public final class ForcedWinSolver {
             offenses += sign * o.offenses;
             plannerNodes += sign * o.plannerNodes;
             plannerTimeouts += sign * o.plannerTimeouts;
+            plannerNodeLimits += sign * o.plannerNodeLimits;
             engineRuns += sign * o.engineRuns;
             engineNodes += sign * o.engineNodes;
             engineSteps += sign * o.engineSteps;
@@ -846,6 +849,9 @@ public final class ForcedWinSolver {
             o.addProperty("offenses", offenses);
             o.addProperty("planner_nodes", plannerNodes);
             o.addProperty("planner_timeouts", plannerTimeouts);
+            if (plannerNodeLimits != 0) {
+                o.addProperty("planner_node_limits", plannerNodeLimits);
+            }
             o.addProperty("engine_runs", engineRuns);
             o.addProperty("engine_nodes", engineNodes);
             o.addProperty("engine_steps", engineSteps);
@@ -1885,6 +1891,9 @@ public final class ForcedWinSolver {
     private ForcedWinPlanner.Result plan(Position pos, ForcedWinPlanner.Limits lim) {
         final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
         meter.plannerNodes += r.visited;
+        if (r.visited >= lim.nodes) {
+            meter.plannerNodeLimits++; // kill-line-1106
+        }
         if (r.timedOut) {
             meter.plannerTimeouts++;
         }
