@@ -1066,6 +1066,9 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
             final Player me = (Player) copier.find(liveMe);
             g.AI_TIMEOUT = Math.max(g.AI_TIMEOUT, 600);
             redraw.apply(game, liveMe, g, me, new Random(mix(seed, 2)));
+            if (ForcedWinSolver.Config.staleStaticsIn(System.getProperty("forge.ai.forcedWin.spec", ""))) {
+                g.staleStatics = true; // pr209-followups: a belief world; the seats' solvers (that spec) copy it
+            }
             // P's own library: known positions kept, unknown positions shuffled, the first unknown one stratified
             final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
             final List<Integer> upos = new ArrayList<>();

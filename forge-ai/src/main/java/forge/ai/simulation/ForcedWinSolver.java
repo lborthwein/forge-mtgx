@@ -499,6 +499,21 @@ public final class ForcedWinSolver {
             return oppMin || cacPicks || cacLine || planScry || planDiscard || payRecord;
         }
 
+        /**
+         * pr209-followups (#212's belief-world sites): the {@code staleStatics} key of a comma spec ({@code k=v,...}) as a
+         * seat's solver reads it (CubeComboControl: the last value of a key wins; null or absent = off).
+         */
+        public static boolean staleStaticsIn(final String spec) {
+            boolean on = false;
+            for (String part : spec == null ? new String[0] : spec.split(",")) {
+                final int eq = part.indexOf('=');
+                if (eq > 0 && "staleStatics".equals(part.substring(0, eq).trim())) {
+                    on = "true".equals(part.substring(eq + 1).trim());
+                }
+            }
+            return on;
+        }
+
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
             final String budget = get.apply("budget");
@@ -2081,6 +2096,22 @@ public final class ForcedWinSolver {
     /** kill-line-1106 (report only): planner searches stopped by their limit; engine lines taken after planner lines failed. */
     public int plannerExhausted, planFailEngineTakes;
 
+    /**
+     * unified-search-1106 (unknownWorlds): a gated position (no planner line) is cached as having no line, unless the key
+     * is on and the engine's line there had no verified world (unknown, not refuted). Key off: always cached.
+     */
+    static boolean cachesGated(final Config cfg, final boolean engineUnverified) {
+        return !(cfg.unknownWorlds && engineUnverified);
+    }
+
+    /**
+     * unified-search-1106 (unknownWorlds): a declined position is cached as having no line, unless the key is on and its
+     * best line had no verified world (unknown, not refuted). Key off: always cached.
+     */
+    static boolean cachesDeclined(final Config cfg, final Eval best) {
+        return !(cfg.unknownWorlds && best != null && best.unverified());
+    }
+
     private Line offense0(Game live, String key) {
         decisions++;
         final int index = decisionIndex++;
@@ -2165,7 +2196,7 @@ public final class ForcedWinSolver {
                 return engine;
             }
             gated++;
-            if (!(cfg.unknownWorlds && engineUnverified)) {
+            if (cachesGated(cfg, engineUnverified)) {
                 noLineKey = key;
             }
             receipt("FORCED_WIN gate" + tag() + " turn=" + pos.turn + " none " + res.summary() + " probes=" + reader.probeStats.summary());
@@ -2204,7 +2235,7 @@ public final class ForcedWinSolver {
                 }
                 lastOutcome = "declined";
             }
-            if (!(cfg.unknownWorlds && best != null && best.unverified())) {
+            if (cachesDeclined(cfg, best)) {
                 noLineKey = key;
             }
             if (best == null) {
@@ -3756,6 +3787,9 @@ public final class ForcedWinSolver {
             final Random rng = new Random(mix(cfg.seed, 0x425657L + decisionIndex));
             copies++;
             redraw.apply(live, me, g, cm, rng);
+            if (cfg.staleStatics) {
+                g.staleStatics = true; // pr209-followups: a belief world; the probes' copies of it skip swapped-out cards' statics
+            }
             shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), pinnedIn(cm), rng, cfg.infoState);
             return g;
         }

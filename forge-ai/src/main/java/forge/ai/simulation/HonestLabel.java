@@ -757,7 +757,8 @@ public final class HonestLabel {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setCopyFidelity(1); // storm count, per-turn records (as the solver's own play-outs)
-                ForcedWinEngine.copyStackIf(copier, live, spec.winConfig().engineStack); // R3-5
+                final ForcedWinSolver.Config wc = spec.winConfig();
+                ForcedWinEngine.copyStackIf(copier, live, wc.engineStack); // R3-5
                 final Game g = copier.makeCopy();
                 final Player me = (Player) copier.find(liveMe);
                 final Player opp = (Player) copier.find(liveOpp);
@@ -765,6 +766,9 @@ public final class HonestLabel {
                 // visible top shuffled
                 final List<Integer> before = knownOwn == null ? null : OwnLibraryMemory.order(me);
                 belief.resampleBelief(live, liveMe, g, me, rng, null);
+                if (wc.staleStatics) {
+                    g.staleStatics = true; // pr209-followups: a belief world; the solver's copies of it skip swapped-out cards' statics
+                }
                 if (knownOwn != null) {
                     OwnLibraryMemory.keepKnown(me, before, knownOwn);
                 }
