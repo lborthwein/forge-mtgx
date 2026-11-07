@@ -117,15 +117,49 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         }
 
         List<SpellAbility> manaAbilities = getAllManaAbilities(card);
+        // The browser seat (owner, 2026-11-07): a source with one ability per colour (a dual land's
+        // basic land types) offers the abilities that make a colour able to pay what is left. One
+        // left: Forge takes it, and the seat's log is told which colour.
+        byte offeredBefore = 0;
+        final List<SpellAbility> canPay = abilitiesThatCanPay(manaAbilities);
+        if (canPay != null) {
+            for (SpellAbility sa : manaAbilities) {
+                offeredBefore |= producibleColours(sa);
+            }
+            manaAbilities = canPay;
+        }
         // Desktop Forge floating menu functionality
         if (manaAbilities.size() == 1) {
-            return activateManaAbility(card, manaAbilities.get(0));
+            return activateManaAbility(card, manaAbilities.get(0), offeredBefore);
         }
         SpellAbility spellAbility = getController().getAbilityToPlay(card, manaAbilities, triggerEvent);
         if (spellAbility != null) {
             return activateManaAbility(card, spellAbility);
         }
         return true;
+    }
+
+    /**
+     * For a seat whose produced mana floats ({@link FullControlFlag#NoPaymentFromManaAbility}): those of
+     * {@code abilities} that make a colour able to pay what is left of the cost once the floating
+     * unrestricted mana is counted, or null to keep them all (another seat, a generic part left, which
+     * any of them pays, no colour that can pay, or every ability can).
+     */
+    private List<SpellAbility> abilitiesThatCanPay(final List<SpellAbility> abilities) {
+        if (abilities.size() < 2) {
+            return null;
+        }
+        final byte payable = coloursThatCanPayLeft(abilities.get(0).getHostCard());
+        if (payable == 0 || leftAfterFloating().isAnyPartPayableWith((byte) ManaAtom.GENERIC, player.getManaPool())) {
+            return null;
+        }
+        final List<SpellAbility> canPay = new ArrayList<>();
+        for (SpellAbility sa : abilities) {
+            if ((producibleColours(sa) & payable) != 0) {
+                canPay.add(sa);
+            }
+        }
+        return canPay.isEmpty() || canPay.size() == abilities.size() ? null : canPay;
     }
 
     protected List<SpellAbility> getAllManaAbilities(Card card) {
@@ -399,6 +433,14 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         return activateManaAbility(card, null);
     }
     protected boolean activateManaAbility(final Card card, SpellAbility chosenAbility) {
+        return activateManaAbility(card, chosenAbility, (byte) 0);
+    }
+
+    /**
+     * {@code offeredBefore}: the colours the source's abilities offered before they were narrowed to
+     * {@code chosenAbility}, the only one that can pay (the browser seat), else 0.
+     */
+    private boolean activateManaAbility(final Card card, SpellAbility chosenAbility, final byte offeredBefore) {
         if (locked) {
             System.err.print("Should wait till previous call to playAbility finishes.");
             return false;
@@ -424,7 +466,7 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         final SpellAbility chosen;
         // The browser seat: the colours the source's mana abilities offered before they were
         // narrowed to the ones that can pay (0 when no narrowing happened).
-        byte cardColours = 0;
+        byte cardColours = offeredBefore;
 
         if (chosenAbility == null) {
             HashMap<SpellAbilityView, SpellAbility> abilitiesMap = new HashMap<>();
@@ -477,27 +519,25 @@ public abstract class InputPayMana extends InputSyncronizedBase {
 
             boolean choice = true;
             // The browser seat (produced mana floats, so the cost never shrinks): Forge's narrowing
-            // kept only the abilities making a colour the whole cost names, and a Tropical Island
-            // paying {1}{G} made {G} with no question though its {U} pays the {1}. Keep the
-            // abilities that make a colour able to pay what is left once the floating mana is counted.
-            final byte payableLeft = guessAbilityWithRequiredColors ? coloursThatCanPayLeft(card) : 0;
-            if (payableLeft != 0) {
-                for (SpellAbility sa : abilitiesMap.values()) {
-                    cardColours |= producibleColours(sa);
-                }
-                final HashMap<SpellAbilityView, SpellAbility> colorMatches = new HashMap<>();
-                for (SpellAbility sa : abilitiesMap.values()) {
-                    if (sa.isManaAbilityFor(saPaidFor, payableLeft)) {
-                        colorMatches.put(sa.getView(), sa);
+            // kept only the abilities making a colour the whole cost names, and a dual land paying
+            // {1}{G} made {G} with no question though its {U} pays the {1}. The same rule as a
+            // selected card: the abilities that make a colour able to pay what is left.
+            final boolean floatingSeat = guessAbilityWithRequiredColors
+                    && player.getController().isFullControl(FullControlFlag.NoPaymentFromManaAbility)
+                    && !saPaidFor.tracksManaSpent();
+            if (floatingSeat) {
+                final List<SpellAbility> canPay = abilitiesThatCanPay(new ArrayList<>(abilitiesMap.values()));
+                if (canPay != null) {
+                    for (SpellAbility sa : abilitiesMap.values()) {
+                        cardColours |= producibleColours(sa);
                     }
-                }
-                if (colorMatches.isEmpty()) {
-                    choice = false;
-                } else if (colorMatches.size() < abilitiesMap.size()) {
-                    abilitiesMap = colorMatches;
-                }
-                if (colorMatches.isEmpty() || abilitiesMap.size() != 1) {
-                    cardColours = 0; // no colour was decided here: the seat is asked, or nothing pays
+                    abilitiesMap = new HashMap<>();
+                    for (SpellAbility sa : canPay) {
+                        abilitiesMap.put(sa.getView(), sa);
+                    }
+                    if (abilitiesMap.size() != 1) {
+                        cardColours = 0; // no colour was decided here: the seat is asked
+                    }
                 }
             } else if (guessAbilityWithRequiredColors) {
                 // express Mana Choice

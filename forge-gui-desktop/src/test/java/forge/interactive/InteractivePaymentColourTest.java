@@ -557,17 +557,6 @@ public class InteractivePaymentColourTest extends AITest {
         }
     }
 
-    /** The first control on {@code request} that lists items. */
-    private static JsonObject itemsControl(final JsonObject request) {
-        for (JsonElement c : request.getAsJsonArray("controls")) {
-            if (c.getAsJsonObject().has("items")) {
-                return c.getAsJsonObject();
-            }
-        }
-        fail("no item list: " + request);
-        return null;
-    }
-
     private static List<String> itemLabels(final JsonObject control) {
         final List<String> labels = new java.util.ArrayList<>();
         for (JsonElement item : control.getAsJsonArray("items")) {
@@ -578,7 +567,7 @@ public class InteractivePaymentColourTest extends AITest {
 
     /**
      * A dual land with two abilities (its basic land types) paying {1}{G}: its {U} pays the {1}, so the
-     * seat chooses between them. Before, Forge kept only the {G} ability and took it with no question.
+     * seat chooses between them, as before (the browser seat's ability menu).
      */
     @Test(timeOut = 600000)
     public void aTwoAbilityDualLandAsksWithAGenericPartPending() throws Exception {
@@ -586,29 +575,29 @@ public class InteractivePaymentColourTest extends AITest {
         final Card[] library = new Card[1];
         try (Harness h = new Harness((seat, foe) -> {
             island[0] = addCard("Tropical Island", seat);
+            addCard("Forest", seat);
             library[0] = addCardToZone("Sylvan Library", seat, ZoneType.Hand);
             addCard("Plains", foe);
         })) {
             final JsonObject payment = cast(h, library[0]);
             final String tap = h.sendSelect(payment, island[0]);
             final JsonObject question = h.request();
-            assertFalse("mana".equals(kind(question)), "a question, not " + question);
-            final JsonObject list = itemsControl(question);
-            final List<String> labels = itemLabels(list);
-            assertEquals(labels.size(), 2, "both abilities: " + question);
-            String id = null;
-            for (JsonElement item : list.getAsJsonArray("items")) {
-                if (item.getAsJsonObject().get("label").getAsString().contains("{U}")) {
-                    id = item.getAsJsonObject().get("id").getAsString();
+            String blue = null;
+            int abilities = 0;
+            for (JsonElement c : question.getAsJsonArray("controls")) {
+                final JsonObject control = c.getAsJsonObject();
+                if ("selectAbility".equals(control.get("type").getAsString())) {
+                    abilities++;
+                    if (control.get("label").getAsString().contains("{U}")) {
+                        blue = control.get("controlId").getAsString();
+                    }
                 }
             }
-            assertNotNull(id, "the {U} ability is offered: " + labels);
+            assertEquals(abilities, 2, "both abilities: " + question);
+            assertNotNull(blue, "the {U} ability is offered: " + question);
             final JsonObject action = new JsonObject();
-            action.addProperty("type", "choice");
-            action.addProperty("controlId", list.get("controlId").getAsString());
-            final com.google.gson.JsonArray choices = new com.google.gson.JsonArray();
-            choices.add(id);
-            action.add("choices", choices);
+            action.addProperty("type", "selectAbility");
+            action.addProperty("controlId", blue);
             h.answer(question, action);
             h.acked(tap);
             final JsonObject after = h.request();
@@ -619,7 +608,10 @@ public class InteractivePaymentColourTest extends AITest {
         }
     }
 
-    /** The same land paying a {U}: only its {U} can pay, so Forge takes it and the log says which. */
+    /**
+     * The same land paying a {U}: only its {U} can pay, so Forge takes it and the log says which. Before,
+     * the seat was asked to choose between the {G} and the {U} ability.
+     */
     @Test(timeOut = 600000)
     public void aTwoAbilityDualLandMakesTheOnlyColourThatCanPayAndTheLogSaysWhich() throws Exception {
         final Card[] island = new Card[1];
@@ -725,18 +717,19 @@ public class InteractivePaymentColourTest extends AITest {
         }
     }
 
-    /** The same source paying {B}{B}: only {B} can pay, so both mana are {B} and the log says so. */
+    /** The same source paying {B}{B}{B}: only {B} can pay, so both mana are {B} and the log says so. */
     @Test(timeOut = 600000)
     public void anyCombinationAmountTwoWithOneColourForcesItAndTheLogSaysWhich() throws Exception {
         final Card[] key = new Card[1];
-        final Card[] hymn = new Card[1];
+        final Card[] prophecy = new Card[1];
         try (Harness h = new Harness((seat, foe) -> {
             key[0] = addCard("Key to the Archive", seat);
             key[0].setTapped(false);
-            hymn[0] = addCardToZone("Hymn to Tourach", seat, ZoneType.Hand);
+            addCard("Swamp", seat);
+            prophecy[0] = addCardToZone("Dark Prophecy", seat, ZoneType.Hand);
             addCard("Plains", foe);
         })) {
-            final JsonObject payment = cast(h, hymn[0]);
+            final JsonObject payment = cast(h, prophecy[0]);
             h.select(payment, key[0]);
             final JsonObject after = h.request();
             assertEquals(kind(after), "mana", "no question: " + after);
