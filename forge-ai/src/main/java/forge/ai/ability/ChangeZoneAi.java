@@ -366,7 +366,8 @@ public class ChangeZoneAi extends SpellAbilityAi {
                 });
             }
             // TODO: prevent ai searching its own library when Ob Nixilis, Unshackled is in play
-            else if (origin != null && origin.size() == 1 && origin.get(0).isKnown()) {
+            else if (origin != null && origin.size() == 1 && origin.get(0).isKnown()
+                    && (type != null || !forge.game.EngineFixes.copyRobust())) {
                 // FIXME: make this properly interact with several origin zones
                 list = CardLists.getValidCards(list, type, source.getController(), source, sa);
             }
