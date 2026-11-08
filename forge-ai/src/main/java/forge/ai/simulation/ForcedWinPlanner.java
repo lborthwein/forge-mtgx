@@ -998,10 +998,11 @@ public final class ForcedWinPlanner {
         }
         // ledger-sweep2-1107 (planExpandCap): every resolve step counts (report only when off); past the cap the branch is
         // dropped, as the node limit drops the branches it never reaches
-        if (++expandCalls > expandLimit) {
+        if (expandCalls >= expandLimit) {
             expandCut = true;
             return;
         }
+        expandCalls++;
         if (s.won || ei >= effs.size()) {
             out.add(s);
             return;
