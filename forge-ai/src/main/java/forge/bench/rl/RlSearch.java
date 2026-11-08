@@ -219,6 +219,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int beliefBasics = 8;
         /** Default off: preserve the published copier protection in resampled look-ahead worlds. */
         public boolean beliefStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_STATICS; // house p8; live-fixes-1107 default
+        public boolean beliefRememberedHand = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_REMEMBERED_HAND; // house; live-fixes-1107 default
         public boolean stackAbilityCopies = forge.ai.simulation.LookaheadSearch.LIVE_STACK_ABILITY_COPIES; // house; live-fixes-1107 default
         public boolean copyBackFace = forge.ai.simulation.LookaheadSearch.LIVE_COPY_BACK_FACE; // house; live-fixes-1107 default
         public boolean offBattlefieldLimits = forge.ai.simulation.LookaheadSearch.LIVE_OFF_BATTLEFIELD_LIMITS; // house; live-fixes-1107 default
@@ -237,7 +238,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "stackAbilityCopies", "copyBackFace", "offBattlefieldLimits", "copyTurnLimits", "beliefPlayerStatics", "beliefSingleton", "infoState"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "beliefRememberedHand", "stackAbilityCopies", "copyBackFace", "offBattlefieldLimits", "copyTurnLimits", "beliefPlayerStatics", "beliefSingleton", "infoState"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -295,6 +296,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
             if (o.has("beliefStatics")) c.beliefStatics = o.get("beliefStatics").getAsBoolean();
             if (o.has("beliefPlayerStatics")) c.beliefPlayerStatics = o.get("beliefPlayerStatics").getAsBoolean();
+            if (o.has("beliefRememberedHand")) c.beliefRememberedHand = o.get("beliefRememberedHand").getAsBoolean();
             if (o.has("copyTurnLimits")) c.copyTurnLimits = o.get("copyTurnLimits").getAsBoolean();
             if (o.has("offBattlefieldLimits")) c.offBattlefieldLimits = o.get("offBattlefieldLimits").getAsBoolean();
             if (o.has("stackAbilityCopies")) c.stackAbilityCopies = o.get("stackAbilityCopies").getAsBoolean(); // house p16
@@ -440,6 +442,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (beliefStatics) o.addProperty("beliefStatics", true);
                 if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 if (copyTurnLimits) o.addProperty("copyTurnLimits", true); // house p11
+                if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true); // house p14
                 if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true); // house p12
                 if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true); // house p16
                 if (copyBackFace) o.addProperty("copyBackFace", true); // house p15
@@ -645,6 +648,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.infoState = cfg.infoState; // order-memory-1102 (off by default)
         lc.beliefStatics = cfg.beliefStatics;
         lc.beliefPlayerStatics = cfg.beliefPlayerStatics;
+        lc.beliefRememberedHand = cfg.beliefRememberedHand;
         lc.copyTurnLimits = cfg.copyTurnLimits;
         lc.offBattlefieldLimits = cfg.offBattlefieldLimits;
         lc.stackAbilityCopies = cfg.stackAbilityCopies; // house p16
@@ -1963,6 +1967,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         f.setVersion(obsVersion);
         f.setKnowledge(k);
         return new CopyCtx(k, f);
+    }
+
+    @Override
+    public boolean remembersHandCard(final Game live, final Player observer, final forge.game.card.Card card) {
+        // Reject other games even if physical card/player IDs happen to agree.
+        return cfg.beliefRememberedHand && liveKnow != null && liveKnow.game() == live
+                && observer != null && observer.getGame() == live && card != null && card.getGame() == live
+                && card.isInZone(forge.game.zone.ZoneType.Hand) && !card.isFaceDown()
+                && liveKnow.knows(liveKnow.seatOf(observer), card);
     }
 
     /**

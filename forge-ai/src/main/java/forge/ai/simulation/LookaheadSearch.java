@@ -70,6 +70,7 @@ public final class LookaheadSearch {
      * {@link Config} and RlSearch.Config start from these, so a spec key still sets them per seat.
      */
     public static final boolean LIVE_BELIEF_STATICS = forge.game.EngineFixes.liveFlag("forge.house.beliefStatics");
+    public static final boolean LIVE_BELIEF_REMEMBERED_HAND = forge.game.EngineFixes.liveFlag("forge.house.beliefRememberedHand");
     public static final boolean LIVE_STACK_ABILITY_COPIES = forge.game.EngineFixes.liveFlag("forge.house.stackAbilityCopies");
     public static final boolean LIVE_COPY_BACK_FACE = forge.game.EngineFixes.liveFlag("forge.house.copyBackFace");
     public static final boolean LIVE_OFF_BATTLEFIELD_LIMITS = forge.game.EngineFixes.liveFlag("forge.house.offBattlefieldLimits");
@@ -342,6 +343,8 @@ public final class LookaheadSearch {
         public int beliefBasics = 8;
         /** House p8 (live-fixes-1107: default {@link #LIVE_BELIEF_STATICS}): later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
         public boolean beliefStatics = LIVE_BELIEF_STATICS;
+        /** House release (live-fixes-1107: default {@link #LIVE_BELIEF_REMEMBERED_HAND}): beliefRememberedHand. */
+        public boolean beliefRememberedHand = LIVE_BELIEF_REMEMBERED_HAND;
         /** House release (live-fixes-1107: default {@link #LIVE_STACK_ABILITY_COPIES}): stackAbilityCopies. */
         public boolean stackAbilityCopies = LIVE_STACK_ABILITY_COPIES;
         /** House release (live-fixes-1107: default {@link #LIVE_COPY_BACK_FACE}): copyBackFace. */
@@ -468,6 +471,7 @@ public final class LookaheadSearch {
                 o.addProperty("copyEot", copyEot.key());
             }
             if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
+            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
             if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
             if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true); // house p16
             if (copyBackFace) o.addProperty("copyBackFace", true); // house p15
@@ -1400,6 +1404,9 @@ public final class LookaheadSearch {
      * supply to {@link #decideGiven}. Every method is called only when its option is set with {@link #setHooks}.
      */
     public interface SearchHooks {
+        /** Only recorded observation knowledge, never an inference from the opponent's actual hidden cards. */
+        default boolean remembersHandCard(Game live, Player observer, Card card) { return false; }
+
         /** Decision thread, inside the copy's preparation (after the world draw): a per-copy context, or null. */
         Object onCopy(Game copy, Player me);
 
@@ -7112,12 +7119,24 @@ public final class LookaheadSearch {
 
     // ------------------------------------------------------------------ belief (lane belief-sampling-0928)
 
+    private boolean rememberedHand(Game live, Player observer, Card card) {
+        return cfg.beliefRememberedHand && hooks != null && card != null
+                && card.getGame() == live && observer.getGame() == live
+                && card.isInZone(ZoneType.Hand) && card.getController() != observer
+                && !card.isFaceDown() && hooks.remembersHandCard(live, observer, card);
+    }
+
+    private boolean handKnown(Game live, Player observer, Card card) {
+        return card.getView().canBeShownTo(observer.getView()) || rememberedHand(live, observer, card);
+    }
+
     /** The opponent's hidden hand cards / known library top, as the seat sees them in the live game. */
-    private static int[] hiddenCounts(Game live, Player liveOpp, PlayerView myView) {
+    private int[] hiddenCounts(Game live, Player liveOpp, Player liveMe) {
+        final PlayerView myView = liveMe.getView();
         int keep = 0;
         final List<Card> hand = new ArrayList<>(liveOpp.getCardsIn(ZoneType.Hand));
         for (Card c : hand) {
-            if (c.getView().canBeShownTo(myView)) {
+            if (handKnown(live, liveMe, c)) {
                 keep++;
             }
         }
@@ -7148,7 +7167,7 @@ public final class LookaheadSearch {
         }
         final Player liveOpp = opps.get(0);
         final PlayerView myView = liveMe.getView();
-        final int[] hid = hiddenCounts(live, liveOpp, myView);
+        final int[] hid = hiddenCounts(live, liveOpp, liveMe);
         if (hid[0] == 0 && hid[1] == 0) {
             stats.beliefSkipped++;
             return null;
@@ -7262,7 +7281,7 @@ public final class LookaheadSearch {
             known.addAll(ownDeckNames(liveMe));
             for (Card c : live.getCardsInGame()) {
                 if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
-                        && c.getView().canBeShownTo(myView)) {
+                        && (c.getView().canBeShownTo(myView) || rememberedHand(live, liveMe, c))) {
                     known.add(c.getPaperCard().getName());
                 }
             }
@@ -7346,7 +7365,14 @@ public final class LookaheadSearch {
         if (beliefCube == null || cfg.beliefShadow) {
             return null;
         }
-        return (live, liveMe, g, me, rng) -> redrawOpponents(live, liveMe, g, me, rng, null);
+        return new ForcedWinSolver.Redraw() {
+            @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                redrawOpponents(live, liveMe, g, me, rng, null);
+            }
+            @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                return rememberedHand(live, observer, card);
+            }
+        };
     }
 
     /**
@@ -7422,7 +7448,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && handKnown(live, liveMe, lc)) {
                     keep.add(c);
                 }
             }
@@ -7542,7 +7568,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && handKnown(live, liveMe, lc)) {
                     keep.add(c);
                 }
             }

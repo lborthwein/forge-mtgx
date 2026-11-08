@@ -305,6 +305,8 @@ public final class ForcedWinSolver {
     @FunctionalInterface
     public interface Redraw {
         void apply(Game live, Player liveMe, Game g, Player me, Random rng);
+        /** Observation tracker knowledge retained by the redraw, also respected by the later world hand filter. */
+        default boolean remembersHandCard(Game live, Player observer, Card card) { return false; }
     }
     private final Config cfg;
 
@@ -1545,7 +1547,7 @@ public final class ForcedWinSolver {
                     redraw.apply(live, me, g, cm, rng); // honest-belief-1020
                 }
                 for (Player o : cm.getOpponents()) {
-                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
+                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng, redraw); // house p14
                 }
                 if (cfg.infoState) {
                     // order-memory-1102: the known cards below the top stay at their index; canonical unknown order
@@ -1803,7 +1805,7 @@ public final class ForcedWinSolver {
                     }
                     for (Player o : cm.getOpponents()) {
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
-                        hideOrSample(live, me, liveOpp, o, world == 0, rng);
+                        hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw);
                     }
                     if (cfg.infoState) {
                         shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng, true); // order-memory-1102
@@ -1881,6 +1883,10 @@ public final class ForcedWinSolver {
      * we have seen). Their library is shuffled either way.
      */
     static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng) {
+        hideOrSample(live, liveMe, liveOpp, opp, hide, rng, null);
+    }
+
+    static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng, Redraw knowledge) {
         final forge.game.player.PlayerView myView = liveMe.getView();
         final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
         final List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
@@ -1888,7 +1894,8 @@ public final class ForcedWinSolver {
         final List<Card> pool = new ArrayList<>(lib);
         for (Card c : hand) {
             final Card lc = live.findById(c.getId());
-            if (lc != null && lc.getView().canBeShownTo(myView)) {
+            if (lc != null && (lc.getView().canBeShownTo(myView)
+                    || knowledge != null && knowledge.remembersHandCard(live, liveMe, lc))) {
                 keep.add(c);
             } else {
                 pool.add(c);

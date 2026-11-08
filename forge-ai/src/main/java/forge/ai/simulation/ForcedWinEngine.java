@@ -529,7 +529,7 @@ final class ForcedWinEngine {
                     lim.redraw.apply(live, liveMe, root.g, root.me, rng); // honest-belief-1020
                 }
                 for (Player o : root.me.getOpponents()) {
-                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng);
+                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng, lim.redraw);
                 }
                 if (lim.ownKnownTop >= 0) {
                     ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, rng);
