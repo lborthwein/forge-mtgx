@@ -70,6 +70,7 @@ public final class LookaheadSearch {
      * {@link Config} and RlSearch.Config start from these, so a spec key still sets them per seat.
      */
     public static final boolean LIVE_BELIEF_STATICS = forge.game.EngineFixes.liveFlag("forge.house.beliefStatics");
+    public static final boolean LIVE_BELIEF_PLAYER_STATICS = forge.game.EngineFixes.liveFlag("forge.house.beliefPlayerStatics");
 
     public static final double TERMINAL = 100000.0;
     private static final AtomicInteger FAILURE_TRACES = new AtomicInteger();
@@ -337,6 +338,8 @@ public final class LookaheadSearch {
         public int beliefBasics = 8;
         /** House p8 (live-fixes-1107: default {@link #LIVE_BELIEF_STATICS}): later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
         public boolean beliefStatics = LIVE_BELIEF_STATICS;
+        /** House release (live-fixes-1107: default {@link #LIVE_BELIEF_PLAYER_STATICS}): beliefPlayerStatics. */
+        public boolean beliefPlayerStatics = LIVE_BELIEF_PLAYER_STATICS;
         /**
          * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
          * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
@@ -504,6 +507,7 @@ public final class LookaheadSearch {
                 o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 o.addProperty("beliefBasics", beliefBasics);
                 if (beliefStatics) o.addProperty("beliefStatics", true);
+                if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 if (beliefPool != null) {
                     o.addProperty("beliefPoolSize", beliefPool.size());
                 }
@@ -7292,6 +7296,7 @@ public final class LookaheadSearch {
      */
     void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
         if (cfg.beliefStatics) g.staleStatics = true; // house p8
+        if (cfg.beliefPlayerStatics) g.stalePlayerStatics = true; // house p10
         if (beliefCube != null && !cfg.beliefShadow) {
             resampleBelief(live, liveMe, g, me, rng, decisionBelief);
         } else if (cfg.infoState) {
