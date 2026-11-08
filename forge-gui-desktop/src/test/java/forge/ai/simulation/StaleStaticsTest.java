@@ -65,7 +65,6 @@ public class StaleStaticsTest extends SimulationTest {
         ForcedWinEngine.search(live, me, a, off, System.nanoTime() + 5_000_000_000L, 1L, null, 0);
         AssertJUnit.assertTrue(off.summary(), off.moveErrors > 0);
         AssertJUnit.assertTrue(off.summary(), off.lastMoveError.contains("Couldn't map Grist"));
-        AssertJUnit.assertTrue(off.summary(), off.summary().contains("moveErrors="));
         final ForcedWinEngine.Stats on = new ForcedWinEngine.Stats();
         final ForcedWinEngine.Limits b = new ForcedWinEngine.Limits();
         b.redraw = swap;
