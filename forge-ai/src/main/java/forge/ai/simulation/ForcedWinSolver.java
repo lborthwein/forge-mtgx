@@ -156,6 +156,11 @@ public final class ForcedWinSolver {
          */
         public boolean lineUncapped = false;
         /**
+         * ledger-sweep2-1107 (off by default; live-fixes-1107: default forge.liveFixes): one planner expansion builds at most
+         * as many branches as the planner has nodes left (ForcedWinPlanner.Limits#expandCap; ledger row 66, an OOM).
+         */
+        public boolean planExpandCap = false;
+        /**
          * search-bones-1015, off by default: the engine search's root copy shuffles our library below the known top
          * (pile memory), as the verification worlds do; without it the engine plays on our real library order, hidden
          * information (a line that needs the top card was found on the real order and taken when the worlds agreed).
@@ -230,6 +235,7 @@ public final class ForcedWinSolver {
             c.stalePlayerStatics = boolOrLive(get.apply("stalePlayerStatics")); // house; live-fixes-1107: default forge.liveFixes
             c.turnLimits = boolOrLive(get.apply("turnLimits")); // engine-reach-1107; live-fixes-1107: default forge.liveFixes
             c.lineUncapped = boolOrLive(get.apply("lineUncapped")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
+            c.planExpandCap = boolOrLive(get.apply("planExpandCap")); // ledger-sweep2-1107; live-fixes-1107: default forge.liveFixes
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
@@ -617,6 +623,13 @@ public final class ForcedWinSolver {
     private String lastOutcome = "?";
     private int lastPlannerNodes;
 
+    /** ledger-sweep2-1107: planner limits with this solver's expansion cap (planExpandCap; off = as {@code new Limits()}). */
+    private ForcedWinPlanner.Limits limits() {
+        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        lim.expandCap = cfg.planExpandCap;
+        return lim;
+    }
+
     private Line offense0(Game live, String key) {
         decisions++;
         final int index = decisionIndex++;
@@ -627,7 +640,7 @@ public final class ForcedWinSolver {
             noLineKey = key;
             return null;
         }
-        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        final ForcedWinPlanner.Limits lim = limits(); // ledger-sweep2-1107
         lim.nodes = cfg.nodes;
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
@@ -888,7 +901,7 @@ public final class ForcedWinSolver {
                 pos.library.addAll(pool.subList(Math.min(hidden, pool.size()), pool.size()));
                 pos.library.sort((x, y) -> Integer.compare(x.id, y.id));
             }
-            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            final ForcedWinPlanner.Limits lim = limits(); // ledger-sweep2-1107
             lim.nodes = cfg.nodes / 2;
             // POST-FREEZE 3: when they cannot act at sorcery speed now (our turn, or their non-main step), their
             // threat window is their next two turns (a setup spell next turn, the win the turn after: a
@@ -984,7 +997,7 @@ public final class ForcedWinSolver {
                 }
             }
             pos.sorcerySpeed = ph.isPlayerTurn(opp) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
-            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            final ForcedWinPlanner.Limits lim = limits(); // ledger-sweep2-1107
             lim.nodes = cfg.nodes / 2;
             lim.horizon = (pos.sorcerySpeed ? 2 : 3) + cfg.threatExtraTurns;
             lim.ms = cfg.planMs;
