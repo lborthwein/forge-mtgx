@@ -7241,7 +7241,7 @@ public final class LookaheadSearch {
                 pool.add(name);
             }
         }
-        pool.addAll(Arrays.asList(BeliefSampler.BASICS));
+        pool.addAll(Arrays.asList(BeliefSampler.basics()));
         return pool;
     }
 
@@ -7268,11 +7268,11 @@ public final class LookaheadSearch {
      * fewer slots than the hidden cards it must fill (so a hidden library is never cut short).
      */
     private int basicsFor(List<String> pool, int hand, int lib) {
-        final int nonBasic = pool.size() - BeliefSampler.BASICS.length;
+        final int nonBasic = pool.size() - BeliefSampler.basics().length;
         final int need = hand + lib;
         int m = cfg.beliefBasics;
-        if (nonBasic + m * BeliefSampler.BASICS.length < need) {
-            m = (need - nonBasic + BeliefSampler.BASICS.length - 1) / BeliefSampler.BASICS.length;
+        if (nonBasic + m * BeliefSampler.basics().length < need) {
+            m = (need - nonBasic + BeliefSampler.basics().length - 1) / BeliefSampler.basics().length;
         }
         return m;
     }
@@ -7470,7 +7470,7 @@ public final class LookaheadSearch {
                 if (fillBasics && !BeliefSampler.isBasic(nm)) {
                     final Integer it = itemOf.get(nm);
                     if (it == null || !linked[it]) {
-                        nm = BeliefSampler.BASICS[rng.nextInt(BeliefSampler.BASICS.length)];
+                        nm = BeliefSampler.basics()[rng.nextInt(BeliefSampler.basics().length)];
                     }
                 }
                 final Card nc = beliefCard(nm, opp, g);
