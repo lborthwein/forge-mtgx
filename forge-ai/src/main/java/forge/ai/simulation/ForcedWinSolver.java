@@ -183,6 +183,11 @@ public final class ForcedWinSolver {
          */
         public boolean hold = false;
 
+        /** live-fixes-1107: an explicit true|false, else {@link forge.game.EngineFixes#liveFixes()}. */
+        static boolean boolOrLive(final String v) {
+            return v == null ? forge.game.EngineFixes.liveFixes() : "true".equals(v.trim());
+        }
+
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
             c.frameMemory = "true".equals(get.apply("frameMemory"));
@@ -210,9 +215,9 @@ public final class ForcedWinSolver {
             c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
-            c.staleStatics = "true".equals(get.apply("staleStatics")); // unified-search-1106
-            c.turnLimits = "true".equals(get.apply("turnLimits")); // engine-reach-1107
-            c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
+            c.staleStatics = boolOrLive(get.apply("staleStatics")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
+            c.turnLimits = boolOrLive(get.apply("turnLimits")); // engine-reach-1107; live-fixes-1107: default forge.liveFixes
+            c.lineUncapped = boolOrLive(get.apply("lineUncapped")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
