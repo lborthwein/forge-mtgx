@@ -58,6 +58,8 @@ public final class RlFeaturizer {
         public final float[] scal = new float[RlSchema.N_SCAL];
         /** N_CTX of the observation's schema (v1 32, v2 69). */
         public float[] ctx = new float[RlSchema.N_CTX];
+        /** v-inputs-1107 (obsManaAvail on only): [seat, opp] x [total, W, U, B, R, G, C]. In-process only. */
+        public int[][] manaAvail;
         public boolean hasPriv;
         public int P;
         public int[] privCard = new int[0];
@@ -635,8 +637,14 @@ public final class RlFeaturizer {
         s[4] = (opp == null ? 20 : opp.getLife()) / 20f;
         s[5] = seat.getCardsIn(ZoneType.Hand).size() / 7f;
         s[6] = (opp == null ? 0 : opp.getCardsIn(ZoneType.Hand).size()) / 7f;
-        s[7] = 0f;
-        s[8] = 0f;
+        if (RlManaAvail.ON) { // v-inputs-1107 (off by default): mana available now, pool + untapped sources
+            o.manaAvail = new int[][] {RlManaAvail.of(seat), RlManaAvail.of(opp)};
+            s[7] = o.manaAvail[0][0] / 10f;
+            s[8] = o.manaAvail[1][0] / 10f;
+        } else {
+            s[7] = 0f;
+            s[8] = 0f;
+        }
         s[9] = mulligans(seat) / 2f;
         s[10] = (opp == null ? 0 : mulligans(opp)) / 2f;
         s[11] = 1f / 3f;
