@@ -49,6 +49,25 @@ public final class EngineFixes {
         copyAltCost = on;
     }
 
+    /**
+     * ledger-sweep-1107, ledger row 18 ({@code -Dforge.standInEffect=true}, off by default). A frame install with
+     * {@code forge.gamestate.installAsIs} links an exiled card whose recorded source is in no zone to a stand-in object.
+     * Off, the stand-in is a blank {@code new Card(id, game)}: its name is empty, so any last-known-information copy of a
+     * card exiled with it (Forge AI asking whether it may play that card, Spell.canPlayFromHost) looks up a paper card for
+     * the empty name and throws (CardDb$CardRequest.fromString). On, the stand-in is built as Forge builds any effect
+     * object: a name that no card has and the effect game-piece type, so the copy finds no paper card and goes on.
+     */
+    private static boolean standInEffect = Boolean.getBoolean("forge.standInEffect");
+
+    public static boolean standInEffect() {
+        return standInEffect;
+    }
+
+    /** For tests. */
+    public static void setStandInEffectForTest(final boolean on) {
+        standInEffect = on;
+    }
+
     /** For tests. */
     public static void setCopyRobustForTest(final boolean on) {
         copyRobust = on;
