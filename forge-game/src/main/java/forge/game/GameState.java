@@ -153,6 +153,8 @@ public class GameState {
      * </ul>
      */
     public static final String INSTALL_AS_IS_KEY = "forge.gamestate.installAsIs";
+    /** ledger-sweep-1107 (row 18, {@link EngineFixes#standInEffect}): the name of an exile source's stand-in, no card's name. */
+    public static final String STAND_IN_NAME = "Exile source (not recorded)";
     /**
      * install-fidelity-1105: the install round-trip assertion, {@code off} | {@code warn} | {@code throw}
      * (-Dforge.gamestate.installCheck; default {@code warn} when {@link #INSTALL_AS_IS_KEY} is on, else {@code off}).
@@ -1333,6 +1335,12 @@ public class GameState {
                 final Card standIn = exiledWithStandIns.computeIfAbsent(id, k -> {
                     final Card sc = new Card(c.getGame().nextCardId(), c.getGame());
                     sc.setOwner(c.getOwner());
+                    if (EngineFixes.standInEffect()) {
+                        // ledger-sweep-1107 (row 18): an effect object, as SpellAbilityEffect.createEffect builds one; a
+                        // blank name made every LKI copy of the exiled card throw in the paper-card lookup
+                        sc.setName(STAND_IN_NAME);
+                        sc.setGamePieceType(forge.card.GamePieceType.EFFECT);
+                    }
                     return sc;
                 });
                 standIn.addExiledCard(c);
