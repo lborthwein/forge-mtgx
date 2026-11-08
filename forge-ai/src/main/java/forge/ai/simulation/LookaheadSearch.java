@@ -70,6 +70,7 @@ public final class LookaheadSearch {
      * {@link Config} and RlSearch.Config start from these, so a spec key still sets them per seat.
      */
     public static final boolean LIVE_BELIEF_STATICS = forge.game.EngineFixes.liveFlag("forge.house.beliefStatics");
+    public static final boolean LIVE_COPY_TURN_LIMITS = forge.game.EngineFixes.liveFlag("forge.house.copyTurnLimits");
     public static final boolean LIVE_BELIEF_PLAYER_STATICS = forge.game.EngineFixes.liveFlag("forge.house.beliefPlayerStatics");
 
     public static final double TERMINAL = 100000.0;
@@ -338,6 +339,8 @@ public final class LookaheadSearch {
         public int beliefBasics = 8;
         /** House p8 (live-fixes-1107: default {@link #LIVE_BELIEF_STATICS}): later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
         public boolean beliefStatics = LIVE_BELIEF_STATICS;
+        /** House release (live-fixes-1107: default {@link #LIVE_COPY_TURN_LIMITS}): copyTurnLimits. */
+        public boolean copyTurnLimits = LIVE_COPY_TURN_LIMITS;
         /** House release (live-fixes-1107: default {@link #LIVE_BELIEF_PLAYER_STATICS}): beliefPlayerStatics. */
         public boolean beliefPlayerStatics = LIVE_BELIEF_PLAYER_STATICS;
         /**
@@ -455,6 +458,7 @@ public final class LookaheadSearch {
             if (copyEot != AiFixes.Mode.OFF) {
                 o.addProperty("copyEot", copyEot.key());
             }
+            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
             if (copyFidelity != 0) {
                 o.addProperty("copyFidelity", copyFidelity);
             }
@@ -5275,6 +5279,7 @@ public final class LookaheadSearch {
     /** A copier of the live game for this search: carries until-EOT commands when copyEot is ON (lane misplays-1005). */
     GameCopier copierOf(Game live) {
         final GameCopier c = new GameCopier(live, true);
+        if (cfg.copyTurnLimits) c.setTurnLimits(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }
