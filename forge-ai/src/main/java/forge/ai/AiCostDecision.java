@@ -111,6 +111,88 @@ public class AiCostDecision extends CostDecisionMakerBase {
         return null == chosen ? null : PaymentDecision.card(chosen);
     }
 
+    /**
+     * r3-inline-choices-1030 (research): the seat's choose-a-card hook may replace the cards of an exile, discard,
+     * sacrifice or tap-type cost part (no hook: the decision, unchanged).
+     */
+    @Override
+    public PaymentDecision review(final CostPart part, final PaymentDecision decision) {
+        final PlayerControllerAi pc = PlayerControllerAi.cacOf(player); // the wrapped controller on a taped seat
+        if (pc == null || !pc.dpInstrumented() || decision == null || part instanceof forge.game.cost.CostPartMana
+                || part instanceof forge.game.cost.CostTap || part instanceof forge.game.cost.CostUntap) {
+            return reviewCac(part, decision);
+        }
+        final String ctx = "seam:cost:" + part.getClass().getSimpleName();
+        final CardCollection valid = decision.cards == null || decision.cards.isEmpty() ? null : validCards(part, decision);
+        if (valid == null) {
+            // a part without a card choice the point can pose (fixed amounts, from-source, random): observed only
+            final PaymentDecision out = reviewCac(part, decision);
+            forge.ai.dp.DecisionPoints.note(player, forge.ai.dp.Kind.SELECT, ctx, -1, out == decision ? "forge" : "cac");
+            return out;
+        }
+        // decisionpoint-1102 PR-C: the part's cards are a decision point: SELECT exactly as many as Forge AI chose, from
+        // the cards the part may take (the choose-a-card hook's own list); Forge AI's cards are the default
+        final int n = decision.cards.size();
+        final CardCollectionView chosen = PlayerControllerAi.seam(player, forge.ai.dp.Kind.SELECT, ctx, ability, valid,
+                n, n, a -> a instanceof CardCollectionView c && c.size() == n && valid.containsAll(c)
+                        && new java.util.HashSet<>(c).size() == n, // review #175 S2: exactly a CardCollectionView
+                () -> decision.cards, cur -> {
+                    final PaymentDecision r = reviewCac(part, decision);
+                    return r == decision ? cur : r.cards;
+                }, part);
+        return chosen == decision.cards ? decision : PaymentDecision.card(chosen);
+    }
+
+    /**
+     * The cards a list cost part may take for {@code decision}, as the choose-a-card hook reads them (exile, discard,
+     * sacrifice, tap-type from a typed list); null when the part's choice is not such a list or Forge's own pick is not in
+     * it.
+     */
+    private CardCollection validCards(final CostPart part, final PaymentDecision decision) {
+        if (!(part instanceof CostPartWithList pl)) {
+            return null;
+        }
+        final java.util.List<ZoneType> zones;
+        if (part instanceof CostExile ce) {
+            if (ce.payCostFromSource()) return null;
+            zones = ce.getFrom();
+        } else if (part instanceof CostDiscard cd) {
+            final String t = cd.getType();
+            if (cd.payCostFromSource() || t.equals("Hand") || t.contains("Random") || t.equals("LastDrawn")) return null;
+            zones = List.of(ZoneType.Hand);
+        } else if (part instanceof CostSacrifice cs) {
+            if (cs.payCostFromSource()) return null;
+            zones = List.of(ZoneType.Battlefield);
+        } else if (part instanceof CostTapType) {
+            zones = List.of(ZoneType.Battlefield);
+        } else {
+            return null;
+        }
+        final String type = pl.getType();
+        if (type == null || type.equals("All") || type.contains("+with") || type.contains("FromTop")) return null;
+        CardCollection valid = CardLists.getValidCards(player.getCardsIn(zones), type.split(";"), player, source, ability);
+        if (part instanceof CostTapType) valid = CardLists.filter(valid, CardPredicates.UNTAPPED);
+        if (part instanceof CostSacrifice) valid = CardLists.filter(valid, CardPredicates.canBeSacrificedBy(ability, isEffect()));
+        for (Card x : decision.cards) {
+            if (!valid.contains(x)) return null; // a choice that cannot be reproduced from this list
+        }
+        return valid;
+    }
+
+    private PaymentDecision reviewCac(final CostPart part, final PaymentDecision decision) {
+        final PlayerControllerAi pc = PlayerControllerAi.cacOf(player); // the wrapped controller on a taped seat
+        if (pc == null || pc.getCacHook() == null || decision == null
+                || decision.cards == null || decision.cards.isEmpty() || !(part instanceof CostPartWithList)) {
+            return decision;
+        }
+        final CardCollection valid = validCards(part, decision);
+        if (valid == null) return decision;
+        final CardCollectionView out = pc.getCacHook().costCards(pc, ability, part.getClass().getSimpleName(), valid,
+                decision.cards.size(), decision.cards);
+        if (out == decision.cards || out == null || out.size() != decision.cards.size()) return decision;
+        return PaymentDecision.card(out);
+    }
+
     @Override
     public PaymentDecision visit(CostDiscard cost) {
         final String type = cost.getType();
@@ -264,7 +346,7 @@ public class AiCostDecision extends CostDecisionMakerBase {
      * Oracle of {@code doom-16702353-s0} is named by no existing predicate.
      * Follow-up: derive this union from each plan's own zone definitions in
      * {@code CubeComboAi.protectedPieceNames}. */
-    private static final Set<String> CUBE_GATE_PIECES = Set.of(
+    static final Set<String> CUBE_GATE_PIECES = Set.of(
             "Doomsday", "Thassa's Oracle",
             "Yawgmoth's Will", "Tendrils of Agony",
             "Underworld Breach", "Brain Freeze",
@@ -684,6 +766,10 @@ public class AiCostDecision extends CostDecisionMakerBase {
         int c = cost.getAbilityAmount(ability);
 
         CardCollectionView res = ComputerUtil.chooseReturnType(player, cost.getType(), source, ability.getTargetCard(), c, ability);
+        // r2-choose-a-card-1029: the seat's choose-a-card hook may replace the cards (no hook: Forge AI's, unchanged)
+        if (player.getController() instanceof PlayerControllerAi pc && pc.getCacHook() != null) {
+            res = pc.getCacHook().returnCost(pc, ability, cost.getType(), c, res);
+        }
         return res.isEmpty() ? null : PaymentDecision.card(res);
     }
 

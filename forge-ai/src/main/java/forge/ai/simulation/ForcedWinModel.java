@@ -59,7 +59,9 @@ public final class ForcedWinModel {
     enum EffKind {
         DRAW, MANA, PUTBACK, MILL, MILL_OPP, LIFE, DRAIN, DISCARD, PILE, TUTOR, TUTOR_TOP, WIN, SHUFFLE,
         /** solver-gaps-1015: our whole hand / graveyard goes into our library (Timetwister, Echo of Eons); our hand is exiled (Memory Jar). */
-        HAND_TO_LIBRARY, GRAVEYARD_TO_LIBRARY, EXILE_HAND
+        HAND_TO_LIBRARY, GRAVEYARD_TO_LIBRARY, EXILE_HAND,
+        /** labeller-v2 (c): scry n / surveil n of our library (observed only by a planScry reader). */
+        SCRY, SURVEIL
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
@@ -116,7 +118,7 @@ public final class ForcedWinModel {
 
     /** ENGINE: a step found by the engine search (any legal action, targets recorded); ATTACK: attack with everything. */
     /** REPEAT (search-bones-1015): a loop body found by the engine search's cycle table, repeated a number of times. */
-    enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK, REPEAT }
+    enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK, REPEAT, MAIN }
 
     /** One executable ability of a card: its printed cost and its observed effects. */
     static final class Abil {
@@ -521,6 +523,13 @@ public final class ForcedWinModel {
         int oppLibrary;
         boolean landDrop;
         boolean sorcerySpeed;
+        /**
+         * line-adoption-1107 (solverCfg anyWindow): the position is our turn before main phase 1 (upkeep or draw step); a
+         * MAIN step moves the plan to main phase 1 of this turn, drawing the draw step's card when {@link #preMainDraw}.
+         */
+        boolean preMain, preMainDraw;
+        /** line-adoption-1107 (anyWindow): the position is not in our main phase (lines planned here are Line.offMain). */
+        boolean offMain;
         int storm;
         final int[] pool = new int[6];
         final List<ACard> hand = new ArrayList<>();
@@ -632,13 +641,26 @@ public final class ForcedWinModel {
 
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         synchronized ACard card(Game live, Player me, Card c) {
-            ACard t = templates.get(c.getName());
+            // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
+            final String key = planScry ? "scry|" + c.getName() : c.getName();
+            ACard t = templates.get(key);
             if (t == null) {
-                t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
-                templates.put(c.getName(), t);
+                final boolean prev = ForcedWinProbe.PLAN_SCRY.get();
+                ForcedWinProbe.PLAN_SCRY.set(planScry);
+                try {
+                    t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
+                } finally {
+                    ForcedWinProbe.PLAN_SCRY.set(prev);
+                }
+                if (!forge.ai.AiWork.spent()) {
+                    templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                }
             }
             return t.instance(c.getId());
         }
+
+        /** labeller-v2 (c): observe scry / surveil as SCRY / SURVEIL effects (false = v1). */
+        boolean planScry;
 
         /**
          * Read the seat's position; null when it is outside the model (more than one opponent). The library and

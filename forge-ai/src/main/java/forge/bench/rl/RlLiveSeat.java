@@ -276,9 +276,30 @@ public final class RlLiveSeat {
                     // order-memory-1102 (absent = off, the seat byte for byte as before): the search worlds keep the
                     // library positions this seat knows (forge.ai.simulation.InfoStates); arming is its own decision
                     case "infoState": c.infoState = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    case "beliefStatics": c.beliefStatics = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    case "beliefPlayerStatics": c.beliefPlayerStatics = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    case "copyTurnLimits": c.copyTurnLimits = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    case "offBattlefieldLimits": c.offBattlefieldLimits = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    case "historyLki": c.historyLki = LookaheadSearch.Config.infoStateKey(k, v); break;
                     default:
                         if (k.startsWith("plans.")) {
                             planKey(c, k, v); // sb-live-1018: S-b, flat keys
+                            break;
+                        }
+                        if (k.startsWith("cac.")) {
+                            // r2-choose-a-card-1029: choose-a-card, flat keys (cac.mode=shadow, cac.cap=32, ...)
+                            if (c.cac == null) {
+                                c.cac = new JsonObject();
+                            }
+                            final String ck = k.substring(4);
+                            if ("mode".equals(ck) || "kinds".equals(ck)) {
+                                c.cac.addProperty(ck, v);
+                            } else if ("margin".equals(ck)) {
+                                c.cac.addProperty(ck, Double.parseDouble(v));
+                            } else {
+                                c.cac.addProperty(ck, Long.parseLong(v));
+                            }
+                            forge.ai.simulation.ChooseACard.Config.fromJson(c.cac);
                             break;
                         }
                         throw new IllegalArgumentException("policySearch: unknown key " + k);
@@ -538,6 +559,7 @@ public final class RlLiveSeat {
             s.onSearched = this::searched;
         }
         rs.search = s;
+        RlSearch.attachInfoStates(spec.search, g); // #173: attached at bind whenever a consumer key is on (with or without plans)
         if (spec.search.plans != null) {
             // sb-live-1018: S-b's plan hook on this seat's bridged controller (RlSearch.attach, as the bench's RL seat)
             final boolean[] rl = new boolean[ctl.length];

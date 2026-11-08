@@ -79,9 +79,85 @@ public final class ForcedWinProbe {
         int handBefore, gyBefore;
     }
 
+    /** labeller-v2 (c): set by a planScry reader around its learning (false = v1). */
+    static final ThreadLocal<Boolean> PLAN_SCRY = ThreadLocal.withInitial(() -> false);
+
+    /**
+     * ledger-sweep-1107, ledger row 45 ({@code -Dforge.probeEmptyDraw=true}, off by default). A probe runs in a copy of
+     * the position. When our library there is empty, an ability that draws ("mill two, then draw a card") is replaced by
+     * the permanent that turns an empty-library draw into a win, so the run is won with no card moved: the template got
+     * neither a DRAW (no card was drawn) nor a WIN (that win belongs to the permanent, solver-gaps-1015). The planner then
+     * saw the ability do nothing and found only the draw step's win, a turn later. On: such a run is repeated with our
+     * library stocked (up to {@link #STOCK} of our own exiled or graveyard cards, not the probed card); when the repeat
+     * plays, is not won and draws, its observation is the ability's. Otherwise the first run stands.
+     */
+    static boolean emptyDrawProbe = Boolean.getBoolean("forge.probeEmptyDraw");
+    static final int STOCK = 8;
+
+    /** For tests. */
+    static void setEmptyDrawProbeForTest(final boolean on) {
+        emptyDrawProbe = on;
+    }
+
+    /** ledger-sweep-1107 (row 45): {@code first}, or the stocked-library repeat of its run (see {@link #emptyDrawProbe}). */
+    static Obs emptyDrawRetry(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st, Obs first,
+            String name) {
+        if (!emptyDrawProbe || first.error != null || !first.played || !first.won || !first.libraryEmptied) {
+            return first;
+        }
+        final Obs o = run(live, liveMe, cardId, (g, m, c) -> {
+            if (setup != null) {
+                setup.apply(g, m, c);
+            }
+            int n = 0;
+            for (ZoneType z : new ZoneType[] {ZoneType.Exile, ZoneType.Graveyard}) {
+                for (Card x : new ArrayList<>(m.getCardsIn(z))) {
+                    if (n >= STOCK) {
+                        break;
+                    }
+                    if (x.getId() == c.getId() || x.getOwner() != m) {
+                        continue;
+                    }
+                    g.getAction().moveToLibrary(x, null);
+                    n++;
+                }
+            }
+        }, act, ForcedWinSolver.mix(seed, 0x45L), st);
+        boolean drew = false;
+        for (String line : o.trace) {
+            if (line.startsWith("MOVE ") && line.contains(" Library@me Hand@me")) {
+                drew = true;
+            }
+        }
+        final boolean use = o.error == null && o.played && !o.won && drew;
+        ForcedWinSolver.receipt("FORCED_WIN probe-empty-draw card=" + name + " repeat=" + (use ? "used" : "kept-first")
+                + " played=" + o.played + " won=" + o.won + " drew=" + drew);
+        return use ? o : first;
+    }
+
     /** The sandbox's controller for our seat: passes, records choice asks, never shuffles a looked-at library. */
     static final class ProbeAi extends PlayerControllerAi {
         final List<String> trace;
+        /** labeller-v2 (c): record scry / surveil asks and keep the looked-at cards on top (false = Forge AI's answer). */
+        boolean planScry;
+
+        @Override
+        public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+            if (!planScry || topN == null) {
+                return super.arrangeForScry(topN);
+            }
+            trace.add("ASK scry " + topN.size());
+            return org.apache.commons.lang3.tuple.ImmutablePair.of(new CardCollection(topN), new CardCollection());
+        }
+
+        @Override
+        public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+            if (!planScry || topN == null) {
+                return super.arrangeForSurveil(topN);
+            }
+            trace.add("ASK surveil " + topN.size());
+            return org.apache.commons.lang3.tuple.ImmutablePair.of(new CardCollection(topN), new CardCollection());
+        }
 
         ProbeAi(Game g, Player p, forge.LobbyPlayer lp, List<String> trace) {
             super(g, p, lp);
@@ -221,7 +297,9 @@ public final class ForcedWinProbe {
                 return o;
             }
             g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
-            me.dangerouslySetController(new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace));
+            final ProbeAi probeAi = new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace);
+            probeAi.planScry = PLAN_SCRY.get();
+            me.dangerouslySetController(probeAi);
             for (Player p : g.getPlayers()) {
                 if (p != me) {
                     p.dangerouslySetController(new PassAi(g, p, p.getController().getLobbyPlayer()));
@@ -457,6 +535,19 @@ public final class ForcedWinProbe {
                 }
                 continue;
             }
+            if (line.startsWith("ASK scry ") || line.startsWith("ASK surveil ")) {
+                // labeller-v2 (c) (only a planScry probe records these): the look comes in order with the moves
+                if (last != null) {
+                    out.add(new Eff(last, run, 0));
+                    last = null;
+                    run = 0;
+                }
+                final int n = Integer.parseInt(line.substring(line.lastIndexOf(' ') + 1));
+                if (n > 0) {
+                    out.add(new Eff(line.startsWith("ASK scry ") ? EffKind.SCRY : EffKind.SURVEIL, n, 0));
+                }
+                continue;
+            }
             if (line.startsWith("ASK pick ")) {
                 pendingAsk = line;
                 final int ni = line.indexOf(" names=");
@@ -684,7 +775,7 @@ public final class ForcedWinProbe {
                         setHandSize(g, m, c, probeHand);
                     }
                 };
-                final Obs o = run(live, me, id, inHand, (g, m, c) -> {
+                final Act castIt = (g, m, c) -> {
                     final SpellAbility sa = locate(c, m, desc, costKey, false);
                     if (sa == null) {
                         return false;
@@ -701,7 +792,10 @@ public final class ForcedWinProbe {
                         }
                     }
                     return play(g, m, sa);
-                }, ForcedWinSolver.mix(seed, id * 31L + variant++), st);
+                };
+                final long runSeed = ForcedWinSolver.mix(seed, id * 31L + variant++);
+                final Obs o = emptyDrawRetry(live, me, id, inHand, castIt, runSeed, st,
+                        run(live, me, id, inHand, castIt, runSeed, st), card.getName());
                 final Abil ab = withEffects(base, o, id, sa0, v);
                 ab.cardTargets = v == null && targetsAnything(sa0);
                 ab.handMask = handMask;
@@ -848,12 +942,13 @@ public final class ForcedWinProbe {
                 final int probeHand = handFor(handMask, me.getCardsIn(ZoneType.Hand).size() - (card.isInZone(ZoneType.Hand) ? 1 : 0));
                 for (String v : variants) {
                     final String desc = sa0.getDescription(), costKey = base.costKey;
-                    final Obs o = run(live, me, id, (g, m, c) -> {
+                    final Setup onBattlefield = (g, m, c) -> {
                         toBattlefield(g, m, c);
                         if (probeHand >= 0) {
                             setHandSize(g, m, null, probeHand);
                         }
-                    }, (g, m, c) -> {
+                    };
+                    final Act activate = (g, m, c) -> {
                         final SpellAbility sa = locate(c, m, desc, costKey, true);
                         if (sa == null) {
                             return false;
@@ -863,7 +958,10 @@ public final class ForcedWinProbe {
                             return false;
                         }
                         return play(g, m, sa);
-                    }, ForcedWinSolver.mix(seed, id * 31L + variant++), st);
+                    };
+                    final long runSeed = ForcedWinSolver.mix(seed, id * 31L + variant++);
+                    final Obs o = emptyDrawRetry(live, me, id, onBattlefield, activate, runSeed, st,
+                            run(live, me, id, onBattlefield, activate, runSeed, st), card.getName());
                     final Abil ab = withEffects(base, o, id, sa0, v);
                     ab.cardTargets = v == null && targetsAnything(sa0);
                     ab.handMask = handMask;

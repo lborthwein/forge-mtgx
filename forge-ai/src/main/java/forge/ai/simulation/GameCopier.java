@@ -83,6 +83,14 @@ public class GameCopier {
         }
     }
 
+    /** r3-inline-choices-1030: skip the copy's state-based check (the caller resumes it); default off = as before. */
+    private boolean deferStateEffects = false;
+
+    /** r3-inline-choices-1030: see {@link #deferStateEffects} (a legend-rule choice resumed on the copy). */
+    public void setDeferStateEffects(boolean b) {
+        this.deferStateEffects = b;
+    }
+
     /** C1: also copy the original game's stack. Callers must first check {@link #stackUnsupported}. */
     public void setCopyStack(boolean copyStack) {
         this.copyStack = copyStack;
@@ -130,16 +138,38 @@ public class GameCopier {
      */
     private boolean pendingStrict = false;
     /**
-     * unified-search-1106 (off by default): the original is itself a copy whose hidden cards a belief world swapped out; its
+     * judge lane (off by default): the original is itself a copy whose hidden cards a belief world swapped out; its
      * static effects can still name those cards. They are skipped, instead of failing the copy.
      */
     private boolean staleStatics = false;
+    private boolean stalePlayerStatics = false;
 
-    /** engine-reach-1107 (false = off): per-turn limits of statics (may-play caps) and non-planeswalker abilities are copied. */
+    /** Off by default: per-turn limits of statics (may-play caps) and non-planeswalker abilities are copied. */
     private boolean turnLimits = false;
+    private boolean offBattlefieldLimits = false;
+    private boolean historyLki = false;
+    private boolean copyBackFace = false;
+    private boolean stackAbilityCopies = false;
+    private boolean stackHistory = false;
+
+    public void setStackHistory(boolean on) { this.stackHistory = on; }
+
+    public void setStackAbilityCopies(boolean on) { this.stackAbilityCopies = on; }
+
+    public void setCopyBackFace(boolean on) { this.copyBackFace = on; }
+
+    public void setHistoryLki(boolean on) { this.historyLki = on; }
+
+    public void setOffBattlefieldLimits(boolean on) {
+        this.offBattlefieldLimits = on;
+    }
 
     public void setTurnLimits(boolean on) {
         this.turnLimits = on;
+    }
+
+    public void setStalePlayerStatics(boolean on) {
+        this.stalePlayerStatics = on;
     }
 
     public void setStaleStatics(boolean on) {
@@ -265,6 +295,12 @@ public class GameCopier {
             if (host.getZone() == null || (spell && host.getZone().getZoneType() != ZoneType.Stack)) {
                 return "zone";
             }
+            if (forge.game.EngineFixes.researchFixes() && g.findById(host.getId()) == null) {
+                // void-causes-1104 (S2 label void 2989378278): an ability whose host no longer exists in any zone (a
+                // token sacrificed to pay for it); the copier maps a host by its card in the copy, so it cannot be
+                // rebuilt and copyStackFaithfully threw "Couldn't map". Unsupported, like the other gaps above.
+                return "gone";
+            }
             for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
                 if (!s.usesTargeting()) {
                     continue;
@@ -289,10 +325,12 @@ public class GameCopier {
      * be rebuilt (callers treat that as a failed copy).
      */
     private void copyStackFaithfully(Game newGame) {
+        final Map<Integer, Integer> historyIds = stackHistory || origGame.stackHistory ? new java.util.HashMap<>() : null;
         final SpellAbility origTop = origGame.getStack().peekAbility();
         int skipped = 0;
         for (java.util.Iterator<SpellAbilityStackInstance> it = origGame.getStack().reverseIterator(); it.hasNext(); ) {
-            final SpellAbility orig = it.next().getSpellAbility();
+            final SpellAbilityStackInstance sourceEntry = it.next();
+            final SpellAbility orig = sourceEntry.getSpellAbility();
             if (skipResolvingTrigger && orig == origTop && orig.isWrapper() && origGame.getStack().isResolving()) {
                 skipped++;
                 continue;
@@ -311,13 +349,37 @@ public class GameCopier {
                     }
                 }
             }
+            final boolean altFallback = base == null && orig.isSpell() && orig.getAlternativeCost() != null
+                    && forge.game.EngineFixes.copyAltCost();
+            if (altFallback) {
+                // loop-exec-1107 (forge.copyAltCost): an alternative cost a keyword grants only in another zone (escape from
+                // the graveyard) is not among the card's abilities on the stack: rebuild from the card's own spell of the
+                // same effect, and keep the alternative cost below.
+                for (SpellAbility cardSa : newHost.getAllSpellAbilities()) {
+                    if (cardSa.isSpell() && cardSa.getAlternativeCost() == null && cardSa.getApi() == orig.getApi()) {
+                        base = cardSa;
+                        break;
+                    }
+                }
+            }
             if (base == null) {
                 throw new IllegalStateException("stack copy: no ability '" + orig.getDescription() + "' on " + newHost);
+            }
+            if (stackAbilityCopies || origGame.stackAbilityCopies) {
+                // A pending activation must not alias the reusable card template or another
+                // stack entry. Menu enumeration mutates that template's activator and choices.
+                base = base.copy(newHost, activator, false, true);
+                if (base == null) {
+                    throw new IllegalStateException("stack copy: unable to isolate ability on " + newHost);
+                }
             }
             base.setActivatingPlayer(activator);
             SpellAbility copy = SpellAbilityChoiceCopier.copyCastChoices(orig, base, activator);
             if (copy == null) {
                 throw new IllegalStateException("stack copy: modes of " + orig + " not found");
+            }
+            if (altFallback) {
+                copy.setAlternativeCost(orig.getAlternativeCost());
             }
             for (SpellAbility sub = copy; sub != null; sub = sub.getSubAbility()) {
                 if (sub.usesTargeting()) {
@@ -356,11 +418,13 @@ public class GameCopier {
                 newHost.setCastFrom(((Player) find(castFrom.getPlayer())).getZone(castFrom.getZoneType()));
             }
             newGame.getStack().dangerouslyPushCopy(copy);
+            if (historyIds != null) historyIds.put(sourceEntry.getId(), newGame.getStack().peek().getId());
             stackSaMap.put(orig, copy);
         }
         if (newGame.getStack().size() != origGame.getStack().size() - skipped) {
             throw new IllegalStateException("stack copy: size " + newGame.getStack().size() + " != " + origGame.getStack().size());
         }
+        if (historyIds != null) newGame.setCopiedStackIds(historyIds);
     }
 
     public Game getOriginalGame() {
@@ -380,7 +444,15 @@ public class GameCopier {
         // another thread than the original (forge.game.IndependentCopies).
         forge.game.IndependentCopies.enter();
         try {
-            return makeCopy0(advanceToPhase, aiPlayer);
+            final Game copy = makeCopy0(advanceToPhase, aiPlayer);
+            if (forge.game.WorkClock.active()) {
+                // work-units-1107: one copy plus one unit per card in it (copying dominates a copy's cost)
+                forge.game.WorkClock.tick(forge.game.WorkClock.Site.COPY);
+                forge.game.WorkClock.tick(forge.game.WorkClock.Site.COPY_CARD, copy.getCardsInGame().size());
+            }
+            // decisionpoint-1102 (census attribution only; a no-op without an observer): this game is a copy
+            forge.ai.dp.DecisionPoints.markCopy(copy, origGame);
+            return copy;
         } finally {
             forge.game.IndependentCopies.exit();
         }
@@ -507,19 +579,31 @@ public class GameCopier {
         // Undo effects first before calculating them below, to avoid them applying twice.
         for (StaticEffect effect : origGame.getStaticEffects().getEffects()) {
             if (staleStatics || origGame.staleStatics) {
-                effect.removeMapped(gameObjectMap, c -> cardMap.containsKey(c)); // unified-search-1106
+                effect.removeMapped(gameObjectMap, c -> cardMap.containsKey(c),
+                        stalePlayerStatics || origGame.stalePlayerStatics);
             } else {
                 effect.removeMapped(gameObjectMap);
             }
         }
 
         newGame.staleStatics = origGame.staleStatics;
+        newGame.stalePlayerStatics = stalePlayerStatics || origGame.stalePlayerStatics;
+        newGame.offBattlefieldLimits = offBattlefieldLimits || origGame.offBattlefieldLimits;
+        newGame.historyLki = historyLki || origGame.historyLki;
+        newGame.copyBackFace = copyBackFace || origGame.copyBackFace;
+        newGame.stackAbilityCopies = stackAbilityCopies || origGame.stackAbilityCopies;
+        newGame.stackHistory = stackHistory || origGame.stackHistory;
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
         }
 
-        newGame.getAction().checkStateEffects(true); //ensure state based effects and triggers are updated
+        if (deferStateEffects) {
+            // r3-inline-choices-1030: the caller runs the state-based actions itself (a legend-rule choice on the copy)
+            newGame.getAction().checkStaticAbilities(false);
+        } else {
+            newGame.getAction().checkStateEffects(true); //ensure state based effects and triggers are updated
+        }
         newGame.getTriggerHandler().resetActiveTriggers();
 
         if (GameSimulator.COPY_STACK)
@@ -559,6 +643,7 @@ public class GameCopier {
     private void copyTurnState(final Game newGame) {
         fidelityLeftOut = 0;
         fidelityStandIns = 0;
+        if (historyLki || origGame.historyLki) staleMap.clear();
         final Map<Integer, Card> byId = new java.util.HashMap<>();
         for (Card c : cardMap.values()) {
             byId.putIfAbsent(c.getId(), c);
@@ -589,6 +674,9 @@ public class GameCopier {
                 if (c == null) {
                     return null;
                 }
+                // Card equality is by id: the ordinary map otherwise collapses a historical
+                // object onto the current zone object before the old LKI fallback can run.
+                if (historyLki || origGame.historyLki) return mapCardPending(c, newGame);
                 Card r = memo.get(c);
                 if (r != null) {
                     return r;
@@ -664,6 +752,16 @@ public class GameCopier {
                 final Card nc = cardMap.get(c);
                 if (nc != null) {
                     fidelityLeftOut += nc.copyTurnStateFrom(c, m);
+                    if (forge.game.EngineFixes.researchFixes() && c.getEffectSourceAbility() != null && nc.getEffectSourceAbility() == null
+                            && nc.getEffectSource() != null) {
+                        // void-causes-1104 (S2 label NPE, game 2989384742): copyTurnStateFrom gives an effect card its
+                        // source CARD; a static ability of the effect that reads the source ABILITY (its extra
+                        // loyalty activations) then threw in every copy. The ability goes too (unmapped = as before).
+                        final SpellAbility esa = copyEffectSourceAbility(c.getEffectSourceAbility());
+                        if (esa != null && esa.getHostCard() == nc.getEffectSource()) {
+                            nc.setEffectSource(esa);
+                        }
+                    }
                 }
             }
         }
@@ -1695,6 +1793,8 @@ public class GameCopier {
         if (v == null || inert(v)) {
             return null;
         }
+        forge.game.WorkMeter.tick("copyLeakWalk"); // void-causes-1104: hang watchdog unit (no meter open = no-op)
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.LEAK); // work-units-1107 (no clock = no-op)
         if (depth > 24) {
             return path + "!depth";
         }
@@ -1934,10 +2034,12 @@ public class GameCopier {
             }
             if (card.getCopiedPermanent() != null) {
                 // TODO would it be safe to simply reuse the prototype?
-                otherCard.setCopiedPermanent(new CardCopyService(card.getCopiedPermanent()).copyCard(false));
+                otherCard.setCopiedPermanent(forge.game.EngineFixes.researchFixes() ? copyPrototype(newGame, card.getCopiedPermanent())
+                        : new CardCopyService(card.getCopiedPermanent()).copyCard(false));
             }
             // TODO: Verify that the above relationships are preserved bi-directionally or not.
         }
+        if (forge.game.EngineFixes.researchFixes()) ownTraitStates(newGame); // void-causes-1104: every copied trait's card state is a state of the copy
     }
 
     private static PaperCard hidden_info_card = new PaperCard(CardRules.fromScript(Lists.newArrayList("Name:hidden", "Types:Artifact", "Oracle:")), "", CardRarity.Common);
@@ -2033,11 +2135,15 @@ public class GameCopier {
     }
 
     /**
-     * engine-reach-1107 ({@link #setTurnLimits}): a copied card comes fresh from its script, so "once each turn" counts on its
+     * {@link #setTurnLimits}: a copied card comes fresh from its script, so "once each turn" counts on its
      * static abilities and its activated abilities read zero. A copy could use the limit again. Statics match by position when
      * both cards have the same list.
      */
     private void copyTurnLimits(Card c, Card newCard) {
+        copyTurnLimits(c, newCard, false);
+    }
+
+    private void copyTurnLimits(Card c, Card newCard, boolean allActivatedAbilities) {
         final java.util.List<StaticAbility> from = new java.util.ArrayList<>(c.getStaticAbilities());
         final java.util.List<StaticAbility> to = new java.util.ArrayList<>(newCard.getStaticAbilities());
         if (from.size() == to.size()) {
@@ -2049,7 +2155,7 @@ public class GameCopier {
                 }
             }
         }
-        if (!c.isPlaneswalker()) {
+        if (allActivatedAbilities || !c.isPlaneswalker()) {
             for (SpellAbility sa : c.getAllSpellAbilities()) {
                 final int active = sa.getActivationsThisTurn();
                 if (active > 0 && sa.isActivatedAbility()) {
@@ -2065,6 +2171,11 @@ public class GameCopier {
     private void addCard(Game newGame, ZoneType zone, Card c, Player aiPlayer) {
         final Player owner = playerMap.get(c.getOwner());
         final Card newCard = createCardCopy(newGame, owner, c, aiPlayer);
+        if (copyBackFace || origGame.copyBackFace) {
+            // setState restores displayed characteristics, but does not restore the physical
+            // orientation that Transform toggles and isTransformed reads. Preserve both independently.
+            newCard.setBackSide(c.isBackSide());
+        }
         cardMap.put(c, newCard);
 
         // TODO ExiledWith
@@ -2171,6 +2282,11 @@ public class GameCopier {
             newCard.copyChangedSVarsFrom(c);
         }
 
+        if (zone != ZoneType.Battlefield && (offBattlefieldLimits || origGame.offBattlefieldLimits)) {
+            // The published battlefield repair does not reach abilities usable from other zones.
+            copyTurnLimits(c, newCard, true);
+        }
+
         if (zone == ZoneType.Exile && c.isFaceDown()) {
             // Face-down exile state (foretell, "exile face down" effects) must
             // survive the copy: cards rebuilt from their paper card default to
@@ -2189,6 +2305,179 @@ public class GameCopier {
         } else {
             zoneOwner.getZone(zone).add(newCard);
         }
+    }
+
+    /**
+     * void-causes-1104 (P-GEN hang, game 2989505186): a copied card's traits (triggers, statics, replacement effects,
+     * abilities) can keep the card state they were copied from: a copy token's enters trigger pointed at the ORIGINAL
+     * creature's state (a card of the game it was copied from). Registered in the copy's TriggerHandler, it held that
+     * game alive, and a search's copies of copies chained every ancestor: the live heap at the hang held 165 of 184
+     * search copies only through another game's TriggerHandler.activeTriggers -> TriggerChangesZone.cardState. Each such
+     * card state is now the copy's: the same state of the copy's card of that original card, else of the trait's own
+     * card (a card the copy does not hold).
+     */
+    private void ownTraitStates(Game newGame) {
+        for (Card nc : cardMap.values()) {
+            ownTraits(nc, newGame);
+            for (Card pc = nc.getCopiedPermanent(); pc != null && pc.getGame() == newGame; pc = pc.getCopiedPermanent()) {
+                ownTraits(pc, newGame); // a copy token's prototype (copyPrototype): its states' traits too
+                if (pc.getCopiedPermanent() == pc) {
+                    break;
+                }
+            }
+        }
+    }
+
+    private static java.lang.reflect.Field abilityForTriggerField;
+
+    /** A state's trigger-execute abilities (CardState.abilityForTrigger, private): empty when it cannot be read. */
+    @SuppressWarnings("unchecked")
+    private static java.util.Collection<SpellAbility> abilitiesForTrigger(forge.game.card.CardState st) {
+        try {
+            if (abilityForTriggerField == null) {
+                final java.lang.reflect.Field f = forge.game.card.CardState.class.getDeclaredField("abilityForTrigger");
+                f.setAccessible(true);
+                abilityForTriggerField = f;
+            }
+            final Object m = abilityForTriggerField.get(st);
+            return m instanceof Map ? ((Map<String, SpellAbility>) m).values() : java.util.Collections.emptyList();
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return java.util.Collections.emptyList();
+        }
+    }
+
+    /** Every trait of {@code owner} (each state's and the card's own; abilities with their sub-abilities) re-pointed. */
+    private void ownTraits(Card owner, Game newGame) {
+        final List<forge.game.CardTraitBase> traits = new ArrayList<>();
+        final List<SpellAbility> sas = new ArrayList<>();
+        for (forge.card.CardStateName sn : owner.getStates()) {
+            final forge.game.card.CardState st = owner.getState(sn);
+            if (st == null) {
+                continue;
+            }
+            for (Trigger t : st.getTriggers()) {
+                traits.add(t);
+                if (t.getOverridingAbility() != null) {
+                    sas.add(t.getOverridingAbility());
+                }
+            }
+            st.getStaticAbilities().forEach(traits::add);
+            st.getReplacementEffects().forEach(traits::add);
+            st.getSpellAbilities().forEach(sas::add);
+            sas.addAll(abilitiesForTrigger(st));
+        }
+        owner.getTriggers().forEach(traits::add);
+        owner.getStaticAbilities().forEach(traits::add);
+        owner.getReplacementEffects().forEach(traits::add);
+        owner.getSpellAbilities().forEach(sas::add);
+        final java.util.Set<SpellAbility> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (SpellAbility root : sas) {
+            for (SpellAbility a = root; a != null && seen.add(a); a = a.getSubAbility()) {
+                traits.add(a);
+            }
+        }
+        for (forge.game.CardTraitBase t : traits) {
+            final forge.game.card.CardState cs = t.getCardState();
+            if (cs == null || cs.getCard() == null || cs.getCard().getGame() == newGame) {
+                continue;
+            }
+            final Card src = cs.getCard();
+            Card mapped = src.getGame() == origGame ? cardMap.get(src) : null;
+            if (mapped == null) {
+                mapped = owner;
+            }
+            final forge.card.CardStateName sn = cs.getStateName();
+            t.setCardState(sn != null && mapped.hasState(sn) ? mapped.getState(sn) : mapped.getCurrentState());
+        }
+    }
+
+    /**
+     * void-causes-1104 (P-GEN hang, game 2989505186): the copy's own copy of a token's prototype (the card a copy token was
+     * copied from). It was made in the ORIGINAL game (CardCopyService's default target game, the original's owner), so
+     * every copied token held a card of the game it was copied from, and through it that whole game: a search's copies
+     * chained every ancestor copy alive (a creature-copy loop's 128 repetitions: 181 games, 4 GB, OutOfMemoryError /
+     * GC stall). Now it belongs to the copy: the copy's game and owner, and its own prototype and effect source mapped
+     * the same way (a source that is not in the copy is dropped, as the copier drops one off the battlefield).
+     */
+    private Card copyPrototype(Game newGame, Card proto) {
+        final Player owner = proto.getOwner() == null ? null : playerMap.get(proto.getOwner());
+        final Card out = new CardCopyService(proto, newGame).copyCard(false, owner != null ? owner : proto.getOwner());
+        if (proto.getCopiedPermanent() != null && proto.getCopiedPermanent() != proto) {
+            out.setCopiedPermanent(copyPrototype(newGame, proto.getCopiedPermanent()));
+        }
+        if (out.getEffectSource() != null && out.getEffectSource().getGame() != newGame) {
+            out.setEffectSource(cardMap.get(out.getEffectSource()));
+        }
+        // the ability that made the token (the copyStats path carries the original's object, whose host and activator
+        // are the original game's: the live heap at the hang held 164 copies through prototype.tokenSpawningAbility
+        // .activatingPlayer): the copy's ability of the copied host, by description, activated by the copied player
+        final SpellAbility tsa = out.getTokenSpawningAbility();
+        if (tsa != null && !ofGame(tsa, newGame)) {
+            out.setTokenSpawningAbility(mapSpawningAbility(tsa));
+        }
+        return out;
+    }
+
+    private static boolean ofGame(SpellAbility sa, Game g) {
+        return (sa.getHostCard() == null || sa.getHostCard().getGame() == g)
+                && (sa.getActivatingPlayer() == null || sa.getActivatingPlayer().getGame() == g);
+    }
+
+    /** void-causes-1104: a token-spawning ability of the original as the copy's (null when its host is not copied). */
+    private SpellAbility mapSpawningAbility(SpellAbility sa) {
+        final Card host = sa.getHostCard();
+        final Card h = host == null || host.getGame() != origGame ? null : cardMap.get(host);
+        final SpellAbility base = h == null ? null : findSAInCard(sa, h);
+        if (base == null) {
+            return null;
+        }
+        final SpellAbility m = base.copy(h, true);
+        final Player act = sa.getActivatingPlayer() == null ? null : playerMap.get(sa.getActivatingPlayer());
+        if (act != null) {
+            m.setActivatingPlayer(act);
+        }
+        return m;
+    }
+
+    /**
+     * void-causes-1104: the copy's counterpart of an effect's source ability {@code esa} (a resolved ability: no longer on
+     * the stack, so nothing else maps it): the copied host's own ability that {@code esa}'s root was played from (by
+     * description, as {@link #findSAInCard}), copied with the same ids and marked as played from it
+     * ({@code getOriginalAbility}), and the sub-ability at {@code esa}'s place in that chain. Null when the host was
+     * not copied or the ability is not found (the effect then keeps only its source card, as before).
+     */
+    private SpellAbility copyEffectSourceAbility(SpellAbility esa) {
+        final Card host = esa.getHostCard();
+        final Card newHost = host == null ? null : cardMap.get(host);
+        if (newHost == null) {
+            return null;
+        }
+        final SpellAbility root = esa.getRootAbility();
+        final SpellAbility played = root.getOriginalAbility() != null ? root.getOriginalAbility() : root;
+        final SpellAbility printed = findSAInCard(played, newHost);
+        if (printed == null) {
+            return null;
+        }
+        final SpellAbility n = printed.copy(newHost, true); // lki: the same ids, no id drawn in the copy
+        if (root.getOriginalAbility() != null) {
+            n.setOriginalAbility(printed);
+        }
+        // the same place in the sub-ability chain when esa is on it; else (a die result's or a mode's ability, held
+        // outside that chain) the root, which is what every reader of the effect's source ability goes through
+        int depth = 0;
+        SpellAbility a = root;
+        while (a != null && a != esa) {
+            a = a.getSubAbility();
+            depth++;
+        }
+        if (a == null) {
+            return n;
+        }
+        SpellAbility sub = n;
+        for (int k = 0; sub != null && k < depth; k++) {
+            sub = sub.getSubAbility();
+        }
+        return sub != null ? sub : n;
     }
 
     private static SpellAbility findSAInCard(SpellAbility sa, Card c) {

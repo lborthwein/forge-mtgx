@@ -472,6 +472,18 @@ public final class AiTapeCodec {
     }
 
     static void applyConfig(final Game g, final Player seat, final SpellAbility sa, final JsonElement e) {
+        applyConfig(g, seat, sa, e, false);
+    }
+
+    /**
+     * {@code charmModesLater} (bvw-decision-log-1027; the priority decision's own config only): a charm the AI chose
+     * carries the modes its deliberation attached; a forced replay does not deliberate, and the play re-chooses the
+     * modes (the recorded chooseModeForAbility) and sets their targets (the recorded "h" checkpoint). Then only the
+     * charm's own part is set here. A play that does not re-choose them leaves those recorded decisions unused: a
+     * divergence at the play, never a silent difference.
+     */
+    static void applyConfig(final Game g, final Player seat, final SpellAbility sa, final JsonElement e,
+            final boolean charmModesLater) {
         checkEncodable(e);
         final JsonObject o = e.getAsJsonObject();
         final int host = o.get("h").getAsInt();
@@ -483,7 +495,13 @@ public final class AiTapeCodec {
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
             links++;
         }
-        if (links != o.get("n").getAsInt()) {
+        final boolean modesLater = charmModesLater && sa.getApi() == forge.game.ability.ApiType.Charm
+                && links < o.get("n").getAsInt();
+        if (links == 1 && links < o.get("n").getAsInt() && !modesLater && sa.getApi() == forge.game.ability.ApiType.Charm
+                && inferCharmModes(g, seat, sa, o)) {
+            links = o.get("n").getAsInt();
+        }
+        if (links != o.get("n").getAsInt() && !modesLater) {
             throw new IllegalStateException("the record's ability has " + o.get("n").getAsInt() + " parts, the game's " + links);
         }
         if (o.has("x")) {
@@ -517,6 +535,75 @@ public final class AiTapeCodec {
                 }
             }
         }
+    }
+
+    /**
+     * codec-1103 (class B, DIAG-REPLAY-PILOT): a modal spell played from an effect (cast from exile by another card's
+     * ability, a free cast) or without the stack gets its modes from Forge AI's deliberation, which sets them directly
+     * (no chooseModeForAbility ask is recorded) and which a forced replay does not run. The record's checkpoint still
+     * has the chain's length and every part's targets, so the modes are recovered from those: every set of
+     * {@code n - 1} distinct modes of the charm, chained in the charm's order, whose parts are targeted exactly where the
+     * record's are and can legally take the record's targets. Exactly one such set: it is chained (as
+     * CharmEffect.chainAbilities does) and true is returned. None or several: nothing changes and false is returned (the
+     * caller then diverges, as before). No mode is ever guessed. Repeatable-mode charms are not inferred.
+     */
+    static boolean inferCharmModes(final Game g, final Player seat, final SpellAbility sa, final JsonObject o) {
+        if (sa.isCopied() || sa.hasParam("CanRepeatModes") || sa.getSubAbility() != null) {
+            return false;
+        }
+        final int k = o.get("n").getAsInt() - 1;
+        final JsonArray t = o.getAsJsonArray("t");
+        if (sa.getActivatingPlayer() == null) {
+            sa.setActivatingPlayer(seat);
+        }
+        final List<forge.game.spellability.AbilitySub> options = forge.game.ability.effects.CharmEffect.makePossibleOptions(sa);
+        if (k < 1 || k > options.size() || t == null || t.size() != k + 1) {
+            return false;
+        }
+        options.sort(java.util.Comparator.comparingInt(x -> x.getSVarInt("CharmOrder") == null ? 0 : x.getSVarInt("CharmOrder")));
+        List<forge.game.spellability.AbilitySub> fit = null;
+        final int n = options.size();
+        for (int mask = 0; mask < (1 << n); mask++) {
+            if (Integer.bitCount(mask) != k) {
+                continue;
+            }
+            final List<forge.game.spellability.AbilitySub> pick = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                if ((mask & (1 << i)) != 0) {
+                    pick.add(options.get(i));
+                }
+            }
+            boolean ok = true;
+            for (int j = 0; j < k && ok; j++) {
+                final forge.game.spellability.AbilitySub m = pick.get(j);
+                final JsonElement tj = t.get(j + 1);
+                final boolean targeted = !(tj.isJsonNull());
+                if (targeted != m.usesTargeting()) {
+                    ok = false;
+                } else if (targeted && !(tj.isJsonPrimitive() && "other".equals(tj.getAsString()))) {
+                    if (m.getActivatingPlayer() == null) {
+                        m.setActivatingPlayer(seat);
+                    }
+                    for (GameObject x : AiTapeCodec.<GameObject>derefs(g, tj)) {
+                        if (!m.canTarget(x)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (ok) {
+                if (fit != null) {
+                    return false; // two sets fit the record: not ours to pick
+                }
+                fit = pick;
+            }
+        }
+        if (fit == null) {
+            return false;
+        }
+        forge.game.ability.effects.CharmEffect.chainAbilities(sa, new ArrayList<>(fit));
+        return true;
     }
 
     private static boolean sameTargets(final SpellAbility s, final List<GameObject> want) {
