@@ -125,9 +125,11 @@ public final class ForcedWinPlanner {
         static final Step PASS = new Step();
         /** solver-gaps-1104 (enginePassToEnd): pass to the opponent's end step of the next turn (see {@link #toEnd}). */
         static final Step PASS_END = new Step(true);
+        /** line-adoption-1107 (solverCfg anyWindow): on to main phase 1 of this turn, from our upkeep or draw step. */
+        static final Step MAIN = new Step(AbilKind.MAIN, -1, "main", "main", "", null, List.of(), -1);
 
         Step copy() {
-            if (pass) {
+            if (pass || this == MAIN) {
                 return this;
             }
             final Step s = new Step(kind, hostId, hostName, desc, costKey, targetVariant, effects, floatColor);
@@ -245,6 +247,9 @@ public final class ForcedWinPlanner {
             if (kind == AbilKind.ATTACK) {
                 return "ATTACK";
             }
+            if (kind == AbilKind.MAIN) {
+                return "MAIN";
+            }
             if (kind == AbilKind.REPEAT) {
                 return "REPEAT" + times + "x" + body;
             }
@@ -288,6 +293,11 @@ public final class ForcedWinPlanner {
         int rank;
         /** The play-outs keep this many cards on top of our library in place (the line was planned on a known top). */
         int knownTop;
+        /**
+         * line-adoption-1107 (solverCfg anyWindow): planned outside our main phases; its steps before the first PASS or MAIN
+         * are played in the window it was taken in.
+         */
+        boolean offMain;
 
         Line(List<Step> steps, List<String> pileNames, int winTurn, int lifeLeft, int manaLeft, int protection,
                 List<String> protectionNames, String how) {
@@ -336,6 +346,8 @@ public final class ForcedWinPlanner {
          */
         boolean planScry, planDiscard, payRecord;
         int planScryMax = 3, payVariants = 3;
+        /** next-turn-1107 (evalAvoidLost): card ids of ours that are gone once we pass the turn (lost in a verification). */
+        Set<Integer> goneAtPass = Set.of();
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -397,6 +409,8 @@ public final class ForcedWinPlanner {
         int turnIdx;
         /** We may cast sorcery-speed things now (our main phase with an empty stack). */
         boolean sorcery;
+        /** line-adoption-1107: before main phase 1 of our turn (anyWindow from our upkeep or draw step). */
+        boolean preMain;
         int life, oppLife, oppLib, storm;
         boolean landDrop;
         final int[] pool = new int[7];
@@ -430,6 +444,7 @@ public final class ForcedWinPlanner {
             final S s = new S();
             s.turnIdx = turnIdx;
             s.sorcery = sorcery;
+            s.preMain = preMain;
             s.life = life;
             s.oppLife = oppLife;
             s.oppLib = oppLib;
@@ -464,7 +479,7 @@ public final class ForcedWinPlanner {
 
         String key() {
             final StringBuilder sb = new StringBuilder();
-            sb.append(turnIdx).append(sorcery ? 'S' : 'i').append('/').append(life).append('/').append(oppLife).append('/').append(oppLib)
+            sb.append(turnIdx).append(sorcery ? 'S' : 'i').append(preMain ? "M" : "").append('/').append(life).append('/').append(oppLife).append('/').append(oppLib)
                     .append('/').append(storm).append(landDrop ? 'L' : 'l').append(Arrays.toString(pool)).append('h');
             sb.append(names(hand)).append('b');
             // permutations of the same permanents are one position (order matters only for returned subtypes)
@@ -527,6 +542,7 @@ public final class ForcedWinPlanner {
         deadline = lim.ms < 0 ? Long.MAX_VALUE : forge.game.WorkClock.nanoTime() + lim.ms * 1_000_000L;
         final S s = new S();
         s.sorcery = pos.sorcerySpeed;
+        s.preMain = pos.preMain;
         s.life = pos.life;
         s.oppLife = pos.oppLife;
         s.oppLib = pos.oppLibrary;
@@ -653,6 +669,21 @@ public final class ForcedWinPlanner {
         final List<S> out = new ArrayList<>(first);
         out.addAll(second);
         out.addAll(third);
+        if (s.preMain && !pending) {
+            // line-adoption-1107: from our upkeep or draw step, the turn goes on to its main phase (not to our next turn)
+            final S n = s.copy();
+            n.steps.add(Step.MAIN);
+            n.preMain = false;
+            n.sorcery = true;
+            Arrays.fill(n.pool, 0);
+            n.anyQueue.clear();
+            if (pos.preMainDraw) {
+                resolve(n, List.of(new Eff(EffKind.DRAW, 1, 0)), 0, 0, null, out);
+            } else {
+                out.add(n);
+            }
+            return out;
+        }
         if (s.turnIdx < lim.horizon - 1 && !pending) {
             final S n = s.copy();
             n.steps.add(Step.PASS);
@@ -911,6 +942,10 @@ public final class ForcedWinPlanner {
             s.how = "opponent-decked";
             out.add(s);
             return out;
+        }
+        if (!lim.goneAtPass.isEmpty()) {
+            // next-turn-1107: permanents a verification world lost in the opponent's turn are not there on our next turn
+            s.bf.removeIf(p -> lim.goneAtPass.contains(cards.get(p.card).id));
         }
         s.turnIdx++;
         s.sorcery = true;
@@ -1702,6 +1737,7 @@ public final class ForcedWinPlanner {
             }
         }
         final Line line = new Line(steps, pileNames, s.turnIdx, s.life, mana, prot.size(), prot, s.how);
+        line.offMain = pos.offMain; // line-adoption-1107
         if (lineKeys.add(line.key())) {
             result.lines.add(line);
             if (s.turnIdx == 0) {

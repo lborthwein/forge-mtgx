@@ -115,16 +115,34 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * solverCfg.budgetMs this reserves the rest of the decision for that comparison.
          */
         public boolean lineDuel = false;
+        /**
+         * unified-search-1106 (off by default): one deadline, no cliff. The solver runs under the decision's own deadline; a
+         * line that won every verified world (any number from one) is taken; a line with no verified world is unknown, not
+         * P = 0, and its point is asked again; lines are compared instead of sampling plans; a capped search compares the best
+         * line's posterior with the root's value at the search's departZ. Needs no lineFloor.
+         */
+        public boolean unified = false;
+        /** Preserve the priority answer's announced X in sampled plans; absent means legacy matching. */
+        public boolean exactActions = false;
         public boolean lineFloorAlways = false;
         /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
         public boolean lineKeep = false;
 
         /** unified-search-1106 (off by default): a sampled plan's steps keep the announced X they were recorded with. */
         public boolean planX = false;
+        /**
+         * line-adoption-1107 (off by default): at a plan point whose solver line wins on a later turn than the search's
+         * horizon reaches, every candidate's play-out runs to the start of the turn after the line's win turn (with a value
+         * leaf: the seat's first priority in it). The line is then valued by its own outcome in each world and the
+         * alternatives by the same later leaf, in the same worlds and under the same departZ gate, instead of the line
+         * being cut at the leaf before its kill.
+         */
+        public boolean lineHorizon = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "planX"));
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX",
+                "lineHorizon", "exactActions"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -154,7 +172,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineFloor")) s.lineFloor = o.get("lineFloor").getAsDouble();
             if (o.has("lineFloorAlways")) s.lineFloorAlways = o.get("lineFloorAlways").getAsBoolean();
             if (o.has("lineDuel")) s.lineDuel = o.get("lineDuel").getAsBoolean();
+            if (o.has("unified")) s.unified = o.get("unified").getAsBoolean();
             if (o.has("planX")) s.planX = o.get("planX").getAsBoolean();
+            if (o.has("lineHorizon")) s.lineHorizon = o.get("lineHorizon").getAsBoolean();
+            if (o.has("exactActions")) s.exactActions = o.get("exactActions").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -225,12 +246,24 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final String label;
         /** unified-search-1106 (plans.planX): the announced X this step was played with; -1 = none recorded. */
         final int x;
+        /** house p3 (plans.exactActions): only a candidate announcing the same X (-1 = none) matches; no fallback. */
+        final boolean exact;
 
         PStep(final SpellAbility sa, final String phase) {
             this(sa, phase, -1);
         }
 
         PStep(final SpellAbility sa, final String phase, final int x) {
+            this(sa, phase, x, false);
+        }
+
+        /** house p3 (exactActions; the house's form, PlanActionIdentityTest): x null = legacy, else an exact step (-1 = none). */
+        PStep(final SpellAbility sa, final String phase, final Integer x) {
+            this(sa, phase, x == null ? -1 : x, x != null);
+        }
+
+        PStep(final SpellAbility sa, final String phase, final int x, final boolean exact) {
+            this.exact = exact;
             this.x = x;
             this.pass = sa == null;
             this.hostId = sa == null || sa.getHostCard() == null ? -1 : sa.getHostCard().getId();
@@ -241,7 +274,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
 
         String key() {
-            return phase + ":" + (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc) + (x >= 0 ? "|x" + x : "");
+            return phase + ":" + (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc)
+                    + (exact ? "|x=" + x : x >= 0 ? "|x" + x : "");
         }
 
         boolean matches(final SpellAbility sa) {
@@ -353,7 +387,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
     }
 
-    /** The menu candidate of a step (the first one: X variants of one entry play its first variant), or -1. */
+    /** The menu candidate of a step: with its recorded X when planX recorded one (else the first match), exactly when exactActions did; -1 if unavailable. */
     static int match(final RlCandidates.Menu m, final List<SpellAbility> objs, final PStep st) {
         int first = -1;
         for (int c = 0; c < m.C(); c++) {
@@ -364,6 +398,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (ch < 0 || ch > objs.size()) {
                 continue;
             }
+            final com.google.gson.JsonElement fx0 = m.cands.get(c).frag;
+            final int fx = fx0 != null && fx0.isJsonObject() && fx0.getAsJsonObject().has("x") ? fx0.getAsJsonObject().get("x").getAsInt() : -1;
+            if (st.exact) {
+                if (st.x == fx && st.matches(ch == 0 ? null : objs.get(ch - 1))) {
+                    return c; // house p3 (exactActions): the same announcement or none
+                }
+                continue;
+            }
             if (st.matches(ch == 0 ? null : objs.get(ch - 1))) {
                 if (st.x < 0) {
                     return c;
@@ -371,8 +413,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 if (first < 0) {
                     first = c;
                 }
-                final com.google.gson.JsonElement f = m.cands.get(c).frag;
-                if (f != null && f.isJsonObject() && f.getAsJsonObject().has("x") && f.getAsJsonObject().get("x").getAsInt() == st.x) {
+                if (fx == st.x) {
                     return c; // unified-search-1106: the same X the plan was recorded with
                 }
             }
@@ -390,12 +431,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final double temperature;
         final boolean sampled;
         final int maxSteps;
+        final boolean exactActions;
         final List<PStep> steps = new ArrayList<>();
         /** unified-search-1106 (plans.planX). */
         boolean recordX;
         Player seatPlayer;
 
         Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps) {
+            this(turn, seed, temperature, sampled, maxSteps, false);
+        }
+
+        Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps,
+                final boolean exactActions) {
+            this.exactActions = exactActions;
             this.turn = turn;
             this.rng = new Random(seed);
             this.temperature = temperature;
@@ -416,19 +464,23 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         @Override
         public void answered(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
                 final int choice) {
-            if (!inPlan(g, p) || choice < 0 || choice > objs.size()) {
-                return;
-            }
-            steps.add(new PStep(choice == 0 ? null : objs.get(choice - 1), String.valueOf(g.getPhaseHandler().getPhase())));
+            answered(g, p, m, objs, choice, -1);
         }
 
         @Override
         public void answered(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
                 final int choice, final int x) {
-            if (!recordX || x < 0) {
-                answered(g, p, m, objs, choice);
-            } else if (inPlan(g, p) && choice >= 0 && choice <= objs.size()) {
-                steps.add(new PStep(choice == 0 ? null : objs.get(choice - 1), String.valueOf(g.getPhaseHandler().getPhase()), x));
+            if (!inPlan(g, p) || choice < 0 || choice > objs.size()) {
+                return;
+            }
+            final SpellAbility sa = choice == 0 ? null : objs.get(choice - 1);
+            final String phase = String.valueOf(g.getPhaseHandler().getPhase());
+            if (exactActions) {
+                steps.add(new PStep(sa, phase, x, true)); // house p3 (exactActions): X or none, matched exactly
+            } else if (recordX && x >= 0) {
+                steps.add(new PStep(sa, phase, x)); // unified-search-1106 (planX)
+            } else {
+                steps.add(new PStep(sa, phase));
             }
         }
 
@@ -810,10 +862,42 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return worked(() -> driver.forgeCosts()); // work-units-1107
     }
 
+    /** line-adoption-1107 (plans.lineHorizon; report only): plan points whose play-outs ran past the search's horizon. */
+    int horizonExtends;
+
+    /**
+     * line-adoption-1107: the turn after the latest win turn of the plan's solver lines, when that is later than the
+     * search's horizon (now + horizonTurns); else 0. A line's win turn counts our turns from this one (0 = this turn):
+     * from our turn T it is T + 2w, from theirs T + 2w - 1.
+     */
+    static int lineHorizonTurn(final Game g, final Player me, final List<Object> plans, final int horizonTurns) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        final int turn = ph.getTurn();
+        final boolean ours = ph.isPlayerTurn(me);
+        int out = 0;
+        for (Object pl : plans) {
+            if (!(pl instanceof LinePlan)) {
+                continue;
+            }
+            final int w = ((LinePlan) pl).proposal.winTurn;
+            if (w <= 0) {
+                continue;
+            }
+            out = Math.max(out, winAbs(turn, w, ours) + 1);
+        }
+        return out > turn + horizonTurns ? out : 0;
+    }
+
+    static int winAbs(final int turn, final int winTurn, final boolean ourTurn) {
+        return turn + 2 * winTurn - (ourTurn ? 0 : 1);
+    }
+
     /** kill-line-1106 (plans.lineFloor; report only): lines adopted by the floor. */
     int lineFloorTakes;
     /** kill-line-1106 (plans.lineDuel; report only): points scored as default against the line. */
     int lineDuels;
+    /** unified-search-1106 (report only): capped points adopted by the posterior, points with a line of no verified world. */
+    int lineCapTakes, lineUnknowns;
 
     /** kill-line-1106: plans.lineKeep. */
     @Override
@@ -857,13 +941,21 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     /** A plan point: our main phase (or their end step, solver lines only), empty stack, once per phase or after a plan. */
     boolean planPoint(final Game g) {
+        return planPoint(g, null);
+    }
+
+    /**
+     * As above; with solverCfg anyWindow (line-adoption-1107), also any other window of ours with an empty stack where the
+     * menu {@code objs} holds an action that is not a mana ability (solver lines only).
+     */
+    boolean planPoint(final Game g, final List<SpellAbility> objs) {
         if (!g.getStack().isEmpty() || live != null || !driver.solver().lineDone()) {
             return false;
         }
         final PhaseHandler ph = g.getPhaseHandler();
         final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
         final boolean theirEnd = spec.solver && !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
-        if (!ourMain && !theirEnd) {
+        if (!ourMain && !theirEnd && !(anyWindow() && canAct(objs))) {
             return false;
         }
         final String phase = String.valueOf(ph.getPhase());
@@ -878,7 +970,56 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         lastPointPhase = phase;
         pointAgain = false;
         lastPointIds = mine;
+        if (!ourMain && !theirEnd) {
+            windowPoints++; // line-adoption-1107
+        }
         return true;
+    }
+
+    /** line-adoption-1107: solverCfg anyWindow is on (the solver proposes at any window of ours). */
+    boolean anyWindow() {
+        return spec.solver && spec.solverCfg.has("anyWindow") && "true".equals(spec.solverCfg.get("anyWindow").getAsString());
+    }
+
+    /** line-adoption-1107: the menu holds an action that is not a mana ability. */
+    static boolean canAct(final List<SpellAbility> objs) {
+        if (objs == null) {
+            return false;
+        }
+        for (SpellAbility sa : objs) {
+            if (sa != null && !sa.isManaAbility()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** line-adoption-1107 (report only): plan points opened by anyWindow outside our main phases and their end step. */
+    int windowPoints;
+
+    /**
+     * wu-reads-1107 (solverCfg windowWorkMs; 0 = off, the default, and then nothing changes): the solver's budget at a plan
+     * point anyWindow opened (outside our main phases and their end step), in ms on the budget clock. With workUnits that
+     * is work at the same unit costs as every other budget, so a window point costs at most this much solver work. The
+     * solver's one deadline there is the earlier of the decision's and {@code b0 + windowWorkMs}, and its planner runs
+     * within it.
+     */
+    long windowWorkMs() {
+        if (!spec.solver || !spec.solverCfg.has("windowWorkMs")) {
+            return 0L;
+        }
+        return Math.max(0L, spec.solverCfg.get("windowWorkMs").getAsLong());
+    }
+
+    /** wu-reads-1107 (report only): window plan points whose solver ran on the window budget. */
+    int windowBudgeted;
+
+    /** wu-reads-1107: a window of ours that anyWindow opens (not our main phases, not their end step). */
+    boolean offWindow(final Game g) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
+        final boolean theirEnd = !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
+        return !ourMain && !theirEnd;
     }
 
     /** choice-search-1105 (replanOnEntry): our nonland permanents' ids at the last plan point, and the replans counted. */
@@ -907,6 +1048,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         int knownTop;
         double ms;
         String note = "";
+        /** line-adoption-1107 (plans.lineHorizon): the absolute turn the play-outs run to, 0 = the search's own horizon. */
+        int horizonTurn;
     }
 
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
@@ -926,7 +1069,23 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         st.knownTop = driver.probe(() -> solver.knownTopCount(g));
         if (spec.solver) {
             final long a = System.nanoTime();
+            // unified-search-1106; wu-reads-1107: from b0, the decision's start on the budget clock (t0 when workUnits is
+            // off), so with workUnits the one deadline is on the work clock like every deadline the solver compares it with
+            long hard = spec.unified ? b0 + forge.ai.WallClock.budgetMs(rs.budgetMs()) * 1_000_000L : 0L;
+            final long wms = windowWorkMs();
+            final boolean windowed = wms > 0 && anyWindow() && offWindow(g);
+            if (windowed) {
+                final long w = b0 + wms * 1_000_000L; // wu-reads-1107 (solverCfg windowWorkMs)
+                hard = hard == 0L ? w : Math.min(hard, w);
+                windowBudgeted++;
+            }
+            if (hard != 0L) {
+                solver.setHardDeadline(hard);
+            }
+            solver.setWindowCap(windowed);
             final List<ForcedWinSolver.Proposal> props = driver.probe(() -> solver.propose(g));
+            solver.setHardDeadline(0L);
+            solver.setWindowCap(false);
             solverRuns++;
             if (solver.lastCap() != null) {
                 // rollout-budget-1101 (review #160 S2-2): the proposal hit its Forge AI work cap (it proposes nothing)
@@ -936,7 +1095,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             solverMs.add((System.nanoTime() - a) / 1e6);
             ForcedWinSolver.Proposal proven = null;
             for (ForcedWinSolver.Proposal pr : props) {
-                if (pr.proven(spec.minProvenWorlds) && (proven == null || pr.steps < proven.steps)) {
+                if (pr.proven(spec.unified ? 1 : spec.minProvenWorlds) && (proven == null || pr.steps < proven.steps)) {
                     proven = pr;
                 }
             }
@@ -970,15 +1129,26 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 n++;
                 lineCands++;
             }
+            if (spec.lineHorizon) {
+                st.horizonTurn = lineHorizonTurn(g, me, st.plans, rs.horizonTurns());
+                if (st.horizonTurn > 0) {
+                    horizonExtends++;
+                }
+            }
             if (duel != null) {
                 st.duel = true;
                 lineDuels++;
                 st.ms = (System.nanoTime() - t0) / 1e6;
                 return st; // kill-line-1106: default against the line; no plans sampled
             }
+            if (spec.unified && n > 0) {
+                st.ms = (System.nanoTime() - t0) / 1e6;
+                return st; // unified-search-1106: the decision's time goes to comparing the lines, not to sampling plans
+            }
         }
         final PhaseHandler ph = g.getPhaseHandler();
-        if (spec.samples > 0 && ph.isPlayerTurn(p)) {
+        final boolean offMain = !(ph.isPlayerTurn(p) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)));
+        if (spec.samples > 0 && ph.isPlayerTurn(p) && !(anyWindow() && offMain)) {
             final long a = System.nanoTime();
             final long ba = forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : a; // work-units-1107 (off: a)
             // J0 (block-search-1019): both clocks go through WallClock, so a "Continue from here" rebuild unbinds them
@@ -989,13 +1159,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     : Math.min(ba + forge.ai.WallClock.budgetMs(spec.recordMs) * 1_000_000L,
                     b0 + Math.max(1000L, forge.ai.WallClock.budgetMs(rs.budgetMs()) / 2) * 1_000_000L);
             final List<Object> recs = new ArrayList<>();
-            final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps);
+            final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps, spec.exactActions);
             greedy.recordX = spec.planX;
             recs.add(greedy);
             final long seed0 = rs.ls().nextWorld0Seed();
             for (int i = 0; i < spec.samples; i++) {
                 final Recorder sampled = new Recorder(ph.getTurn(), RlSearch.splitmix(seed0 ^ (0x5a3L + i)), spec.temperature, true,
-                        spec.maxSteps);
+                        spec.maxSteps, spec.exactActions);
                 sampled.recordX = spec.planX;
                 recs.add(sampled);
             }
@@ -1045,6 +1215,38 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             provenPicks++;
         }
         if (r.chosen < givenSize) {
+            if (spec.unified && "capped".equals(r.outcome)) {
+                // unified-search-1106: no play-out verdict. The best verified line's posterior against the root's value,
+                // at the search's own z. A line with no verified world is unknown: this point is asked again.
+                LinePlan best = null;
+                boolean unknown = false;
+                for (Object pl : st.plans) {
+                    if (pl instanceof LinePlan) {
+                        final ForcedWinSolver.Proposal pr = ((LinePlan) pl).proposal;
+                        unknown |= pr.worldsRun == 0;
+                        if (pr.worldsRun > 0 && (best == null || pr.pBelief > best.proposal.pBelief)) {
+                            best = (LinePlan) pl;
+                        }
+                    }
+                }
+                if (best != null) {
+                    final int k = best.proposal.worldsRun;
+                    final double post = (best.proposal.pBelief * k + 1) / (k + 2);
+                    final double sd = Math.sqrt(post * (1 - post) / (k + 3));
+                    if (post - (1 + vRoot) / 2 > rs.departZ() * sd) {
+                        driver.solver().adopt(best.line);
+                        handoff = true;
+                        lineCapTakes++;
+                        lineTurns.add(g.getPhaseHandler().getTurn());
+                        return RlSeat.PrioritySearch.HOOK;
+                    }
+                }
+                if (unknown) {
+                    pointAgain = true;
+                    lineUnknowns++;
+                }
+                return -2;
+            }
             if (spec.lineFloor > 0 && ("capped".equals(r.outcome) || spec.lineFloorAlways && "kept".equals(r.outcome))) {
                 // kill-line-1106: the verified line's P(win) against the root's, where the search gave no verdict for it
                 LinePlan best = null;
@@ -1233,11 +1435,26 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("planDecisions", planDecisions);
         o.addProperty("planDepartures", planDepartures);
         o.addProperty("lineDepartures", lineDepartures);
+        if (lineCapTakes != 0) {
+            o.addProperty("lineCapTakes", lineCapTakes); // unified-search-1106
+        }
+        if (lineUnknowns != 0) {
+            o.addProperty("lineUnknowns", lineUnknowns); // unified-search-1106
+        }
         if (lineDuels != 0) {
             o.addProperty("lineDuels", lineDuels); // kill-line-1106
         }
         if (lineFloorTakes != 0) {
             o.addProperty("lineFloorTakes", lineFloorTakes); // kill-line-1106
+        }
+        if (spec.lineHorizon) {
+            o.addProperty("horizonExtends", horizonExtends); // line-adoption-1107 (only when on)
+        }
+        if (anyWindow()) {
+            o.addProperty("windowPoints", windowPoints); // line-adoption-1107 (only when on)
+        }
+        if (windowWorkMs() > 0) {
+            o.addProperty("windowBudgeted", windowBudgeted); // wu-reads-1107 (only when on)
         }
         o.addProperty("policyPlanDepartures", policyPlanDepartures);
         o.addProperty("provenPicks", provenPicks);

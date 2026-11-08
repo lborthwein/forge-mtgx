@@ -97,6 +97,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int maxSteps = 5000;
         public int leafExtraSteps = 400;
         public double departZ = 1.645;
+        /** unified-search-1106 (off by default): {@link LookaheadSearch.Config#anytime}. */
+        public boolean anytime = false;
         public double margin = 0.0;
         /** static | value */
         public String leaf = "static";
@@ -240,11 +242,26 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * Attaching is per game: a second seat of that game with infoState on reads it too.
          */
         public boolean infoAttach = false;
+        /** house p4 (explicit draw; off by default): an explicit draw reason is reported as a draw, read by the actor from this spec. */
+        public boolean honorDrawReason = false;
         /** honest-belief-1020: the cube list file ({@code mtgx-belief-cube/1}; {@code classpath:} = a jar resource) and its pin. */
         public String beliefCube;
         public String beliefCubeSha256;
         /** honest-belief-1020: copies of each basic in the pool. */
         public int beliefBasics = 8;
+        /** Default off: preserve the published copier protection in resampled look-ahead worlds. */
+        public boolean beliefStatics = false;
+        /** Default off: carry player-only stale-static repair into resampled look-ahead copies. */
+        public boolean beliefPlayerStatics = false;
+        /** Default off: belief worlds retain hand identities already present in the seat's observation. */
+        public boolean beliefRememberedHand = false;
+        /** Default off: preserve turn-use limits in look-ahead copies. */
+        public boolean copyTurnLimits = false;
+        public boolean offBattlefieldLimits = false;
+        public boolean historyLki = false;
+        public boolean copyBackFace = false;
+        public boolean stackAbilityCopies = false;
+        public boolean stackHistory = false;
         /** honest-belief-1020: the pool is a singleton cube (our deck and the cards we saw leave it). */
         public boolean beliefSingleton = true;
         /**
@@ -259,6 +276,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * hand, whatever the policy answers. Generic: no card or deck logic. The policy's answer is logged.
          */
         public boolean alwaysKeep = false;
+        /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
+        public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
@@ -316,7 +335,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "workUnits", "workScale", "workWallMs", "blockSampleSeed"));
+                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
+                "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
+                "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -332,6 +353,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("maxSteps")) c.maxSteps = o.get("maxSteps").getAsInt();
             if (o.has("leafExtraSteps")) c.leafExtraSteps = o.get("leafExtraSteps").getAsInt();
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
+            if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
             if (o.has("leaf")) c.leaf = o.get("leaf").getAsString();
             if (o.has("playout")) c.playout = o.get("playout").getAsString();
@@ -366,6 +388,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
             if (o.has("forcedWin") && !o.get("forcedWin").isJsonNull()) c.forcedWin = o.getAsJsonObject("forcedWin");
             if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
+            if (o.has("basicsByType") && o.get("basicsByType").getAsBoolean()) {
+                c.basicsByType = true;
+                forge.ai.simulation.BeliefSampler.BASICS_BY_TYPE = true; // bugfix-basics: process-wide, same names on a real DB
+            }
             if (o.has("choiceScorer") && !o.get("choiceScorer").isJsonNull()) {
                 c.choiceScorer = o.getAsJsonObject("choiceScorer");
                 ChoiceScorer.Config.parse(c.choiceScorer); // a bad key fails at parse, not at the first ask
@@ -386,12 +412,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("belief")) c.belief = o.get("belief").getAsString();
             if (o.has("infoState")) c.infoState = o.get("infoState").getAsBoolean();
             if (o.has("infoAttach")) c.infoAttach = o.get("infoAttach").getAsBoolean();
+            if (o.has("honorDrawReason")) c.honorDrawReason = o.get("honorDrawReason").getAsBoolean();
             armInfoState(c);
             if (o.has("beliefCube") && !o.get("beliefCube").isJsonNull()) c.beliefCube = o.get("beliefCube").getAsString();
             if (o.has("beliefCubeSha256") && !o.get("beliefCubeSha256").isJsonNull()) {
                 c.beliefCubeSha256 = o.get("beliefCubeSha256").getAsString();
             }
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
+            if (o.has("beliefStatics")) c.beliefStatics = o.get("beliefStatics").getAsBoolean();
+            if (o.has("beliefPlayerStatics")) c.beliefPlayerStatics = o.get("beliefPlayerStatics").getAsBoolean();
+            if (o.has("beliefRememberedHand")) c.beliefRememberedHand = o.get("beliefRememberedHand").getAsBoolean();
+            if (o.has("copyTurnLimits")) c.copyTurnLimits = o.get("copyTurnLimits").getAsBoolean();
+            if (o.has("offBattlefieldLimits")) c.offBattlefieldLimits = o.get("offBattlefieldLimits").getAsBoolean();
+            if (o.has("historyLki")) c.historyLki = o.get("historyLki").getAsBoolean();
+            if (o.has("copyBackFace")) c.copyBackFace = o.get("copyBackFace").getAsBoolean();
+            if (o.has("stackAbilityCopies")) c.stackAbilityCopies = o.get("stackAbilityCopies").getAsBoolean();
+            if (o.has("stackHistory")) c.stackHistory = o.get("stackHistory").getAsBoolean();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             if (o.has("beliefDeck") && !o.get("beliefDeck").isJsonNull()) {
                 // unified-jar-1106: boolean = live's deck-belief-1105; string = research's model export path (belief-n11-1030)
@@ -592,6 +628,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (cac != null) {
                 o.add("chooseACard", cac); // r2-choose-a-card-1029: only when on
             }
+            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
+            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
+            if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (historyLki) o.addProperty("historyLki", true);
+            if (copyBackFace) o.addProperty("copyBackFace", true);
+            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
+            if (stackHistory) o.addProperty("stackHistory", true);
+            if (basicsByType) {
+                o.addProperty("basicsByType", true); // bugfix-basics: only when on
+            }
             if (blocks > 0) {
                 // block-search-1019: only when on, so every other spec's JSON is unchanged
                 o.addProperty("blocks", blocks);
@@ -610,6 +656,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 }
                 o.addProperty("beliefBasics", beliefBasics);
+                if (beliefStatics) o.addProperty("beliefStatics", true);
+                if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 o.addProperty("beliefSingleton", beliefSingleton);
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
@@ -913,6 +961,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.seed = splitmix(gameSeed ^ splitmix(cfg.seedSalt));
         lc.threads = cfg.threads;
         lc.departZ = cfg.departZ;
+        lc.anytime = cfg.anytime;
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
@@ -923,6 +972,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.maxSameDepartures = cfg.sameDepartures;
         lc.copyFidelity = cfg.copyFidelity;
         lc.infoState = cfg.infoState; // order-memory-1102 (off by default)
+        lc.beliefStatics = cfg.beliefStatics;
+        lc.beliefPlayerStatics = cfg.beliefPlayerStatics;
+        lc.beliefRememberedHand = cfg.beliefRememberedHand;
+        lc.copyTurnLimits = cfg.copyTurnLimits;
+        lc.offBattlefieldLimits = cfg.offBattlefieldLimits;
+        lc.historyLki = cfg.historyLki;
+        lc.copyBackFace = cfg.copyBackFace;
+        lc.stackAbilityCopies = cfg.stackAbilityCopies;
+        lc.stackHistory = cfg.stackHistory;
         if (!"off".equals(cfg.belief)) {
             // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
             lc.belief = cfg.belief;
@@ -993,8 +1051,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the decision budget, ms (0 = none). */
+    double departZ() {
+        return cfg.departZ; // unified-search-1106
+    }
+
     long budgetMs() {
         return cfg.budgetMs;
+    }
+
+    /** line-adoption-1107: the search's horizon in turns. */
+    int horizonTurns() {
+        return cfg.horizon;
     }
 
     static long splitmix(long z) {
@@ -1374,7 +1441,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final LookaheadSearch.GivenResult r;
         PlanSearch.Stage stage = null;
-        if (sb != null && sb.planPoint(g)) {
+        if (sb != null && sb.planPoint(g, menuObjs)) {
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
             stage = sb.propose(g, me, m, menuObjs, t0, bt0);
             if (stage.hook) {
@@ -1390,6 +1457,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         armForce(mark());
+        if (cfg.anytime && "value".equals(cfg.leaf)) {
+            ls.setRootP((1 + sc.valueObs) / 2); // unified-search-1106
+        }
         if (sb != null) {
             // S-b: every searched decision has the proof flags; a plan point also has its plans (and its budget counts
             // from the decision's start, the proposals included)
@@ -1407,6 +1477,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 expandLimit = order.size();
                 ex = this;
+            }
+            if (stage != null && stage.horizonTurn > 0) {
+                ls.setPlanHorizonTurn(stage.horizonTurn); // line-adoption-1107 (plans.lineHorizon); cleared by the decision
             }
             r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : cfg.breadth, stage.plans, stage.labels, kt, bt0, sb.threat, ex)
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
@@ -1696,6 +1769,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         row.add("plans", labels);
         row.addProperty("known_top", st.knownTop);
+        if (st.horizonTurn > 0) {
+            row.addProperty("horizon_turn", st.horizonTurn); // line-adoption-1107 (only when extended)
+        }
         if (r != null) {
             row.addProperty("outcome", r.outcome);
             row.addProperty("proven", r.proven);
@@ -2604,6 +2680,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         f.setVersion(obsVersion);
         f.setKnowledge(k);
         return new CopyCtx(k, f);
+    }
+
+    @Override
+    public boolean remembersHandCard(final Game live, final Player observer, final forge.game.card.Card card) {
+        // Reject other games even if physical card/player IDs happen to agree.
+        return cfg.beliefRememberedHand && liveKnow != null && liveKnow.game() == live
+                && observer != null && observer.getGame() == live && card != null && card.getGame() == live
+                && card.isInZone(forge.game.zone.ZoneType.Hand) && !card.isFaceDown()
+                && liveKnow.knows(liveKnow.seatOf(observer), card);
     }
 
     /**

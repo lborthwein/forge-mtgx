@@ -118,6 +118,13 @@ public final class LookaheadSearch {
          */
         public double departZ = 0.0;
         /**
+         * unified-search-1106 (off by default; proof decisions only): one anytime comparison. Each candidate is compared with
+         * the default on the worlds both finished, by the departZ test on those paired differences. A failed or unfinished
+         * world drops that world, not the candidate or the decision; a default with no finished world is estimated by
+         * the root's value. With every world finished this chooses exactly as the plain gate.
+         */
+        public boolean anytime = false;
+        /**
          * Target variants (lane forge-ai-misplays-0928; 0 = off, the default: candidates unchanged). Up to this many
          * extra candidates per decision: a single-target spell or ability among the candidates played with a target
          * other than the one Forge AI would choose (or with none, when "up to one"), so the play-outs, not Forge AI's
@@ -345,6 +352,20 @@ public final class LookaheadSearch {
         public String beliefCubeSha256 = null;
         /** Copies of each basic land type in the pool. */
         public int beliefBasics = 8;
+        /** Default off: later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
+        public boolean beliefStatics = false;
+        /** Default off: carry player-only stale-static repair into resampled look-ahead copies. */
+        public boolean beliefPlayerStatics = false;
+        /** Default off: preserve opponent-hand identities remembered by the searching seat's observation tracker. */
+        public boolean beliefRememberedHand = false;
+        /** Default off: preserve this turn's use limits in look-ahead copies, as p9 does for solver copies. */
+        public boolean copyTurnLimits = false;
+        /** Default off: retain turn-use limits outside the battlefield. */
+        public boolean offBattlefieldLimits = false;
+        public boolean historyLki = false;
+        public boolean copyBackFace = false;
+        public boolean stackAbilityCopies = false;
+        public boolean stackHistory = false;
         /**
          * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
          * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
@@ -513,6 +534,13 @@ public final class LookaheadSearch {
             if (copyEot != AiFixes.Mode.OFF) {
                 o.addProperty("copyEot", copyEot.key());
             }
+            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
+            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
+            if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (historyLki) o.addProperty("historyLki", true);
+            if (copyBackFace) o.addProperty("copyBackFace", true);
+            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
+            if (stackHistory) o.addProperty("stackHistory", true);
             if (copyFidelity != 0) {
                 o.addProperty("copyFidelity", copyFidelity);
             }
@@ -567,6 +595,8 @@ public final class LookaheadSearch {
                 o.addProperty("beliefCube", beliefCube);
                 o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 o.addProperty("beliefBasics", beliefBasics);
+                if (beliefStatics) o.addProperty("beliefStatics", true);
+                if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 if (beliefPool != null) {
                     o.addProperty("beliefPoolSize", beliefPool.size());
                 }
@@ -1512,6 +1542,9 @@ public final class LookaheadSearch {
      * supply to {@link #decideGiven}. Every method is called only when its option is set with {@link #setHooks}.
      */
     public interface SearchHooks {
+        /** Only recorded observation knowledge, never an inference from the opponent's actual hidden cards. */
+        default boolean remembersHandCard(Game live, Player observer, Card card) { return false; }
+
         /** Decision thread, inside the copy's preparation (after the world draw): a per-copy context, or null. */
         Object onCopy(Game copy, Player me);
 
@@ -2434,6 +2467,24 @@ public final class LookaheadSearch {
      * of its budget; 0 = the play-outs' own start (S-c).
      */
     private volatile long decisionStartNanos = 0L;
+    /** unified-search-1106 ({@link Config#anytime}): the root's P(win) from the value head, NaN = none. */
+    private volatile double rootP = Double.NaN;
+
+    public void setRootP(double p) {
+        this.rootP = p;
+    }
+
+    /**
+     * line-adoption-1107 (plans.lineHorizon; 0 = none, the default): the absolute turn at whose start (with a value leaf:
+     * the seat's first priority in it) every play-out of the decision in progress ends, when later than now + horizon. Set
+     * by a plan point whose solver line wins past the search's horizon, so the line is scored by its own outcome and its
+     * alternatives by the same leaf, in the same worlds. Cleared when the decision ends.
+     */
+    private volatile int planHorizonTurn = 0;
+
+    public void setPlanHorizonTurn(int turn) {
+        this.planHorizonTurn = turn;
+    }
     /**
      * S-b: cards on top of our library the seat placed itself (pile memory, ForcedWinSolver.knownTopCount); every world
      * keeps them in place. 0 = S-c's worlds (only the cards we can see stay).
@@ -2477,6 +2528,8 @@ public final class LookaheadSearch {
             ownKnownTop = 0;
             decisionStartNanos = 0L;
             oppCheck = null;
+            rootP = Double.NaN;
+            planHorizonTurn = 0;
         }
     }
 
@@ -3038,7 +3091,24 @@ public final class LookaheadSearch {
         } finally {
             forceFidelity = false;
         }
-        if (proof && aborted > 0) {
+        // unified-search-1106 (anytime): which play-outs finished; null = the plain path
+        final boolean[][] finished = proof && cfg.anytime ? finishedWorlds(outs, n, k) : null;
+        if (finished != null) {
+            int otherWorlds = 0;
+            for (int c = 0; c < n; c++) {
+                boolean any = false;
+                for (int w = 0; w < k; w++) {
+                    any |= finished[c][w];
+                    otherWorlds += c > 0 && finished[c][w] ? 1 : 0;
+                }
+                ok[c] = any;
+            }
+            if (aborted > 0 && otherWorlds > 0) {
+                aborted = 0;
+                stats.partialDecisions++;
+                res.partialWorlds = otherWorlds;
+            }
+        } else if (proof && aborted > 0) {
             // search-bones-1015 (S-b): anytime. Over the budget, the worlds every candidate finished in decide (common
             // random numbers kept), when there are at least two; otherwise the decision is capped as S-c's
             final List<Integer> full = new ArrayList<>();
@@ -3091,10 +3161,14 @@ public final class LookaheadSearch {
         final double[] ev = new double[n];
         for (int c = 0; c < n; c++) {
             double s = 0;
+            int kc = 0;
             for (int w = 0; w < k; w++) {
-                s += values[c][w];
+                if (finished == null || finished[c][w]) {
+                    s += values[c][w];
+                    kc++;
+                }
             }
-            ev[c] = ok[c] ? s / k : Double.NaN;
+            ev[c] = ok[c] ? s / kc : Double.NaN;
             if (!ok[c]) {
                 stats.candidatesDropped++;
                 res.failed++;
@@ -3124,11 +3198,15 @@ public final class LookaheadSearch {
         final boolean[] provenWin = new boolean[n], provenLoss = new boolean[n];
         final int[] planBroken = new int[n];
         int provenPick = -1;
-        if (proof && !overBudget && k >= Math.min(3, Math.max(1, cfg.worlds))) {
+        if (proof && !overBudget && (finished != null || k >= Math.min(3, Math.max(1, cfg.worlds)))) {
             for (int c = 0; c < n; c++) {
                 boolean win = ok[c], loss = ok[c];
                 for (int w = 0; w < k; w++) {
                     final Rollout r = outs[c][w];
+                    if (finished != null && !finished[c][w]) {
+                        loss = false; // unified-search-1106: a world not finished is not evidence for a win
+                        continue;
+                    }
                     if (r == null || !r.ok) {
                         win = false;
                         loss = false;
@@ -3168,9 +3246,11 @@ public final class LookaheadSearch {
             res.provenLoss = provenLoss;
             res.planBroken = planBroken;
         }
-        final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick : argmax(values, okArg, n, k);
+        final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick
+                : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP)
+                : argmax(values, okArg, n, k);
         int best = plainBest;
-        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0) {
+        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0 && finished == null) {
             final int medBest = argmaxMedian(values, okArg, n, k);
             if (medBest != plainBest) {
                 stats.departMedianChanged++;
@@ -4285,6 +4365,95 @@ public final class LookaheadSearch {
     }
 
     /** The search's choice from its values: the argmax, ties and a failed Forge answer to Forge's answer (index 0). */
+    private static boolean[][] finishedWorlds(Rollout[][] outs, int n, int k) {
+        final boolean[][] f = new boolean[n][k];
+        for (int c = 0; c < n; c++) {
+            for (int w = 0; w < k; w++) {
+                final Rollout r = outs[c][w];
+                f[c][w] = r != null && r.ok && !r.aborted;
+            }
+        }
+        return f;
+    }
+
+    /**
+     * unified-search-1106 ({@link Config#anytime}): the candidate with the largest mean gain over the default, among those
+     * whose gain passes the z test. Pairs are the worlds both finished; where the default has none, its mean, or with no
+     * finished world at all {@code rootP}. A candidate with fewer worlds than the decision's uses the larger of its own and
+     * the decision's pooled variance, so a thin sample carries the uncertainty the rest of the decision shows.
+     * With every world finished this is {@link #argmax}.
+     */
+    static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP) {
+        double defSum = 0;
+        int defN = 0;
+        for (int w = 0; w < k; w++) {
+            if (f[0][w]) {
+                defSum += v[0][w];
+                defN++;
+            }
+        }
+        final double defAll = defN > 0 ? defSum / defN : rootP;
+        if (Double.isNaN(defAll)) {
+            return 0;
+        }
+        final double[] mean = new double[n], var = new double[n];
+        final int[] kc = new int[n];
+        double poolSs = 0;
+        int poolDof = 0;
+        for (int c = 1; c < n; c++) {
+            if (!ok[c]) {
+                continue;
+            }
+            double sum = 0;
+            for (int w = 0; w < k; w++) {
+                if (f[c][w]) {
+                    sum += v[c][w] - (f[0][w] ? v[0][w] : defAll);
+                    kc[c]++;
+                }
+            }
+            if (kc[c] == 0) {
+                continue;
+            }
+            mean[c] = sum / kc[c];
+            double ss = 0;
+            for (int w = 0; w < k; w++) {
+                if (f[c][w]) {
+                    final double d = v[c][w] - (f[0][w] ? v[0][w] : defAll) - mean[c];
+                    ss += d * d;
+                }
+            }
+            var[c] = kc[c] > 1 ? ss / (kc[c] - 1) : Double.NaN;
+            poolSs += ss;
+            poolDof += Math.max(0, kc[c] - 1);
+        }
+        final double pooled = poolDof > 0 ? poolSs / poolDof : Double.NaN;
+        int best = 0;
+        double bestGain = margin;
+        for (int c = 1; c < n; c++) {
+            if (!ok[c] || kc[c] == 0 || !(mean[c] > 0)) {
+                continue;
+            }
+            if (z > 0 && k >= 2) {
+                final double s2;
+                if (kc[c] == k) {
+                    s2 = var[c];
+                } else if (Double.isNaN(pooled)) {
+                    continue; // nothing to measure a thin sample's uncertainty by
+                } else {
+                    s2 = Double.isNaN(var[c]) ? pooled : Math.max(var[c], pooled);
+                }
+                if (!(mean[c] > z * Math.sqrt(s2 / kc[c]))) {
+                    continue;
+                }
+            }
+            if (mean[c] > bestGain) {
+                best = c;
+                bestGain = mean[c];
+            }
+        }
+        return best;
+    }
+
     int argmax(double[][] values, boolean[] ok, int n, int k) {
         if (!ok[0]) {
             return 0;
@@ -6043,6 +6212,12 @@ public final class LookaheadSearch {
     /** A copier of the live game for this search: carries until-EOT commands when copyEot is ON (lane misplays-1005). */
     GameCopier copierOf(Game live) {
         final GameCopier c = new GameCopier(live, true);
+        if (cfg.copyTurnLimits) c.setTurnLimits(true);
+        if (cfg.offBattlefieldLimits) c.setOffBattlefieldLimits(true);
+        if (cfg.historyLki) c.setHistoryLki(true);
+        if (cfg.copyBackFace) c.setCopyBackFace(true);
+        if (cfg.stackAbilityCopies) c.setStackAbilityCopies(true);
+        if (cfg.stackHistory) c.setStackHistory(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }
@@ -6134,8 +6309,9 @@ public final class LookaheadSearch {
                     setFirstPriority(ph, p.firstPriority);
                 }
             }
-            final TurnWatch watch = new TurnWatch(ph.getTurn() + (recording ? 1 : p.capTurns > 0 ? p.capTurns
-                    : cfg.horizonTurns), Boolean.TRUE.equals(wantFp) ? me : null);
+            // line-adoption-1107: planHorizonTurn 0 unless plans.lineHorizon
+            final TurnWatch watch = new TurnWatch(recording ? ph.getTurn() + 1 : Math.max(ph.getTurn()
+                    + (p.capTurns > 0 ? p.capTurns : cfg.horizonTurns), planHorizonTurn), Boolean.TRUE.equals(wantFp) ? me : null);
             final int maxSteps = p.capSteps > 0 ? p.capSteps : cfg.maxSteps;
             g.subscribeToEvents(watch);
             if (probe != null) {
@@ -7908,12 +8084,24 @@ public final class LookaheadSearch {
 
     // ------------------------------------------------------------------ belief (lane belief-sampling-0928)
 
+    private boolean rememberedHand(Game live, Player observer, Card card) {
+        return cfg.beliefRememberedHand && hooks != null && card != null
+                && card.getGame() == live && observer.getGame() == live
+                && card.isInZone(ZoneType.Hand) && card.getController() != observer
+                && !card.isFaceDown() && hooks.remembersHandCard(live, observer, card);
+    }
+
+    private boolean handKnown(Game live, Player observer, Card card) {
+        return card.getView().canBeShownTo(observer.getView()) || rememberedHand(live, observer, card);
+    }
+
     /** The opponent's hidden hand cards / known library top, as the seat sees them in the live game. */
-    private static int[] hiddenCounts(Game live, Player liveOpp, PlayerView myView) {
+    private int[] hiddenCounts(Game live, Player liveOpp, Player liveMe) {
+        final PlayerView myView = liveMe.getView();
         int keep = 0;
         final List<Card> hand = new ArrayList<>(liveOpp.getCardsIn(ZoneType.Hand));
         for (Card c : hand) {
-            if (c.getView().canBeShownTo(myView)) {
+            if (handKnown(live, liveMe, c)) {
                 keep++;
             }
         }
@@ -7944,7 +8132,7 @@ public final class LookaheadSearch {
         }
         final Player liveOpp = opps.get(0);
         final PlayerView myView = liveMe.getView();
-        final int[] hid = hiddenCounts(live, liveOpp, myView);
+        final int[] hid = hiddenCounts(live, liveOpp, liveMe);
         if (hid[0] == 0 && hid[1] == 0) {
             stats.beliefSkipped++;
             return null;
@@ -8058,7 +8246,7 @@ public final class LookaheadSearch {
             known.addAll(ownDeckNames(liveMe));
             for (Card c : live.getCardsInGame()) {
                 if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
-                        && c.getView().canBeShownTo(myView)) {
+                        && (c.getView().canBeShownTo(myView) || rememberedHand(live, liveMe, c))) {
                     known.add(c.getPaperCard().getName());
                 }
             }
@@ -8069,7 +8257,7 @@ public final class LookaheadSearch {
                 pool.add(name);
             }
         }
-        pool.addAll(Arrays.asList(BeliefSampler.BASICS));
+        pool.addAll(Arrays.asList(BeliefSampler.basics()));
         return pool;
     }
 
@@ -8096,11 +8284,11 @@ public final class LookaheadSearch {
      * fewer slots than the hidden cards it must fill (so a hidden library is never cut short).
      */
     private int basicsFor(List<String> pool, int hand, int lib) {
-        final int nonBasic = pool.size() - BeliefSampler.BASICS.length;
+        final int nonBasic = pool.size() - BeliefSampler.basics().length;
         final int need = hand + lib;
         int m = cfg.beliefBasics;
-        if (nonBasic + m * BeliefSampler.BASICS.length < need) {
-            m = (need - nonBasic + BeliefSampler.BASICS.length - 1) / BeliefSampler.BASICS.length;
+        if (nonBasic + m * BeliefSampler.basics().length < need) {
+            m = (need - nonBasic + BeliefSampler.basics().length - 1) / BeliefSampler.basics().length;
         }
         return m;
     }
@@ -8111,6 +8299,8 @@ public final class LookaheadSearch {
      * belief off or in shadow mode, {@link #resample} as before.
      */
     void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
+        if (cfg.beliefStatics) g.staleStatics = true;
+        if (cfg.beliefPlayerStatics) g.stalePlayerStatics = true;
         if (beliefCube != null && !cfg.beliefShadow && cfg.beliefDeck) {
             // deck-belief-1105: the opponents' hidden cards from the deck posterior, then our own library as before
             redrawOpponentsDeck(live, liveMe, g, me, rng, DECK_PARAMS);
@@ -8219,7 +8409,14 @@ public final class LookaheadSearch {
         if (beliefCube == null || cfg.beliefShadow) {
             return null;
         }
-        return (live, liveMe, g, me, rng) -> redrawOpponents(live, liveMe, g, me, rng, null);
+        return new ForcedWinSolver.Redraw() {
+            @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                redrawOpponents(live, liveMe, g, me, rng, null);
+            }
+            @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                return rememberedHand(live, observer, card);
+            }
+        };
     }
 
     /**
@@ -8234,7 +8431,14 @@ public final class LookaheadSearch {
         if (beliefCube == null || cfg.beliefShadow) {
             return null;
         }
-        return (live, liveMe, g, me, rng) -> redrawOpponentsDeck(live, liveMe, g, me, rng, p);
+        return new ForcedWinSolver.Redraw() {
+            @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                redrawOpponentsDeck(live, liveMe, g, me, rng, p);
+            }
+            @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                return rememberedHand(live, observer, card);
+            }
+        };
     }
 
     /** The solver's re-draw for a solver config: {@link #opponentRedrawDeck} with {@code deckBelief}, else as before. */
@@ -8253,7 +8457,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && handKnown(live, liveMe, lc)) {
                     keep.add(c);
                 }
             }
@@ -8461,7 +8665,7 @@ public final class LookaheadSearch {
                 if (fillBasics && !BeliefSampler.isBasic(nm)) {
                     final Integer it = itemOf.get(nm);
                     if (it == null || !linked[it]) {
-                        nm = BeliefSampler.BASICS[rng.nextInt(BeliefSampler.BASICS.length)];
+                        nm = BeliefSampler.basics()[rng.nextInt(BeliefSampler.basics().length)];
                     }
                 }
                 final Card nc = beliefCard(nm, opp, g);
@@ -8499,7 +8703,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && handKnown(live, liveMe, lc)) {
                     keep.add(c);
                 }
             }

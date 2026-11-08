@@ -238,7 +238,28 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             k.seenIds[s].putAll(seenIds[s]);
             k.seenOpp[s].addAll(seenOpp[s]);
         }
-        k.tail.addAll(tail);
+        if (copy.stackHistory) {
+            final Map<Integer, Integer> ids = copy.getCopiedStackIds();
+            for (StackEvent event : tail) {
+                final StackEvent mapped = new StackEvent(event.name, event.fullName, event.faceDown,
+                        event.ability, event.controllerSeat);
+                mapped.facts = event.facts.clone();
+                final List<int[]> targets = new ArrayList<>();
+                for (int[] target : event.targets) {
+                    final int[] ref = target.clone();
+                    if (ref[0] == RlStackFacts.T_STACK) {
+                        // A target no longer on the copied stack stays unresolved. Do not let a
+                        // recycled/scoped numeric ID bind it to a different future stack entry.
+                        ref[1] = ids.getOrDefault(ref[1], -1);
+                    }
+                    targets.add(ref);
+                }
+                mapped.targets = Collections.unmodifiableList(targets);
+                k.tail.addLast(mapped);
+            }
+        } else {
+            k.tail.addAll(tail);
+        }
         k.arranged.addAll(arranged);
         for (Map.Entry<Integer, Set<Integer>> e : revealedInResolution.entrySet()) {
             k.revealedInResolution.put(e.getKey(), new HashSet<>(e.getValue()));
