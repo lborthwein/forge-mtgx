@@ -616,6 +616,58 @@ public final class ForcedWinModel {
             }
         }
 
+        /**
+         * ledger-sweep2-1107 (solverCfg sourceColorsLive; off by default): each permanent's plain mana output (colors and
+         * amount) is read from its mana abilities in the position, as the probe reads them, instead of from the template
+         * learned at the card's first sight. A template is learned once per name per game, in that moment's context: a land
+         * whose color comes from a static ability (Urborg making itself and every land a Swamp) learned from the hand has no
+         * output, and an Island learned before Urborg arrived makes only U (ledger row 15: dd6's T15 kill needs B from both).
+         * Sacrifice sources and summoning-sick creatures keep what read() gave them.
+         */
+        static void readSourceColors(Position p, Player me) {
+            int i = 0;
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isFaceDown()) {
+                    continue;
+                }
+                if (i >= p.battlefield.size()) {
+                    return;
+                }
+                final ACard a = p.battlefield.get(i++);
+                if (a.sourceSick || a.sourceSac) {
+                    continue;
+                }
+                int colors = 0, amount = 0;
+                for (SpellAbility original : c.getManaAbilities()) {
+                    final SpellAbility m = original.copy(me);
+                    if (m.getManaPart() == null) {
+                        continue;
+                    }
+                    int col = 0;
+                    for (int k = 0; k < 6; k++) {
+                        if (m.canProduce(SHORT[k])) {
+                            col |= 1 << k;
+                        }
+                    }
+                    final Abil cost = col == 0 ? null : readCost(m, AbilKind.FLOAT);
+                    if (cost == null || cost.sacSelf || cost.generic != 0 || java.util.Arrays.stream(cost.pips).sum() != 0
+                            || cost.life != 0 || cost.discardHand || m.getSubAbility() != null) {
+                        continue;
+                    }
+                    colors |= col;
+                    int n;
+                    try {
+                        n = Math.max(1, m.amountOfManaGenerated(true));
+                    } catch (RuntimeException e) {
+                        n = 1;
+                    }
+                    amount = Math.max(amount, n);
+                }
+                a.sourceColors = colors;
+                a.sourceAmount = amount;
+            }
+        }
+
         /** strong-opp-1020: the learned templates as JSON (card name -> template), for a precomputed cache. */
         synchronized String exportJson() {
             return new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(templates);

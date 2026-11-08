@@ -255,6 +255,11 @@ public final class ForcedWinSolver {
          * left (ForcedWinPlanner.Limits#expandCap; ledger row 66).
          */
         public boolean planExpandCap = false;
+        /**
+         * ledger-sweep2-1107 (off by default): battlefield mana sources' colors and amounts are read from the position at every
+         * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
+         */
+        public boolean sourceColorsLive = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -727,6 +732,7 @@ public final class ForcedWinSolver {
             c.evalAvoidLost = "true".equals(get.apply("evalAvoidLost")); // next-turn-1107
             c.anyWindow = "true".equals(get.apply("anyWindow")); // line-adoption-1107
             c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
+            c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -2529,6 +2535,9 @@ public final class ForcedWinSolver {
         if (base == null) {
             return t;
         }
+        if (cfg.sourceColorsLive) {
+            ForcedWinModel.Reader.readSourceColors(base, opp); // ledger-sweep2-1107: their battlefield is public
+        }
         if (without != null) {
             for (Card w : without) {
                 base.hand.removeIf(a -> a.id == w.getId());
@@ -2628,6 +2637,9 @@ public final class ForcedWinSolver {
                     redraw.apply(live, me, g, cm, new Random(mix(cfg.seed, 7919L * w + 31L * ph.getTurn() + 5)));
                 }
                 pos = oppReader.read(g, co, null, true, co, pending);
+                if (pos != null && cfg.sourceColorsLive) {
+                    ForcedWinModel.Reader.readSourceColors(pos, co); // ledger-sweep2-1107
+                }
                 if (pos != null && revealed) {
                     // their hand is known to us (a discard effect revealed it): the real hand, only the library is drawn
                     final Position real = oppReader.read(live, opp, null, false, opp, pending);
@@ -3956,10 +3968,18 @@ public final class ForcedWinSolver {
         if (cfg.honestProbes) {
             return forge.bench.PlayerControllerBridge.isolated(live, () -> forge.util.IdScope.detached(() -> {
                 final Game g = honestProbeRoot(live, knownOrder);
-                return reader.read(g, (Player) g.getPlayer(me.getId()), knownOrder, true);
+                final Player pg = (Player) g.getPlayer(me.getId());
+                final Position hp = reader.read(g, pg, knownOrder, true);
+                if (cfg.sourceColorsLive && hp != null) {
+                    ForcedWinModel.Reader.readSourceColors(hp, pg); // ledger-sweep2-1107
+                }
+                return hp;
             }));
         }
         final Position pos = reader.read(live, me, knownOrder, true);
+        if (cfg.sourceColorsLive && pos != null) {
+            ForcedWinModel.Reader.readSourceColors(pos, me); // ledger-sweep2-1107 (before sourceOutput, which reads amounts only)
+        }
         if (cfg.sourceOutput && pos != null) {
             ForcedWinModel.Reader.readSourceOutputs(pos, me); // kill-line-1106
         }
@@ -5025,6 +5045,9 @@ public final class ForcedWinSolver {
         }
         if (pos == null) {
             return null;
+        }
+        if (cfg.sourceColorsLive) {
+            ForcedWinModel.Reader.readSourceColors(pos, p); // ledger-sweep2-1107
         }
         if (cfg.sourceOutput) {
             ForcedWinModel.Reader.readSourceOutputs(pos, p);
