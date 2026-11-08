@@ -135,6 +135,31 @@ public final class ForcedWinSolver {
         public boolean act = true;
         /** search-bones-1015 (c), off by default: the engine search's cycle table and REPEAT moves. */
         public boolean cycles = false;
+        /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
+        public boolean staleStatics = false;
+        /** house release (live-fixes-1107 port; off by default): stackAbilityCopies. */
+        public boolean stackAbilityCopies = false;
+        /** house release (live-fixes-1107 port; off by default): copyBackFace. */
+        public boolean copyBackFace = false;
+        /** house release (live-fixes-1107 port; off by default): offBattlefieldLimits. */
+        public boolean offBattlefieldLimits = false;
+        /** house release (live-fixes-1107 port; off by default): stalePlayerStatics. */
+        public boolean stalePlayerStatics = false;
+        /**
+         * engine-reach-1107 (off by default): engine nodes and the solver's play-out copies keep this turn's may-play and
+         * activation counts ({@link GameCopier#setTurnLimits}).
+         */
+        public boolean turnLimits = false;
+        /**
+         * unified-search-1106 (off by default): a followed line's own steps are not cut by the play-out loop breaker. A line is
+         * finite; a REPEAT longer than the breaker's window stopped mid-way in verification and read as no win.
+         */
+        public boolean lineUncapped = false;
+        /**
+         * ledger-sweep2-1107 (off by default; live-fixes-1107: default forge.liveFixes): one planner expansion builds at most
+         * as many branches as the planner has nodes left (ForcedWinPlanner.Limits#expandCap; ledger row 66, an OOM).
+         */
+        public boolean planExpandCap = false;
         /**
          * search-bones-1015, off by default: the engine search's root copy shuffles our library below the known top
          * (pile memory), as the verification worlds do; without it the engine plays on our real library order, hidden
@@ -171,6 +196,11 @@ public final class ForcedWinSolver {
          */
         public boolean hold = false;
 
+        /** live-fixes-1107: an explicit true|false, else {@link forge.game.EngineFixes#liveFixes()}. */
+        static boolean boolOrLive(final String v) {
+            return v == null ? forge.game.EngineFixes.liveFixes() : "true".equals(v.trim());
+        }
+
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
             c.frameMemory = "true".equals(get.apply("frameMemory"));
@@ -198,6 +228,14 @@ public final class ForcedWinSolver {
             c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
+            c.staleStatics = boolOrLive(get.apply("staleStatics")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
+            c.stackAbilityCopies = boolOrLive(get.apply("stackAbilityCopies")); // house; live-fixes-1107: default forge.liveFixes
+            c.copyBackFace = boolOrLive(get.apply("copyBackFace")); // house; live-fixes-1107: default forge.liveFixes
+            c.offBattlefieldLimits = boolOrLive(get.apply("offBattlefieldLimits")); // house; live-fixes-1107: default forge.liveFixes
+            c.stalePlayerStatics = boolOrLive(get.apply("stalePlayerStatics")); // house; live-fixes-1107: default forge.liveFixes
+            c.turnLimits = boolOrLive(get.apply("turnLimits")); // engine-reach-1107; live-fixes-1107: default forge.liveFixes
+            c.lineUncapped = boolOrLive(get.apply("lineUncapped")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
+            c.planExpandCap = boolOrLive(get.apply("planExpandCap")); // ledger-sweep2-1107; live-fixes-1107: default forge.liveFixes
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
@@ -273,6 +311,8 @@ public final class ForcedWinSolver {
     @FunctionalInterface
     public interface Redraw {
         void apply(Game live, Player liveMe, Game g, Player me, Random rng);
+        /** Observation tracker knowledge retained by the redraw, also respected by the later world hand filter. */
+        default boolean remembersHandCard(Game live, Player observer, Card card) { return false; }
     }
     private final Config cfg;
 
@@ -583,6 +623,13 @@ public final class ForcedWinSolver {
     private String lastOutcome = "?";
     private int lastPlannerNodes;
 
+    /** ledger-sweep2-1107: planner limits with this solver's expansion cap (planExpandCap; off = as {@code new Limits()}). */
+    private ForcedWinPlanner.Limits limits() {
+        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        lim.expandCap = cfg.planExpandCap;
+        return lim;
+    }
+
     private Line offense0(Game live, String key) {
         decisions++;
         final int index = decisionIndex++;
@@ -593,7 +640,7 @@ public final class ForcedWinSolver {
             noLineKey = key;
             return null;
         }
-        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        final ForcedWinPlanner.Limits lim = limits(); // ledger-sweep2-1107
         lim.nodes = cfg.nodes;
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
@@ -854,7 +901,7 @@ public final class ForcedWinSolver {
                 pos.library.addAll(pool.subList(Math.min(hidden, pool.size()), pool.size()));
                 pos.library.sort((x, y) -> Integer.compare(x.id, y.id));
             }
-            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            final ForcedWinPlanner.Limits lim = limits(); // ledger-sweep2-1107
             lim.nodes = cfg.nodes / 2;
             // POST-FREEZE 3: when they cannot act at sorcery speed now (our turn, or their non-main step), their
             // threat window is their next two turns (a setup spell next turn, the win the turn after: a
@@ -914,7 +961,13 @@ public final class ForcedWinSolver {
                 final Player co;
                 synchronized (live) {
                     final GameCopier copier = new GameCopier(live, true);
+                    copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                    copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                    copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                    copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                     g = copier.makeCopy();
+                    g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
+                    g.stalePlayerStatics = cfg.stalePlayerStatics; // house stalePlayerStatics
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -944,7 +997,7 @@ public final class ForcedWinSolver {
                 }
             }
             pos.sorcerySpeed = ph.isPlayerTurn(opp) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
-            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            final ForcedWinPlanner.Limits lim = limits(); // ledger-sweep2-1107
             lim.nodes = cfg.nodes / 2;
             lim.horizon = (pos.sorcerySpeed ? 2 : 3) + cfg.threatExtraTurns;
             lim.ms = cfg.planMs;
@@ -1348,6 +1401,12 @@ public final class ForcedWinSolver {
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
         el.cycles = cfg.cycles;
+        el.staleStatics = cfg.staleStatics; // unified-search-1106
+        el.stackAbilityCopies = cfg.stackAbilityCopies; // house
+        el.copyBackFace = cfg.copyBackFace; // house
+        el.offBattlefieldLimits = cfg.offBattlefieldLimits; // house
+        el.stalePlayerStatics = cfg.stalePlayerStatics; // house
+        el.turnLimits = cfg.turnLimits; // engine-reach-1107
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
             el.ownKnownTop = kt == null ? 0 : kt.size();
@@ -1487,7 +1546,13 @@ public final class ForcedWinSolver {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1);
+                copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
+                g.stalePlayerStatics = cfg.stalePlayerStatics; // house stalePlayerStatics
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -1495,7 +1560,7 @@ public final class ForcedWinSolver {
                     redraw.apply(live, me, g, cm, rng); // honest-belief-1020
                 }
                 for (Player o : cm.getOpponents()) {
-                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
+                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng, redraw); // house p14
                 }
                 if (cfg.infoState) {
                     // order-memory-1102: the known cards below the top stay at their index; canonical unknown order
@@ -1736,7 +1801,13 @@ public final class ForcedWinSolver {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records
+                copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                 g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
+                g.stalePlayerStatics = cfg.stalePlayerStatics; // house stalePlayerStatics
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -1747,7 +1818,7 @@ public final class ForcedWinSolver {
                     }
                     for (Player o : cm.getOpponents()) {
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
-                        hideOrSample(live, me, liveOpp, o, world == 0, rng);
+                        hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw);
                     }
                     if (cfg.infoState) {
                         shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng, true); // order-memory-1102
@@ -1760,6 +1831,7 @@ public final class ForcedWinSolver {
             final Follower f = new Follower(line);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
             lineAi.bounded(wall);
+            lineAi.uncapped = cfg.lineUncapped; // unified-search-1106
             cm.dangerouslySetController(lineAi);
             AdversaryAi adv = null;
             for (Player o : g.getPlayers()) {
@@ -1824,6 +1896,10 @@ public final class ForcedWinSolver {
      * we have seen). Their library is shuffled either way.
      */
     static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng) {
+        hideOrSample(live, liveMe, liveOpp, opp, hide, rng, null);
+    }
+
+    static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng, Redraw knowledge) {
         final forge.game.player.PlayerView myView = liveMe.getView();
         final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
         final List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
@@ -1831,7 +1907,8 @@ public final class ForcedWinSolver {
         final List<Card> pool = new ArrayList<>(lib);
         for (Card c : hand) {
             final Card lc = live.findById(c.getId());
-            if (lc != null && lc.getView().canBeShownTo(myView)) {
+            if (lc != null && (lc.getView().canBeShownTo(myView)
+                    || knowledge != null && knowledge.remembersHandCard(live, liveMe, lc))) {
                 keep.add(c);
             } else {
                 pool.add(c);
@@ -2496,6 +2573,12 @@ public final class ForcedWinSolver {
         String protectedBy;
         /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
         boolean continueAfter;
+        /** unified-search-1106 ({@link Config#lineUncapped}). */
+        boolean uncapped;
+
+        List<SpellAbility> lineAction(SpellAbility sa) {
+            return uncapped ? List.of(sa) : capped(List.of(sa));
+        }
 
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
@@ -2513,7 +2596,7 @@ public final class ForcedWinSolver {
             if (!f.done && !f.broken) {
                 final Follower.Next n = f.next(g, getPlayer());
                 if (n.action != null) {
-                    return capped(List.of(n.action));
+                    return lineAction(n.action);
                 }
                 if (n.waiting) {
                     return null;

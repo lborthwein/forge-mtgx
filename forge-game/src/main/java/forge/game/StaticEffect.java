@@ -345,4 +345,39 @@ public class StaticEffect {
         makeMappedCopy(map).remove(Maps.newHashMap());
     }
 
+    /**
+     * {@link #removeMapped(IEntityMap)} for a game whose hidden cards were swapped after its effects were computed (a belief
+     * world): cards no longer in the game (per {@code present}) have nothing to undo. With no such card it does the same.
+     */
+    public void removeMapped(IEntityMap map, java.util.function.Predicate<Card> present) {
+        removeMapped(map, present, false);
+    }
+
+    /** Also undo player effects when their source and all affected cards have left the world. */
+    public void removeMapped(IEntityMap map, java.util.function.Predicate<Card> present, boolean stalePlayers) {
+        final CardCollection kept = new CardCollection();
+        for (final Card c : this.affectedCards) {
+            if (present.test(c)) {
+                kept.add(map.map(c));
+            }
+        }
+        if (!present.test(this.source) && kept.isEmpty() && (!stalePlayers || this.affectedPlayers.isEmpty())) {
+            return;
+        }
+        // A source that is gone gets no reference into this copy: the only use of the source in remove() is IgnoreEffectCost's trait undo, which then has nothing to undo.
+        final boolean hasSource = present.test(this.source);
+        final StaticEffect copy = new StaticEffect(hasSource ? map.map(this.source) : null);
+        copy.ability = this.ability;
+        copy.affectedCards = kept;
+        copy.affectedPlayers = map.mapList(this.affectedPlayers);
+        copy.timestamp = this.timestamp;
+        if (hasSource || !hasParam("IgnoreEffectCost")) {
+            copy.mapParams = this.mapParams;
+        } else {
+            copy.mapParams = new java.util.HashMap<>(this.mapParams);
+            copy.mapParams.remove("IgnoreEffectCost");
+        }
+        copy.remove(Maps.newHashMap());
+    }
+
 }

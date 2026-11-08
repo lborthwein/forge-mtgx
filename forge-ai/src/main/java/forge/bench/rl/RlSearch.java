@@ -217,6 +217,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String beliefCubeSha256;
         /** honest-belief-1020: copies of each basic in the pool. */
         public int beliefBasics = 8;
+        /** Default off: preserve the published copier protection in resampled look-ahead worlds. */
+        public boolean beliefStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_STATICS; // house p8; live-fixes-1107 default
+        public boolean beliefRememberedHand = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_REMEMBERED_HAND; // house; live-fixes-1107 default
+        public boolean stackAbilityCopies = forge.ai.simulation.LookaheadSearch.LIVE_STACK_ABILITY_COPIES; // house; live-fixes-1107 default
+        public boolean copyBackFace = forge.ai.simulation.LookaheadSearch.LIVE_COPY_BACK_FACE; // house; live-fixes-1107 default
+        public boolean offBattlefieldLimits = forge.ai.simulation.LookaheadSearch.LIVE_OFF_BATTLEFIELD_LIMITS; // house; live-fixes-1107 default
+        public boolean copyTurnLimits = forge.ai.simulation.LookaheadSearch.LIVE_COPY_TURN_LIMITS; // house; live-fixes-1107 default
+        public boolean beliefPlayerStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_PLAYER_STATICS; // house; live-fixes-1107 default
         /** honest-belief-1020: the pool is a singleton cube (our deck and the cards we saw leave it). */
         public boolean beliefSingleton = true;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -230,7 +238,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "beliefRememberedHand", "stackAbilityCopies", "copyBackFace", "offBattlefieldLimits", "copyTurnLimits", "beliefPlayerStatics", "beliefSingleton", "infoState"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -286,6 +294,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 c.beliefCubeSha256 = o.get("beliefCubeSha256").getAsString();
             }
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
+            if (o.has("beliefStatics")) c.beliefStatics = o.get("beliefStatics").getAsBoolean();
+            if (o.has("beliefPlayerStatics")) c.beliefPlayerStatics = o.get("beliefPlayerStatics").getAsBoolean();
+            if (o.has("beliefRememberedHand")) c.beliefRememberedHand = o.get("beliefRememberedHand").getAsBoolean();
+            if (o.has("copyTurnLimits")) c.copyTurnLimits = o.get("copyTurnLimits").getAsBoolean();
+            if (o.has("offBattlefieldLimits")) c.offBattlefieldLimits = o.get("offBattlefieldLimits").getAsBoolean();
+            if (o.has("stackAbilityCopies")) c.stackAbilityCopies = o.get("stackAbilityCopies").getAsBoolean(); // house p16
+            if (o.has("copyBackFace")) c.copyBackFace = o.get("copyBackFace").getAsBoolean(); // house p15
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             c.check();
             return c;
@@ -415,6 +430,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (infoState) {
                 o.addProperty("infoState", true); // order-memory-1102: only when on
             }
+            // house p11-p16 (live-fixes-1107): only when on, independent of the belief, as the house releases emit them
+            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
+            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
+            if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (copyBackFace) o.addProperty("copyBackFace", true);
+            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
             if (!"off".equals(belief)) {
                 // honest-belief-1020: only when on, so every other spec's JSON is unchanged
                 o.addProperty("belief", belief);
@@ -424,6 +445,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 }
                 o.addProperty("beliefBasics", beliefBasics);
+                if (beliefStatics) o.addProperty("beliefStatics", true);
+                if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 o.addProperty("beliefSingleton", beliefSingleton);
             }
             if (choices > 0) {
@@ -624,6 +647,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.maxSameDepartures = cfg.sameDepartures;
         lc.copyFidelity = cfg.copyFidelity;
         lc.infoState = cfg.infoState; // order-memory-1102 (off by default)
+        lc.beliefStatics = cfg.beliefStatics;
+        lc.beliefPlayerStatics = cfg.beliefPlayerStatics;
+        lc.beliefRememberedHand = cfg.beliefRememberedHand;
+        lc.copyTurnLimits = cfg.copyTurnLimits;
+        lc.offBattlefieldLimits = cfg.offBattlefieldLimits;
+        lc.stackAbilityCopies = cfg.stackAbilityCopies; // house p16
+        lc.copyBackFace = cfg.copyBackFace; // house p15
         if (!"off".equals(cfg.belief)) {
             // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
             lc.belief = cfg.belief;
@@ -1938,6 +1968,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         f.setVersion(obsVersion);
         f.setKnowledge(k);
         return new CopyCtx(k, f);
+    }
+
+    @Override
+    public boolean remembersHandCard(final Game live, final Player observer, final forge.game.card.Card card) {
+        // Reject other games even if physical card/player IDs happen to agree.
+        return cfg.beliefRememberedHand && liveKnow != null && liveKnow.game() == live
+                && observer != null && observer.getGame() == live && card != null && card.getGame() == live
+                && card.isInZone(forge.game.zone.ZoneType.Hand) && !card.isFaceDown()
+                && liveKnow.knows(liveKnow.seatOf(observer), card);
     }
 
     /**

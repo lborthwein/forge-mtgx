@@ -69,6 +69,7 @@ public final class InteractiveMain {
                 new FileOutputStream(FileDescriptor.err), true, StandardCharsets.UTF_8));
         final BufferedReader input = new BufferedReader(
                 new InputStreamReader(System.in, StandardCharsets.UTF_8));
+        System.err.println(forge.game.EngineFixes.describe()); // live-fixes-1107: the switch's state, at startup (stderr)
 
         // lane puzzle-speed-1021 (off unless -Dforge.interactive.prewarm=true): the Forge model (~6.5 s, the whole card
         // database) is initialized BEFORE the config line is read, so a host can keep this JVM as a warm spare and hand

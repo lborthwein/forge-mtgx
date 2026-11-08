@@ -36,6 +36,60 @@ public final class BeliefSampler {
 
     public static final String[] BASICS = {"Plains", "Island", "Swamp", "Mountain", "Forest"};
 
+    /**
+     * bugfix-basics (off unless {@link #BASICS_BY_TYPE} is set, by -Dforge.ai.belief.basicsByType=true or a search spec's
+     * {@code basicsByType}): the five basic lands found in Forge's card database by their rules (a basic, non-snow land
+     * of one colour), not by a hard-coded name list, so a renamed card pool still has its basics. On Forge's real card
+     * database this gives exactly {@link #BASICS}. Off: {@link #BASICS}.
+     */
+    public static volatile boolean BASICS_BY_TYPE = forge.game.EngineFixes.liveFlag("forge.ai.belief.basicsByType"); // live-fixes-1107: default forge.liveFixes
+    private static volatile String[] basicsByType;
+
+    /** The basic land names in use: {@link #BASICS}, or (key on) the ones found by type. */
+    public static String[] basics() {
+        if (!BASICS_BY_TYPE) {
+            return BASICS;
+        }
+        String[] b = basicsByType;
+        if (b == null) {
+            b = basicsOf(StaticData.instance().getCommonCards().getUniqueCards());
+            basicsByType = b;
+        }
+        return b;
+    }
+
+    /**
+     * The basic lands of a card pool, one per colour in W, U, B, R, G order: cards whose type is a basic land, not snow,
+     * with exactly one of the five basic land types; per type the first name in sort order. A colour with none keeps {@link #BASICS}' name.
+     */
+    public static String[] basicsOf(final Iterable<PaperCard> cards) {
+        // the rules' five basic land types (305.6), W U B R G: types, not card names, so a renamed pool keeps them
+        final List<String> types = forge.card.MagicColor.Constant.BASIC_LANDS;
+        final String[] out = new String[5];
+        for (PaperCard pc : cards) {
+            final forge.card.CardRules r = pc.getRules();
+            if (r == null || r.getType() == null || !r.getType().isBasicLand() || r.getType().isSnow()) {
+                continue;
+            }
+            int hit = -1, n = 0;
+            for (int i = 0; i < 5; i++) {
+                if (r.getType().hasSubtype(types.get(i))) {
+                    hit = i;
+                    n++;
+                }
+            }
+            if (n == 1 && (out[hit] == null || pc.getName().compareTo(out[hit]) < 0)) {
+                out[hit] = pc.getName();
+            }
+        }
+        for (int i = 0; i < 5; i++) {
+            if (out[i] == null) {
+                out[i] = BASICS[i];
+            }
+        }
+        return out;
+    }
+
     /** The pinned cube: Forge names in file order, their tags, the basic multiplicity M. */
     public static final class Cube {
         public final List<String> names = new ArrayList<>();
@@ -100,7 +154,7 @@ public final class BeliefSampler {
             cube.tags.put(name, t);
             cube.paper.put(name, pc);
         }
-        for (String b : BASICS) {
+        for (String b : basics()) {
             final PaperCard pc = resolve(b);
             if (pc == null) {
                 throw new IllegalStateException("belief: Forge cannot resolve basic land " + b);
@@ -153,7 +207,7 @@ public final class BeliefSampler {
             cube.paper.put(fn, pc);
         }
         cube.sha256 = hex(sha256(String.join("\n", cube.names).getBytes(StandardCharsets.UTF_8)));
-        for (String b : BASICS) {
+        for (String b : basics()) {
             final PaperCard pc = resolve(b);
             if (pc == null) {
                 throw new IllegalStateException("belief: Forge cannot resolve basic land " + b);
@@ -202,7 +256,7 @@ public final class BeliefSampler {
     }
 
     public static boolean isBasic(String name) {
-        for (String b : BASICS) {
+        for (String b : basics()) {
             if (b.equals(name)) {
                 return true;
             }
