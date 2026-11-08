@@ -121,6 +121,11 @@ public class GameCopier {
 
     /** engine-reach-1107 (false = off): per-turn limits of statics (may-play caps) and non-planeswalker abilities are copied. */
     private boolean turnLimits = false;
+    private boolean offBattlefieldLimits = false;
+
+    public void setOffBattlefieldLimits(boolean on) {
+        this.offBattlefieldLimits = on;
+    }
 
     public void setTurnLimits(boolean on) {
         this.turnLimits = on;
@@ -484,6 +489,7 @@ public class GameCopier {
 
         newGame.staleStatics = origGame.staleStatics;
         newGame.stalePlayerStatics = stalePlayerStatics || origGame.stalePlayerStatics; // house p7
+        newGame.offBattlefieldLimits = offBattlefieldLimits || origGame.offBattlefieldLimits; // house p12
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
@@ -1213,6 +1219,10 @@ public class GameCopier {
      * both cards have the same list.
      */
     private void copyTurnLimits(Card c, Card newCard) {
+        copyTurnLimits(c, newCard, false);
+    }
+
+    private void copyTurnLimits(Card c, Card newCard, boolean allActivatedAbilities) {
         final java.util.List<StaticAbility> from = new java.util.ArrayList<>(c.getStaticAbilities());
         final java.util.List<StaticAbility> to = new java.util.ArrayList<>(newCard.getStaticAbilities());
         if (from.size() == to.size()) {
@@ -1224,7 +1234,7 @@ public class GameCopier {
                 }
             }
         }
-        if (!c.isPlaneswalker()) {
+        if (allActivatedAbilities || !c.isPlaneswalker()) {
             for (SpellAbility sa : c.getAllSpellAbilities()) {
                 final int active = sa.getActivationsThisTurn();
                 if (active > 0 && sa.isActivatedAbility()) {
@@ -1344,6 +1354,11 @@ public class GameCopier {
 
             newCard.setSVars(c.getSVars());
             newCard.copyChangedSVarsFrom(c);
+        }
+
+        if (zone != ZoneType.Battlefield && (offBattlefieldLimits || origGame.offBattlefieldLimits)) {
+            // The published battlefield repair does not reach abilities usable from other zones.
+            copyTurnLimits(c, newCard, true);
         }
 
         if (zone == ZoneType.Exile && c.isFaceDown()) {

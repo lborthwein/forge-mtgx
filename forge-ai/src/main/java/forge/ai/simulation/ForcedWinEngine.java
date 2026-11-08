@@ -169,6 +169,8 @@ final class ForcedWinEngine {
         int nodes = 250;
         /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
         boolean staleStatics = false;
+        /** house release (live-fixes-1107 port; false = off): offBattlefieldLimits. */
+        boolean offBattlefieldLimits = false;
         /** house release (live-fixes-1107 port; false = off): stalePlayerStatics. */
         boolean stalePlayerStatics = false;
         /** engine-reach-1107 (false = off): node copies keep this turn's may-play and activation counts ({@link GameCopier#setTurnLimits}). */
@@ -510,6 +512,7 @@ final class ForcedWinEngine {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 copier.setTurnLimits(lim.turnLimits); // engine-reach-1107
+                copier.setOffBattlefieldLimits(lim.offBattlefieldLimits); // house p12
                 root.g = copier.makeCopy();
                 root.g.staleStatics = lim.staleStatics; // unified-search-1106 (a belief world after the redraw below)
                 root.g.stalePlayerStatics = lim.stalePlayerStatics; // house stalePlayerStatics
@@ -1159,6 +1162,7 @@ final class ForcedWinEngine {
             copier.setStaleStatics(lim.staleStatics); // unified-search-1106
             copier.setStalePlayerStatics(lim.stalePlayerStatics); // house stalePlayerStatics
             copier.setTurnLimits(lim.turnLimits); // engine-reach-1107
+            copier.setOffBattlefieldLimits(lim.offBattlefieldLimits); // house p12
                 copier.setCopyFidelity(1); // storm count, per-turn records
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);

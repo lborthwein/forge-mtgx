@@ -65,6 +65,8 @@ public class Game {
     public boolean staleStatics = false;
     /** Default-off extension: undo stale player-only static effects in belief copies. */
     public boolean stalePlayerStatics = false;
+    /** Default off: copies retain turn-use limits outside the battlefield; inherited only by copies. */
+    public boolean offBattlefieldLimits = false;
 
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 
