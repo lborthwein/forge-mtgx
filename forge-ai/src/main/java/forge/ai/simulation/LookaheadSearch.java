@@ -70,6 +70,7 @@ public final class LookaheadSearch {
      * {@link Config} and RlSearch.Config start from these, so a spec key still sets them per seat.
      */
     public static final boolean LIVE_BELIEF_STATICS = forge.game.EngineFixes.liveFlag("forge.house.beliefStatics");
+    public static final boolean LIVE_COPY_BACK_FACE = forge.game.EngineFixes.liveFlag("forge.house.copyBackFace");
     public static final boolean LIVE_OFF_BATTLEFIELD_LIMITS = forge.game.EngineFixes.liveFlag("forge.house.offBattlefieldLimits");
     public static final boolean LIVE_COPY_TURN_LIMITS = forge.game.EngineFixes.liveFlag("forge.house.copyTurnLimits");
     public static final boolean LIVE_BELIEF_PLAYER_STATICS = forge.game.EngineFixes.liveFlag("forge.house.beliefPlayerStatics");
@@ -340,6 +341,8 @@ public final class LookaheadSearch {
         public int beliefBasics = 8;
         /** House p8 (live-fixes-1107: default {@link #LIVE_BELIEF_STATICS}): later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
         public boolean beliefStatics = LIVE_BELIEF_STATICS;
+        /** House release (live-fixes-1107: default {@link #LIVE_COPY_BACK_FACE}): copyBackFace. */
+        public boolean copyBackFace = LIVE_COPY_BACK_FACE;
         /** House release (live-fixes-1107: default {@link #LIVE_OFF_BATTLEFIELD_LIMITS}): offBattlefieldLimits. */
         public boolean offBattlefieldLimits = LIVE_OFF_BATTLEFIELD_LIMITS;
         /** House release (live-fixes-1107: default {@link #LIVE_COPY_TURN_LIMITS}): copyTurnLimits. */
@@ -463,6 +466,7 @@ public final class LookaheadSearch {
             }
             if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
             if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (copyBackFace) o.addProperty("copyBackFace", true); // house p15
             if (copyFidelity != 0) {
                 o.addProperty("copyFidelity", copyFidelity);
             }
@@ -5285,6 +5289,7 @@ public final class LookaheadSearch {
         final GameCopier c = new GameCopier(live, true);
         if (cfg.copyTurnLimits) c.setTurnLimits(true);
         if (cfg.offBattlefieldLimits) c.setOffBattlefieldLimits(true);
+        if (cfg.copyBackFace) c.setCopyBackFace(true); // house p15
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }

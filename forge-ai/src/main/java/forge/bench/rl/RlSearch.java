@@ -219,6 +219,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int beliefBasics = 8;
         /** Default off: preserve the published copier protection in resampled look-ahead worlds. */
         public boolean beliefStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_STATICS; // house p8; live-fixes-1107 default
+        public boolean copyBackFace = forge.ai.simulation.LookaheadSearch.LIVE_COPY_BACK_FACE; // house; live-fixes-1107 default
         public boolean offBattlefieldLimits = forge.ai.simulation.LookaheadSearch.LIVE_OFF_BATTLEFIELD_LIMITS; // house; live-fixes-1107 default
         public boolean copyTurnLimits = forge.ai.simulation.LookaheadSearch.LIVE_COPY_TURN_LIMITS; // house; live-fixes-1107 default
         public boolean beliefPlayerStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_PLAYER_STATICS; // house; live-fixes-1107 default
@@ -235,7 +236,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "offBattlefieldLimits", "copyTurnLimits", "beliefPlayerStatics", "beliefSingleton", "infoState"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "copyBackFace", "offBattlefieldLimits", "copyTurnLimits", "beliefPlayerStatics", "beliefSingleton", "infoState"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -295,6 +296,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("beliefPlayerStatics")) c.beliefPlayerStatics = o.get("beliefPlayerStatics").getAsBoolean();
             if (o.has("copyTurnLimits")) c.copyTurnLimits = o.get("copyTurnLimits").getAsBoolean();
             if (o.has("offBattlefieldLimits")) c.offBattlefieldLimits = o.get("offBattlefieldLimits").getAsBoolean();
+            if (o.has("copyBackFace")) c.copyBackFace = o.get("copyBackFace").getAsBoolean(); // house p15
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             c.check();
             return c;
@@ -437,6 +439,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 if (copyTurnLimits) o.addProperty("copyTurnLimits", true); // house p11
                 if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true); // house p12
+                if (copyBackFace) o.addProperty("copyBackFace", true); // house p15
                 o.addProperty("beliefSingleton", beliefSingleton);
             }
             if (choices > 0) {
@@ -641,6 +644,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.beliefPlayerStatics = cfg.beliefPlayerStatics;
         lc.copyTurnLimits = cfg.copyTurnLimits;
         lc.offBattlefieldLimits = cfg.offBattlefieldLimits;
+        lc.copyBackFace = cfg.copyBackFace; // house p15
         if (!"off".equals(cfg.belief)) {
             // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
             lc.belief = cfg.belief;

@@ -123,6 +123,13 @@ public class GameCopier {
     private boolean turnLimits = false;
     private boolean offBattlefieldLimits = false;
 
+    /** House p15 (live-fixes-1107 port; false = off). */
+    private boolean copyBackFace = false;
+
+    public void setCopyBackFace(boolean on) {
+        this.copyBackFace = on;
+    }
+
     public void setOffBattlefieldLimits(boolean on) {
         this.offBattlefieldLimits = on;
     }
@@ -490,6 +497,7 @@ public class GameCopier {
         newGame.staleStatics = origGame.staleStatics;
         newGame.stalePlayerStatics = stalePlayerStatics || origGame.stalePlayerStatics; // house p7
         newGame.offBattlefieldLimits = offBattlefieldLimits || origGame.offBattlefieldLimits; // house p12
+        newGame.copyBackFace = copyBackFace || origGame.copyBackFace; // house p15
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
@@ -1250,6 +1258,11 @@ public class GameCopier {
     private void addCard(Game newGame, ZoneType zone, Card c, Player aiPlayer) {
         final Player owner = playerMap.get(c.getOwner());
         final Card newCard = createCardCopy(newGame, owner, c, aiPlayer);
+        if (copyBackFace || origGame.copyBackFace) {
+            // house p15: setState restores displayed characteristics, but does not restore the physical
+            // orientation that Transform toggles and isTransformed reads. Preserve both independently.
+            newCard.setBackSide(c.isBackSide());
+        }
         cardMap.put(c, newCard);
 
         // TODO ExiledWith
