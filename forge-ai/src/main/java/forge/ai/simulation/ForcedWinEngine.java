@@ -169,6 +169,8 @@ final class ForcedWinEngine {
         int nodes = 250;
         /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
         boolean staleStatics = false;
+        /** house release (live-fixes-1107 port; false = off): stalePlayerStatics. */
+        boolean stalePlayerStatics = false;
         /** engine-reach-1107 (false = off): node copies keep this turn's may-play and activation counts ({@link GameCopier#setTurnLimits}). */
         boolean turnLimits = false;
         int depth = 64;
@@ -510,6 +512,7 @@ final class ForcedWinEngine {
                 copier.setTurnLimits(lim.turnLimits); // engine-reach-1107
                 root.g = copier.makeCopy();
                 root.g.staleStatics = lim.staleStatics; // unified-search-1106 (a belief world after the redraw below)
+                root.g.stalePlayerStatics = lim.stalePlayerStatics; // house stalePlayerStatics
                 root.me = (Player) copier.find(liveMe);
                 st.copies++;
                 final Random rng = new Random(LookaheadSearch.mix(seed, 2));
@@ -1154,6 +1157,7 @@ final class ForcedWinEngine {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
             copier.setStaleStatics(lim.staleStatics); // unified-search-1106
+            copier.setStalePlayerStatics(lim.stalePlayerStatics); // house stalePlayerStatics
             copier.setTurnLimits(lim.turnLimits); // engine-reach-1107
                 copier.setCopyFidelity(1); // storm count, per-turn records
             final Game g = copier.makeCopy();

@@ -137,6 +137,8 @@ public final class ForcedWinSolver {
         public boolean cycles = false;
         /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
         public boolean staleStatics = false;
+        /** house release (live-fixes-1107 port; off by default): stalePlayerStatics. */
+        public boolean stalePlayerStatics = false;
         /**
          * engine-reach-1107 (off by default): engine nodes and the solver's play-out copies keep this turn's may-play and
          * activation counts ({@link GameCopier#setTurnLimits}).
@@ -216,6 +218,7 @@ public final class ForcedWinSolver {
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
             c.staleStatics = boolOrLive(get.apply("staleStatics")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
+            c.stalePlayerStatics = boolOrLive(get.apply("stalePlayerStatics")); // house; live-fixes-1107: default forge.liveFixes
             c.turnLimits = boolOrLive(get.apply("turnLimits")); // engine-reach-1107; live-fixes-1107: default forge.liveFixes
             c.lineUncapped = boolOrLive(get.apply("lineUncapped")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -937,6 +940,7 @@ public final class ForcedWinSolver {
                     copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
                     g = copier.makeCopy();
                     g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
+                    g.stalePlayerStatics = cfg.stalePlayerStatics; // house stalePlayerStatics
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -1371,6 +1375,7 @@ public final class ForcedWinSolver {
         el.nodes = cfg.engineNodes;
         el.cycles = cfg.cycles;
         el.staleStatics = cfg.staleStatics; // unified-search-1106
+        el.stalePlayerStatics = cfg.stalePlayerStatics; // house
         el.turnLimits = cfg.turnLimits; // engine-reach-1107
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -1514,6 +1519,7 @@ public final class ForcedWinSolver {
                 copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
+                g.stalePlayerStatics = cfg.stalePlayerStatics; // house stalePlayerStatics
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -1765,6 +1771,7 @@ public final class ForcedWinSolver {
                 copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics; // unified-search-1106: a belief world; its copies skip swapped-out cards' statics
+                g.stalePlayerStatics = cfg.stalePlayerStatics; // house stalePlayerStatics
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));

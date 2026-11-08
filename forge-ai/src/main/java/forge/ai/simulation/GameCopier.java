@@ -109,6 +109,11 @@ public class GameCopier {
      * static effects can still name those cards. They are skipped, instead of failing the copy.
      */
     private boolean staleStatics = false;
+    private boolean stalePlayerStatics = false;
+
+    public void setStalePlayerStatics(boolean on) {
+        this.stalePlayerStatics = on;
+    }
 
     public void setStaleStatics(boolean on) {
         this.staleStatics = on;
@@ -470,13 +475,15 @@ public class GameCopier {
         // Undo effects first before calculating them below, to avoid them applying twice.
         for (StaticEffect effect : origGame.getStaticEffects().getEffects()) {
             if (staleStatics || origGame.staleStatics) {
-                effect.removeMapped(gameObjectMap, c -> cardMap.containsKey(c)); // unified-search-1106
+                effect.removeMapped(gameObjectMap, c -> cardMap.containsKey(c),
+                        stalePlayerStatics || origGame.stalePlayerStatics); // unified-search-1106; house p7
             } else {
                 effect.removeMapped(gameObjectMap);
             }
         }
 
         newGame.staleStatics = origGame.staleStatics;
+        newGame.stalePlayerStatics = stalePlayerStatics || origGame.stalePlayerStatics; // house p7
 
         if (origPhaseHandler.getCombat() != null) {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
