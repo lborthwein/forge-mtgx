@@ -257,6 +257,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             this(sa, phase, x, false);
         }
 
+        /** house p3 (exactActions; the house's form, PlanActionIdentityTest): x null = legacy, else an exact step (-1 = none). */
+        PStep(final SpellAbility sa, final String phase, final Integer x) {
+            this(sa, phase, x == null ? -1 : x, x != null);
+        }
+
         PStep(final SpellAbility sa, final String phase, final int x, final boolean exact) {
             this.exact = exact;
             this.x = x;
