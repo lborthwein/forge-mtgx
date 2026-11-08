@@ -236,6 +236,15 @@ public final class ForcedWinSolver {
          */
         public boolean putBackKeep = false;
         /**
+         * ledger-sweep-1107, ledger row 60 (off by default): the engine search plays payment variants of its moves on wall
+         * budgets, as payRecord does on counter budgets (labeller-v2 (e): each distinct untapped remainder of our one-tap
+         * lands after the move's mana cost, up to payVariants, its sources floated before the move), and a follower floats a
+         * step's recorded sources before Forge AI pays. Off: every engine move is paid by Forge AI's own choice of lands
+         * (paySearch reaches only the planner, followPay only Phyrexian life), so a loop could tap the only red source for
+         * its first Sol Ring and never cast its outlet.
+         */
+        public boolean enginePay = false;
+        /**
          * next-turn-1107 (off by default): the lines verified per decision are distinct in their steps (cards and abilities),
          * not only in pile filler; and a card a failed verification lost during the opponent's turn (a step of ours after the
          * pass found it gone) rules out the remaining candidates that use it after their pass. Off: the first cfg.top
@@ -250,6 +259,13 @@ public final class ForcedWinSolver {
          * search still runs only in our main phases.
          */
         public boolean anyWindow = false;
+        /** house releases p7, p12, p13, p15, p16, p17 (off by default): solver copies get the matching GameCopier keys. */
+        public boolean stalePlayerStatics = false;
+        public boolean offBattlefieldLimits = false;
+        public boolean historyLki = false;
+        public boolean copyBackFace = false;
+        public boolean stackAbilityCopies = false;
+        public boolean stackHistory = false;
         /**
          * ledger-sweep2-1107 (off by default): one planner expansion builds at most as many branches as the planner has nodes
          * left (ForcedWinPlanner.Limits#expandCap; ledger row 66).
@@ -729,8 +745,15 @@ public final class ForcedWinSolver {
             c.positionKeyFull = "true".equals(get.apply("positionKeyFull")); // unified-search-1106
             c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
             c.putBackKeep = "true".equals(get.apply("putBackKeep")); // next-turn-1107
+            c.enginePay = "true".equals(get.apply("enginePay")); // ledger-sweep-1107 (row 60)
             c.evalAvoidLost = "true".equals(get.apply("evalAvoidLost")); // next-turn-1107
             c.anyWindow = "true".equals(get.apply("anyWindow")); // line-adoption-1107
+            c.stalePlayerStatics = "true".equals(get.apply("stalePlayerStatics")); // house p7
+            c.offBattlefieldLimits = "true".equals(get.apply("offBattlefieldLimits")); // house p12
+            c.historyLki = "true".equals(get.apply("historyLki")); // house p13
+            c.copyBackFace = "true".equals(get.apply("copyBackFace")); // house p15
+            c.stackAbilityCopies = "true".equals(get.apply("stackAbilityCopies")); // house p16
+            c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
@@ -785,7 +808,8 @@ public final class ForcedWinSolver {
                 + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes + " V=" + OppMin.VERSION : "")
                 + (cacPicks ? " cacPicks V=" + cacVariants + " cap=" + cacCap : "") + (cacLine ? " cacLine" : "")
                 + (planScry ? " planScry max=" + planScryMax : "") + (planDiscard ? " planDiscard" : "")
-                + (payRecord ? " payRecord V=" + payVariants : "") + (engineNodesPerSearch ? " engineNodesPerSearch" : "")
+                + (payRecord ? " payRecord V=" + payVariants : "") + (enginePay ? " enginePay V=" + payVariants : "")
+                + (engineNodesPerSearch ? " engineNodesPerSearch" : "")
                 + (loopMacro ? " loopMacro" : "") + (engineAfterPlanFail ? " engineAfterPlanFail" : "")
                 + (engineAnyWindow ? " engineAnyWindow" : "") + (engineGateWide ? " engineGateWide" : "")
                 + (engineLadder ? " engineLadder N=" + ladderNodes + " S=" + ladderSteps : "")
@@ -883,6 +907,8 @@ public final class ForcedWinSolver {
     @FunctionalInterface
     public interface Redraw {
         void apply(Game live, Player liveMe, Game g, Player me, Random rng);
+        /** Observation tracker knowledge retained by the redraw, also respected by the later world hand filter. */
+        default boolean remembersHandCard(Game live, Player observer, Card card) { return false; }
     }
     private final Config cfg;
 
@@ -2629,8 +2655,14 @@ public final class ForcedWinSolver {
                     copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                     copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                    copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
+                    copier.setHistoryLki(cfg.historyLki); // house p13
+                    copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                    copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                    copier.setStackHistory(cfg.stackHistory); // house p17
                     g = copier.makeCopy();
                     g.staleStatics = cfg.staleStatics;
+                    g.stalePlayerStatics = cfg.stalePlayerStatics;
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -3241,6 +3273,12 @@ public final class ForcedWinSolver {
                         && playout(live, l, mix(cfg.seed, 7_100_000L + 64L * index + tries[0]++), 0, -1, decisionWall).won;
             };
         }
+        el.stalePlayerStatics = cfg.stalePlayerStatics; // house p7
+        el.offBattlefieldLimits = cfg.offBattlefieldLimits; // house p12
+        el.historyLki = cfg.historyLki; // house p13
+        el.copyBackFace = cfg.copyBackFace; // house p15
+        el.stackAbilityCopies = cfg.stackAbilityCopies; // house p16
+        el.stackHistory = cfg.stackHistory; // house p17
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -3258,7 +3296,7 @@ public final class ForcedWinSolver {
         el.cac = cfg.cacPicks;
         el.cacVariants = cfg.cacVariants;
         el.cacCap = cfg.cacCap;
-        el.pay = cfg.payRecord;
+        el.pay = cfg.payRecord || cfg.enginePay; // ledger-sweep-1107 (row 60): enginePay on wall budgets
         el.payVariants = cfg.payVariants;
         // solver-cap12 round 3 (all off by default)
         el.order = "static".equals(cfg.engineOrder) ? StaticValuer.INSTANCE
@@ -3784,8 +3822,14 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1);
                 copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
+                copier.setHistoryLki(cfg.historyLki); // house p13
+                copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                copier.setStackHistory(cfg.stackHistory); // house p17
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
+                g.stalePlayerStatics = cfg.stalePlayerStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -3796,7 +3840,7 @@ public final class ForcedWinSolver {
                     if (world != 0 && keepDealtHand()) {
                         continue; // deck-belief-1105: the redraw dealt this world's hand
                     }
-                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
+                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng, redraw);
                 }
                 if (cfg.infoState) {
                     // order-memory-1102: the known cards below the top stay at their index; canonical unknown order
@@ -4521,8 +4565,14 @@ public final class ForcedWinSolver {
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 ForcedWinEngine.copyStackIf(copier, live, cfg.engineStack); // R3-5
                 copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
+                copier.setHistoryLki(cfg.historyLki); // house p13
+                copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                copier.setStackHistory(cfg.stackHistory); // house p17
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
+                g.stalePlayerStatics = cfg.stalePlayerStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -4536,7 +4586,7 @@ public final class ForcedWinSolver {
                             continue; // deck-belief-1105: the redraw dealt this world's hand
                         }
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
-                        hideOrSample(live, me, liveOpp, o, world == 0, rng);
+                        hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw);
                     }
                     if (libArrange != null) {
                         libArrange.apply(cm, rng); // e1-q8-1101: an exact-draw sequence at the first hidden slots
@@ -4687,6 +4737,10 @@ public final class ForcedWinSolver {
      * we have seen). Their library is shuffled either way.
      */
     static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng) {
+        hideOrSample(live, liveMe, liveOpp, opp, hide, rng, null);
+    }
+
+    static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng, Redraw knowledge) {
         final forge.game.player.PlayerView myView = liveMe.getView();
         final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
         final List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
@@ -4694,7 +4748,8 @@ public final class ForcedWinSolver {
         final List<Card> pool = new ArrayList<>(lib);
         for (Card c : hand) {
             final Card lc = live.findById(c.getId());
-            if (lc != null && lc.getView().canBeShownTo(myView)) {
+            if (lc != null && (lc.getView().canBeShownTo(myView)
+                    || knowledge != null && knowledge.remembersHandCard(live, liveMe, lc))) {
                 keep.add(c);
             } else {
                 pool.add(c);
@@ -5116,6 +5171,8 @@ public final class ForcedWinSolver {
          * payment sources float before its action.
          */
         boolean cacLine, payRecord;
+        /** ledger-sweep-1107 ({@link Config#enginePay}): set with payRecord; kept by a verifyReplan follower. */
+        boolean enginePay;
         int floatDone;
 
         Follower(Line line) {
@@ -5129,7 +5186,8 @@ public final class ForcedWinSolver {
         static Follower of(Line line, Config cfg) {
             final Follower fo = new Follower(line);
             fo.cacLine = cfg.cacLine;
-            fo.payRecord = cfg.payRecord;
+            fo.payRecord = cfg.payRecord || cfg.enginePay; // ledger-sweep-1107 (row 60)
+            fo.enginePay = cfg.enginePay;
             fo.uncapped = cfg.loopMacro && cfg.loopMacro3; // review #154 S2: its own key
             fo.costLine = cfg.engineCostChoice;
             fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
@@ -5681,9 +5739,13 @@ public final class ForcedWinSolver {
                     replanner = null;
                     final Line fresh = rp.apply(f.line);
                     if (fresh != null) {
-                        final boolean keep = f.putBackKeep;
+                        final boolean keep = f.putBackKeep, keepEnginePay = f.enginePay;
                         f = new Follower(fresh);
                         f.putBackKeep = keep; // next-turn-1107
+                        if (keepEnginePay) {
+                            f.enginePay = true; // ledger-sweep-1107 (row 60): the re-planned line's recorded payments too
+                            f.payRecord = true;
+                        }
                         final Follower.Next m = f.next(g, getPlayer());
                         return m.action != null ? capped(List.of(m.action)) : null;
                     }

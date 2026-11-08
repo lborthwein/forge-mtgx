@@ -352,6 +352,20 @@ public final class LookaheadSearch {
         public String beliefCubeSha256 = null;
         /** Copies of each basic land type in the pool. */
         public int beliefBasics = 8;
+        /** Default off: later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
+        public boolean beliefStatics = false;
+        /** Default off: carry player-only stale-static repair into resampled look-ahead copies. */
+        public boolean beliefPlayerStatics = false;
+        /** Default off: preserve opponent-hand identities remembered by the searching seat's observation tracker. */
+        public boolean beliefRememberedHand = false;
+        /** Default off: preserve this turn's use limits in look-ahead copies, as p9 does for solver copies. */
+        public boolean copyTurnLimits = false;
+        /** Default off: retain turn-use limits outside the battlefield. */
+        public boolean offBattlefieldLimits = false;
+        public boolean historyLki = false;
+        public boolean copyBackFace = false;
+        public boolean stackAbilityCopies = false;
+        public boolean stackHistory = false;
         /**
          * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
          * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
@@ -520,6 +534,13 @@ public final class LookaheadSearch {
             if (copyEot != AiFixes.Mode.OFF) {
                 o.addProperty("copyEot", copyEot.key());
             }
+            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
+            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
+            if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (historyLki) o.addProperty("historyLki", true);
+            if (copyBackFace) o.addProperty("copyBackFace", true);
+            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
+            if (stackHistory) o.addProperty("stackHistory", true);
             if (copyFidelity != 0) {
                 o.addProperty("copyFidelity", copyFidelity);
             }
@@ -574,6 +595,8 @@ public final class LookaheadSearch {
                 o.addProperty("beliefCube", beliefCube);
                 o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 o.addProperty("beliefBasics", beliefBasics);
+                if (beliefStatics) o.addProperty("beliefStatics", true);
+                if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 if (beliefPool != null) {
                     o.addProperty("beliefPoolSize", beliefPool.size());
                 }
@@ -1519,6 +1542,9 @@ public final class LookaheadSearch {
      * supply to {@link #decideGiven}. Every method is called only when its option is set with {@link #setHooks}.
      */
     public interface SearchHooks {
+        /** Only recorded observation knowledge, never an inference from the opponent's actual hidden cards. */
+        default boolean remembersHandCard(Game live, Player observer, Card card) { return false; }
+
         /** Decision thread, inside the copy's preparation (after the world draw): a per-copy context, or null. */
         Object onCopy(Game copy, Player me);
 
@@ -6186,6 +6212,12 @@ public final class LookaheadSearch {
     /** A copier of the live game for this search: carries until-EOT commands when copyEot is ON (lane misplays-1005). */
     GameCopier copierOf(Game live) {
         final GameCopier c = new GameCopier(live, true);
+        if (cfg.copyTurnLimits) c.setTurnLimits(true);
+        if (cfg.offBattlefieldLimits) c.setOffBattlefieldLimits(true);
+        if (cfg.historyLki) c.setHistoryLki(true);
+        if (cfg.copyBackFace) c.setCopyBackFace(true);
+        if (cfg.stackAbilityCopies) c.setStackAbilityCopies(true);
+        if (cfg.stackHistory) c.setStackHistory(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }
@@ -8052,12 +8084,24 @@ public final class LookaheadSearch {
 
     // ------------------------------------------------------------------ belief (lane belief-sampling-0928)
 
+    private boolean rememberedHand(Game live, Player observer, Card card) {
+        return cfg.beliefRememberedHand && hooks != null && card != null
+                && card.getGame() == live && observer.getGame() == live
+                && card.isInZone(ZoneType.Hand) && card.getController() != observer
+                && !card.isFaceDown() && hooks.remembersHandCard(live, observer, card);
+    }
+
+    private boolean handKnown(Game live, Player observer, Card card) {
+        return card.getView().canBeShownTo(observer.getView()) || rememberedHand(live, observer, card);
+    }
+
     /** The opponent's hidden hand cards / known library top, as the seat sees them in the live game. */
-    private static int[] hiddenCounts(Game live, Player liveOpp, PlayerView myView) {
+    private int[] hiddenCounts(Game live, Player liveOpp, Player liveMe) {
+        final PlayerView myView = liveMe.getView();
         int keep = 0;
         final List<Card> hand = new ArrayList<>(liveOpp.getCardsIn(ZoneType.Hand));
         for (Card c : hand) {
-            if (c.getView().canBeShownTo(myView)) {
+            if (handKnown(live, liveMe, c)) {
                 keep++;
             }
         }
@@ -8088,7 +8132,7 @@ public final class LookaheadSearch {
         }
         final Player liveOpp = opps.get(0);
         final PlayerView myView = liveMe.getView();
-        final int[] hid = hiddenCounts(live, liveOpp, myView);
+        final int[] hid = hiddenCounts(live, liveOpp, liveMe);
         if (hid[0] == 0 && hid[1] == 0) {
             stats.beliefSkipped++;
             return null;
@@ -8202,7 +8246,7 @@ public final class LookaheadSearch {
             known.addAll(ownDeckNames(liveMe));
             for (Card c : live.getCardsInGame()) {
                 if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
-                        && c.getView().canBeShownTo(myView)) {
+                        && (c.getView().canBeShownTo(myView) || rememberedHand(live, liveMe, c))) {
                     known.add(c.getPaperCard().getName());
                 }
             }
@@ -8213,7 +8257,7 @@ public final class LookaheadSearch {
                 pool.add(name);
             }
         }
-        pool.addAll(Arrays.asList(BeliefSampler.BASICS));
+        pool.addAll(Arrays.asList(BeliefSampler.basics()));
         return pool;
     }
 
@@ -8240,11 +8284,11 @@ public final class LookaheadSearch {
      * fewer slots than the hidden cards it must fill (so a hidden library is never cut short).
      */
     private int basicsFor(List<String> pool, int hand, int lib) {
-        final int nonBasic = pool.size() - BeliefSampler.BASICS.length;
+        final int nonBasic = pool.size() - BeliefSampler.basics().length;
         final int need = hand + lib;
         int m = cfg.beliefBasics;
-        if (nonBasic + m * BeliefSampler.BASICS.length < need) {
-            m = (need - nonBasic + BeliefSampler.BASICS.length - 1) / BeliefSampler.BASICS.length;
+        if (nonBasic + m * BeliefSampler.basics().length < need) {
+            m = (need - nonBasic + BeliefSampler.basics().length - 1) / BeliefSampler.basics().length;
         }
         return m;
     }
@@ -8255,6 +8299,8 @@ public final class LookaheadSearch {
      * belief off or in shadow mode, {@link #resample} as before.
      */
     void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
+        if (cfg.beliefStatics) g.staleStatics = true;
+        if (cfg.beliefPlayerStatics) g.stalePlayerStatics = true;
         if (beliefCube != null && !cfg.beliefShadow && cfg.beliefDeck) {
             // deck-belief-1105: the opponents' hidden cards from the deck posterior, then our own library as before
             redrawOpponentsDeck(live, liveMe, g, me, rng, DECK_PARAMS);
@@ -8363,7 +8409,14 @@ public final class LookaheadSearch {
         if (beliefCube == null || cfg.beliefShadow) {
             return null;
         }
-        return (live, liveMe, g, me, rng) -> redrawOpponents(live, liveMe, g, me, rng, null);
+        return new ForcedWinSolver.Redraw() {
+            @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                redrawOpponents(live, liveMe, g, me, rng, null);
+            }
+            @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                return rememberedHand(live, observer, card);
+            }
+        };
     }
 
     /**
@@ -8378,7 +8431,14 @@ public final class LookaheadSearch {
         if (beliefCube == null || cfg.beliefShadow) {
             return null;
         }
-        return (live, liveMe, g, me, rng) -> redrawOpponentsDeck(live, liveMe, g, me, rng, p);
+        return new ForcedWinSolver.Redraw() {
+            @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                redrawOpponentsDeck(live, liveMe, g, me, rng, p);
+            }
+            @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                return rememberedHand(live, observer, card);
+            }
+        };
     }
 
     /** The solver's re-draw for a solver config: {@link #opponentRedrawDeck} with {@code deckBelief}, else as before. */
@@ -8397,7 +8457,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && handKnown(live, liveMe, lc)) {
                     keep.add(c);
                 }
             }
@@ -8605,7 +8665,7 @@ public final class LookaheadSearch {
                 if (fillBasics && !BeliefSampler.isBasic(nm)) {
                     final Integer it = itemOf.get(nm);
                     if (it == null || !linked[it]) {
-                        nm = BeliefSampler.BASICS[rng.nextInt(BeliefSampler.BASICS.length)];
+                        nm = BeliefSampler.basics()[rng.nextInt(BeliefSampler.basics().length)];
                     }
                 }
                 final Card nc = beliefCard(nm, opp, g);
@@ -8643,7 +8703,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && handKnown(live, liveMe, lc)) {
                     keep.add(c);
                 }
             }

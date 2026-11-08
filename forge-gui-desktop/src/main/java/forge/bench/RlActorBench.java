@@ -284,6 +284,8 @@ public final class RlActorBench {
         /** Review #137 S3: the record pass's tier and attempt, written on every sidecar line (null / 0 = not given). */
         String decisionLogTier = null;
         int decisionLogAttempt = 0;
+        /** house p4 (explicit draw): report explicit game draws as draws even when surviving players have win bits. Off preserves receipts. */
+        boolean honorDrawReason = false;
     }
 
     static void parseReference(final Cfg c, final JsonObject o, final String where) {
@@ -319,6 +321,7 @@ public final class RlActorBench {
             }
         }
         if (o.has("dpMeter")) c.dpMeter = o.get("dpMeter").getAsBoolean();
+        if (o.has("honorDrawReason")) c.honorDrawReason = o.get("honorDrawReason").getAsBoolean();
         if (o.has("mode")) c.mode = o.get("mode").getAsString();
         if (o.has("server") && !o.get("server").isJsonNull()) c.server = o.get("server").getAsString();
         if (o.has("actorId")) c.actorId = o.get("actorId").getAsString();
@@ -351,6 +354,7 @@ public final class RlActorBench {
         }
         if (o.has("search") && o.get("search").isJsonObject()) {
             c.search = RlSearch.Config.parse(o.getAsJsonObject("search"));
+            if (c.search.honorDrawReason) c.honorDrawReason = true; // the baseline spec can reach the actor key
             if (o.has("searchAlt") && o.get("searchAlt").isJsonObject()) {
                 // choice-search-1105: the alt spec over the game's spec (the harness keys it omits, server, policySha,
                 // the logs, come from the game's spec); its decision log is the game's with an "-alt" suffix
@@ -1257,7 +1261,7 @@ public final class RlActorBench {
         }
         final int[] result = {0, 0};
         String reason = voidReason == null ? "draw" : voidReason;
-        if (voidReason == null && game != null && game.getOutcome() != null && !game.getOutcome().isDraw()) {
+        if (voidReason == null && game != null && game.getOutcome() != null && !game.getOutcome().isDraw(cfg.honorDrawReason)) {
             final LobbyPlayer w = game.getOutcome().getWinningLobbyPlayer();
             int ws = -1; // the seat whose lobby player won (a bridge's getSeat() is its index; the K8 seat has none)
             for (int s = 0; s < 2; s++) {

@@ -122,6 +122,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * line's posterior with the root's value at the search's departZ. Needs no lineFloor.
          */
         public boolean unified = false;
+        /** Preserve the priority answer's announced X in sampled plans; absent means legacy matching. */
+        public boolean exactActions = false;
         public boolean lineFloorAlways = false;
         /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
         public boolean lineKeep = false;
@@ -140,7 +142,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
                 "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX",
-                "lineHorizon"));
+                "lineHorizon", "exactActions"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -173,6 +175,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("unified")) s.unified = o.get("unified").getAsBoolean();
             if (o.has("planX")) s.planX = o.get("planX").getAsBoolean();
             if (o.has("lineHorizon")) s.lineHorizon = o.get("lineHorizon").getAsBoolean();
+            if (o.has("exactActions")) s.exactActions = o.get("exactActions").getAsBoolean();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -243,12 +246,24 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final String label;
         /** unified-search-1106 (plans.planX): the announced X this step was played with; -1 = none recorded. */
         final int x;
+        /** house p3 (plans.exactActions): only a candidate announcing the same X (-1 = none) matches; no fallback. */
+        final boolean exact;
 
         PStep(final SpellAbility sa, final String phase) {
             this(sa, phase, -1);
         }
 
         PStep(final SpellAbility sa, final String phase, final int x) {
+            this(sa, phase, x, false);
+        }
+
+        /** house p3 (exactActions; the house's form, PlanActionIdentityTest): x null = legacy, else an exact step (-1 = none). */
+        PStep(final SpellAbility sa, final String phase, final Integer x) {
+            this(sa, phase, x == null ? -1 : x, x != null);
+        }
+
+        PStep(final SpellAbility sa, final String phase, final int x, final boolean exact) {
+            this.exact = exact;
             this.x = x;
             this.pass = sa == null;
             this.hostId = sa == null || sa.getHostCard() == null ? -1 : sa.getHostCard().getId();
@@ -259,7 +274,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
 
         String key() {
-            return phase + ":" + (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc) + (x >= 0 ? "|x" + x : "");
+            return phase + ":" + (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc)
+                    + (exact ? "|x=" + x : x >= 0 ? "|x" + x : "");
         }
 
         boolean matches(final SpellAbility sa) {
@@ -371,7 +387,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
     }
 
-    /** The menu candidate of a step (the first one: X variants of one entry play its first variant), or -1. */
+    /** The menu candidate of a step: with its recorded X when planX recorded one (else the first match), exactly when exactActions did; -1 if unavailable. */
     static int match(final RlCandidates.Menu m, final List<SpellAbility> objs, final PStep st) {
         int first = -1;
         for (int c = 0; c < m.C(); c++) {
@@ -382,6 +398,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (ch < 0 || ch > objs.size()) {
                 continue;
             }
+            final com.google.gson.JsonElement fx0 = m.cands.get(c).frag;
+            final int fx = fx0 != null && fx0.isJsonObject() && fx0.getAsJsonObject().has("x") ? fx0.getAsJsonObject().get("x").getAsInt() : -1;
+            if (st.exact) {
+                if (st.x == fx && st.matches(ch == 0 ? null : objs.get(ch - 1))) {
+                    return c; // house p3 (exactActions): the same announcement or none
+                }
+                continue;
+            }
             if (st.matches(ch == 0 ? null : objs.get(ch - 1))) {
                 if (st.x < 0) {
                     return c;
@@ -389,8 +413,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 if (first < 0) {
                     first = c;
                 }
-                final com.google.gson.JsonElement f = m.cands.get(c).frag;
-                if (f != null && f.isJsonObject() && f.getAsJsonObject().has("x") && f.getAsJsonObject().get("x").getAsInt() == st.x) {
+                if (fx == st.x) {
                     return c; // unified-search-1106: the same X the plan was recorded with
                 }
             }
@@ -408,12 +431,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final double temperature;
         final boolean sampled;
         final int maxSteps;
+        final boolean exactActions;
         final List<PStep> steps = new ArrayList<>();
         /** unified-search-1106 (plans.planX). */
         boolean recordX;
         Player seatPlayer;
 
         Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps) {
+            this(turn, seed, temperature, sampled, maxSteps, false);
+        }
+
+        Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps,
+                final boolean exactActions) {
+            this.exactActions = exactActions;
             this.turn = turn;
             this.rng = new Random(seed);
             this.temperature = temperature;
@@ -434,19 +464,23 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         @Override
         public void answered(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
                 final int choice) {
-            if (!inPlan(g, p) || choice < 0 || choice > objs.size()) {
-                return;
-            }
-            steps.add(new PStep(choice == 0 ? null : objs.get(choice - 1), String.valueOf(g.getPhaseHandler().getPhase())));
+            answered(g, p, m, objs, choice, -1);
         }
 
         @Override
         public void answered(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
                 final int choice, final int x) {
-            if (!recordX || x < 0) {
-                answered(g, p, m, objs, choice);
-            } else if (inPlan(g, p) && choice >= 0 && choice <= objs.size()) {
-                steps.add(new PStep(choice == 0 ? null : objs.get(choice - 1), String.valueOf(g.getPhaseHandler().getPhase()), x));
+            if (!inPlan(g, p) || choice < 0 || choice > objs.size()) {
+                return;
+            }
+            final SpellAbility sa = choice == 0 ? null : objs.get(choice - 1);
+            final String phase = String.valueOf(g.getPhaseHandler().getPhase());
+            if (exactActions) {
+                steps.add(new PStep(sa, phase, x, true)); // house p3 (exactActions): X or none, matched exactly
+            } else if (recordX && x >= 0) {
+                steps.add(new PStep(sa, phase, x)); // unified-search-1106 (planX)
+            } else {
+                steps.add(new PStep(sa, phase));
             }
         }
 
@@ -1125,13 +1159,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     : Math.min(ba + forge.ai.WallClock.budgetMs(spec.recordMs) * 1_000_000L,
                     b0 + Math.max(1000L, forge.ai.WallClock.budgetMs(rs.budgetMs()) / 2) * 1_000_000L);
             final List<Object> recs = new ArrayList<>();
-            final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps);
+            final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps, spec.exactActions);
             greedy.recordX = spec.planX;
             recs.add(greedy);
             final long seed0 = rs.ls().nextWorld0Seed();
             for (int i = 0; i < spec.samples; i++) {
                 final Recorder sampled = new Recorder(ph.getTurn(), RlSearch.splitmix(seed0 ^ (0x5a3L + i)), spec.temperature, true,
-                        spec.maxSteps);
+                        spec.maxSteps, spec.exactActions);
                 sampled.recordX = spec.planX;
                 recs.add(sampled);
             }
