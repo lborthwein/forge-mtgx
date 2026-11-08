@@ -268,6 +268,7 @@ public final class RlLiveSeat {
                     // order-memory-1102 (absent = off, the seat byte for byte as before): the search worlds keep the
                     // library positions this seat knows (forge.ai.simulation.InfoStates); arming is its own decision
                     case "infoState": c.infoState = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    case "beliefStatics": c.beliefStatics = LookaheadSearch.Config.infoStateKey(k, v); break;
                     default:
                         if (k.startsWith("plans.")) {
                             planKey(c, k, v); // sb-live-1018: S-b, flat keys
