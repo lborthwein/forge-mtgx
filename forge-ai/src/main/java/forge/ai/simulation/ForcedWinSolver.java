@@ -656,6 +656,9 @@ public final class ForcedWinSolver {
             c.cacLine = v2all || "true".equals(get.apply("cacLine"));
             c.planScry = v2all || "true".equals(get.apply("planScry"));
             c.planDiscard = v2all || "true".equals(get.apply("planDiscard"));
+            // consolidate-1107: planDiscardWall = the planner's discard branching on wall budgets (kill-line-1106 #210's pilot
+            // use, as the U arm ran it before #212). planDiscard itself stays a labeller v2 key (counts only), as on live.
+            final boolean discardWall = "true".equals(get.apply("planDiscardWall"));
             c.payRecord = v2all || "true".equals(get.apply("payRecord"));
             c.cacVariants = intOr(get.apply("cacVariants"), c.cacVariants);
             c.cacCap = intOr(get.apply("cacCap"), c.cacCap);
@@ -665,6 +668,7 @@ public final class ForcedWinSolver {
                 throw new IllegalArgumentException((c.oppMin ? "oppMin" : "a labeller v2 key")
                         + " needs budget=counter (labeller v2 is counts only)");
             }
+            c.planDiscard |= discardWall;
             c.frameMemory = "true".equals(get.apply("frameMemory"));
             c.infoState = "true".equals(get.apply("infoState"));
             c.likely = "true".equals(get.apply("likely"));
