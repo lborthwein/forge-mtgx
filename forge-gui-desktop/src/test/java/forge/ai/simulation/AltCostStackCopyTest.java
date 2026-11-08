@@ -2,6 +2,7 @@ package forge.ai.simulation;
 
 import org.testng.AssertJUnit;
 import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import forge.game.EngineFixes;
@@ -20,6 +21,12 @@ import forge.game.zone.ZoneType;
  * its escape cost.
  */
 public class AltCostStackCopyTest extends SimulationTest {
+
+    /** live-fixes-1107: forge.liveFixes defaults the key on in this jar; each test starts from key off, as written. */
+    @BeforeMethod
+    public void keyOffFirst() {
+        reset();
+    }
 
     @AfterMethod
     public void reset() {

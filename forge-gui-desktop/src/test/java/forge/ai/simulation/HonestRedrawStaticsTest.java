@@ -10,6 +10,8 @@ import java.util.Random;
 import java.util.Set;
 
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
@@ -21,9 +23,48 @@ import forge.game.player.Player;
 import forge.game.zone.ZoneType;
 import forge.util.IdScope;
 
-/** Copy/redraw correctness only. These synthetic fixtures never become corpus rows. */
+/**
+ * Copy/redraw correctness only. These synthetic fixtures never become corpus rows.
+ *
+ * <p>unified-jar-1106 (936560e5cf9) keyed the belief world's static refresh (LookaheadSearch#refreshBeliefStatics) on
+ * {@code -Dforge.researchFixes} (off = the live line, byte for byte), so these tests run with the key on;
+ * {@link #keyOffTheRedrawIsUnchanged} pins the off side.
+ */
 public class HonestRedrawStaticsTest extends SimulationTest {
     private Path pool;
+    private boolean researchFixesWas;
+
+    @BeforeClass
+    public void researchFixesOn() {
+        researchFixesWas = forge.game.EngineFixes.researchFixes();
+        forge.game.EngineFixes.setResearchFixesForTest(true);
+    }
+
+    @AfterClass(alwaysRun = true)
+    public void researchFixesRestored() {
+        forge.game.EngineFixes.setResearchFixesForTest(researchFixesWas);
+    }
+
+    @Test
+    public void keyOffTheRedrawIsUnchanged() throws Exception {
+        forge.game.EngineFixes.setResearchFixesForTest(false);
+        try {
+            Game live = board("Pack Rat", ZoneType.Hand);
+            IdScope.open();
+            try {
+                Game root = world(live, "uniform");
+                Set<Card> cards = Collections.newSetFromMap(new IdentityHashMap<>());
+                for (Card card : root.getCardsInGame()) cards.add(card);
+                boolean stale = false;
+                for (StaticEffect effect : root.getStaticEffects().getEffects()) stale |= !cards.contains(effect.getSource());
+                Assert.assertTrue(stale, "key off: the world still lists the discarded card's static");
+            } finally {
+                IdScope.close();
+            }
+        } finally {
+            forge.game.EngineFixes.setResearchFixesForTest(true);
+        }
+    }
 
     private String pool() throws Exception {
         if (pool == null) {

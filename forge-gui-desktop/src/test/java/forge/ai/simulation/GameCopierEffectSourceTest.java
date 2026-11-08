@@ -23,6 +23,10 @@ import forge.game.zone.ZoneType;
  *
  * <p>The copy now carries the source ability (the copied host's own ability, marked as played from it); an effect whose
  * source ability is unknown grants no extra activation instead of crashing.
+ *
+ * <p>unified-jar-1106 (936560e5cf9) keyed the copier half on {@code -Dforge.researchFixes} (off = the live line's
+ * copier, byte for byte), so the copy test sets the key: on, the copy keeps the source ability; off, it does not, as
+ * before. The null-safe read is not keyed.
  */
 public class GameCopierEffectSourceTest extends forge.ai.AITest {
 
@@ -83,18 +87,40 @@ public class GameCopierEffectSourceTest extends forge.ai.AITest {
         final SpellAbility printed = (SpellAbility) pos[2];
         Assert.assertEquals(StaticAbilityNumLoyaltyAct.additionalActivations(pw, printed), 2);
 
+        final boolean was = forge.game.EngineFixes.researchFixes();
+        try {
+            // key off: the live line's copy, unchanged, drops the source ability (the null-safe read then grants 0)
+            forge.game.EngineFixes.setResearchFixesForTest(false);
+            final GameCopier off = new GameCopier(g, true);
+            off.setCopyFidelity(1);
+            final Game offCopy = off.makeCopy();
+            final Card offEff = effectOf(offCopy, (Card) off.find(pw));
+            Assert.assertNotNull(offEff, "key off: the copied effect");
+            Assert.assertNull(offEff.getEffectSourceAbility(), "key off: the copier is unchanged");
+            forge.game.EngineFixes.setResearchFixesForTest(true);
+            theCopyKeepsIt(g, pw);
+        } finally {
+            forge.game.EngineFixes.setResearchFixesForTest(was);
+        }
+    }
+
+    static Card effectOf(final Game copy, final Card pwCopy) {
+        for (Card c : copy.getCardsIn(ZoneType.Command)) {
+            if (c.getEffectSource() == pwCopy) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    static void theCopyKeepsIt(final Game g, final Card pw) {
         // the label search's copies (R3LabelSearch.candidates, ForcedWinEngine): copy fidelity 1, which gives an effect
         // card its source card (Card#copyTurnStateFrom)
         final GameCopier copier = new GameCopier(g, true);
         copier.setCopyFidelity(1);
         final Game copy = copier.makeCopy();
         final Card pwCopy = (Card) copier.find(pw);
-        Card effCopy = null;
-        for (Card c : copy.getCardsIn(ZoneType.Command)) {
-            if (c.getEffectSource() == pwCopy) {
-                effCopy = c;
-            }
-        }
+        final Card effCopy = effectOf(copy, pwCopy);
         Assert.assertNotNull(effCopy, "the copied effect");
         Assert.assertNotNull(effCopy.getEffectSourceAbility(), "the copy dropped the effect's source ability");
         Assert.assertSame(effCopy.getEffectSourceAbility().getHostCard(), pwCopy);
