@@ -200,6 +200,8 @@ public final class ForcedWinSolver {
          * depth-first pass ({@link ForcedWinEngine.Limits#hoistShare}).
          */
         public int engineHoistShare = 0;
+        /** loop-exec-1107 (off by default, with engineHoistShare): unused reserve goes back to the plain pass. */
+        public boolean engineHoistReturn = false;
         /** engine-reach-1107 (0 = off): {@link ForcedWinEngine.Limits#frontierAfterPct}. */
         public int engineFrontierPct = 0;
         /**
@@ -730,6 +732,7 @@ public final class ForcedWinSolver {
             c.engineLoopHoist = "true".equals(get.apply("engineLoopHoist")); // loop-exec-1107
             c.engineLoopBisect = "true".equals(get.apply("engineLoopBisect")); // loop-exec-1107
             c.engineHoistShare = intOr(get.apply("engineHoistShare"), c.engineHoistShare); // loop-exec-1107
+            c.engineHoistReturn = "true".equals(get.apply("engineHoistReturn")); // loop-exec-1107
             c.engineFrontierPct = intOr(get.apply("engineFrontierPct"), c.engineFrontierPct); // engine-reach-1107
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
@@ -3251,6 +3254,7 @@ public final class ForcedWinSolver {
             el.loopHoist = cfg.engineLoopHoist; // loop-exec-1107
             el.loopBisect = cfg.engineLoopBisect; // loop-exec-1107
             el.hoistShare = cfg.engineHoistShare; // loop-exec-1107
+            el.hoistReturn = cfg.engineHoistReturn; // loop-exec-1107
         }
         el.frontierAfterPct = cfg.engineFrontierPct; // engine-reach-1107
         if (cfg.engineVerify) {

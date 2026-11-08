@@ -284,6 +284,13 @@ final class ForcedWinEngine {
          */
         int hoistShare = 0;
         /**
+         * loop-exec-1107 (false = off; with hoistShare > 0): the reserve goes back to the plain pass. The plain depth-first
+         * search is not stopped; at its first node after (100 - hoistShare) percent of the time left, if a loop is queued, the
+         * queued loops are hoisted there, then the same search goes on in whatever time they leave. Nothing queued: the
+         * plain search keeps all of its time. Loops queued later are hoisted when the plain search ends, if time is left.
+         */
+        boolean hoistReturn = false;
+        /**
          * loop-exec-1107 (false = off, with loopOutlets): when an outlet search first wins at a doubling, the counts between
          * the last losing doubling and it are bisected with the same outlet search; the line takes the smallest winning count.
          */
@@ -1348,6 +1355,9 @@ final class ForcedWinEngine {
         if (!(lim.loopHoist && lim.loopOutlets && lim.hoistShare > 0)) {
             return dfs(root, 0);
         }
+        if (lim.hoistReturn) {
+            return passReturn(root); // loop-exec-1107
+        }
         final long t = forge.game.WorkClock.nanoTime();
         final long passEnd = deadline;
         final int nodesEnd = lim.nodes;
@@ -1385,6 +1395,46 @@ final class ForcedWinEngine {
             lim.nodes = nodesEnd;
             hoistQueue.clear();
         }
+    }
+
+    /** loop-exec-1107 ({@link Limits#hoistReturn}): when the reserve starts (0 = not in such a pass), and whether it ran. */
+    private long hoistMark;
+    private boolean hoistsRan;
+
+    /** loop-exec-1107 ({@link Limits#hoistReturn}): one plain pass that hoists its queued loops at the mark, then goes on. */
+    private List<Step> passReturn(Node root) {
+        final long t = forge.game.WorkClock.nanoTime();
+        hoistQueue.clear();
+        hoistsRan = false;
+        hoistMark = t + Math.max(0L, deadline - t) / 100 * (100 - lim.hoistShare);
+        try {
+            final List<Step> win = dfs(root, 0);
+            if (win != null || hoistQueue.isEmpty()) {
+                return win;
+            }
+            return runHoists(); // loops queued after the mark, if any time is left
+        } finally {
+            hoistMark = 0;
+            hoistQueue.clear();
+        }
+    }
+
+    /** loop-exec-1107: hoist the queued loops in order (the queue is emptied); a winning line from the root, or null. */
+    private List<Step> runHoists() {
+        final List<Object[]> q = new ArrayList<>(hoistQueue);
+        hoistQueue.clear();
+        for (Object[] e : q) {
+            if (out() || st.hoists >= lim.hoistMax) {
+                break;
+            }
+            @SuppressWarnings("unchecked")
+            final List<Step> body = (List<Step>) e[1];
+            final List<Step> w = hoist((Node) e[0], body, (Integer) e[2]);
+            if (w != null) {
+                return w;
+            }
+        }
+        return null;
     }
 
     /** loop-exec-1107 ({@link Limits#loopHoist}): (node, rotation) pairs a hoisted fast-forward has tried. */
@@ -2199,6 +2249,14 @@ final class ForcedWinEngine {
     }
 
     private List<Step> dfs(Node node, int depth) {
+        if (hoistMark != 0 && !hoistsRan && !inOutlet && !hoistQueue.isEmpty() && forge.game.WorkClock.nanoTime() >= hoistMark) {
+            hoistsRan = true; // loop-exec-1107 (hoistReturn): the reserve's hoists, here; the search goes on after them
+            final List<Step> w = runHoists();
+            forge.util.IdScope.install(cloneScope(node.ids));
+            if (w != null) {
+                return w;
+            }
+        }
         if (lim.pathCards > 0 && pathCards + node.cards > lim.pathCards) {
             st.pathPrunes++; // bvw-step1-build-1024: budget=counter's memory guard (0 = off: never here)
             return null;
