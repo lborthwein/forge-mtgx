@@ -131,6 +131,14 @@ public final class PlayoutKeys {
 
     /** A 128-bit digest (hex) of the play-out state; see the class comment. Call on the play-out's own thread. */
     public static String stateKey(Game g) {
+        return stateKey(g, true);
+    }
+
+    /**
+     * label-speed-1104: {@link #stateKey} without the thread's random stream ({@code withRng} false), for a computation
+     * that runs under its own seeded stream (the R3 proof leaf runs inside {@code R3LabelSearch.isolated}).
+     */
+    public static String stateKey(Game g, boolean withRng) {
         final StringBuilder sb = new StringBuilder(8192);
         final PhaseHandler ph = g.getPhaseHandler();
         sb.append("T").append(ph.getTurn()).append(' ').append(ph.getPhase())
@@ -142,7 +150,9 @@ public final class PlayoutKeys {
                 .append(" ts=").append(g.getTimestamp());
         final int[] ids = g.peekCardIdCounters();
         sb.append(" cid=").append(ids[0]).append('/').append(ids[1]);
-        sb.append(" rng=").append(rngState());
+        if (withRng) {
+            sb.append(" rng=").append(rngState());
+        }
         final Object scope = forge.util.IdScope.capture();
         if (scope instanceof java.util.concurrent.atomic.AtomicInteger[] a) {
             sb.append(" ids=");

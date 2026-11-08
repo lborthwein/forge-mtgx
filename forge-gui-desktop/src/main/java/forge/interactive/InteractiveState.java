@@ -8,6 +8,7 @@
  */
 package forge.interactive;
 
+import com.google.common.collect.Multiset;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -20,6 +21,7 @@ import forge.game.card.Card;
 import forge.game.card.CardState;
 import forge.game.card.CardCollectionView;
 import forge.game.card.CardView;
+import forge.game.card.CounterType;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
 import forge.game.spellability.SpellAbilityStackInstance;
@@ -29,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * Produces a browser payload from the human seat's information set.
@@ -87,6 +90,7 @@ final class InteractiveState {
         view.add("life", life);
         final PlayerView viewer = human.getView();
         addEliminatedSeats(view, game, viewer);
+        addPlayerCounters(view, game);
         sanitizePlayerZones(view, game, viewer, lookedAt);
         addVisibleLibraryTops(view, game, viewer);
         sanitizeStack(view, game, viewer);
@@ -129,6 +133,57 @@ final class InteractiveState {
             seat++;
         }
         view.add("players", out);
+    }
+
+    /** A player's field for the counters that player has (energy, experience, poison, rad, tickets, ...). */
+    static final String PLAYER_COUNTERS = "counters";
+
+    /**
+     * Lane player-counters-1107 (owner, 2026-11-07: "Where can I see my energy counter total?"): every counter on a
+     * player, as Forge holds it, keyed the way a card's {@code counters} are keyed ({@code {"ENERGY": 3}}). Generic: no
+     * counter kind is named, so experience, rad, tickets and poison (also sent as the scalar {@code poison}) all arrive.
+     * Player counters are public. Omitted when the player has none, so a game in which no player ever gets a counter sends
+     * the same bytes as before. Added here and not in {@link StateEncoder}, whose players also feed the bridge's state,
+     * the RL featurizer and the search's payloads; those stay as they are. Keys are sorted, so the bytes do not depend on
+     * the counter multiset's hash order.
+     */
+    private static void addPlayerCounters(final JsonObject view, final Game game) {
+        if (!view.has("players") || !view.get("players").isJsonArray()) {
+            return;
+        }
+        final List<Player> registered = game.getRegisteredPlayers();
+        for (JsonElement element : view.getAsJsonArray("players")) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            final JsonObject player = element.getAsJsonObject();
+            if (!player.has("index") || !player.get("index").isJsonPrimitive()) {
+                continue;
+            }
+            final int index;
+            try {
+                index = player.get("index").getAsInt();
+            } catch (RuntimeException ignored) {
+                continue;
+            }
+            if (index < 0 || index >= registered.size()) {
+                continue;
+            }
+            final Map<String, Integer> sorted = new TreeMap<>();
+            for (Multiset.Entry<CounterType> e : registered.get(index).getCounters().entrySet()) {
+                if (e.getCount() > 0) {
+                    sorted.merge(e.getElement().toString(), e.getCount(), Integer::sum);
+                }
+            }
+            if (sorted.isEmpty()) {
+                continue;
+            }
+            final JsonObject counters = new JsonObject();
+            for (Map.Entry<String, Integer> e : sorted.entrySet()) {
+                counters.addProperty(e.getKey(), e.getValue());
+            }
+            player.add(PLAYER_COUNTERS, counters);
+        }
     }
 
     /**

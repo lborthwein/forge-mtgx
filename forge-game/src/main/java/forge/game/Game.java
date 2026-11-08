@@ -63,6 +63,23 @@ import java.util.function.Predicate;
 public class Game {
     /** Off by default: copies of this game skip static effects naming cards with no copy (a belief world swapped them out). Inherited by copies. */
     public boolean staleStatics = false;
+    /** Default-off extension: undo stale player-only static effects in belief copies. */
+    public boolean stalePlayerStatics = false;
+    /** Default off: copies retain turn-use limits outside the battlefield; inherited only by copies. */
+    public boolean offBattlefieldLimits = false;
+    /** Default off: history references retain last-known card state and timestamp in copies. */
+    public boolean historyLki = false;
+    /** Default-off preservation of physical back-face orientation in search copies. */
+    public boolean copyBackFace = false;
+    /** Default-off independent ability objects for copied stack entries. */
+    public boolean stackAbilityCopies = false;
+    /** Default off: remap observed stack-history targets when knowledge is forked into a copy. */
+    public boolean stackHistory = false;
+    // IDs in the immediately preceding game -> IDs of this copy's actual stack entries.
+    // This mapping is rebuilt per copy, not inherited transitively. No live game objects are retained.
+    private Map<Integer, Integer> copiedStackIds = Collections.emptyMap();
+    public Map<Integer, Integer> getCopiedStackIds() { return copiedStackIds; }
+    public void setCopiedStackIds(Map<Integer, Integer> ids) { copiedStackIds = Map.copyOf(ids); }
 
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 
@@ -223,13 +240,33 @@ public class Game {
         return true;
     }
 
+    /**
+     * mtgx (lane lki-leak-1027): the last-known-information zones of the current last-state snapshot. Each LKI card of a
+     * snapshot points at its snapshot zone, and that zone held every LKI card of the snapshot, so one LKI card kept after
+     * its snapshot was replaced (the cards that left the battlefield or the graveyard this turn, a change-zone LKI, a
+     * trigger's run parameters) kept the whole snapshot alive: one battlefield or graveyard copy per departure. The next
+     * snapshot releases the old zones' card lists; the LKI cards keep their zone and every other field, so the game's
+     * snapshot reads exactly as before until the next one is taken. The zones {@link #copyLastState(ZoneType)} makes for
+     * cost and zone-change tables are released at once (lane lki-fix-port-1027, review S3-2): their readers use the
+     * returned collection, never the zone.
+     */
+    private final List<Zone> lastStateZones = new ArrayList<>(4);
+
     public void copyLastState() {
+        for (final Zone z : lastStateZones) {
+            z.releaseLastKnownCards();
+        }
+        lastStateZones.clear();
         lastStateBattlefield.clear();
         lastStateGraveyard.clear();
         Map<Integer, Card> cachedMap = Maps.newHashMap();
         for (final Player p : getPlayers()) {
-            lastStateBattlefield.addAll(p.getZone(ZoneType.Battlefield).getLKICopy(cachedMap));
-            lastStateGraveyard.addAll(p.getZone(ZoneType.Graveyard).getLKICopy(cachedMap));
+            final Zone bf = p.getZone(ZoneType.Battlefield).getLKICopy(cachedMap);
+            final Zone gy = p.getZone(ZoneType.Graveyard).getLKICopy(cachedMap);
+            lastStateBattlefield.addAll(bf);
+            lastStateGraveyard.addAll(gy);
+            lastStateZones.add(bf);
+            lastStateZones.add(gy);
         }
     }
 
@@ -237,7 +274,11 @@ public class Game {
         CardCollection result = new CardCollection();
         Map<Integer, Card> cachedMap = Maps.newHashMap();
         for (final Player p : getPlayers()) {
-            result.addAll(p.getZone(type).getLKICopy(cachedMap));
+            final Zone z = p.getZone(type).getLKICopy(cachedMap);
+            result.addAll(z);
+            // lane lki-fix-port-1027 (review S3-2): the cost / zone-change table reads `result`, not the zone: release it
+            // now (a sacrifice's LKI from here goes to Player.sacrificedThisTurn and would keep the whole zone otherwise)
+            z.releaseLastKnownCards();
         }
         return result;
     }
@@ -1082,8 +1123,6 @@ public class Game {
      * unless a research consumer adds one; never copied to a game copy; not the event bus (see the interface).
      */
     private final List<LibraryInfoListener> libraryInfoListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
-    /** Review #172 S1: a listener failure is logged once per game and never reaches the effect. */
-    private boolean libraryInfoFailureLogged = false;
 
     public void addLibraryInfoListener(final LibraryInfoListener listener) {
         libraryInfoListeners.add(Objects.requireNonNull(listener));
@@ -1133,14 +1172,21 @@ public class Game {
             try {
                 l.onLibraryInfo(kind, roo, roc, zone);
             } catch (RuntimeException e) {
-                // review #172 S1 (fail-safe): an observer never unwinds the effect that teaches it
+                // review #172 S1: a listener never takes the game down: it is told, fails closed, and the effect goes on
                 if (!libraryInfoFailureLogged) {
                     libraryInfoFailureLogged = true;
-                    System.err.println("[library-info] listener failed (ignored, logged once): " + e);
+                    System.err.println("[library-info] listener failed (fails closed, logged once): " + e);
+                }
+                try {
+                    l.onListenerFailure(e);
+                } catch (RuntimeException ignored) {
+                    // nothing more to do
                 }
             }
         }
     }
+
+    private boolean libraryInfoFailureLogged = false;
 
     /**
      * order-memory-1102: {@code chooser} arranged {@code cards} going to {@code dest} (an orderMoveToZoneList answer;

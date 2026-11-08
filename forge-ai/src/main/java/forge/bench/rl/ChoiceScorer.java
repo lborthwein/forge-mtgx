@@ -278,7 +278,7 @@ public final class ChoiceScorer {
         screenReader = null; // one reader per ask: its probes are of this position's copies
         final int seat = g.getRegisteredPlayers().indexOf(me);
         final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
-        final long deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : Long.MAX_VALUE;
+        final long deadline = cfg.budgetMs > 0 ? (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0) + cfg.budgetMs * 1_000_000L : Long.MAX_VALUE;
         if (m.family == RlSchema.F_CARDS) {
             cards(g, me, m, greedy, seed, fr, s, deadline);
         } else if (m.family == RlSchema.F_MULLIGAN) {
@@ -337,7 +337,7 @@ public final class ChoiceScorer {
             no.steps = new short[0];
             no.label = "decline";
             no.policy = greedy != null && greedy.length == 0;
-            if (System.nanoTime() < deadline) {
+            if (forge.game.WorkClock.nanoTime() < deadline) {
                 run(g, me, Collections.singletonList(-1), seed, fr, no, s);
             } else {
                 no.fail = "budget";
@@ -350,7 +350,7 @@ public final class ChoiceScorer {
             o.steps = new short[] {(short) i};
             o.label = m.cands.get(i).host.getName();
             o.policy = i == own;
-            if (System.nanoTime() >= deadline && !o.policy) {
+            if (forge.game.WorkClock.nanoTime() >= deadline && !o.policy) {
                 o.fail = "budget";
                 s.overBudget = true;
             } else {
@@ -515,7 +515,7 @@ public final class ChoiceScorer {
                 note(ChoiceApply.applyHand(g, me, false, null, seed, cfg.fidelity, fr), o, s, 0);
             } else {
                 for (int w = 0; w < worlds; w++) {
-                    if (System.nanoTime() >= deadline) {
+                    if (forge.game.WorkClock.nanoTime() >= deadline) {
                         s.overBudget = true;
                         break;
                     }
@@ -554,7 +554,7 @@ public final class ChoiceScorer {
             o.steps = st;
             o.label = lb.toString();
             o.policy = greedy != null && sameSet(greedy, st);
-            if (System.nanoTime() >= deadline && !o.policy) {
+            if (forge.game.WorkClock.nanoTime() >= deadline && !o.policy) {
                 o.fail = "budget";
                 s.overBudget = true;
             } else {

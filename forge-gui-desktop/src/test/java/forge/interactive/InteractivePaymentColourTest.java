@@ -288,9 +288,12 @@ public class InteractivePaymentColourTest extends AITest {
         }
     }
 
-    /** An Island floated the {U}: the Sanctum makes the G that is left, without a question. */
+    /**
+     * An Island floated the {U}: {1}{G} is left, and the Sanctum's {U} can pay the {1}, so the seat
+     * is asked (owner, 2026-11-07: a dual land with a cost pending asks among the colours that can pay).
+     */
     @Test(timeOut = 600000)
-    public void aDualLandMakesTheOneColourTheFloatingManaLeavesNeeded() throws Exception {
+    public void aDualLandAsksWhenTheCostLeftHasAGenericPart() throws Exception {
         final Card[] sanctum = new Card[1];
         final Card[] island = new Card[1];
         final Card[] oko = new Card[1];
@@ -306,17 +309,29 @@ public class InteractivePaymentColourTest extends AITest {
             final JsonObject afterIsland = h.request();
             assertEquals(kind(afterIsland), "mana", afterIsland.toString());
             assertEquals(floating(afterIsland, "U"), 1, afterIsland.toString());
-            h.select(afterIsland, sanctum[0]);
+            final String tap = h.sendSelect(afterIsland, sanctum[0]);
+            final JsonObject question = h.request();
+            assertEquals(kind(question), "confirm", "a colour question, not " + question);
+            final JsonObject blue = control(question, "Blue");
+            assertNotNull(blue, "Blue is offered: " + question);
+            assertNotNull(control(question, "Green"), "Green is offered: " + question);
+            final JsonObject action = new JsonObject();
+            action.addProperty("type", "confirm");
+            action.addProperty("controlId", blue.get("controlId").getAsString());
+            action.addProperty("confirm", blue.get("value").getAsBoolean());
+            h.answer(question, action);
+            h.acked(tap);
             final JsonObject afterSanctum = h.request();
-            assertEquals(kind(afterSanctum), "mana", "no question: " + afterSanctum);
-            assertEquals(floating(afterSanctum, "G"), 1, "the Sanctum made the G: " + afterSanctum);
-            assertEquals(floating(afterSanctum, "U"), 1, afterSanctum.toString());
+            assertEquals(kind(afterSanctum), "mana", afterSanctum.toString());
+            assertEquals(floating(afterSanctum, "U"), 2, "the Sanctum made the U it was asked for: " + afterSanctum);
+            assertEquals(floating(afterSanctum, "G"), 0, afterSanctum.toString());
+            noForcedColour(h);
         }
     }
 
-    /** Unchanged: a cost that needs one of the land's colours gets it without a question. */
+    /** Only the land's {U} can pay a {U}: Forge takes it without a question, and the log says which. */
     @Test(timeOut = 600000)
-    public void aDualLandMakesTheOnlyNeededColourAsBefore() throws Exception {
+    public void aDualLandMakesTheOnlyColourThatCanPayAndTheLogSaysWhich() throws Exception {
         final Card[] sanctum = new Card[1];
         final Card[] brainstorm = new Card[1];
         try (Harness h = new Harness((seat, foe) -> {
@@ -330,6 +345,7 @@ public class InteractivePaymentColourTest extends AITest {
             assertEquals(kind(after), "mana", "no question: " + after);
             assertEquals(floating(after, "U"), 1, after.toString());
             assertEquals(floating(after, "G"), 0, after.toString());
+            forcedColour(h, "Botanical Sanctum", "U");
         }
     }
 
@@ -538,6 +554,187 @@ public class InteractivePaymentColourTest extends AITest {
             assertEquals(kind(after), "mana", "no color question: " + after);
             assertEquals(floating(after, "B"), 1, after.toString());
             forcedColour(h, "Lotus Petal", "B");
+        }
+    }
+
+    private static List<String> itemLabels(final JsonObject control) {
+        final List<String> labels = new java.util.ArrayList<>();
+        for (JsonElement item : control.getAsJsonArray("items")) {
+            labels.add(item.getAsJsonObject().get("label").getAsString());
+        }
+        return labels;
+    }
+
+    /**
+     * A dual land with two abilities (its basic land types) paying {1}{G}: its {U} pays the {1}, so the
+     * seat chooses between them, as before (the browser seat's ability menu).
+     */
+    @Test(timeOut = 600000)
+    public void aTwoAbilityDualLandAsksWithAGenericPartPending() throws Exception {
+        final Card[] island = new Card[1];
+        final Card[] library = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            island[0] = addCard("Tropical Island", seat);
+            addCard("Forest", seat);
+            library[0] = addCardToZone("Sylvan Library", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, library[0]);
+            final String tap = h.sendSelect(payment, island[0]);
+            final JsonObject question = h.request();
+            String blue = null;
+            int abilities = 0;
+            for (JsonElement c : question.getAsJsonArray("controls")) {
+                final JsonObject control = c.getAsJsonObject();
+                if ("selectAbility".equals(control.get("type").getAsString())) {
+                    abilities++;
+                    if (control.get("label").getAsString().contains("{U}")) {
+                        blue = control.get("controlId").getAsString();
+                    }
+                }
+            }
+            assertEquals(abilities, 2, "both abilities: " + question);
+            assertNotNull(blue, "the {U} ability is offered: " + question);
+            final JsonObject action = new JsonObject();
+            action.addProperty("type", "selectAbility");
+            action.addProperty("controlId", blue);
+            h.answer(question, action);
+            h.acked(tap);
+            final JsonObject after = h.request();
+            assertEquals(kind(after), "mana", after.toString());
+            assertEquals(floating(after, "U"), 1, after.toString());
+            assertEquals(floating(after, "G"), 0, after.toString());
+            noForcedColour(h);
+        }
+    }
+
+    /**
+     * The same land paying a {U}: only its {U} can pay, so Forge takes it and the log says which. Before,
+     * the seat was asked to choose between the {G} and the {U} ability.
+     */
+    @Test(timeOut = 600000)
+    public void aTwoAbilityDualLandMakesTheOnlyColourThatCanPayAndTheLogSaysWhich() throws Exception {
+        final Card[] island = new Card[1];
+        final Card[] brainstorm = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            island[0] = addCard("Tropical Island", seat);
+            brainstorm[0] = addCardToZone("Brainstorm", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, brainstorm[0]);
+            h.select(payment, island[0]);
+            final JsonObject after = h.request();
+            assertEquals(kind(after), "mana", "no question: " + after);
+            assertEquals(floating(after, "U"), 1, after.toString());
+            forcedColour(h, "Tropical Island", "U");
+        }
+    }
+
+    /** "Any combination", amount 2, answered as an allocation of {@code split} (colour label to count). */
+    private static void allocate(final Harness h, final JsonObject question, final java.util.Map<String, Integer> split)
+            throws Exception {
+        final JsonObject allocation = control(question, "Assign mana");
+        assertNotNull(allocation, "an allocation: " + question);
+        final com.google.gson.JsonArray order = new com.google.gson.JsonArray();
+        for (JsonElement item : allocation.getAsJsonArray("items")) {
+            final String label = item.getAsJsonObject().get("label").getAsString().toUpperCase(java.util.Locale.ROOT);
+            if (split.containsKey(label)) {
+                final JsonObject entry = new JsonObject();
+                entry.addProperty("id", item.getAsJsonObject().get("id").getAsString());
+                entry.addProperty("amount", split.get(label));
+                order.add(entry);
+            }
+        }
+        assertEquals(order.size(), split.size(), "every colour is offered: " + question);
+        final JsonObject action = new JsonObject();
+        action.addProperty("type", "order");
+        action.addProperty("controlId", "generic-allocation");
+        action.add("order", order);
+        h.answer(question, action);
+    }
+
+    private static List<String> allocationLabels(final JsonObject question) {
+        final JsonObject allocation = control(question, "Assign mana");
+        assertNotNull(allocation, "an allocation: " + question);
+        final List<String> labels = new java.util.ArrayList<>();
+        for (String label : itemLabels(allocation)) {
+            labels.add(label.toUpperCase(java.util.Locale.ROOT));
+        }
+        return labels;
+    }
+
+    /**
+     * "Add two mana in any combination of colors" paying {U}{B}, a cost pending: the seat assigns the
+     * two mana among the colours that can pay, {U} and {B}. Before, Forge narrowed each mana by its
+     * position in the cost with no question.
+     */
+    @Test(timeOut = 600000)
+    public void anyCombinationAmountTwoAsksAmongTheColoursThatCanPay() throws Exception {
+        final Card[] key = new Card[1];
+        final Card[] strix = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            key[0] = addCard("Key to the Archive", seat);
+            key[0].setTapped(false);
+            strix[0] = addCardToZone("Baleful Strix", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, strix[0]);
+            final String tap = h.sendSelect(payment, key[0]);
+            final JsonObject question = h.request();
+            assertEquals(new java.util.TreeSet<>(allocationLabels(question)),
+                    new java.util.TreeSet<>(List.of("BLUE", "BLACK")), question.toString());
+            allocate(h, question, java.util.Map.of("BLUE", 2));
+            h.acked(tap);
+            final JsonObject after = h.request();
+            assertEquals(floating(after, "U"), 2, "the seat's combination, not the cost's order: " + after);
+            assertEquals(floating(after, "B"), 0, after.toString());
+            noForcedColour(h);
+        }
+    }
+
+    /** The same source paying {1}{G}{U}: the {1} lets every colour pay, so all five are offered. */
+    @Test(timeOut = 600000)
+    public void anyCombinationAmountTwoWithAGenericPartOffersEveryColour() throws Exception {
+        final Card[] key = new Card[1];
+        final Card[] oko = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            key[0] = addCard("Key to the Archive", seat);
+            key[0].setTapped(false);
+            addCard("Island", seat);
+            oko[0] = addCardToZone("Oko, Thief of Crowns", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, oko[0]);
+            final String tap = h.sendSelect(payment, key[0]);
+            final JsonObject question = h.request();
+            assertEquals(allocationLabels(question).size(), 5, question.toString());
+            allocate(h, question, java.util.Map.of("GREEN", 1, "RED", 1));
+            h.acked(tap);
+            final JsonObject after = h.request();
+            assertEquals(floating(after, "G"), 1, after.toString());
+            assertEquals(floating(after, "R"), 1, after.toString());
+            noForcedColour(h);
+        }
+    }
+
+    /** The same source paying {B}{B}{B}: only {B} can pay, so both mana are {B} and the log says so. */
+    @Test(timeOut = 600000)
+    public void anyCombinationAmountTwoWithOneColourForcesItAndTheLogSaysWhich() throws Exception {
+        final Card[] key = new Card[1];
+        final Card[] prophecy = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            key[0] = addCard("Key to the Archive", seat);
+            key[0].setTapped(false);
+            addCard("Swamp", seat);
+            prophecy[0] = addCardToZone("Dark Prophecy", seat, ZoneType.Hand);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject payment = cast(h, prophecy[0]);
+            h.select(payment, key[0]);
+            final JsonObject after = h.request();
+            assertEquals(kind(after), "mana", "no question: " + after);
+            assertEquals(floating(after, "B"), 2, after.toString());
+            forcedColour(h, "Key to the Archive", "B");
         }
     }
 

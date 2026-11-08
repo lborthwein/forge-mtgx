@@ -19,6 +19,14 @@ public abstract class CostDecisionMakerBase implements ICostVisitor<PaymentDecis
     }
 
     public Player getPlayer() { return player; }
+
+    /**
+     * r3-inline-choices-1030 (research): a decision maker may review the decision just made for {@code part} (the AI's
+     * choose-a-card hook). The default returns it unchanged, so every other decision maker is byte for byte as before.
+     */
+    public PaymentDecision review(final CostPart part, final PaymentDecision decision) {
+        return decision;
+    }
     public abstract boolean paysRightAfterDecision();
     public boolean isEffect() {
         return effect;

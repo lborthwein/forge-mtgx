@@ -34,6 +34,13 @@ import com.google.gson.JsonObject;
  * DECIDE and LEAVES payload is decoded as that schema's frame (a frame of the other schema fails to decode and the
  * connection is closed, as the real service does). With {@link #checker} set, every DECIDE frame goes through
  * {@link FakeRlServer#check} and every SCORE and leaf frame through its v2 structure check.
+ *
+ * <p>Lane bvw-p3-batch-1023: chunked LEAVES as search_server.py now serves them. The HELLO_ACK advertises
+ * {@code leaves_chunked} (with {@code max_frame}, {@code leaves_max}, {@code leaves_bytes_max}) unless
+ * {@link #chunkedLeaves} is false (an older service: no keys, and every LEAVES frame answered on its own whatever its
+ * flags); a LEAVES frame with {@link RlSearchClient#FLAG_LEAVES_MORE} is held until the message's last frame, then one
+ * VALUES answers the whole message. {@link #answerEveryFrame}: a broken service that advertises the capability but
+ * answers every frame. Every LEAVES frame ({@link #leafFrames}) and message ({@link #leafMessages}) is recorded.
  */
 public final class FakeSearchService implements Closeable {
     private final ServerSocket ss;
@@ -63,8 +70,27 @@ public final class FakeSearchService implements Closeable {
      * null for the random legal steps.
      */
     public volatile java.util.function.Function<RlWire.Decide, short[]> script = null;
+    /**
+     * bvw-step2-fork-1027 (null = off): a scripted policy that also sees the DECIDE payload's raw bytes (a policy that is
+     * a function of the frame alone, e.g. a hash of it); asked before {@link #script}.
+     */
+    public volatile java.util.function.BiFunction<RlWire.Decide, byte[], short[]> scriptRaw = null;
     public final AtomicLong hellos = new AtomicLong(), scores = new AtomicLong(), decides = new AtomicLong(),
             leaves = new AtomicLong(), errors = new AtomicLong();
+    /** bvw-p3-batch-1023: advertise and serve chunked LEAVES (the default, as search_server.py now); false = an older service. */
+    public volatile boolean chunkedLeaves = true;
+    /** bvw-p3-batch-1023: the advertised limits. */
+    public volatile long ackLeavesMax = 65536, ackLeavesBytesMax = 256L << 20, ackMaxFrame = RlWire.MAX_FRAME;
+    /** bvw-p3-batch-1023: a broken service that advertises chunked LEAVES but answers every frame on its own. */
+    public volatile boolean answerEveryFrame = false;
+    /** bvw-step1-build-1024: the HELLO_ACK's {@code value_backend} (null = none, the policy's own v(o)). */
+    public volatile JsonObject ackValueBackend = null;
+    /** bvw-p3-batch-1023: every LEAVES frame seen, {flags, payload bytes, leaves}, and every answered message's leaves. */
+    public final List<int[]> leafFrames = Collections.synchronizedList(new ArrayList<>());
+    public final List<Integer> leafMessages = Collections.synchronizedList(new ArrayList<>());
+    /** bvw-p3-batch-1023: the raw payload of every LEAVES frame, when {@link #keepLeafFrames}. */
+    public volatile boolean keepLeafFrames = false;
+    public final List<byte[]> leafFramePayloads = Collections.synchronizedList(new ArrayList<>());
     private volatile boolean dead = false;
 
     public FakeSearchService(final String policySha) throws IOException {
@@ -139,11 +165,22 @@ public final class FakeSearchService implements Closeable {
             ack.addProperty("policy_sha", policySha);
             ack.addProperty("policy_version", 7);
             ack.addProperty("device", "cpu");
+            final JsonObject vb = ackValueBackend;
+            if (vb != null) {
+                ack.add("value_backend", vb.deepCopy()); // bvw-step1-build-1024: a value backend's identity, as served
+            }
             if (ackObs >= 0) {
                 ack.addProperty("obs_schema", ackObs);
             }
+            if (chunkedLeaves) {
+                ack.addProperty(RlSearchClient.ACK_LEAVES_CHUNKED, 1);
+                ack.addProperty(RlSearchClient.ACK_MAX_FRAME, ackMaxFrame);
+                ack.addProperty(RlSearchClient.ACK_LEAVES_MAX, ackLeavesMax);
+                ack.addProperty(RlSearchClient.ACK_LEAVES_BYTES_MAX, ackLeavesBytesMax);
+            }
             RlWire.writeFrame(out, RlWire.T_HELLO_ACK, 0, RlWire.canonical(ack));
             out.flush();
+            final List<Float> pending = new ArrayList<>();
             while (!dead) {
                 final RlWire.Frame f = RlWire.readFrame(in);
                 if (f.type == RlSearchClient.T_SCORE) {
@@ -206,7 +243,8 @@ public final class FakeSearchService implements Closeable {
                     x.status = RlWire.ST_OK;
                     x.policyVersion = 7;
                     final java.util.function.Function<RlWire.Decide, short[]> sc = script;
-                    final short[] scripted = sc == null ? null : sc.apply(d);
+                    final java.util.function.BiFunction<RlWire.Decide, byte[], short[]> sr = scriptRaw;
+                    final short[] scripted = sr != null ? sr.apply(d, f.payload) : sc == null ? null : sc.apply(d);
                     x.steps = scripted != null ? scripted
                             : FakeRlServer.randomSteps(d, new Random(FakeRlServer.mix(11, d.gameUid, d.decIdx)));
                     RlWire.writeFrame(out, RlWire.T_DECISION, 0, RlWire.encodeDecision(x));
@@ -214,8 +252,10 @@ public final class FakeSearchService implements Closeable {
                     final ByteBuffer p = ByteBuffer.wrap(f.payload).order(ByteOrder.LITTLE_ENDIAN);
                     final int n = p.getInt();
                     leaves.addAndGet(n);
-                    final ByteBuffer b = ByteBuffer.allocate(8 + 4 * n).order(ByteOrder.LITTLE_ENDIAN);
-                    b.putInt(n).putInt(7);
+                    leafFrames.add(new int[] {f.flags, f.payload.length, n});
+                    if (keepLeafFrames) {
+                        leafFramePayloads.add(f.payload);
+                    }
                     final java.util.function.ToDoubleFunction<byte[]> lv = leafValue;
                     for (int i = 0; i < n; i++) {
                         final int len = p.getInt();
@@ -232,8 +272,18 @@ public final class FakeSearchService implements Closeable {
                         if (keepLeaves) {
                             leafPayloads.add(leaf);
                         }
-                        b.putFloat(lv == null ? 0f : (float) lv.applyAsDouble(leaf));
+                        pending.add(lv == null ? 0f : (float) lv.applyAsDouble(leaf));
                     }
+                    if ((f.flags & RlSearchClient.FLAG_LEAVES_MORE) != 0 && chunkedLeaves && !answerEveryFrame) {
+                        continue; // bvw-p3-batch-1023: more frames of this message follow
+                    }
+                    final ByteBuffer b = ByteBuffer.allocate(8 + 4 * pending.size()).order(ByteOrder.LITTLE_ENDIAN);
+                    b.putInt(pending.size()).putInt(7);
+                    for (float x : pending) {
+                        b.putFloat(x);
+                    }
+                    leafMessages.add(pending.size());
+                    pending.clear();
                     RlWire.writeFrame(out, RlSearchClient.T_VALUES, 0, b.array());
                 } else {
                     errors.incrementAndGet();

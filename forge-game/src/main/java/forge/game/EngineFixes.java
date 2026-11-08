@@ -7,11 +7,29 @@ package forge.game;
 public final class EngineFixes {
     private static boolean copyRobust = Boolean.getBoolean("forge.copyRobust");
 
+    /**
+     * unified-jar-1106 ({@code -Dforge.researchFixes=true}, read at class load; off = the live line's copies and leaves,
+     * byte for byte): the research line's unkeyed copier and client changes, keyed on this line. A research run (labels,
+     * dump, generator) sets it to get what that line always had. Sites: GameCopier's copy-token prototype, effect source
+     * ability, owned trait states and the "gone" stack refusal; LookaheadSearch's belief-world static refresh and the
+     * shown-on-stack filter; RlSearchClient's split LEAVES batches.
+     */
+    private static boolean researchFixes = Boolean.getBoolean("forge.researchFixes");
+
     private EngineFixes() {
     }
 
     public static boolean copyRobust() {
         return copyRobust;
+    }
+
+    public static boolean researchFixes() {
+        return researchFixes;
+    }
+
+    /** For tests. */
+    public static void setResearchFixesForTest(final boolean on) {
+        researchFixes = on;
     }
 
     /**
@@ -29,6 +47,25 @@ public final class EngineFixes {
     /** For tests. */
     public static void setCopyAltCostForTest(final boolean on) {
         copyAltCost = on;
+    }
+
+    /**
+     * ledger-sweep-1107, ledger row 18 ({@code -Dforge.standInEffect=true}, off by default). A frame install with
+     * {@code forge.gamestate.installAsIs} links an exiled card whose recorded source is in no zone to a stand-in object.
+     * Off, the stand-in is a blank {@code new Card(id, game)}: its name is empty, so any last-known-information copy of a
+     * card exiled with it (Forge AI asking whether it may play that card, Spell.canPlayFromHost) looks up a paper card for
+     * the empty name and throws (CardDb$CardRequest.fromString). On, the stand-in is built as Forge builds any effect
+     * object: a name that no card has and the effect game-piece type, so the copy finds no paper card and goes on.
+     */
+    private static boolean standInEffect = Boolean.getBoolean("forge.standInEffect");
+
+    public static boolean standInEffect() {
+        return standInEffect;
+    }
+
+    /** For tests. */
+    public static void setStandInEffectForTest(final boolean on) {
+        standInEffect = on;
     }
 
     /** For tests. */

@@ -59,7 +59,7 @@ public class PermanentAi extends SpellAbilityAi {
         }
 
         if (CubeComboAi.control(ai) != null && CubeComboAi.probeIds(ai,
-                () -> CubeComboAi.control(ai).doomsdayPlan().holdDelayedOracle(sa))) {
+                () -> CubeComboAi.control(ai).planHoldsDelayedOracle(sa))) { // decisionpoint-1102: the family-plans key
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 

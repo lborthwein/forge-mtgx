@@ -148,6 +148,8 @@ public final class LookaheadBench {
     /** Tutor-ranking keys: tutorRank (0 = off), tutorUrl, tutorShadow, tutorLands, tutorTimeoutMs (2000), tutorCheckpointSha256. */
     static void applyTutor(JsonObject la, LookaheadSearch.Config c) {
         c.tutorRank = la.has("tutorRank") ? la.get("tutorRank").getAsInt() : 0;
+        // r2-choose-a-card-1029 (absent = off, the default)
+        c.cac = la.has("chooseACard") ? la.getAsJsonObject("chooseACard") : null;
         c.tutorUrl = la.has("tutorUrl") ? la.get("tutorUrl").getAsString() : null;
         c.tutorShadow = la.has("tutorShadow") && la.get("tutorShadow").getAsBoolean();
         c.tutorLands = la.has("tutorLands") && la.get("tutorLands").getAsBoolean();
@@ -506,6 +508,7 @@ public final class LookaheadBench {
             rules.setAISideboardingEnabled(false);
             rules.setSideboardForAI(false);
             rules.setAllowCheatShuffle(false);
+            forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "LookaheadBench"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
             rules.setWarnAboutAICards(false);
             final Match match = new Match(rules, seats, "mtgx-lookahead");
             MyRandom.setRandom(new Random(seed));
