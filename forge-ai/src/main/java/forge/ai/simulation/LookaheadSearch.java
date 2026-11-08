@@ -7417,8 +7417,11 @@ public final class LookaheadSearch {
                 }
             }
             for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
-                if (si.getActivatingPlayer() == liveOpp && si.getSourceCard() != null && si.getSourceCard().getPaperCard() != null) {
-                    shown.add(si.getSourceCard().getPaperCard().getName());
+                // review #123 S3-4 (forge.researchFixes): a face-down spell (a morph cast face down) or one we cannot see shows nothing
+                final Card sc = si.getSourceCard();
+                if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getPaperCard() != null
+                        && (!forge.game.EngineFixes.researchFixes() || !sc.isFaceDown() && sc.getView().canBeShownTo(myView))) {
+                    shown.add(sc.getPaperCard().getName());
                 }
             }
             // deck-guess-1021: the cards of their earlier games link their co-draft partners too
@@ -7586,6 +7589,9 @@ public final class LookaheadSearch {
 
     /** Rebuild derived effects from the sampled zones, not discarded actual hidden-card objects. */
     private void refreshBeliefStatics(Game g) {
+        if (!forge.game.EngineFixes.researchFixes()) {
+            return; // unified-jar-1106: research's, keyed on this line
+        }
         // setCards does not update statics. Hidden CDAs (Pack Rat, Grist, ...) otherwise leave their old source in
         // StaticEffects, leaking a reference outside the sampled zones and breaking the next GameCopier mapping.
         // Recompute after all opponents are replaced, retaining effects of public and kept/revealed cards.

@@ -31,6 +31,23 @@ public final class EngineFixes {
         copyAltCost = on;
     }
 
+    /**
+     * unified-jar-1106 ({@code -Dforge.researchFixes=true}, read at class load; off = the live line's copies, byte for byte):
+     * the research line's copier fixes, keyed. Live port (live-fixes-1107) sites: GameCopier's copy-token prototype and owned
+     * trait states, effect source ability and the "gone" stack refusal; LookaheadSearch's belief-world static refresh and the
+     * shown-on-stack filter. The split-LEAVES batches of the research line are not on the live line.
+     */
+    private static boolean researchFixes = Boolean.getBoolean("forge.researchFixes");
+
+    public static boolean researchFixes() {
+        return researchFixes;
+    }
+
+    /** For tests. */
+    public static void setResearchFixesForTest(final boolean on) {
+        researchFixes = on;
+    }
+
     /** For tests. */
     public static void setCopyRobustForTest(final boolean on) {
         copyRobust = on;
