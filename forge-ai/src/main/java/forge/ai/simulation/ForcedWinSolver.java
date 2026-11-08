@@ -143,6 +143,11 @@ public final class ForcedWinSolver {
          */
         public boolean turnLimits = false;
         /**
+         * unified-search-1106 (off by default): a followed line's own steps are not cut by the play-out loop breaker. A line is
+         * finite; a REPEAT longer than the breaker's window stopped mid-way in verification and read as no win.
+         */
+        public boolean lineUncapped = false;
+        /**
          * search-bones-1015, off by default: the engine search's root copy shuffles our library below the known top
          * (pile memory), as the verification worlds do; without it the engine plays on our real library order, hidden
          * information (a line that needs the top card was found on the real order and taken when the worlds agreed).
@@ -207,6 +212,7 @@ public final class ForcedWinSolver {
             c.cycles = "true".equals(get.apply("cycles"));
             c.staleStatics = "true".equals(get.apply("staleStatics")); // unified-search-1106
             c.turnLimits = "true".equals(get.apply("turnLimits")); // engine-reach-1107
+            c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
@@ -1777,6 +1783,7 @@ public final class ForcedWinSolver {
             final Follower f = new Follower(line);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
             lineAi.bounded(wall);
+            lineAi.uncapped = cfg.lineUncapped; // unified-search-1106
             cm.dangerouslySetController(lineAi);
             AdversaryAi adv = null;
             for (Player o : g.getPlayers()) {
@@ -2513,6 +2520,12 @@ public final class ForcedWinSolver {
         String protectedBy;
         /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
         boolean continueAfter;
+        /** unified-search-1106 ({@link Config#lineUncapped}). */
+        boolean uncapped;
+
+        List<SpellAbility> lineAction(SpellAbility sa) {
+            return uncapped ? List.of(sa) : capped(List.of(sa));
+        }
 
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
@@ -2530,7 +2543,7 @@ public final class ForcedWinSolver {
             if (!f.done && !f.broken) {
                 final Follower.Next n = f.next(g, getPlayer());
                 if (n.action != null) {
-                    return capped(List.of(n.action));
+                    return lineAction(n.action);
                 }
                 if (n.waiting) {
                     return null;
