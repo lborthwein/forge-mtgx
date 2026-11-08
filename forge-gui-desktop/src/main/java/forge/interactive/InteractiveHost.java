@@ -18,14 +18,17 @@ import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
-import java.nio.channels.Channels;
+import java.nio.ByteBuffer;
+import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -144,7 +147,7 @@ public final class InteractiveHost {
 
     /** One game: its context, its streams, {@link InteractiveMain#runSession}, its exit frame. */
     static void serve(final SocketChannel connection, final int n, final int[] bootIds) {
-        final FrameSink sink = new FrameSink(Channels.newOutputStream(connection));
+        final FrameSink sink = new FrameSink(outputOf(connection));
         int status = 1;
         GameContext context = null;
         try (connection) {
@@ -161,7 +164,7 @@ public final class InteractiveHost {
             GAME_ERR.set(err);
             final PrintStream protocolOut = new PrintStream(out, true, StandardCharsets.UTF_8);
             final BufferedReader input = new BufferedReader(
-                    new InputStreamReader(Channels.newInputStream(connection), StandardCharsets.UTF_8));
+                    new InputStreamReader(inputOf(connection), StandardCharsets.UTF_8));
             try {
                 status = InteractiveMain.runSession(input, protocolOut, true);
             } catch (Throwable failure) {
@@ -182,6 +185,45 @@ public final class InteractiveHost {
             }
             GameContext.clearThread();
         }
+    }
+
+    /**
+     * A game's stdin side of its connection (lane shared-engine-1105). Not {@code Channels.newInputStream}: on JDK 17 its
+     * blocking read holds the channel's blockingLock, which {@code Channels.newOutputStream} also needs, so a human game's
+     * reader, parked waiting for the browser, froze every protocol write of that game (the first frame after the reader
+     * started never left). A SocketChannel's own read and write take separate locks.
+     */
+    static InputStream inputOf(final ReadableByteChannel channel) {
+        return new InputStream() {
+            @Override
+            public int read() throws IOException {
+                final byte[] one = new byte[1];
+                return read(one, 0, 1) < 0 ? -1 : one[0] & 0xff;
+            }
+
+            @Override
+            public int read(final byte[] b, final int off, final int len) throws IOException {
+                return len == 0 ? 0 : channel.read(ByteBuffer.wrap(b, off, len));
+            }
+        };
+    }
+
+    /** A game's stdout side of its connection, safe beside a parked {@link #inputOf} read. */
+    static OutputStream outputOf(final WritableByteChannel channel) {
+        return new OutputStream() {
+            @Override
+            public void write(final int b) throws IOException {
+                write(new byte[] {(byte) b}, 0, 1);
+            }
+
+            @Override
+            public void write(final byte[] b, final int off, final int len) throws IOException {
+                final ByteBuffer buffer = ByteBuffer.wrap(b, off, len);
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer);
+                }
+            }
+        };
     }
 
     /** System.out / System.err: the calling game's stderr, else the host's own. */

@@ -150,6 +150,56 @@ public class InteractiveHostTest {
         sink.exit(1); // dropped quietly
     }
 
+    /**
+     * Lane shared-engine-1105, the 11-04 stall: a human game's reader is parked on its connection for the whole game, and
+     * the game's protocol writes must still go out (on JDK 17 Channels' two streams share a lock, and they did not).
+     */
+    @Test(timeOut = 30_000)
+    public void aParkedReaderNeverBlocksTheGamesWrites() throws Exception {
+        final java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("mtgx-fh-test");
+        final java.net.UnixDomainSocketAddress address = java.net.UnixDomainSocketAddress.of(dir.resolve("s"));
+        try (java.nio.channels.ServerSocketChannel server =
+                     java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX)) {
+            server.bind(address);
+            try (java.nio.channels.SocketChannel browser = java.nio.channels.SocketChannel.open(address);
+                 java.nio.channels.SocketChannel connection = server.accept()) {
+                final java.io.InputStream in = InteractiveHost.inputOf(connection);
+                final java.io.OutputStream out = InteractiveHost.outputOf(connection);
+                final CompletableFuture<Integer> parked = new CompletableFuture<>();
+                final Thread reader = new Thread(() -> {
+                    try {
+                        parked.complete(in.read());
+                    } catch (java.io.IOException e) {
+                        parked.completeExceptionally(e);
+                    }
+                }, "test-parked-reader");
+                reader.setDaemon(true);
+                reader.start();
+                while (reader.getState() != Thread.State.RUNNABLE || !reader.isAlive()) {
+                    Thread.sleep(10);
+                }
+                Thread.sleep(300); // inside its blocking read
+                final CompletableFuture<Void> wrote = new CompletableFuture<>();
+                final Thread writer = new Thread(() -> {
+                    try {
+                        out.write("Ohello\n".getBytes(StandardCharsets.UTF_8));
+                        wrote.complete(null);
+                    } catch (java.io.IOException e) {
+                        wrote.completeExceptionally(e);
+                    }
+                }, "test-writer");
+                writer.setDaemon(true);
+                writer.start();
+                wrote.get(5, TimeUnit.SECONDS);
+                final java.nio.ByteBuffer got = java.nio.ByteBuffer.allocate(16);
+                browser.read(got);
+                assertEquals(new String(got.array(), 0, got.position(), StandardCharsets.UTF_8), "Ohello\n");
+                browser.write(java.nio.ByteBuffer.wrap(new byte[] {'y'}));
+                assertEquals((int) parked.get(5, TimeUnit.SECONDS), (int) 'y', "the reader still gets its input");
+            }
+        }
+    }
+
     /** Lane shared-engine-1104: a hosted game's end runs its end hooks once and drops its slots; off: no hook kept. */
     @Test
     public void aGameEndRunsItsHooksAndDropsItsState() throws Exception {
