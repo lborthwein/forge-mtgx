@@ -259,6 +259,13 @@ public final class ForcedWinSolver {
          * search still runs only in our main phases.
          */
         public boolean anyWindow = false;
+        /** house releases p7, p12, p13, p15, p16, p17 (off by default): solver copies get the matching GameCopier keys. */
+        public boolean stalePlayerStatics = false;
+        public boolean offBattlefieldLimits = false;
+        public boolean historyLki = false;
+        public boolean copyBackFace = false;
+        public boolean stackAbilityCopies = false;
+        public boolean stackHistory = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -731,6 +738,12 @@ public final class ForcedWinSolver {
             c.enginePay = "true".equals(get.apply("enginePay")); // ledger-sweep-1107 (row 60)
             c.evalAvoidLost = "true".equals(get.apply("evalAvoidLost")); // next-turn-1107
             c.anyWindow = "true".equals(get.apply("anyWindow")); // line-adoption-1107
+            c.stalePlayerStatics = "true".equals(get.apply("stalePlayerStatics")); // house p7
+            c.offBattlefieldLimits = "true".equals(get.apply("offBattlefieldLimits")); // house p12
+            c.historyLki = "true".equals(get.apply("historyLki")); // house p13
+            c.copyBackFace = "true".equals(get.apply("copyBackFace")); // house p15
+            c.stackAbilityCopies = "true".equals(get.apply("stackAbilityCopies")); // house p16
+            c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -882,6 +895,8 @@ public final class ForcedWinSolver {
     @FunctionalInterface
     public interface Redraw {
         void apply(Game live, Player liveMe, Game g, Player me, Random rng);
+        /** Observation tracker knowledge retained by the redraw, also respected by the later world hand filter. */
+        default boolean remembersHandCard(Game live, Player observer, Card card) { return false; }
     }
     private final Config cfg;
 
@@ -2625,8 +2640,14 @@ public final class ForcedWinSolver {
                     copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                     copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                    copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
+                    copier.setHistoryLki(cfg.historyLki); // house p13
+                    copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                    copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                    copier.setStackHistory(cfg.stackHistory); // house p17
                     g = copier.makeCopy();
                     g.staleStatics = cfg.staleStatics;
+                    g.stalePlayerStatics = cfg.stalePlayerStatics;
                     final Player cm = (Player) copier.find(me);
                     co = (Player) copier.find(opp);
                     copies++;
@@ -3234,6 +3255,12 @@ public final class ForcedWinSolver {
                         && playout(live, l, mix(cfg.seed, 7_100_000L + 64L * index + tries[0]++), 0, -1, decisionWall).won;
             };
         }
+        el.stalePlayerStatics = cfg.stalePlayerStatics; // house p7
+        el.offBattlefieldLimits = cfg.offBattlefieldLimits; // house p12
+        el.historyLki = cfg.historyLki; // house p13
+        el.copyBackFace = cfg.copyBackFace; // house p15
+        el.stackAbilityCopies = cfg.stackAbilityCopies; // house p16
+        el.stackHistory = cfg.stackHistory; // house p17
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -3770,8 +3797,14 @@ public final class ForcedWinSolver {
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1);
                 copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
+                copier.setHistoryLki(cfg.historyLki); // house p13
+                copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                copier.setStackHistory(cfg.stackHistory); // house p17
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
+                g.stalePlayerStatics = cfg.stalePlayerStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -3782,7 +3815,7 @@ public final class ForcedWinSolver {
                     if (world != 0 && keepDealtHand()) {
                         continue; // deck-belief-1105: the redraw dealt this world's hand
                     }
-                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
+                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng, redraw);
                 }
                 if (cfg.infoState) {
                     // order-memory-1102: the known cards below the top stay at their index; canonical unknown order
@@ -4499,8 +4532,14 @@ public final class ForcedWinSolver {
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 ForcedWinEngine.copyStackIf(copier, live, cfg.engineStack); // R3-5
                 copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
+                copier.setHistoryLki(cfg.historyLki); // house p13
+                copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
+                copier.setStackHistory(cfg.stackHistory); // house p17
                 g = copier.makeCopy();
                 g.staleStatics = cfg.staleStatics;
+                g.stalePlayerStatics = cfg.stalePlayerStatics;
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
@@ -4514,7 +4553,7 @@ public final class ForcedWinSolver {
                             continue; // deck-belief-1105: the redraw dealt this world's hand
                         }
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
-                        hideOrSample(live, me, liveOpp, o, world == 0, rng);
+                        hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw);
                     }
                     if (libArrange != null) {
                         libArrange.apply(cm, rng); // e1-q8-1101: an exact-draw sequence at the first hidden slots
@@ -4665,6 +4704,10 @@ public final class ForcedWinSolver {
      * we have seen). Their library is shuffled either way.
      */
     static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng) {
+        hideOrSample(live, liveMe, liveOpp, opp, hide, rng, null);
+    }
+
+    static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng, Redraw knowledge) {
         final forge.game.player.PlayerView myView = liveMe.getView();
         final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
         final List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
@@ -4672,7 +4715,8 @@ public final class ForcedWinSolver {
         final List<Card> pool = new ArrayList<>(lib);
         for (Card c : hand) {
             final Card lc = live.findById(c.getId());
-            if (lc != null && lc.getView().canBeShownTo(myView)) {
+            if (lc != null && (lc.getView().canBeShownTo(myView)
+                    || knowledge != null && knowledge.remembersHandCard(live, liveMe, lc))) {
                 keep.add(c);
             } else {
                 pool.add(c);

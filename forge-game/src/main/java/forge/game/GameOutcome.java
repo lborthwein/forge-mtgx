@@ -120,6 +120,11 @@ public final class GameOutcome implements Iterable<Entry<RegisteredPlayer, Playe
         lifeDelta = Math.max(0, winnersHealth - opponentsHealth);
     }
 
+    /** Optional explicit-end-reason handling. Legacy callers retain their player-outcome interpretation. */
+    public boolean isDraw(final boolean honorEndReason) {
+        return honorEndReason && winCondition == GameEndReason.Draw || isDraw();
+    }
+
     public boolean isDraw() {
         for (PlayerStatistics stats : playerRating.values()) {
             if (stats.getOutcome().hasWon()) {

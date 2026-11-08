@@ -217,7 +217,7 @@ public final class DeckBelief {
             } else if (li < lands.size()) {
                 dealt.add(lands.get(li++));
             } else {
-                dealt.add(BeliefSampler.BASICS[rng.nextInt(BeliefSampler.BASICS.length)]);
+                dealt.add(BeliefSampler.basics()[rng.nextInt(BeliefSampler.basics().length)]);
             }
         }
         d.lands = hl;
@@ -233,7 +233,7 @@ public final class DeckBelief {
             } else if (ol < offLands.size()) {
                 dealt.add(offLands.get(ol++));
             } else {
-                dealt.add(BeliefSampler.BASICS[rng.nextInt(BeliefSampler.BASICS.length)]);
+                dealt.add(BeliefSampler.basics()[rng.nextInt(BeliefSampler.basics().length)]);
             }
         }
         Collections.shuffle(dealt, rng);

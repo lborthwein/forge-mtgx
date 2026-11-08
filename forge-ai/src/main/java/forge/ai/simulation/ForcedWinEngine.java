@@ -301,6 +301,13 @@ final class ForcedWinEngine {
          * that needs no luck is found first.
          */
         java.util.function.Predicate<List<Step>> verify;
+        /** house p7/p12/p13/p15/p16/p17 (false = off): node copies get the matching GameCopier keys. */
+        boolean stalePlayerStatics = false;
+        boolean offBattlefieldLimits = false;
+        boolean historyLki = false;
+        boolean copyBackFace = false;
+        boolean stackAbilityCopies = false;
+        boolean stackHistory = false;
         /**
          * choice-search-1105 (CAP-2, live port of solver-cap12-1030 #149; false = off): pass 1's share of {@link #nodes}
          * counted from this search's start. Off, it compares the solver's lifetime node count, so a solver that lives the
@@ -1721,8 +1728,14 @@ final class ForcedWinEngine {
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 copyStackIf(copier, live, lim.stack); // R3-5
                 copier.setTurnLimits(lim.turnLimits); // engine-reach-1107
+                copier.setOffBattlefieldLimits(lim.offBattlefieldLimits); // house p12
+                copier.setHistoryLki(lim.historyLki); // house p13
+                copier.setCopyBackFace(lim.copyBackFace); // house p15
+                copier.setStackAbilityCopies(lim.stackAbilityCopies); // house p16
+                copier.setStackHistory(lim.stackHistory); // house p17
                 root.g = copier.makeCopy();
                 root.g.staleStatics = lim.staleStatics;
+                root.g.stalePlayerStatics = lim.stalePlayerStatics;
                 root.me = (Player) copier.find(liveMe);
                 st.copies++;
                 root.cards = cardCount(root.g);
@@ -1732,7 +1745,7 @@ final class ForcedWinEngine {
                     lim.redraw.apply(live, liveMe, root.g, root.me, rng); // honest-belief-1020
                 }
                 for (Player o : root.me.getOpponents()) {
-                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng);
+                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng, lim.redraw);
                 }
                 if (lim.ownKnownTop >= 0) {
                     ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, lim.ownPinned, rng);
@@ -3657,10 +3670,16 @@ final class ForcedWinEngine {
             } else {
                 final GameCopier copier = new GameCopier(node.g, true);
                 copier.setStaleStatics(lim.staleStatics); // unified-search-1106
+                copier.setStalePlayerStatics(lim.stalePlayerStatics); // house p7
                 copier.setTurnLimits(lim.turnLimits); // engine-reach-1107
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
+                copier.setOffBattlefieldLimits(lim.offBattlefieldLimits); // house p12
+                copier.setHistoryLki(lim.historyLki); // house p13
+                copier.setCopyBackFace(lim.copyBackFace); // house p15
+                copier.setStackAbilityCopies(lim.stackAbilityCopies); // house p16
+                copier.setStackHistory(lim.stackHistory); // house p17
                 copyStackIf(copier, node.g, lim.stack); // R3-5
                 g = copier.makeCopy();
                 me = (Player) copier.find(node.me);
