@@ -236,6 +236,15 @@ public final class ForcedWinSolver {
          */
         public boolean putBackKeep = false;
         /**
+         * ledger-sweep-1107, ledger row 60 (off by default): the engine search plays payment variants of its moves on wall
+         * budgets, as payRecord does on counter budgets (labeller-v2 (e): each distinct untapped remainder of our one-tap
+         * lands after the move's mana cost, up to payVariants, its sources floated before the move), and a follower floats a
+         * step's recorded sources before Forge AI pays. Off: every engine move is paid by Forge AI's own choice of lands
+         * (paySearch reaches only the planner, followPay only Phyrexian life), so a loop could tap the only red source for
+         * its first Sol Ring and never cast its outlet.
+         */
+        public boolean enginePay = false;
+        /**
          * next-turn-1107 (off by default): the lines verified per decision are distinct in their steps (cards and abilities),
          * not only in pile filler; and a card a failed verification lost during the opponent's turn (a step of ours after the
          * pass found it gone) rules out the remaining candidates that use it after their pass. Off: the first cfg.top
@@ -719,6 +728,7 @@ public final class ForcedWinSolver {
             c.positionKeyFull = "true".equals(get.apply("positionKeyFull")); // unified-search-1106
             c.lineUncapped = "true".equals(get.apply("lineUncapped")); // unified-search-1106
             c.putBackKeep = "true".equals(get.apply("putBackKeep")); // next-turn-1107
+            c.enginePay = "true".equals(get.apply("enginePay")); // ledger-sweep-1107 (row 60)
             c.evalAvoidLost = "true".equals(get.apply("evalAvoidLost")); // next-turn-1107
             c.anyWindow = "true".equals(get.apply("anyWindow")); // line-adoption-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
@@ -773,7 +783,8 @@ public final class ForcedWinSolver {
                 + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes + " V=" + OppMin.VERSION : "")
                 + (cacPicks ? " cacPicks V=" + cacVariants + " cap=" + cacCap : "") + (cacLine ? " cacLine" : "")
                 + (planScry ? " planScry max=" + planScryMax : "") + (planDiscard ? " planDiscard" : "")
-                + (payRecord ? " payRecord V=" + payVariants : "") + (engineNodesPerSearch ? " engineNodesPerSearch" : "")
+                + (payRecord ? " payRecord V=" + payVariants : "") + (enginePay ? " enginePay V=" + payVariants : "")
+                + (engineNodesPerSearch ? " engineNodesPerSearch" : "")
                 + (loopMacro ? " loopMacro" : "") + (engineAfterPlanFail ? " engineAfterPlanFail" : "")
                 + (engineAnyWindow ? " engineAnyWindow" : "") + (engineGateWide ? " engineGateWide" : "")
                 + (engineLadder ? " engineLadder N=" + ladderNodes + " S=" + ladderSteps : "")
@@ -3240,7 +3251,7 @@ public final class ForcedWinSolver {
         el.cac = cfg.cacPicks;
         el.cacVariants = cfg.cacVariants;
         el.cacCap = cfg.cacCap;
-        el.pay = cfg.payRecord;
+        el.pay = cfg.payRecord || cfg.enginePay; // ledger-sweep-1107 (row 60): enginePay on wall budgets
         el.payVariants = cfg.payVariants;
         // solver-cap12 round 3 (all off by default)
         el.order = "static".equals(cfg.engineOrder) ? StaticValuer.INSTANCE
@@ -5080,6 +5091,8 @@ public final class ForcedWinSolver {
          * payment sources float before its action.
          */
         boolean cacLine, payRecord;
+        /** ledger-sweep-1107 ({@link Config#enginePay}): set with payRecord; kept by a verifyReplan follower. */
+        boolean enginePay;
         int floatDone;
 
         Follower(Line line) {
@@ -5093,7 +5106,8 @@ public final class ForcedWinSolver {
         static Follower of(Line line, Config cfg) {
             final Follower fo = new Follower(line);
             fo.cacLine = cfg.cacLine;
-            fo.payRecord = cfg.payRecord;
+            fo.payRecord = cfg.payRecord || cfg.enginePay; // ledger-sweep-1107 (row 60)
+            fo.enginePay = cfg.enginePay;
             fo.uncapped = cfg.loopMacro && cfg.loopMacro3; // review #154 S2: its own key
             fo.costLine = cfg.engineCostChoice;
             fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
@@ -5645,9 +5659,13 @@ public final class ForcedWinSolver {
                     replanner = null;
                     final Line fresh = rp.apply(f.line);
                     if (fresh != null) {
-                        final boolean keep = f.putBackKeep;
+                        final boolean keep = f.putBackKeep, keepEnginePay = f.enginePay;
                         f = new Follower(fresh);
                         f.putBackKeep = keep; // next-turn-1107
+                        if (keepEnginePay) {
+                            f.enginePay = true; // ledger-sweep-1107 (row 60): the re-planned line's recorded payments too
+                            f.payRecord = true;
+                        }
                         final Follower.Next m = f.next(g, getPlayer());
                         return m.action != null ? capped(List.of(m.action)) : null;
                     }
