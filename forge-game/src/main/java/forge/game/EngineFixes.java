@@ -6,7 +6,8 @@ package forge.game;
  *
  * <p><b>Live line (live-fixes-1107):</b> {@code -Dforge.liveFixes} (default {@code true} on this line only) is the one
  * switch that sets the DEFAULT of every selected bug fix for every seat: the JVM flags {@code forge.copyRobust},
- * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.probeEmptyDraw} (ForcedWinProbe), and the solver keys {@code staleStatics}, {@code turnLimits},
+ * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
+ * ({@code forge.house.<key>}, read in LookaheadSearch), and the solver keys {@code staleStatics}, {@code turnLimits},
  * {@code lineUncapped} ({@code ForcedWinSolver.Config.fromProps}). An explicit flag or key still wins.
  * {@code -Dforge.liveFixes=false} is the live jar before these fixes, byte for byte.
  */
@@ -37,7 +38,12 @@ public final class EngineFixes {
     /** The startup line: the switch and what each fix resolved to. */
     public static String describe() {
         return "[live-fixes] forge.liveFixes=" + liveFixes + " copyRobust=" + copyRobust + " copyAltCost=" + copyAltCost
-                + " researchFixes=" + researchFixes + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " solver(staleStatics,turnLimits,lineUncapped)=" + liveFixes
+                + " researchFixes=" + researchFixes + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
+                + " house(beliefStatics,beliefPlayerStatics,copyTurnLimits,offBattlefieldLimits,beliefRememberedHand,copyBackFace,stackAbilityCopies)="
+                + flag("forge.house.beliefStatics") + "," + flag("forge.house.beliefPlayerStatics") + "," + flag("forge.house.copyTurnLimits")
+                + "," + flag("forge.house.offBattlefieldLimits") + "," + flag("forge.house.beliefRememberedHand") + ","
+                + flag("forge.house.copyBackFace") + "," + flag("forge.house.stackAbilityCopies")
+                + " solver(staleStatics,turnLimits,lineUncapped,stalePlayerStatics,offBattlefieldLimits,copyBackFace,stackAbilityCopies,planExpandCap)=" + liveFixes
                 + " (solver keys: default; an explicit key wins)";
     }
 
