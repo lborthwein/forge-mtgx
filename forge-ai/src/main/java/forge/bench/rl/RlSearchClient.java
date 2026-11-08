@@ -197,6 +197,7 @@ public final class RlSearchClient implements Closeable {
     public Scores score(final byte[] decidePayload) throws IOException {
         final long t = System.nanoTime();
         send(T_SCORE, 0, decidePayload);
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107 (no clock = no-op)
         final Scores s = decodeScores(expect(T_SCORES).payload);
         calls++;
         nanos += System.nanoTime() - t;
@@ -206,6 +207,7 @@ public final class RlSearchClient implements Closeable {
     public RlWire.Decision decide(final byte[] decidePayload, final boolean sample) throws IOException {
         final long t = System.nanoTime();
         send(RlWire.T_DECIDE, sample ? FLAG_SAMPLE : 0, decidePayload);
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107 (no clock = no-op)
         final RlWire.Decision d;
         try {
             d = RlWire.decodeDecision(expect(RlWire.T_DECISION).payload);
@@ -225,6 +227,8 @@ public final class RlSearchClient implements Closeable {
         final long t = System.nanoTime();
         final float[] v;
         final long bytes = leavesBytes(decidePayloads, 0, decidePayloads.size());
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107: one request + one per leaf
+        forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC_ITEM, decidePayloads.size());
         if (!forge.game.EngineFixes.researchFixes() || LEAVES_FRAME_OVERHEAD + bytes <= frameLimit
                 && decidePayloads.size() <= leavesMax && bytes <= leavesBytesMax) {
             v = new float[decidePayloads.size()];

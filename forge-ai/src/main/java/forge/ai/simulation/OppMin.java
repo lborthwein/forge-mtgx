@@ -280,6 +280,7 @@ public final class OppMin {
                 break;
             }
             out.nodes++;
+            forge.game.WorkClock.tick(forge.game.WorkClock.Site.OPP_NODE); // work-units-1107 (no clock = no-op)
             final Leaf l = play.apply(s);
             if (out.firstLeaf == null) out.firstLeaf = l;
             if (Double.isNaN(l.v)) {
