@@ -137,6 +137,8 @@ public final class ForcedWinSolver {
         public boolean cycles = false;
         /** unified-search-1106 (off by default): copies of a belief world skip static effects naming swapped-out cards. */
         public boolean staleStatics = false;
+        /** house release (live-fixes-1107 port; off by default): stackAbilityCopies. */
+        public boolean stackAbilityCopies = false;
         /** house release (live-fixes-1107 port; off by default): copyBackFace. */
         public boolean copyBackFace = false;
         /** house release (live-fixes-1107 port; off by default): offBattlefieldLimits. */
@@ -222,6 +224,7 @@ public final class ForcedWinSolver {
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
             c.staleStatics = boolOrLive(get.apply("staleStatics")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
+            c.stackAbilityCopies = boolOrLive(get.apply("stackAbilityCopies")); // house; live-fixes-1107: default forge.liveFixes
             c.copyBackFace = boolOrLive(get.apply("copyBackFace")); // house; live-fixes-1107: default forge.liveFixes
             c.offBattlefieldLimits = boolOrLive(get.apply("offBattlefieldLimits")); // house; live-fixes-1107: default forge.liveFixes
             c.stalePlayerStatics = boolOrLive(get.apply("stalePlayerStatics")); // house; live-fixes-1107: default forge.liveFixes
@@ -944,6 +947,7 @@ public final class ForcedWinSolver {
                 synchronized (live) {
                     final GameCopier copier = new GameCopier(live, true);
                     copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                    copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
                     copier.setCopyBackFace(cfg.copyBackFace); // house p15
                     copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                     g = copier.makeCopy();
@@ -1383,6 +1387,7 @@ public final class ForcedWinSolver {
         el.nodes = cfg.engineNodes;
         el.cycles = cfg.cycles;
         el.staleStatics = cfg.staleStatics; // unified-search-1106
+        el.stackAbilityCopies = cfg.stackAbilityCopies; // house
         el.copyBackFace = cfg.copyBackFace; // house
         el.offBattlefieldLimits = cfg.offBattlefieldLimits; // house
         el.stalePlayerStatics = cfg.stalePlayerStatics; // house
@@ -1527,6 +1532,7 @@ public final class ForcedWinSolver {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1);
                 copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
                 copier.setCopyBackFace(cfg.copyBackFace); // house p15
                 copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                 g = copier.makeCopy();
@@ -1781,6 +1787,7 @@ public final class ForcedWinSolver {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 copier.setTurnLimits(cfg.turnLimits); // engine-reach-1107
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
                 copier.setCopyBackFace(cfg.copyBackFace); // house p15
                 copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                 g = copier.makeCopy();

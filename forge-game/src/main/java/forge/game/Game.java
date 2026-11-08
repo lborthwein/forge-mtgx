@@ -67,6 +67,8 @@ public class Game {
     public boolean stalePlayerStatics = false;
     /** Default off: copies retain turn-use limits outside the battlefield; inherited only by copies. */
     public boolean offBattlefieldLimits = false;
+    /** Default-off: copied stack entries get their own ability objects. */
+    public boolean stackAbilityCopies = false;
     /** Default-off preservation of physical back-face orientation in search copies. */
     public boolean copyBackFace = false;
 
