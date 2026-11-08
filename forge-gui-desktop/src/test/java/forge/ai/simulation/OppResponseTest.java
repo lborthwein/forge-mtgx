@@ -39,10 +39,37 @@ public class OppResponseTest extends AITest {
         c.planMs = 1000;
         c.budgetMs = 20000;
         c.worlds = 4;
-        // the verification's opponent passes while our spell is on the stack (as a Forge AI that misses the answer):
-        // the line is "proven" before the check, so the check alone decides what changes
+        // the verification's opponent misses the answer (Forge AI passes, no scripted one-counter adversary): the line is
+        // "proven" before the check, so the check alone decides what changes
         c.testPassiveOpp = true;
+        c.adversary = false;
         return c;
+    }
+
+    static ForcedWinSolver.Proposal bestWith(Game g, ForcedWinSolver.Config c) {
+        final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get(0), c);
+        ForcedWinSolver.Proposal b = null;
+        for (ForcedWinSolver.Proposal p : s.propose(g)) {
+            if (b == null || p.pBelief > b.pBelief) b = p;
+        }
+        Assert.assertNotNull(b, s.summary());
+        System.err.println("[opp-response-test] invariant " + b.text);
+        return b;
+    }
+
+    @Test
+    public void theKeyNeverRaisesPBelief() {
+        // invariant (coordinator 11-08): with the default verification (Forge AI and the one-counter adversary on), the key
+        // can only lower a line's P(belief), never raise it, on every frame here
+        for (String f : List.of(frame("Counterspell", "Island;Island"), frame("Counterspell", "Island|Tapped;Island|Tapped"),
+                frame("Forest", "Island;Island"))) {
+            final ForcedWinSolver.Config off = cfg(false), on = cfg(true);
+            off.testPassiveOpp = on.testPassiveOpp = false;
+            off.adversary = on.adversary = true;
+            final double pOff = bestWith(ForcedWinSolverTest.game("Default", "Default", f), off).pBelief;
+            final double pOn = bestWith(ForcedWinSolverTest.game("Default", "Default", f), on).pBelief;
+            Assert.assertTrue(pOn <= pOff + 1e-9, "key on " + pOn + " > key off " + pOff);
+        }
     }
 
     static ForcedWinSolver.Proposal best(Game g, boolean on) {
