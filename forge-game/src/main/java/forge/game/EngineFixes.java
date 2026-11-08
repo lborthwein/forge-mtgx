@@ -6,7 +6,7 @@ package forge.game;
  *
  * <p><b>Live line (live-fixes-1107):</b> {@code -Dforge.liveFixes} (default {@code true} on this line only) is the one
  * switch that sets the DEFAULT of every selected bug fix for every seat: the JVM flags {@code forge.copyRobust},
- * {@code forge.copyAltCost}, {@code forge.researchFixes}, and the solver keys {@code staleStatics}, {@code turnLimits},
+ * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.probeEmptyDraw} (ForcedWinProbe), and the solver keys {@code staleStatics}, {@code turnLimits},
  * {@code lineUncapped} ({@code ForcedWinSolver.Config.fromProps}). An explicit flag or key still wins.
  * {@code -Dforge.liveFixes=false} is the live jar before these fixes, byte for byte.
  */
@@ -17,6 +17,11 @@ public final class EngineFixes {
     private static boolean flag(final String property) {
         final String v = System.getProperty(property);
         return v == null ? liveFixes : Boolean.parseBoolean(v);
+    }
+
+    /** A fix flag of another module: its own property when set, else {@link #liveFixes()} (read once, at the caller's class load). */
+    public static boolean liveFlag(final String property) {
+        return flag(property);
     }
 
     private static boolean copyRobust = flag("forge.copyRobust");
@@ -32,7 +37,7 @@ public final class EngineFixes {
     /** The startup line: the switch and what each fix resolved to. */
     public static String describe() {
         return "[live-fixes] forge.liveFixes=" + liveFixes + " copyRobust=" + copyRobust + " copyAltCost=" + copyAltCost
-                + " researchFixes=" + researchFixes + " solver(staleStatics,turnLimits,lineUncapped)=" + liveFixes
+                + " researchFixes=" + researchFixes + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " solver(staleStatics,turnLimits,lineUncapped)=" + liveFixes
                 + " (solver keys: default; an explicit key wins)";
     }
 
