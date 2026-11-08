@@ -348,6 +348,14 @@ public final class ForcedWinPlanner {
         int planScryMax = 3, payVariants = 3;
         /** next-turn-1107 (evalAvoidLost): card ids of ours that are gone once we pass the turn (lost in a verification). */
         Set<Integer> goneAtPass = Set.of();
+        /**
+         * ledger-sweep2-1107 (solverCfg planExpandCap; false = off, the default, and nothing changes): one node's expansion
+         * (every successor its abilities' effects branch into, before any is searched) makes at most as many branches as
+         * the planner has nodes left. A branch past that could never be visited, but building it costs memory and time
+         * the node budget does not see: a draw of k lazily chosen pile positions branches into classes^k states (ledger
+         * row 66: 15^5 copies under one Memory Jar activation after Doomsday, then the JVM's heap ran out).
+         */
+        boolean expandCap;
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -365,11 +373,13 @@ public final class ForcedWinPlanner {
         /** bvw-step1-build-1024 (read-only): nodes actually visited, and whether the wall time cut the search. */
         int visited;
         boolean timedOut;
+        /** ledger-sweep2-1107 (report only): the most resolve steps one expansion took; expansions cut by planExpandCap. */
+        int maxExpand, expandStops;
 
         String summary() {
             return "lines=" + lines.size() + " nodes=" + nodes + (exhausted ? "(budget)" : "") + (stoppedBy.isEmpty() ? "" : " stoppedBy=" + stoppedBy)
                     + (depthStops > 0 ? " depthStops=" + depthStops : "") + " sameTurn=" + sameTurn
-                    + " nextTurn=" + nextTurn + " ms=" + nanos / 1_000_000;
+                    + " nextTurn=" + nextTurn + " ms=" + nanos / 1_000_000 + (expandStops > 0 ? " expandStops=" + expandStops : "");
         }
     }
 
@@ -626,7 +636,27 @@ public final class ForcedWinPlanner {
         }
     }
 
+    /** ledger-sweep2-1107 (planExpandCap): branches built in the current expansion, and the most it may build. */
+    private int expandCalls, expandLimit = Integer.MAX_VALUE;
+    private boolean expandCut;
+
     private List<S> successors(S s) {
+        expandCalls = 0;
+        expandCut = false;
+        expandLimit = lim.expandCap ? Math.max(1, lim.nodes - nodes) : Integer.MAX_VALUE;
+        final List<S> out0 = successors0(s);
+        result.maxExpand = Math.max(result.maxExpand, expandCalls);
+        if (expandCut) {
+            result.expandStops++;
+            result.exhausted = true;
+            if (result.stoppedBy.isEmpty()) {
+                result.stoppedBy = "expand";
+            }
+        }
+        return out0;
+    }
+
+    private List<S> successors0(S s) {
         final List<S> first = new ArrayList<>(), second = new ArrayList<>(), third = new ArrayList<>();
         final Set<String> tried = new HashSet<>();
         final boolean pending = pos.pendingId >= 0 && s.steps.isEmpty();
@@ -966,6 +996,13 @@ public final class ForcedWinPlanner {
         if (s.dead) {
             return;
         }
+        // ledger-sweep2-1107 (planExpandCap): every resolve step counts (report only when off); past the cap the branch is
+        // dropped, as the node limit drops the branches it never reaches
+        if (expandCalls >= expandLimit) {
+            expandCut = true;
+            return;
+        }
+        expandCalls++;
         if (s.won || ei >= effs.size()) {
             out.add(s);
             return;

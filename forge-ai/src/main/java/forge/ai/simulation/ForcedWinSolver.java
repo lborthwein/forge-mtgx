@@ -266,6 +266,16 @@ public final class ForcedWinSolver {
         public boolean copyBackFace = false;
         public boolean stackAbilityCopies = false;
         public boolean stackHistory = false;
+        /**
+         * ledger-sweep2-1107 (off by default): one planner expansion builds at most as many branches as the planner has nodes
+         * left (ForcedWinPlanner.Limits#expandCap; ledger row 66).
+         */
+        public boolean planExpandCap = false;
+        /**
+         * ledger-sweep2-1107 (off by default): battlefield mana sources' colors and amounts are read from the position at every
+         * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
+         */
+        public boolean sourceColorsLive = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -744,6 +754,8 @@ public final class ForcedWinSolver {
             c.copyBackFace = "true".equals(get.apply("copyBackFace")); // house p15
             c.stackAbilityCopies = "true".equals(get.apply("stackAbilityCopies")); // house p16
             c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
+            c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
+            c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -2245,7 +2257,7 @@ public final class ForcedWinSolver {
         if (cfg.anyWindow) {
             markWindow(pos, live.getPhaseHandler()); // line-adoption-1107
         }
-        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        final ForcedWinPlanner.Limits lim = limits();
         lim.nodes = cfg.nodes;
         // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
         lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs);
@@ -2549,6 +2561,9 @@ public final class ForcedWinSolver {
         if (base == null) {
             return t;
         }
+        if (cfg.sourceColorsLive) {
+            ForcedWinModel.Reader.readSourceColors(base, opp); // ledger-sweep2-1107: their battlefield is public
+        }
         if (without != null) {
             for (Card w : without) {
                 base.hand.removeIf(a -> a.id == w.getId());
@@ -2577,7 +2592,7 @@ public final class ForcedWinSolver {
                 pos.library.addAll(pool.subList(Math.min(hidden, pool.size()), pool.size()));
                 pos.library.sort((x, y) -> Integer.compare(x.id, y.id));
             }
-            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            final ForcedWinPlanner.Limits lim = limits();
             lim.nodes = cfg.nodes / 2;
             // POST-FREEZE 3: when they cannot act at sorcery speed now (our turn, or their non-main step), their
             // threat window is their next two turns (a setup spell next turn, the win the turn after: a
@@ -2654,6 +2669,9 @@ public final class ForcedWinSolver {
                     redraw.apply(live, me, g, cm, new Random(mix(cfg.seed, 7919L * w + 31L * ph.getTurn() + 5)));
                 }
                 pos = oppReader.read(g, co, null, true, co, pending);
+                if (pos != null && cfg.sourceColorsLive) {
+                    ForcedWinModel.Reader.readSourceColors(pos, co); // ledger-sweep2-1107
+                }
                 if (pos != null && revealed) {
                     // their hand is known to us (a discard effect revealed it): the real hand, only the library is drawn
                     final Position real = oppReader.read(live, opp, null, false, opp, pending);
@@ -2677,7 +2695,7 @@ public final class ForcedWinSolver {
                 }
             }
             pos.sorcerySpeed = ph.isPlayerTurn(opp) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
-            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            final ForcedWinPlanner.Limits lim = limits();
             lim.nodes = cfg.nodes / 2;
             lim.horizon = (pos.sorcerySpeed ? 2 : 3) + cfg.threatExtraTurns;
             lim.ms = cfg.planMs;
@@ -3671,6 +3689,13 @@ public final class ForcedWinSolver {
         this.windowCap = on;
     }
 
+    /** ledger-sweep2-1107: planner limits with this solver's expansion cap (planExpandCap; off = as {@code new Limits()}). */
+    private ForcedWinPlanner.Limits limits() {
+        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        lim.expandCap = cfg.planExpandCap;
+        return lim;
+    }
+
     /** wu-reads-1107: one planner search ({@link #plan}), within the hard deadline when windowCap is on (unchanged otherwise). */
     ForcedWinPlanner.Result planCapped(Position pos, ForcedWinPlanner.Limits lim) {
         if (!windowCap || hardDeadline == 0) {
@@ -3884,7 +3909,7 @@ public final class ForcedWinSolver {
             if (pos == null) {
                 return out;
             }
-            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            final ForcedWinPlanner.Limits lim = limits();
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
@@ -3940,7 +3965,7 @@ public final class ForcedWinSolver {
                 s.failed = true;
                 return s;
             }
-            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            final ForcedWinPlanner.Limits lim = limits();
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
@@ -3987,10 +4012,18 @@ public final class ForcedWinSolver {
         if (cfg.honestProbes) {
             return forge.bench.PlayerControllerBridge.isolated(live, () -> forge.util.IdScope.detached(() -> {
                 final Game g = honestProbeRoot(live, knownOrder);
-                return reader.read(g, (Player) g.getPlayer(me.getId()), knownOrder, true);
+                final Player pg = (Player) g.getPlayer(me.getId());
+                final Position hp = reader.read(g, pg, knownOrder, true);
+                if (cfg.sourceColorsLive && hp != null) {
+                    ForcedWinModel.Reader.readSourceColors(hp, pg); // ledger-sweep2-1107
+                }
+                return hp;
             }));
         }
         final Position pos = reader.read(live, me, knownOrder, true);
+        if (cfg.sourceColorsLive && pos != null) {
+            ForcedWinModel.Reader.readSourceColors(pos, me); // ledger-sweep2-1107 (before sourceOutput, which reads amounts only)
+        }
         if (cfg.sourceOutput && pos != null) {
             ForcedWinModel.Reader.readSourceOutputs(pos, me); // kill-line-1106
         }
@@ -4164,7 +4197,7 @@ public final class ForcedWinSolver {
                 }
                 replanned = true;
                 avoidReplans++;
-                final ForcedWinPlanner.Limits lim2 = new ForcedWinPlanner.Limits();
+                final ForcedWinPlanner.Limits lim2 = limits();
                 lim2.nodes = avoidLim.nodes;
                 lim2.ms = avoidLim.ms;
                 lim2.payPolicies = avoidLim.payPolicies;
@@ -5068,10 +5101,13 @@ public final class ForcedWinSolver {
         if (pos == null) {
             return null;
         }
+        if (cfg.sourceColorsLive) {
+            ForcedWinModel.Reader.readSourceColors(pos, p); // ledger-sweep2-1107
+        }
         if (cfg.sourceOutput) {
             ForcedWinModel.Reader.readSourceOutputs(pos, p);
         }
-        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        final ForcedWinPlanner.Limits lim = limits();
         lim.nodes = cfg.nodes;
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
