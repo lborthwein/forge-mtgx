@@ -430,6 +430,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (infoState) {
                 o.addProperty("infoState", true); // order-memory-1102: only when on
             }
+            // house p11-p16 (live-fixes-1107): only when on, independent of the belief, as the house releases emit them
+            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
+            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
+            if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (copyBackFace) o.addProperty("copyBackFace", true);
+            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
             if (!"off".equals(belief)) {
                 // honest-belief-1020: only when on, so every other spec's JSON is unchanged
                 o.addProperty("belief", belief);
@@ -441,11 +447,6 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("beliefBasics", beliefBasics);
                 if (beliefStatics) o.addProperty("beliefStatics", true);
                 if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
-                if (copyTurnLimits) o.addProperty("copyTurnLimits", true); // house p11
-                if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true); // house p14
-                if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true); // house p12
-                if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true); // house p16
-                if (copyBackFace) o.addProperty("copyBackFace", true); // house p15
                 o.addProperty("beliefSingleton", beliefSingleton);
             }
             if (choices > 0) {

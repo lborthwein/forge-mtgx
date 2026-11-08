@@ -2,6 +2,8 @@ package forge.ai.simulation;
 
 import java.util.List;
 import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 import forge.game.Game;
 import forge.game.phase.PhaseType;
@@ -11,6 +13,26 @@ import forge.game.zone.ZoneType;
 
 /** Real look-ahead world construction must permit the engine's later copies of that world. */
 public class LookaheadBeliefStaticsTest extends SimulationTest {
+    /**
+     * live-fixes-1107: this jar turns round 1's copier fixes on by default (forge.liveFixes), and researchFixes' belief-world
+     * static refresh already repairs what this test's "off" leg reproduces. The test reads its own key in isolation.
+     */
+    private boolean researchWas, robustWas;
+
+    @BeforeMethod
+    public void roundOneFixesOff() {
+        researchWas = forge.game.EngineFixes.researchFixes();
+        robustWas = forge.game.EngineFixes.copyRobust();
+        forge.game.EngineFixes.setResearchFixesForTest(false);
+        forge.game.EngineFixes.setCopyRobustForTest(false);
+    }
+
+    @AfterMethod
+    public void roundOneFixesBack() {
+        forge.game.EngineFixes.setResearchFixesForTest(researchWas);
+        forge.game.EngineFixes.setCopyRobustForTest(robustWas);
+    }
+
     private Game source() {
         Game g = initAndCreateGame();
         g.getPhaseHandler().devModeSet(PhaseType.MAIN2, g.getPlayers().get(0));
@@ -66,7 +88,7 @@ public class LookaheadBeliefStaticsTest extends SimulationTest {
         forge.bench.rl.RlSearch.Config off = forge.bench.rl.RlSearch.Config.parse(spec);
         // live-fixes-1107: the default is forge.liveFixes (off: -Dforge.liveFixes=false), absent from the JSON when off
         Assert.assertEquals(off.beliefStatics, LookaheadSearch.LIVE_BELIEF_STATICS);
-        Assert.assertEquals(off.toJson().has("beliefStatics"), LookaheadSearch.LIVE_BELIEF_STATICS);
+        Assert.assertFalse(off.toJson().has("beliefStatics")); // belief off: the belief keys are not in the JSON
         spec.addProperty("belief", "uniform");
         spec.addProperty("beliefCube", "parse-only-pool.json");
         spec.addProperty("beliefStatics", true);

@@ -34,7 +34,7 @@ public class PlanExpandCapTest extends forge.ai.AITest {
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.horizon = 1;
         lim.nodes = 400;
-        lim.ms = -1L; // nodes only: the test does not depend on the host's speed
+        lim.ms = 600_000L; // live-fixes-1107: the live line has no "ms < 0 = no wall time"; a 10-minute wall leaves the nodes as the bound
         lim.expandCap = cap;
         return lim;
     }

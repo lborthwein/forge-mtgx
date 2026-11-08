@@ -69,7 +69,7 @@ public class OffBattlefieldLimitsTest extends SimulationTest {
         assertSpent(child, zone);
         Assert.assertTrue(child.offBattlefieldLimits);
         assertSpent(live, zone);
-        Assert.assertEquals(live.offBattlefieldLimits, LookaheadSearch.LIVE_OFF_BATTLEFIELD_LIMITS); // live-fixes-1107: default follows forge.liveFixes
+        Assert.assertFalse(live.offBattlefieldLimits);
     }
     private static void assertSpent(Game game, ZoneType zone) {
         Card c = game.getPlayers().get(1).getCardsIn(zone).get(0);
