@@ -59,6 +59,13 @@ public final class ChoiceScorer {
          */
         public double reachAlpha = 0.0;
         public int reachMaxNames = 40;
+        /**
+         * solver-distill-cc-1109 (0 = off, the default): a CARDS ask whose resolution asks again (put-backs: Brainstorm and
+         * the like; the guard's "multiAnswer") is answered as a whole: every ordered sequence of {@code seqs} distinct
+         * menu cards is applied on a copy (no Forge AI tail) and scored like a single pick; the chosen sequence answers the
+         * resolution's later picks and its order ask. The first ask of a resolution only. No card knowledge.
+         */
+        public int seqs = 0;
         /** Ordered multi-pick choices (piles): the planner proposes, applied piles are screened and valued. Off by default. */
         public boolean pile = false;
         public int pileTop = 6;
@@ -75,7 +82,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames"));
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "seqs"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -107,6 +114,7 @@ public final class ChoiceScorer {
             if (o.has("screenMs")) c.screenMs = o.get("screenMs").getAsLong();
             if (o.has("reachAlpha")) c.reachAlpha = o.get("reachAlpha").getAsDouble();
             if (o.has("reachMaxNames")) c.reachMaxNames = o.get("reachMaxNames").getAsInt();
+            if (o.has("seqs")) c.seqs = o.get("seqs").getAsInt();
             if (o.has("guard")) c.guard = o.get("guard").getAsBoolean();
             if (o.has("pile")) c.pile = o.get("pile").getAsBoolean();
             if (o.has("pileTop")) c.pileTop = o.get("pileTop").getAsInt();
@@ -137,6 +145,9 @@ public final class ChoiceScorer {
                 o.addProperty("reachAlpha", reachAlpha);
                 o.addProperty("reachMaxNames", reachMaxNames);
             }
+            if (seqs > 0) {
+                o.addProperty("seqs", seqs);
+            }
             o.addProperty("guard", guard);
             o.addProperty("pile", pile);
             o.addProperty("pileTop", pileTop);
@@ -162,6 +173,8 @@ public final class ChoiceScorer {
         public forge.ai.simulation.ForcedWinSolver.Screen screen;
         /** A pile option: the cards top first. */
         public List<Integer> pileIds;
+        /** solver-distill-cc-1109: a whole-resolution answer ({@link Config#seqs}); pileIds holds its picks. */
+        public boolean seq;
     }
 
     /** One scored ask. */
@@ -340,6 +353,10 @@ public final class ChoiceScorer {
                 piles(g, me, m, seed, fr, s);
                 return;
             }
+            if ("multiAnswer".equals(s.unsupported) && cfg.seqs > 0) {
+                seqs(g, me, m, greedy, seed, fr, s, deadline);
+                return;
+            }
             if (s.unsupported != null) {
                 return;
             }
@@ -422,6 +439,112 @@ public final class ChoiceScorer {
             guardSwap = was;
         }
         return null;
+    }
+
+    private int seqSeen = -1;
+
+    /** solver-distill-cc-1109 ({@link Config#seqs}): every ordered sequence of distinct menu cards, applied whole. */
+    private void seqs(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final long seed,
+            final ChoiceApply.Frames fr, final Scored s, final long deadline) {
+        final SpellAbility top = g.getStack().peekAbility();
+        final int key = top == null ? -1 : System.identityHashCode(top);
+        if (key == seqSeen) {
+            s.unsupported = "seqLaterPick";
+            return;
+        }
+        seqSeen = key;
+        // distinct cards by name (two Islands are one answer; a name twice only when two copies are on the menu)
+        final Map<String, List<Integer>> byKey = new LinkedHashMap<>();
+        for (int i = 0; i < m.C(); i++) {
+            if (m.cands.get(i).kind > 0 && m.cands.get(i).host != null) {
+                byKey.computeIfAbsent(ChoiceWindow.looseKey(m, i, me), x -> new ArrayList<>()).add(i);
+            }
+        }
+        final List<List<Integer>> seqs = new ArrayList<>();
+        final List<String> keys = new ArrayList<>(byKey.keySet());
+        final int k = cfg.seqs;
+        seqBuild(keys, byKey, k, new ArrayList<>(), seqs, Math.max(1, cfg.cap));
+        if (seqs.isEmpty()) {
+            s.unsupported = "seqNone";
+            return;
+        }
+        // the honest-copy checks on the first full sequence: no Forge AI tail, no read of the opponent's hidden cards
+        final List<Integer> probe = ids(m, seqs.get(0));
+        final ChoiceApply.Result a = ChoiceApply.applyPicks(g, me, probe, probe, seed, cfg.settleSteps, cfg.fidelity, fr);
+        if (a.fail == null && a.tailAsks > 0) {
+            s.unsupported = "seqTail";
+            return;
+        }
+        final boolean was = guardSwap;
+        guardSwap = true;
+        try {
+            final ChoiceApply.Result b = ChoiceApply.applyPicks(g, me, probe, probe, seed, cfg.settleSteps, cfg.fidelity, fr);
+            if (a.fail == null && b.fail == null && !Arrays.equals(a.payload, b.payload)) {
+                s.unsupported = "oppHidden";
+                return;
+            }
+        } finally {
+            guardSwap = was;
+        }
+        s.unsupported = null;
+        s.menuOptions = seqs.size();
+        final int own = greedy != null && greedy.length == 1 ? greedy[0] : -1;
+        // the policy's own answer: its first pick, Forge AI on the rest (the seat's own later picks are not known here)
+        if (own >= 0 && own < m.C() && m.cands.get(own).host != null) {
+            final Option o = new Option();
+            o.steps = new short[] {(short) own};
+            o.label = "policy:" + m.cands.get(own).host.getName();
+            o.policy = true;
+            run(g, me, Collections.singletonList(m.cands.get(own).host.getId()), seed, fr, o, s);
+            s.options.add(o);
+        }
+        for (List<Integer> sq : seqs) {
+            final Option o = new Option();
+            o.seq = true;
+            o.steps = new short[] {sq.get(0).shortValue()};
+            o.pileIds = ids(m, sq);
+            final StringBuilder lb = new StringBuilder("seq:");
+            for (int i : sq) {
+                lb.append(lb.length() == 4 ? "" : ">").append(m.cands.get(i).host.getName());
+            }
+            o.label = lb.toString();
+            if (forge.game.WorkClock.nanoTime() >= deadline) {
+                o.fail = "budget";
+                s.overBudget = true;
+            } else {
+                note(ChoiceApply.applyPicks(g, me, o.pileIds, o.pileIds, seed, cfg.settleSteps, cfg.fidelity, fr), o, s, 0);
+            }
+            s.options.add(o);
+        }
+    }
+
+    private static List<Integer> ids(final RlCandidates.Menu m, final List<Integer> idx) {
+        final List<Integer> out = new ArrayList<>();
+        for (int i : idx) {
+            out.add(m.cands.get(i).host.getId());
+        }
+        return out;
+    }
+
+    private static void seqBuild(final List<String> keys, final Map<String, List<Integer>> byKey, final int k,
+            final List<Integer> cur, final List<List<Integer>> out, final int cap) {
+        if (out.size() >= cap) {
+            return;
+        }
+        if (cur.size() == k) {
+            out.add(new ArrayList<>(cur));
+            return;
+        }
+        for (String key : keys) {
+            for (int i : byKey.get(key)) {
+                if (!cur.contains(i)) {
+                    cur.add(i);
+                    seqBuild(keys, byKey, k, cur, out, cap);
+                    cur.remove(cur.size() - 1);
+                    break; // one card per name at each place
+                }
+            }
+        }
     }
 
     /** The planner's piles for the resolving spell, each applied and screened; none: stays refused, the policy picks. */
@@ -697,7 +820,7 @@ public final class ChoiceScorer {
             }
         }
         s.chosen = best;
-        if (best != null && best.pileIds != null) {
+        if (best != null && best.pileIds != null && !best.seq) {
             return best.screen != null && best.screen.lines > 0 ? best.steps : null;
         }
         if (cfg.reachAlpha > 0) {
