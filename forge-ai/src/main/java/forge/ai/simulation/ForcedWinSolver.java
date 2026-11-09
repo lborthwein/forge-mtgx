@@ -4356,12 +4356,31 @@ public final class ForcedWinSolver {
      * solver-distill-cc-1109 (the reach gate): does this seat have ANY line within the goldfish's horizon, with its land
      * drops, either as it stands or with one card of its unknown library as the next draw? One goldfish with no new
      * card, then one per name (most copies first; names of one planner model share a screen with {@code sig}), each over
-     * the same windows, until the first line or {@code maxNodes}. False = no single card makes a line: a search from here
-     * skips the seat's own reach at its leaves. Never throws; a failed read counts as potential (the gate stays open).
+     * the same windows, until the first line or {@code maxNodes}. False = no single card makes a line (or none was found
+     * inside the allowance): a search from here skips the seat's own reach at its leaves. First, with no planner node at
+     * all: a seat none of whose cards (hand, battlefield, graveyard, library) can end the game in the planner's model
+     * (wins on entry or on a small library, an empty-library draw win, a WIN / DRAIN / MILL_OPP effect) has no line.
+     * Names that can end the game or that search or pile the library are planned first. Never throws (false).
      */
     public boolean potential(final Game g, final List<Integer> knownTop, final GoldfishOpts o, final int maxNames,
             final boolean sig, final long maxNodes) {
         try {
+            boolean ender = false;
+            final java.util.Set<String> seen = new java.util.HashSet<>();
+            for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Library}) {
+                for (Card c : me.getCardsIn(z)) {
+                    if (seen.add(c.getName()) && endsGames(reader.card(g, me, c))) {
+                        ender = true;
+                        break;
+                    }
+                }
+                if (ender) {
+                    break;
+                }
+            }
+            if (!ender) {
+                return false;
+            }
             final GoldfishOpts b = new GoldfishOpts();
             b.horizon = o.horizon;
             b.active = o.active;
@@ -4373,8 +4392,12 @@ public final class ForcedWinSolver {
             b.gamma = o.gamma;
             b.window = o.window;
             b.maxNodes = maxNodes;
+            b.maxNodes = Math.max(1, maxNodes / 4);
             final Goldfish blank = goldfish(g, knownTop, b);
-            if (blank.failed || blank.g > 0) {
+            if (blank.failed) {
+                return false;
+            }
+            if (blank.g > 0) {
                 return true;
             }
             long nodes = blank.nodes;
@@ -4407,7 +4430,14 @@ public final class ForcedWinSolver {
             if (sig) {
                 groups = sigGroups(g, groups, lib.subList(0, k));
             }
-            groups.sort((a, c) -> Integer.compare(c.size(), a.size()));
+            // names that can end the game or choose from the library first, then the most copies
+            final java.util.Map<List<Card>, Integer> rank = new java.util.IdentityHashMap<>();
+            for (List<Card> grp : groups) {
+                final ACard a = reader.card(g, me, grp.get(0));
+                rank.put(grp, endsGames(a) ? 0 : chooses(a) ? 1 : 2);
+            }
+            groups.sort((a, c) -> rank.get(a) != rank.get(c).intValue() ? Integer.compare(rank.get(a), rank.get(c))
+                    : Integer.compare(c.size(), a.size()));
             for (int i = 0; i < groups.size() && i < maxNames; i++) {
                 final Card next = groups.get(i).get(0);
                 if (next.isLand() && o.lands) {
@@ -4415,20 +4445,54 @@ public final class ForcedWinSolver {
                 }
                 for (int j = 0; j + w <= h || j == 0; j++) {
                     if (maxNodes > 0 && nodes >= maxNodes) {
-                        return true; // out of allowance before every name was planned: the gate stays open
+                        return false; // no line inside the allowance: closed for now (the next check may find one)
                     }
                     final Screen sc = screenSeq(g, top, List.of(next), grant, h - 1, o.nodes, o.ms, o.window, Math.min(h, j + w), j,
                             o.gamma, o.lambda);
                     nodes += sc.nodes;
-                    if (sc.failed || sc.lines > 0) {
+                    if (sc.failed) {
+                        break;
+                    }
+                    if (sc.lines > 0) {
                         return true;
                     }
                 }
             }
             return false;
         } catch (RuntimeException | StackOverflowError e) {
+            return false;
+        }
+    }
+
+    /** The planner can end the game with this card: it wins on entry or on a small library, or an ability wins, drains or mills. */
+    static boolean endsGames(final ACard a) {
+        if (a == null) {
+            return false;
+        }
+        if (a.winsOnEntry || a.winIfLibraryAtMost >= 0 || a.emptyDrawWin) {
             return true;
         }
+        for (List<ForcedWinModel.Abil> abs : java.util.Arrays.asList(a.fromHand, a.onBattlefield)) {
+            for (ForcedWinModel.Abil ab : abs) {
+                if (!ab.unplayable && (ab.has(EffKind.WIN) || ab.has(EffKind.DRAIN) || ab.has(EffKind.MILL_OPP))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The card searches or piles our library. */
+    static boolean chooses(final ACard a) {
+        if (a == null) {
+            return false;
+        }
+        for (ForcedWinModel.Abil ab : a.fromHand) {
+            if (!ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** GOLDFISH: the ids of granted copies start here (above any game's card ids). */

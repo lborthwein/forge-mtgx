@@ -2984,16 +2984,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return;
         }
         if (!reachSeen) {
-            final long key = g.getPhaseHandler().getTurn() * 1_000_003L + me.getCardsIn(forge.game.zone.ZoneType.Hand).size() * 10_007L
-                    + me.getCardsIn(forge.game.zone.ZoneType.Library).size() * 101L + me.getCardsIn(forge.game.zone.ZoneType.Battlefield).size() * 7L
-                    + me.getCardsIn(forge.game.zone.ZoneType.Graveyard).size();
+            // one check per turn and library size (a draw or a search re-reads it)
+            final long key = g.getPhaseHandler().getTurn() * 1_000L + me.getCardsIn(forge.game.zone.ZoneType.Library).size();
             if (key != reachGateKey) {
                 reachGateKey = key;
                 reachGateChecks++;
                 final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
                 final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
                 reachSeen = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader)
-                        .potential(g, knownTopOf(liveKnow, me), o, rc.maxNames, rc.sig, 40_000L);
+                        .potential(g, knownTopOf(liveKnow, me), o, rc.maxNames, rc.sig, 12_000L);
             }
         }
         reachOn = reachSeen;
