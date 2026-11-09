@@ -54,6 +54,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         default RlWire.Decision decideSampled(byte[] decidePayload, RlWire.Decide frame) throws IOException {
             return decide(decidePayload);
         }
+
+        /**
+         * deadband-1108: the (greedy) decision for this frame; the default is {@link #decide}. A search's play-out seat
+         * answers a SINGLE ask from the policy's scores with the dead-band argmax when {@code forge.search.valueTol} is on.
+         */
+        default RlWire.Decision decideFrame(byte[] decidePayload, RlWire.Decide frame) throws IOException {
+            return decide(decidePayload);
+        }
     }
 
     public enum Role { RL, RECORD, FORGE }
@@ -166,6 +174,15 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
          */
         default void scheduledAsk(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, String askKey, int ordinal,
                 int scheduled, int mine) {
+        }
+
+        /**
+         * deadband-1108: the policy's probabilities for a SINGLE frame of this seat (the search service's SCORE), or null
+         * (none / failed). Asked only with {@code forge.search.valueTol} on, to put the live seat's greedy answer on the
+         * dead-band argmax; the search may reuse the answer for the same frame.
+         */
+        default float[] scoreFrame(RlWire.Decide frame) {
+            return null;
         }
 
         /**
@@ -876,10 +893,12 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     /** DECIDE → DECISION for one frame; null (the game is ended as server_error) on any transport or protocol fault. */
     private RlWire.Decision decide(final RlWire.Decide frame) {
         final RlWire.Decision d;
+        boolean sampled = false;
         try {
             final java.util.function.BiPredicate<Game, RlWire.Decide> si = sampleIf;
-            d = si != null && si.test(game, frame) ? ep.decideSampled(RlWire.encodeDecide(frame), frame)
-                    : ep.decide(RlWire.encodeDecide(frame));
+            sampled = si != null && si.test(game, frame);
+            d = sampled ? ep.decideSampled(RlWire.encodeDecide(frame), frame)
+                    : ep.decideFrame(RlWire.encodeDecide(frame), frame);
         } catch (RlClient.ServerError e) {
             fatal = "server: " + e.getMessage();
             endGame("server_error");
@@ -899,7 +918,54 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             endGame("server_error");
             return null;
         }
+        if (!sampled && d.status == RlWire.ST_OK && forge.ai.simulation.ValueTol.on()) {
+            deadBand(frame, d);
+        }
         return d;
+    }
+
+    /** deadband-1108: live seats whose greedy answer the dead-band moved (diagnostic). */
+    public int deadBandMoved = 0;
+
+    /**
+     * deadband-1108 ({@code forge.search.valueTol} on): a live greedy (eval) seat's SINGLE answer is put on the dead-band
+     * argmax of the policy's probabilities from the seat's search service (lowest index within EPS of the best), when
+     * the answer it got is itself within EPS of the best (the same policy; anything else is left alone). No search
+     * service for the seat, a failed SCORE or another mode leaves the answer as it came.
+     */
+    private void deadBand(final RlWire.Decide frame, final RlWire.Decision d) {
+        if (frame.mode != RlSchema.M_SINGLE || d.steps.length != 1 || !"eval".equals(cfg.mode) || roles[frame.seat] != Role.RL) {
+            return;
+        }
+        final PrioritySearch ps = searchFor(frame.seat);
+        if (ps == null) {
+            return;
+        }
+        final float[] p = ps.scoreFrame(frame);
+        if (p == null || p.length != frame.C) {
+            return;
+        }
+        final double[] v = new double[p.length];
+        for (int i = 0; i < v.length; i++) {
+            v[i] = i < frame.candKind.length && frame.candKind[i] > 0 ? p[i] : Double.NaN;
+        }
+        final int g = d.steps[0];
+        final int t = forge.ai.simulation.ValueTol.argmaxLow(v);
+        if (t < 0 || t == g || g < 0 || g >= v.length || Double.isNaN(v[g])) {
+            return;
+        }
+        double max = Double.NEGATIVE_INFINITY;
+        for (double x : v) {
+            if (!Double.isNaN(x) && x > max) {
+                max = x;
+            }
+        }
+        if (forge.ai.simulation.ValueTol.gt(max, v[g])) {
+            return; // the answer is not a near-tie of the best: another policy's answer, left alone
+        }
+        d.steps = new short[] {(short) t};
+        d.logp = (float) Math.log(v[t]);
+        deadBandMoved++;
     }
 
     private static boolean isDelegate(final JsonObject a) {

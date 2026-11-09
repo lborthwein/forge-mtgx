@@ -1306,6 +1306,90 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         rows.add(row);
     }
 
+    /** deadband-1108: play-out asks answered by the dead-band argmax, and the ones whose answer it moved. */
+    private final java.util.concurrent.atomic.AtomicLong deadBandAsks = new java.util.concurrent.atomic.AtomicLong(),
+            deadBandMoved = new java.util.concurrent.atomic.AtomicLong();
+
+    /** deadband-1108: a greedy play-out ask the dead-band answers (key on, SINGLE, greedy play-outs). */
+    private boolean deadBandAsk(final RlWire.Decide f) {
+        return forge.ai.simulation.ValueTol.on() && !cfg.playoutSample && f != null && f.mode == RlSchema.M_SINGLE;
+    }
+
+    /**
+     * deadband-1108 ({@code forge.search.valueTol} on): a play-out seat's greedy SINGLE answer from the policy's SCORE
+     * (one service call, as DECIDE): the lowest-index legal candidate within EPS of the most likely, instead of the
+     * service's float argmax, whose near-ties flip with the CPU class and the batch. A failed or malformed SCORE falls
+     * back to DECIDE.
+     */
+    private RlWire.Decision deadBandDecide(final byte[] p, final RlWire.Decide f) throws IOException {
+        final RlSearchClient.Scores s;
+        try {
+            s = client().score(p);
+        } catch (IOException | RuntimeException e) {
+            drop();
+            throw e;
+        }
+        final int c = f.C;
+        if (s.status != RlWire.ST_OK || s.probs.length != c) {
+            try {
+                return client().decide(p, false);
+            } catch (IOException | RuntimeException e) {
+                drop();
+                throw e;
+            }
+        }
+        final double[] v = new double[c];
+        int greedy = -1;
+        for (int i = 0; i < c; i++) {
+            v[i] = i < f.candKind.length && f.candKind[i] > 0 ? s.probs[i] : Double.NaN;
+            if (!Double.isNaN(v[i]) && (greedy < 0 || v[i] > v[greedy])) {
+                greedy = i;
+            }
+        }
+        final int pick = forge.ai.simulation.ValueTol.argmaxLow(v);
+        if (pick < 0) {
+            try {
+                return client().decide(p, false);
+            } catch (IOException | RuntimeException e) {
+                drop();
+                throw e;
+            }
+        }
+        deadBandAsks.incrementAndGet();
+        if (pick != greedy) {
+            deadBandMoved.incrementAndGet();
+        }
+        final RlWire.Decision d = new RlWire.Decision();
+        d.gameUid = s.gameUid;
+        d.decIdx = s.decIdx;
+        d.status = RlWire.ST_OK;
+        d.policyVersion = s.policyVersion;
+        d.valueObs = s.valueObs;
+        d.logp = (float) Math.log(v[pick]);
+        d.steps = new short[] {(short) pick};
+        return d;
+    }
+
+    /** deadband-1108: [play-out asks answered by the dead-band, of which moved off the plain argmax]. */
+    public long[] deadBandStats() {
+        return new long[] {deadBandAsks.get(), deadBandMoved.get()};
+    }
+
+    @Override
+    public float[] scoreFrame(final RlWire.Decide frame) {
+        if (!forge.ai.simulation.ValueTol.on() || frame == null || frame.mode != RlSchema.M_SINGLE) {
+            return null;
+        }
+        try {
+            final RlSearchClient.Scores s = client().score(RlWire.encodeDecide(frame));
+            return s.status == RlWire.ST_OK ? s.probs : null;
+        } catch (IOException | RuntimeException e) {
+            drop();
+            System.err.println("[rlsearch] deadband SCORE failed, keeping the policy's answer: " + e);
+            return null;
+        }
+    }
+
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
@@ -1389,7 +1473,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             final double[] a = by.computeIfAbsent(e, k -> new double[] {0.0, -1, -1.0});
             a[0] += sc.probs[i];
-            if (sc.probs[i] > a[2]) {
+            if (forge.ai.simulation.ValueTol.gt(sc.probs[i], a[2])) { // deadband-1108: near-ties to the lower index
                 a[1] = i;
                 a[2] = sc.probs[i];
             }
@@ -1413,10 +1497,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         order.add(def);
         final List<Integer> rest = new ArrayList<>(by.keySet());
         rest.remove(Integer.valueOf(def));
-        rest.sort((x, y) -> {
-            final int k = Double.compare(by.get(y)[0], by.get(x)[0]);
-            return k != 0 ? k : Integer.compare(x, y);
-        });
+        {
+            // by prior, largest first, ties to the lower entry; deadband-1108: priors within the dead-band in entry order
+            // (rest is in ascending entry order here, so the index tie-break is the entry's)
+            final double[] pr = new double[rest.size()];
+            for (int j = 0; j < pr.length; j++) {
+                pr[j] = by.get(rest.get(j))[0];
+            }
+            final List<Integer> sorted = new ArrayList<>(pr.length);
+            for (int j : forge.ai.simulation.ValueTol.orderDesc(pr)) {
+                sorted.add(rest.get(j));
+            }
+            rest.clear();
+            rest.addAll(sorted);
+        }
         if (respond) {
             // (d): the counters right after the default, so the breadth holds them
             final List<Integer> counters = new ArrayList<>();
@@ -2545,6 +2639,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             po.addProperty("max_sent_finished", ps[3]);
             o.add("playout_seats", po);
         }
+        if (forge.ai.simulation.ValueTol.on()) {
+            // deadband-1108: only with the key on (the summary is unchanged off)
+            final JsonObject db = new JsonObject();
+            db.addProperty("eps", forge.ai.simulation.ValueTol.eps());
+            db.addProperty("playout_asks", deadBandAsks.get());
+            db.addProperty("playout_moved", deadBandMoved.get());
+            o.add("deadband", db);
+        }
         if (voided != null) {
             o.addProperty("voided", voided);
         }
@@ -2961,6 +3063,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
 
             @Override
+            public RlWire.Decision decideFrame(final byte[] p, final RlWire.Decide f) throws IOException {
+                if (!deadBandAsk(f)) {
+                    return decide(p);
+                }
+                budgetStop(first);
+                return deadBandDecide(p, f);
+            }
+
+            @Override
             public void record(final byte[] p) throws IOException {
                 throw new IOException("a play-out seat never records");
             }
@@ -3051,8 +3162,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     }
                     int best = match.get(0);
                     for (int i : match) {
-                        if (i < s.probs.length && s.probs[i] > s.probs[best]) {
-                            best = i;
+                        if (i < s.probs.length && best < s.probs.length
+                                && forge.ai.simulation.ValueTol.gt(s.probs[i], s.probs[best])) {
+                            best = i; // deadband-1108: near-ties keep the first match
                         }
                     }
                     return best;
@@ -3184,6 +3296,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     drop();
                     throw e;
                 }
+            }
+
+            @Override
+            public RlWire.Decision decideFrame(final byte[] p, final RlWire.Decide f) throws IOException {
+                if (!deadBandAsk(f)) {
+                    return decide(p);
+                }
+                if (stopOnBudget) {
+                    budgetStop(first);
+                }
+                return deadBandDecide(p, f);
             }
 
             @Override
