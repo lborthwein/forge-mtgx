@@ -637,12 +637,48 @@ public final class HonestLabel {
         }
 
         /**
+         * nearmiss-gen-1109: this seat with {@code k} belief worlds (the second, finer check of a near-miss copy), the rest
+         * of the spec unchanged (its sha changes with the worlds; rows carry it).
+         */
+        public Seat withWorlds(final int k) {
+            final JsonObject o = spec.toJson();
+            o.remove("oppMinVersion"); // derived from the cfgs, never a parse key
+            o.addProperty("worlds", k);
+            final Spec s2 = Spec.parse(o);
+            s2.sequentialAi = spec.sequentialAi;
+            s2.aiTimeoutSec = spec.aiTimeoutSec;
+            s2.libLabels = spec.libLabels;
+            s2.libExactCap = spec.libExactCap;
+            s2.knownLib = spec.knownLib;
+            s2.meterReasons = spec.meterReasons;
+            s2.oppMinRev = spec.oppMinRev;
+            s2.infoState = spec.infoState;
+            return new Seat(s2);
+        }
+
+        /** nearmiss-gen-1109: this seat's spec (its sha goes into the second check's rows). */
+        public Spec spec() {
+            return spec;
+        }
+
+        /**
          * r2-choose-a-card-1029 (N5b, opt-in): as {@link #label(Game, Player, long)}, keeping {@code knownOwn} (our
          * library card ids whose positions the seat knows: a put-back, a pile, a scry) at their positions in every root
          * world, and telling the win solver they are placed (its pile memory). Null or empty = exactly the plain call.
          * The set is passed down as an argument (no field), so concurrent or nested calls do not share it.
          */
         public Result label(final Game live, final Player liveMe, final long key, final Set<Integer> knownOwn) {
+            return label(live, liveMe, key, knownOwn, null);
+        }
+
+        /**
+         * nearmiss-gen-1109: as {@link #label(Game, Player, long, Set)}, with {@code edit} (null = none: exactly the plain
+         * call) applied to every world's copy of {@code live} right after the copy is made, before any re-draw. The
+         * position read from {@code live} (phase, stack, visibility, the gates) is the live one; the solver's worlds hold
+         * the edited position. {@code edit} must change only what it names (a near-miss copy's one generic edit).
+         */
+        public Result label(final Game live, final Player liveMe, final long key, final Set<Integer> knownOwn,
+                final java.util.function.Consumer<Game> edit) {
             final Set<Integer> known = knownOwn == null || knownOwn.isEmpty() ? null : knownOwn;
             final long t0 = System.nanoTime();
             final Result r = new Result();
@@ -660,7 +696,7 @@ public final class HonestLabel {
                 r.knownPinned = tb[1];
             }
             try {
-                label0(live, liveMe, key, r, known);
+                label0(live, liveMe, key, r, known, edit);
             } catch (RuntimeException | StackOverflowError e) {
                 r.label = "unresolved";
                 r.gate = "error";
@@ -670,7 +706,8 @@ public final class HonestLabel {
             return r;
         }
 
-        private void label0(final Game live, final Player liveMe, final long key, final Result r, final Set<Integer> known) {
+        private void label0(final Game live, final Player liveMe, final long key, final Result r, final Set<Integer> known,
+                final java.util.function.Consumer<Game> edit) {
             final PhaseHandler ph = live.getPhaseHandler();
             if (!live.getStack().isEmpty()) {
                 // solver-cap12 round 3 (R3-5, engineStack only): our priority with the opponent's item on top is a win
@@ -680,7 +717,7 @@ public final class HonestLabel {
                     final List<Player> os = new ArrayList<>(liveMe.getOpponents());
                     if (os.size() == 1) {
                         r.check = "win";
-                        win(live, liveMe, os.get(0), key, r, known);
+                        win(live, liveMe, os.get(0), key, r, known, edit);
                         return;
                     }
                 }
@@ -717,15 +754,15 @@ public final class HonestLabel {
             }
             if (mine && main || !mine && end) {
                 r.check = "win";
-                win(live, liveMe, liveOpp, key, r, known);
+                win(live, liveMe, liveOpp, key, r, known, edit);
             } else if (spec.loss && (!mine && main || mine && end)) {
                 r.check = "loss";
-                loss(live, liveMe, liveOpp, key, r, known);
+                loss(live, liveMe, liveOpp, key, r, known, edit);
             } else if (spec.winConfig().engineEveryWindow && spec.winConfig().engineAnyWindow) {
                 // endstep-rows-1103: a window neither check ran at (their upkeep/draw/combat, our upkeep/draw/combat):
                 // the win check, as at their end step
                 r.check = "win";
-                win(live, liveMe, liveOpp, key, r, known);
+                win(live, liveMe, liveOpp, key, r, known, edit);
             } else {
                 r.gate = "phase:" + ph.getPhase();
             }
@@ -753,6 +790,12 @@ public final class HonestLabel {
         /** As above, keeping {@code knownOwn} (null = none) at their library positions. */
         private Object[] world(final Game live, final Player liveMe, final Player liveOpp, final Random rng,
                 final Set<Integer> knownOwn) {
+            return world(live, liveMe, liveOpp, rng, knownOwn, null);
+        }
+
+        /** nearmiss-gen-1109: as above, with {@code edit} (null = none) applied to the copy before the re-draw. */
+        private Object[] world(final Game live, final Player liveMe, final Player liveOpp, final Random rng,
+                final Set<Integer> knownOwn, final java.util.function.Consumer<Game> edit) {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
@@ -760,6 +803,9 @@ public final class HonestLabel {
                 final ForcedWinSolver.Config wc = spec.winConfig();
                 ForcedWinEngine.copyStackIf(copier, live, wc.engineStack); // R3-5
                 final Game g = copier.makeCopy();
+                if (edit != null) {
+                    edit.accept(g); // nearmiss-gen-1109: the near-miss copy's one edit, before anything reads the world
+                }
                 final Player me = (Player) copier.find(liveMe);
                 final Player opp = (Player) copier.find(liveOpp);
                 // their hand + library re-drawn from the pool (visibility read in the LIVE game), our library below its
@@ -777,8 +823,8 @@ public final class HonestLabel {
         }
 
         private void win(final Game live, final Player liveMe, final Player liveOpp, final long key, final Result r,
-                final Set<Integer> knownOwn) {
-            final Object[] w = world(live, liveMe, liveOpp, new Random(LookaheadSearch.mix(spec.seed, key)), knownOwn);
+                final Set<Integer> knownOwn, final java.util.function.Consumer<Game> edit) {
+            final Object[] w = world(live, liveMe, liveOpp, new Random(LookaheadSearch.mix(spec.seed, key)), knownOwn, edit);
             final Game root = (Game) w[0];
             final Player me = (Player) w[1];
             final ForcedWinSolver s = new ForcedWinSolver(me, spec.winConfig());
@@ -1007,7 +1053,7 @@ public final class HonestLabel {
         }
 
         private void loss(final Game live, final Player liveMe, final Player liveOpp, final long key, final Result r,
-                final Set<Integer> knownOwn) {
+                final Set<Integer> knownOwn, final java.util.function.Consumer<Game> edit) {
             final long wall = spec.lossWallMs <= 0 ? Long.MAX_VALUE : System.nanoTime() + spec.lossWallMs * 1_000_000L;
             final ForcedWinSolver.Config cfg = spec.lossConfig();
             int ran = 0, lost = 0, maxTurns = -1;
@@ -1026,7 +1072,7 @@ public final class HonestLabel {
                     break;
                 }
                 final Object[] w = world(live, liveMe, liveOpp,
-                        new Random(LookaheadSearch.mix(spec.seed, key * 131L + 7919L * (j + 1))), knownOwn);
+                        new Random(LookaheadSearch.mix(spec.seed, key * 131L + 7919L * (j + 1))), knownOwn, edit);
                 final Game g = (Game) w[0];
                 final Player opp = (Player) w[2];
                 // the opponent's solver in this world (their sampled hand is theirs to know); exact: the line is checked

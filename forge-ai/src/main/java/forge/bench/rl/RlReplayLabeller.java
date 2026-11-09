@@ -205,6 +205,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private final String jarSha;
     private final Game game;
     private final RlFeaturizer feat;
+    /** nearmiss-gen-1109: the card index (the near-miss copies' featurizers). */
+    private CardIndex cardIndex;
     private final HonestLabel.Seat[] seats = new HonestLabel.Seat[2];
     /** known-lib-1102 (spec knownLib only; null otherwise): each seat's known own-library positions, from this game. */
     private final forge.ai.simulation.KnownOwnLibrary[] knownLib = new forge.ai.simulation.KnownOwnLibrary[2];
@@ -326,6 +328,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             }
         }
         this.feat = game == null ? null : new RlFeaturizer(index);
+        this.cardIndex = index; // nearmiss-gen-1109: the near-miss copies' own featurizers
         if (feat != null) {
             feat.setVersion(obs);
             feat.reset();
@@ -387,6 +390,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         if (LABEL_ONLY != null && !LABEL_ONLY.contains(uidStr + ":" + seat + ":" + ord)) {
             return; // labeller-v2 §4 sample: only the listed positions (each position's label is independent)
+        }
+        if (NearMiss.on() && !NearMiss.selected(tape.get("seed").getAsLong(), seat, ord)) {
+            return; // nearmiss-gen-1109 (nearMissOnly, keyed by the game seed): only the listed positions
         }
         windowDecisions++;
         final String phase = String.valueOf(g.getPhaseHandler().getPhase());
@@ -475,7 +481,131 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             return;
         }
         row(seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, payload, (Integer) got[3], r, sr);
+        if (NearMiss.on() && search == null && fatal == null && FATAL.get() == null) {
+            nearMiss(p, seat, ord, turn, tbe, phase, g.getStack().size(), payload, r, key);
+        }
     }
+
+    // ------------------------------------------------------------------------------------------------ near-miss copies
+
+    /** nearmiss-gen-1109: the second, finer check's seat (NearMiss.WORLDS2 worlds), per seat, built lazily. */
+    private final HonestLabel.Seat[] seats2 = new HonestLabel.Seat[2];
+    /** nearmiss-gen-1109: copy rows written, copies skipped (the edit did not apply), their label ms, second checks. */
+    private int nmRows = 0, nmSkipped = 0, nmSecond = 0;
+    private double nmMs = 0, nmMs2 = 0;
+
+    static boolean fractional(final HonestLabel.Result r) {
+        if (r == null) {
+            return false;
+        }
+        if ("win".equals(r.check)) {
+            return !Double.isNaN(r.pWin) && r.pWin > 1e-9 && r.pWin < 1 - 1e-9;
+        }
+        if ("loss".equals(r.check)) {
+            return !Double.isNaN(r.pLoss) && r.pLoss > 1e-9 && r.pLoss < 1 - 1e-9;
+        }
+        return false;
+    }
+
+    /**
+     * nearmiss-gen-1109: copy k = 0 (the control: no edit; the frame through the copy path, the label the original's)
+     * and copies 1..K (one generic edit each, {@link NearMiss}) of this position, for the seat to move. Each copy's frame
+     * is the seat's v(o) frame of a GameCopier copy with the edit applied, observed through a fork of the live seat
+     * knowledge by a fresh featurizer (as a search leaf's); its label is the same proof check with the edit applied in
+     * every world ({@link HonestLabel.Seat#label(Game, Player, long, java.util.Set, java.util.function.Consumer)}), the
+     * same key (paired worlds). With NearMiss.WORLDS2 &gt; 0, a copy whose edit moved a card into or out of the library,
+     * or whose verdict is fractional, also gets the check at WORLDS2 worlds (field nm_w2). Everything runs under the
+     * bench isolation; the live game is never edited.
+     */
+    private void nearMiss(final Player p, final int seat, final int ord, final int turn, final int tbe, final String phase,
+            final int stack, final byte[] payload0, final HonestLabel.Result r0, final long key) {
+        final Game g = game;
+        final long gseed = tape.get("seed").getAsLong();
+        for (int k = 0; k <= NearMiss.K; k++) {
+            final int kk = k;
+            final long t0 = System.nanoTime();
+            final Object[] got;
+            try {
+                got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+                    final NearMiss.Edit e = kk == 0 ? null : NearMiss.choose(g, p, gseed, ord, kk);
+                    final Game c;
+                    final Player pc;
+                    synchronized (g) {
+                        final forge.ai.simulation.GameCopier copier = new forge.ai.simulation.GameCopier(g, true);
+                        copier.setCopyPending(forge.ai.simulation.GameCopier.SOLVER_COPY_PENDING);
+                        copier.setCopyFidelity(1);
+                        if (!g.getStack().isEmpty() && forge.ai.simulation.GameCopier.stackUnsupported(g) == null) {
+                            copier.setCopyStack(true);
+                        }
+                        c = copier.makeCopy();
+                        pc = (Player) copier.find(p);
+                    }
+                    final String why = e == null ? null : e.apply(c);
+                    if (why != null) {
+                        return new Object[] {e, null, null, null, why, 0, false};
+                    }
+                    final RlFeaturizer f2 = new RlFeaturizer(cardIndex);
+                    f2.setVersion(feat.version());
+                    f2.setKnowledge(knowledge == null ? null : knowledge.forkFor(c));
+                    final RlFeaturizer.Obs o = f2.observe(c, pc, 0, false, null);
+                    final RlWire.Decide f = RlSearch.leafFrame(o, uid, seat, turn);
+                    f.decIdx = ord;
+                    if (f.hasPriv()) {
+                        throw new IllegalStateException("near-miss: a value frame with the privileged block");
+                    }
+                    final byte[] pl = RlWire.encodeDecide(f);
+                    final java.util.Set<Integer> kl = spec.infoState && infoStates != null ? infoStates.known(p, p)
+                            : knownLib[seat] == null ? null : knownLib[seat].known(p);
+                    final java.util.function.Consumer<Game> ed = e == null ? null : x -> e.apply(x);
+                    final HonestLabel.Result rr = e == null ? r0 : seats[seat].label(g, p, key, kl, ed);
+                    HonestLabel.Result r2 = null;
+                    if (NearMiss.WORLDS2 > 0 && (e != null && e.touchesLibrary() || fractional(rr))) {
+                        if (seats2[seat] == null) {
+                            seats2[seat] = seats[seat].withWorlds(NearMiss.WORLDS2);
+                        }
+                        r2 = seats2[seat].label(g, p, key, kl, ed);
+                    }
+                    return new Object[] {e, pl, rr, r2, null, f.C, java.util.Arrays.equals(pl, payload0)};
+                }));
+            } catch (RuntimeException ex) {
+                nmSkipped++;
+                System.err.println("[nearmiss] copy " + kk + " of " + gseed + ":" + seat + ":" + ord + " failed: " + ex);
+                continue;
+            }
+            final double ms = (System.nanoTime() - t0) / 1e6;
+            final NearMiss.Edit e = (NearMiss.Edit) got[0];
+            if (got[4] != null) {
+                nmSkipped++;
+                System.err.println("[nearmiss] copy " + kk + " of " + gseed + ":" + seat + ":" + ord + " skipped: " + got[4]);
+                continue;
+            }
+            final HonestLabel.Result rr = (HonestLabel.Result) got[2], r2 = (HonestLabel.Result) got[3];
+            final JsonObject x = new JsonObject();
+            x.addProperty("schema", NM_SCHEMA);
+            x.addProperty("nm_of", gseed + ":" + seat + ":" + ord);
+            x.addProperty("nm_k", kk);
+            x.addProperty("nm_kind", e == null ? "none" : e.kind);
+            x.addProperty("nm_edit", e == null ? "none (control: the copy path's frame, the original's label)" : e.desc);
+            x.addProperty("nm_lib", e != null && e.touchesLibrary());
+            x.addProperty("nm_frame_eq", (Boolean) got[6]);
+            x.addProperty("nm_seed", NearMiss.SEED);
+            x.addProperty("nm_ms", Math.round(ms));
+            if (r2 != null) {
+                final JsonObject w2 = r2.toJson();
+                w2.addProperty("worlds", NearMiss.WORLDS2);
+                w2.addProperty("spec_sha", seats2[seat].spec().sha());
+                x.add("nm_w2", w2);
+                nmSecond++;
+                nmMs2 += r2.ms;
+            }
+            nmRows++;
+            nmMs += ms;
+            row(seat, ord, turn, tbe, phase, stack, null, (byte[]) got[1], (Integer) got[5], rr, null, null, null, -1, x);
+        }
+    }
+
+    /** nearmiss-gen-1109: the schema of a near-miss copy row (an original row keeps its own). */
+    public static final String NM_SCHEMA = "mtgx-bvw-nearmiss/1";
 
     @Override
     public void afterDecision(final Player p, final List<SpellAbility> chosen) {
@@ -508,6 +638,14 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             final String stateSha, final byte[] payload, final int C, final HonestLabel.Result r,
             final StepSearch.Result sr, final String rowKind, final forge.ai.simulation.R3LabelSearch.Result r3r,
             final int choiceOrd) {
+        row(seat, ord, turn, tbe, phase, stack, stateSha, payload, C, r, sr, rowKind, r3r, choiceOrd, null);
+    }
+
+    /** As above; {@code extra} (null = none: every row as before) adds or replaces header fields (nearmiss-gen-1109). */
+    private void row(final int seat, final int ord, final int turn, final int tbe, final String phase, final int stack,
+            final String stateSha, final byte[] payload, final int C, final HonestLabel.Result r,
+            final StepSearch.Result sr, final String rowKind, final forge.ai.simulation.R3LabelSearch.Result r3r,
+            final int choiceOrd, final JsonObject extra) {
         final JsonObject h = new JsonObject();
         h.addProperty("kind", "value");
         h.addProperty("schema", rowKind != null ? SCHEMA_R3 : search == null ? SCHEMA : variant != null ? SCHEMA_STEP3
@@ -576,6 +714,11 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             dm.add("by_kind", mj);
             h.add("dp_meter", dm);
         }
+        if (extra != null) {
+            for (Map.Entry<String, com.google.gson.JsonElement> e : extra.entrySet()) {
+                h.add(e.getKey(), e.getValue());
+            }
+        }
         final byte[] rec = record(h, payload);
         records.add(rec);
         headers.add(h);
@@ -604,7 +747,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
             "state_sha", "s2t", "row_kind", "choice_ord", "r3", "r3_sha", "r3_ranker", "cap", "cap_hits", "worlds_capped",
             "proof_cap", "lib_tag", "lib_takes", "lib_w", "lib_seqs", "lib_why", "known_top", "known_pinned", "dp_meter",
-            "line_text", "afford", "lib_exact_why"}; // endstep-rows-1103: line_text only with -Dforge.bench.lineText (diagnostics)
+            "line_text", "afford", "lib_exact_why", // endstep-rows-1103: line_text only with -Dforge.bench.lineText (diagnostics)
+            "schema", "nm_of", "nm_k", "nm_kind", "nm_edit", "nm_lib", "nm_frame_eq", "nm_seed", "nm_ms", "nm_w2"}; // nearmiss-gen-1109
 
     /**
      * rollout-budget-1101 (review #160 S2-2): a step row whose proof check was capped says so (proof_cap): its "no proof"
@@ -782,6 +926,18 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         for (Map.Entry<String, Integer> e : labels.entrySet()) lj.addProperty(e.getKey(), e.getValue());
         gr.add("labels", lj);
         gr.addProperty("turns_window", turnsWindow);
+        if (NearMiss.on()) {
+            final JsonObject nm = new JsonObject(); // nearmiss-gen-1109
+            nm.addProperty("k", NearMiss.K);
+            nm.addProperty("seed", NearMiss.SEED);
+            nm.addProperty("worlds2", NearMiss.WORLDS2);
+            nm.addProperty("rows", nmRows);
+            nm.addProperty("skipped", nmSkipped);
+            nm.addProperty("second", nmSecond);
+            nm.addProperty("ms", Math.round(nmMs));
+            nm.addProperty("ms2", Math.round(nmMs2));
+            gr.add("nearmiss", nm);
+        }
         gr.addProperty("spec_sha", specSha);
         gr.addProperty("jar_sha", jarSha);
         if (r3 != null) {
