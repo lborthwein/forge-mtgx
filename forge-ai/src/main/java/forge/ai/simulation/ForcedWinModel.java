@@ -519,6 +519,13 @@ public final class ForcedWinModel {
 
     /** The starting position of a search. */
     static final class Position {
+        /** blockers-1109: cannot block at the opponent's next declare-blockers step (not a creature, or prevented). */
+        static final byte BLOCK_NO = 0;
+        /** blockers-1109: can block there if it is untapped when our turn ends (the default for every creature). */
+        static final byte BLOCK_UNTAPPED = 1;
+        /** blockers-1109: can block there even if tapped when our turn ends (it untaps in their untap step, or blocks tapped). */
+        static final byte BLOCK_TAPPED = 2;
+
         int life, oppLife, turn;
         int oppLibrary;
         boolean landDrop;
@@ -537,6 +544,13 @@ public final class ForcedWinModel {
         final List<Boolean> tapped = new ArrayList<>();
         /** solver-gaps-1015: a planeswalker that has already used its loyalty ability this turn (parallel to battlefield). */
         final List<Boolean> used = new ArrayList<>();
+        /**
+         * blockers-1109 (ledger row 81): whether each permanent can block at the opponent's next declare-blockers step
+         * (parallel to battlefield; one of {@link #BLOCK_NO}, {@link #BLOCK_UNTAPPED}, {@link #BLOCK_TAPPED}). The opponent's
+         * untap step does not untap our permanents, so a creature tapped when our turn ends (it attacked, or paid a cost)
+         * blocks only when it untaps then anyway, or can block while tapped.
+         */
+        final List<Byte> block = new ArrayList<>();
         /**
          * solver-gaps-1015: the opponent's visible clock, their creatures' combat damage, largest first: a line that passes
          * the turn must survive it (our creatures each block one attacker).
@@ -579,6 +593,32 @@ public final class ForcedWinModel {
         final Map<String, ACard> templates = new HashMap<>();
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
         long seed = 20261012L;
+
+        /**
+         * blockers-1109 (ledger row 81): can {@code c} (ours, on the battlefield) block at the opponent's next
+         * declare-blockers step? Engine rules only: a creature the engine lets block (keywords and static abilities, read
+         * as for next turn: CombatUtil.canBlock(c, true)); a tapped one only if it untaps in the opponent's untap step
+         * (StaticAbilityUntapOtherPlayer, and nothing stops it untapping) or can block while tapped. Read off our own turn
+         * (the line's first PASS is then not followed by the opponent's turn first), a tapped creature counts if it
+         * untaps in our untap step, as before this lane.
+         */
+        static byte blockCode(Game live, Player me, Card c) {
+            if (!c.isCreature() || !forge.game.combat.CombatUtil.canBlock(c, true)) {
+                return Position.BLOCK_NO;
+            }
+            if (forge.game.staticability.StaticAbilityCantAttackBlock.canBlockTapped(c)) {
+                return Position.BLOCK_TAPPED;
+            }
+            if (!live.getPhaseHandler().isPlayerTurn(me)) {
+                return Position.BLOCK_TAPPED;
+            }
+            for (Player o : me.getOpponents()) {
+                if (forge.game.staticability.StaticAbilityUntapOtherPlayer.untap(c, o) && c.canUntap(o, true)) {
+                    return Position.BLOCK_TAPPED;
+                }
+            }
+            return Position.BLOCK_UNTAPPED;
+        }
 
         /**
          * kill-line-1106 (sourceOutput): each mana source's output read from the position, over the template learned at
@@ -783,6 +823,7 @@ public final class ForcedWinModel {
                 p.battlefield.add(a);
                 p.tapped.add(c.isTapped());
                 p.used.add(c.isPlaneswalker() && c.getPlaneswalkerAbilityActivated() > 0);
+                p.block.add(blockCode(live, me, c));
                 p.devotionBlue += a.bluePips;
                 p.emptyDrawWinLive |= a.emptyDrawWin;
             }

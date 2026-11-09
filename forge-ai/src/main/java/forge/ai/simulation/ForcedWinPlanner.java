@@ -404,6 +404,8 @@ public final class ForcedWinPlanner {
         boolean tapped;
         boolean activated;
         int loyalty;
+        /** blockers-1109: Position.BLOCK_* (a permanent that entered during the line blocks if untapped). */
+        byte block = ForcedWinModel.Position.BLOCK_UNTAPPED;
 
         Perm copy() {
             final Perm p = new Perm();
@@ -411,6 +413,7 @@ public final class ForcedWinPlanner {
             p.tapped = tapped;
             p.activated = activated;
             p.loyalty = loyalty;
+            p.block = block;
             return p;
         }
     }
@@ -495,7 +498,8 @@ public final class ForcedWinPlanner {
             // permutations of the same permanents are one position (order matters only for returned subtypes)
             final List<String> perms = new ArrayList<>();
             for (Perm p : bf) {
-                perms.add(cards.get(p.card).name + (p.tapped ? 't' : 'u') + (p.activated ? 'a' : '-') + p.loyalty);
+                perms.add(cards.get(p.card).name + (p.tapped ? 't' : 'u') + (p.activated ? 'a' : '-') + p.loyalty
+                        + (p.block == ForcedWinModel.Position.BLOCK_UNTAPPED ? "" : "b" + p.block));
             }
             java.util.Collections.sort(perms);
             sb.append(perms);
@@ -547,6 +551,8 @@ public final class ForcedWinPlanner {
     }
 
     private long deadline = Long.MAX_VALUE;
+    /** blockers-1109: passes whose blocker count differs from the pre-fix count (every creature); diagnostic only. */
+    private int blockerDiffs;
 
     Result run() {
         deadline = lim.ms < 0 ? Long.MAX_VALUE : forge.game.WorkClock.nanoTime() + lim.ms * 1_000_000L;
@@ -569,6 +575,9 @@ public final class ForcedWinPlanner {
             p.tapped = pos.tapped.get(i);
             p.loyalty = pos.battlefield.get(i).startLoyalty;
             p.activated = i < pos.used.size() && pos.used.get(i);
+            if (i < pos.block.size()) {
+                p.block = pos.block.get(i);
+            }
             s.bf.add(p);
         }
         s.devotion = pos.devotionBlue;
@@ -593,6 +602,11 @@ public final class ForcedWinPlanner {
         result.exhausted |= nodes >= lim.nodes; // kill-line-1106: a stop at the node limit counts as exhausted (report only)
         for (Line l : result.lines) {
             l.knownTop = pos.knownTop.size();
+        }
+        if (blockerDiffs > 0) {
+            // blockers-1109 (ledger row 81): this plan saw a pass where a tapped or can't-block creature no longer blocks
+            System.err.println("FORCED_WIN blockers1109 diffs=" + blockerDiffs + " turn=" + pos.turn + " life=" + pos.life
+                    + " lines=" + result.lines.size());
         }
         return result;
     }
@@ -947,14 +961,15 @@ public final class ForcedWinPlanner {
 
     /**
      * Our turn ends; the opponent's turn is modelled by their draw (a milled-out opponent loses) and, since
-     * solver-gaps-1015, their visible clock (their creatures attack; each of our creatures blocks one); our turn.
+     * solver-gaps-1015, their visible clock (their creatures attack; each of our creatures that can block then blocks
+     * one); our turn.
      */
     private List<S> passTurn(S s) {
         final List<S> out = new ArrayList<>();
         if (s.oppLib > 0 && !pos.oppPowers.isEmpty()) {
-            int blockers = 0;
-            for (Perm p : s.bf) {
-                blockers += cards.get(p.card).creature ? 1 : 0;
+            final int blockers = blockers(s);
+            if (blockers != s.bf.stream().filter(p -> cards.get(p.card).creature).count()) {
+                blockerDiffs++; // blockers-1109: a pass where the old count (every creature) differs; logged once per plan
             }
             int damage = 0;
             for (int i = blockers; i < pos.oppPowers.size(); i++) {
@@ -990,6 +1005,22 @@ public final class ForcedWinPlanner {
         final List<Eff> draw = List.of(new Eff(EffKind.DRAW, 1, 0));
         resolve(s, draw, 0, 0, null, out);
         return out;
+    }
+
+    /**
+     * blockers-1109 (ledger row 81): our creatures that can block at the opponent's declare-blockers step after this
+     * pass. Their untap step does not untap ours, so a creature tapped now (it attacked this turn, or paid a cost in the
+     * line) blocks only if the position read it as able to block tapped or to untap then ({@link Perm#block}).
+     */
+    int blockers(S s) {
+        int n = 0;
+        for (Perm p : s.bf) {
+            if (cards.get(p.card).creature && p.block != ForcedWinModel.Position.BLOCK_NO
+                    && (!p.tapped || p.block == ForcedWinModel.Position.BLOCK_TAPPED)) {
+                n++;
+            }
+        }
+        return n;
     }
 
     private void resolve(S s, List<Eff> effs, int ei, int done, Abil ab, List<S> out) {

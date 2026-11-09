@@ -2776,6 +2776,7 @@ public final class ForcedWinSolver {
         p.battlefield.addAll(b.battlefield);
         p.tapped.addAll(b.tapped);
         p.used.addAll(b.used);
+        p.block.addAll(b.block);
         p.oppPowers.addAll(b.oppPowers);
         p.devotionBlue = b.devotionBlue;
         p.emptyDrawWinLive = b.emptyDrawWinLive;
