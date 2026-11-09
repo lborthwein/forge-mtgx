@@ -3331,8 +3331,10 @@ public final class LookaheadSearch {
         }
         final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick
                 : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP,
-                        hooks.reachDepart() > 0 ? reachPart : null, hooks.reachDepart(), stats)
+                        hooks.reachDepart() > 0 && reachPart != null && reachPart.length == n ? reachPart : null,
+                        hooks.reachDepart(), stats)
                 : argmax(values, okArg, n, k);
+        reachPart = null; // this decision's only
         int best = plainBest;
         if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0 && finished == null) {
             final int medBest = argmaxMedian(values, okArg, n, k);
@@ -4499,7 +4501,7 @@ public final class LookaheadSearch {
      * it by {@code depart} on average? Such a candidate replaces the default without the z test.
      */
     static boolean reachExempt(double[][] rp, boolean[][] f, int c, int k, double depart) {
-        if (rp == null || c >= rp.length || !(depart > 0)) {
+        if (rp == null || c >= rp.length || rp[c].length < k || rp[0].length < k || !(depart > 0)) {
             return false;
         }
         double sum = 0;
