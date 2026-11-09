@@ -190,6 +190,12 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         default short[] decideChoice(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, short[] greedy) {
             return null;
         }
+
+        /** choice-search-1109: as above, with the ask's menu objects (the bridge's; may be null). */
+        default short[] decideChoice(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, short[] greedy,
+                Object objs) {
+            return decideChoice(g, p, m, frame, greedy);
+        }
     }
 
     /**
@@ -707,7 +713,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
         if (search != null && d.status == RlWire.ST_OK && search.choiceAsk(family)) {
             // choice-scorer-1106: the options applied on copies, one batched value pass (the policy's answer is the default)
-            final short[] alt = search.decideChoice(g, player, m, frame, d.steps);
+            final short[] alt = search.decideChoice(g, player, m, frame, d.steps, objs); // choice-search-1109: + objs
             if (alt != null && m.validate(alt) == null) {
                 d.steps = alt;
                 searchDepartures++;

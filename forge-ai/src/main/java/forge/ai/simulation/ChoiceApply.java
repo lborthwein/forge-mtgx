@@ -154,6 +154,66 @@ public final class ChoiceApply {
             return super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
         }
 
+        /** choice-search-1109: the forced cards out of {@code from} (min..max of them), or null (missed: Forge AI answers). */
+        private CardCollection forcedCards(final CardCollectionView from, final int min, final int max) {
+            final CardCollection out = new CardCollection();
+            while (next < picks.size() && out.size() < max) {
+                final int id = picks.get(next++);
+                if (id < 0) {
+                    break;
+                }
+                Card hit = null;
+                for (Card c : from) {
+                    if (c.getId() == id) {
+                        hit = c;
+                        break;
+                    }
+                }
+                if (hit == null) {
+                    missed = true;
+                    return null;
+                }
+                out.add(hit);
+            }
+            if (out.size() < min) {
+                missed = true;
+                return null;
+            }
+            return out;
+        }
+
+        /**
+         * choice-search-1109: this seat's own discard choice in the resolving ability (the bridge's discardFrom ask): the
+         * forced cards in one answer; past the list Forge AI answers. Another player's discard is Forge AI's.
+         */
+        @Override
+        public CardCollection chooseCardsToDiscardFrom(final Player p, final SpellAbility sa, final CardCollection validCards,
+                final int min, final int max, final CardCollectionView visibleToChooser) {
+            if (p == getPlayer() && next < picks.size()) {
+                final CardCollection out = forcedCards(validCards, min, max);
+                if (out != null) {
+                    return out;
+                }
+            } else if (p == getPlayer()) {
+                tail++;
+            }
+            return super.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser);
+        }
+
+        /** choice-search-1109: the cleanup discard to hand size, forced like the others. */
+        @Override
+        public CardCollectionView chooseCardsToDiscardToMaximumHandSize(final int numDiscard) {
+            if (next < picks.size()) {
+                final CardCollection out = forcedCards(getPlayer().getCardsIn(ZoneType.Hand), numDiscard, numDiscard);
+                if (out != null) {
+                    return out;
+                }
+            } else {
+                tail++;
+            }
+            return super.chooseCardsToDiscardToMaximumHandSize(numDiscard);
+        }
+
         @Override
         public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone,
                 final SpellAbility source) {
@@ -282,6 +342,38 @@ public final class ChoiceApply {
 
     public static Result applyPicks(final Game live, final Player liveMe, final List<Integer> picks,
             final List<Integer> order, final long seed, final int settleSteps, final int fidelity, final Frames frames) {
+        return applyPicks(live, liveMe, picks, order, seed, settleSteps, fidelity, frames, 0);
+    }
+
+    /**
+     * choice-search-1109: the index of {@code sa} in the resolving entry's chain (0 = its root, as a trigger's wrapped
+     * ability), or -1 when it is not in the chain (or nothing resolves).
+     */
+    public static int chainOf(final Game live, final SpellAbility sa) {
+        if (sa == null || live.getStack().isEmpty() || !live.getStack().isResolving()) {
+            return -1;
+        }
+        SpellAbility root = live.getStack().peekAbility();
+        if (root instanceof forge.game.trigger.WrappedAbility wa) {
+            root = wa.getWrappedAbility();
+        }
+        int i = 0;
+        for (SpellAbility s = root; s != null; s = s.getSubAbility(), i++) {
+            if (s == sa) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * As above; choice-search-1109: {@code chain} > 0 = the ask came from that sub-ability of the resolving entry, whose
+     * earlier effects already happened in the copy (Bazaar's draw before its discard): the copy resolves from that
+     * sub-ability on ({@link forge.game.zone.MagicStack#resolveStackFrom}), so nothing before the choice happens twice.
+     */
+    public static Result applyPicks(final Game live, final Player liveMe, final List<Integer> picks,
+            final List<Integer> order, final long seed, final int settleSteps, final int fidelity, final Frames frames,
+            final int chain) {
         final Result r = new Result();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -327,11 +419,25 @@ public final class ChoiceApply {
             }
             final long t1 = System.nanoTime();
             final PhaseHandler ph = g.getPhaseHandler();
+            if (chain > 0 && trig != null) {
+                r.fail = "triggerSub";
+                return r;
+            }
             if (trig != null) {
                 me.getController().playSpellAbilityNoStack(trig, false);
                 g.getAction().checkStaticAbilities();
                 ph.resetPriority();
                 ph.onStackResolved();
+            } else if (chain > 0) {
+                SpellAbility sub = g.getStack().peekAbility();
+                for (int i = 0; i < chain && sub != null; i++) {
+                    sub = sub.getSubAbility();
+                }
+                if (sub == null) {
+                    r.fail = "chain";
+                    return r;
+                }
+                g.getStack().resolveStackFrom(sub);
             } else {
                 g.getStack().resolveStack();
             }
