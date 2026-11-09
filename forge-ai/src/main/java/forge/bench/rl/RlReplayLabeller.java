@@ -513,8 +513,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * is the seat's v(o) frame of a GameCopier copy with the edit applied, observed through a fork of the live seat
      * knowledge by a fresh featurizer (as a search leaf's); its label is the same proof check with the edit applied in
      * every world ({@link HonestLabel.Seat#label(Game, Player, long, java.util.Set, java.util.function.Consumer)}), the
-     * same key (paired worlds). With NearMiss.WORLDS2 &gt; 0, a copy whose edit moved a card into or out of the library,
-     * or whose verdict is fractional, also gets the check at WORLDS2 worlds (field nm_w2). Everything runs under the
+     * same key (paired worlds). With NearMiss.WORLDS2 &gt; 0, a row whose own verdict is fractional (0 &lt; p &lt; 1, win or
+     * loss side; the control too) also gets the check at WORLDS2 worlds (field nm_w2); NearMiss.W2_LIB adds every copy
+     * whose edit moved a card into or out of the library. Everything runs under the
      * bench isolation; the live game is never edited.
      */
     private void nearMiss(final Player p, final int seat, final int ord, final int turn, final int tbe, final String phase,
@@ -564,7 +565,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                     final java.util.function.Consumer<Game> ed = e == null ? null : x -> e.apply(x);
                     final HonestLabel.Result rr = e == null ? r0 : seats[seat].label(g, p, key, kl, ed);
                     HonestLabel.Result r2 = null;
-                    if (NearMiss.WORLDS2 > 0 && (e != null && e.touchesLibrary() || fractional(rr))) {
+                    // coordinator 11-09: the second check only where this row's own verdict is fractional (copies and the
+                    // control alike); -Dforge.bench.label.nearMissW2Lib=true adds every library-touching copy
+                    if (NearMiss.WORLDS2 > 0 && (NearMiss.W2_LIB && e != null && e.touchesLibrary() || fractional(rr))) {
                         if (seats2[seat] == null) {
                             seats2[seat] = seats[seat].withWorlds(NearMiss.WORLDS2);
                         }

@@ -42,8 +42,10 @@ public final class NearMiss {
     public static final long SEED = Long.getLong("forge.bench.label.nearMissSeed", 0L);
     /** Largest life change. */
     public static final int LIFE_MAX = Integer.getInteger("forge.bench.label.nearMissLife", 5);
-    /** Worlds of the second check (0 = none): run on copies whose edit touched the library or whose verdict was fractional. */
+    /** Worlds of the second check (0 = none): run on rows whose own verdict is fractional (and see W2_LIB). */
     public static final int WORLDS2 = Integer.getInteger("forge.bench.label.nearMissWorlds2", 0);
+    /** With WORLDS2: also run the second check on every library-touching copy (default off: only fractional rows). */
+    public static final boolean W2_LIB = Boolean.getBoolean("forge.bench.label.nearMissW2Lib");
     /** Positions to edit (and the only positions labelled when on): lines "seed:seat:dec_idx"; absent = every position. */
     static final Set<String> ONLY = RlReplayLabeller.loadLabelOnly(System.getProperty("forge.bench.label.nearMissOnly"));
 
