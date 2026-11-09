@@ -828,6 +828,8 @@ public final class LookaheadSearch {
                 leafNanos, playoutSeatFailures, searchCpuNanos;
         /** bvw-step2-fork-1027 (S2T): logging-only opponent leaf calls that failed (reported only when > 0). */
         public long leafOppFailures;
+        /** solver-distill-cc-1109 (REACH): value leaves that carried a reach, and those whose own reach was above 0. */
+        public long reachLeaves, reachHits;
         /** Step-3 hygiene: true-world re-plays refused because fair naming was not on for every player. Always 0 on
          *  research/bvw-step2-keys-1028: the refusal itself is in the excluded hygiene commit 8043ba81bf3; the field
          *  exists only so the S3-3 report (b387c8c1318) compiles. */
@@ -1118,6 +1120,10 @@ public final class LookaheadSearch {
                 s.addProperty("leafLeaves", leafLeaves);
                 s.addProperty("leafFallbacks", leafFallbacks);
                 s.addProperty("leafLate", leafLate);
+                if (reachLeaves > 0) {
+                    s.addProperty("reachLeaves", reachLeaves);
+                    s.addProperty("reachHits", reachHits);
+                }
                 s.addProperty("leafMs", leafNanos / 1e6);
                 s.addProperty("playoutSeatFailures", playoutSeatFailures);
                 s.addProperty("searchCpuMs", searchCpuNanos / 1e6);
@@ -1498,6 +1504,8 @@ public final class LookaheadSearch {
          */
         Player opp;
         Object payloadOpp;
+        /** solver-distill-cc-1109: {@link SearchHooks#leafReach} at the leaf (null = off or failed). */
+        double[] reach;
 
         LeafProbe(SearchHooks hooks, Object ctx) {
             this.hooks = hooks;
@@ -1516,10 +1524,20 @@ public final class LookaheadSearch {
             }
         }
 
+        /** solver-distill-cc-1109: the reach at the leaf, never a failure of the play-out. */
+        void takeReach(Game g, Player me) {
+            try {
+                reach = hooks.leafReach(ctx, g, me);
+            } catch (RuntimeException | StackOverflowError e) {
+                reach = null;
+            }
+        }
+
         /** The searching seat has priority in play-out {@code g}: take the leaf there if the horizon turn has begun. */
         public void onPriority(Game g, Player me) {
             if (!done && watch != null && watch.reached) {
                 payload = hooks.captureLeaf(ctx, g, me);
+                takeReach(g, me);
                 if (opp != null) {
                     // S2T: the opponent's own observation at the same state (its seat's frame, never ours)
                     payloadOpp = captureOpp(g);
@@ -1553,6 +1571,19 @@ public final class LookaheadSearch {
 
         /** Decision thread: one value per leaf payload, P(the seat wins) in [0, 1], in order; null = failed. */
         double[] leafValues(List<Object> payloads);
+
+        /**
+         * solver-distill-cc-1109 (REACH; null = off, the default, and then nothing changes): play-out thread, at the leaf,
+         * {@code [reach of me, reach of the opponent]} ({@link ForcedWinSolver#reach}; NaN where not computed).
+         */
+        default double[] leafReach(Object copyCtx, Game g, Player me) {
+            return null;
+        }
+
+        /** solver-distill-cc-1109: the leaf value given its reach (identity by default). */
+        default double combineReach(double v, double[] reach) {
+            return v;
+        }
 
         /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
         default String leafError() {
@@ -3582,7 +3613,15 @@ public final class LookaheadSearch {
             }
         }
         for (int i = 0; i < where.size(); i++) {
-            values[where.get(i)[0]][where.get(i)[1]] = p[i];
+            final int c = where.get(i)[0], w = where.get(i)[1];
+            final double[] rr = outs[c][w].leafReach;
+            values[c][w] = rr == null ? p[i] : hooks.combineReach(p[i], rr);
+            if (rr != null) {
+                stats.reachLeaves++;
+                if (rr[0] > 0) {
+                    stats.reachHits++;
+                }
+            }
         }
     }
 
@@ -3707,6 +3746,14 @@ public final class LookaheadSearch {
             final double vs = ps[i];
             final double vo = po == null ? Double.NaN : po[i];
             values[c][w] = cfg.leafSym ? (vs + 1.0 - vo) / 2.0 : vs;
+            final double[] rr = outs[c][w].leafReach;
+            if (rr != null) {
+                values[c][w] = hooks.combineReach(values[c][w], rr);
+                stats.reachLeaves++;
+                if (rr[0] > 0) {
+                    stats.reachHits++;
+                }
+            }
             pairs[0][c][w] = vs;
             pairs[1][c][w] = vo;
         }
@@ -5813,6 +5860,8 @@ public final class LookaheadSearch {
         boolean leafLate;
         /** bvw-step2-fork-1027 (S2T, leafOpp): the opponent's own leaf frame at the same moment, or null. */
         Object leafPayloadOpp;
+        /** solver-distill-cc-1109: the leaf's reach ({@link SearchHooks#leafReach}), or null. */
+        double[] leafReach;
         /** S1 policy play-out: why its seat could not play it (the play-out failed), or null. */
         String seatFailure;
         /** Lane copy-fidelity-1010: a failure's class when the play-out itself knows it ({@link #failureClass}), or null. */
@@ -6439,6 +6488,7 @@ public final class LookaheadSearch {
                         if (!probe.done) {
                             // no priority of the seat within the extra steps (or a capped play-out): the leaf is here
                             probe.payload = hooks.captureLeaf(p.hookCtx, g, me);
+                            probe.takeReach(g, me);
                             if (probe.opp != null) {
                                 probe.payloadOpp = probe.captureOpp(g); // S2T
                             }
@@ -6447,6 +6497,7 @@ public final class LookaheadSearch {
                         }
                         r.leafPayload = probe.payload;
                         r.leafPayloadOpp = probe.payloadOpp;
+                        r.leafReach = probe.reach;
                     }
                 }
                 r.fingerprint = watch.fingerprint;

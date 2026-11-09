@@ -271,6 +271,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean beliefDeck = false;
         /** choice-scorer-1106 (null = off, the default, and then absent from the JSON): {@link ChoiceScorer.Config}. */
         public JsonObject choiceScorer = null;
+        /** solver-distill-cc-1109 (REACH; null = off, the default, and then nothing changes): {@link ReachCfg}. */
+        public JsonObject reach = null;
         /**
          * mull-off (owner 2026-11-06; off by default and then absent from the JSON): this search's seat keeps every opening
          * hand, whatever the policy answers. Generic: no card or deck logic. The policy's answer is logged.
@@ -337,7 +339,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
-                "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory"));
+                "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -391,6 +393,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("basicsByType") && o.get("basicsByType").getAsBoolean()) {
                 c.basicsByType = true;
                 forge.ai.simulation.BeliefSampler.BASICS_BY_TYPE = true; // bugfix-basics: process-wide, same names on a real DB
+            }
+            if (o.has("reach") && !o.get("reach").isJsonNull()) {
+                c.reach = o.getAsJsonObject("reach");
+                ReachCfg.parse(c.reach); // a bad key fails at parse
             }
             if (o.has("choiceScorer") && !o.get("choiceScorer").isJsonNull()) {
                 c.choiceScorer = o.getAsJsonObject("choiceScorer");
@@ -621,6 +627,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (choiceScorer != null) {
                 o.add("choiceScorer", choiceScorer); // choice-scorer-1106: only when on
+            }
+            if (reach != null) {
+                o.add("reach", reach); // solver-distill-cc-1109: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -2746,6 +2755,97 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             f.restCnt = o.restCnt;
         }
         return f;
+    }
+
+    /**
+     * solver-distill-cc-1109 (REACH, spec key {@code reach}): the leaf value of a play-out is lifted by the seat's reach, the
+     * planner's chance of an unopposed line by its next turn over its next unknown draw ({@link ForcedWinSolver#reach}):
+     * P = a*R + (1 - a*R) * v * (1 - b*R_opp). {@code alpha} is P(win | an unverified unopposed line), {@code oppBeta} > 0
+     * also screens the opponent (its hand in the world is the belief's sample). Generic: no card or combo knowledge.
+     */
+    public static final class ReachCfg {
+        public double alpha = 0.85;
+        public double oppBeta = 0.0;
+        public int nodes = 2000;
+        public long ms = 60;
+        public int maxNames = 40;
+        static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
+                "ms", "maxNames"));
+
+        public static ReachCfg parse(final JsonObject o) {
+            for (String k : o.keySet()) {
+                if (!KEYS.contains(k)) {
+                    throw new IllegalArgumentException("reach: unknown key " + k);
+                }
+            }
+            final ReachCfg c = new ReachCfg();
+            if (o.has("alpha")) c.alpha = o.get("alpha").getAsDouble();
+            if (o.has("oppBeta")) c.oppBeta = o.get("oppBeta").getAsDouble();
+            if (o.has("nodes")) c.nodes = o.get("nodes").getAsInt();
+            if (o.has("ms")) c.ms = o.get("ms").getAsLong();
+            if (o.has("maxNames")) c.maxNames = o.get("maxNames").getAsInt();
+            return c;
+        }
+    }
+
+    private ReachCfg reachCfg;
+    private forge.ai.simulation.ForcedWinSolver.Config reachSolverCfg;
+    /** One affordance reader per player id for this game (as the solver's readerPerGame). */
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Object> reachReaders = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private synchronized ReachCfg reachCfg() {
+        if (reachCfg == null) {
+            reachCfg = ReachCfg.parse(cfg.reach);
+            reachSolverCfg = cfg.plans != null ? PlanSearch.Spec.parse(cfg.plans).solverConfig()
+                    : new forge.ai.simulation.ForcedWinSolver.Config();
+            reachSolverCfg.sharedReader = false; // no preload per call: the reader below is per game
+            reachSolverCfg.honestProbes = false; // the play-out world is already a belief sample
+        }
+        return reachCfg;
+    }
+
+    /** The reach of {@code p} in {@code g}, with p's known library top from tracker {@code k}. NaN = failed. */
+    double reachOf(final RlKnowledge k, final Game g, final Player p) {
+        final ReachCfg rc = reachCfg();
+        final List<Integer> top = new ArrayList<>();
+        if (k != null) {
+            final int st = k.seatOf(p);
+            for (forge.game.card.Card c : p.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                if (st < 0 || !k.knows(st, c)) {
+                    break;
+                }
+                top.add(c.getId());
+            }
+        }
+        final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        final forge.ai.simulation.ForcedWinSolver.Reach r = forge.ai.simulation.ForcedWinSolver
+                .withReader(p, reachSolverCfg, reader).reach(g, top, rc.nodes, rc.ms, rc.maxNames, true);
+        return r.failed ? Double.NaN : r.p;
+    }
+
+    @Override
+    public double[] leafReach(final Object copyCtx, final Game g, final Player me) {
+        if (cfg.reach == null) {
+            return null;
+        }
+        final ReachCfg rc = reachCfg();
+        final RlKnowledge k = copyCtx instanceof CopyCtx ? ((CopyCtx) copyCtx).know : null;
+        final double[] out = {reachOf(k, g, me), Double.NaN};
+        if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
+            out[1] = reachOf(k, g, me.getOpponents().get(0));
+        }
+        return out;
+    }
+
+    @Override
+    public double combineReach(final double v, final double[] r) {
+        if (cfg.reach == null || r == null) {
+            return v;
+        }
+        final ReachCfg rc = reachCfg();
+        final double a = Double.isNaN(r[0]) ? 0 : rc.alpha * r[0];
+        final double b = Double.isNaN(r[1]) ? 0 : rc.oppBeta * r[1];
+        return a + (1 - a) * v * (1 - b);
     }
 
     @Override

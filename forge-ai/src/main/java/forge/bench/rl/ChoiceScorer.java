@@ -52,6 +52,13 @@ public final class ChoiceScorer {
         /** Planner screen per applied option (nodes; 0 = off) and its wall cap per option, ms. */
         public int screenNodes = 0;
         public long screenMs = 200;
+        /**
+         * solver-distill-cc-1109 (REACH; 0 = off, the default): each applied option's value is lifted by its reach, the
+         * planner screen over the seat's next unknown draw ({@link forge.ai.simulation.ForcedWinSolver#reach}, with
+         * screenNodes / screenMs per screen): P = a*R + (1 - a*R) * v with a = reachAlpha; options rank by P alone.
+         */
+        public double reachAlpha = 0.0;
+        public int reachMaxNames = 40;
         /** Ordered multi-pick choices (piles): the planner proposes, applied piles are screened and valued. Off by default. */
         public boolean pile = false;
         public int pileTop = 6;
@@ -68,7 +75,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs"));
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -98,6 +105,8 @@ public final class ChoiceScorer {
             if (o.has("shadow")) c.shadow = o.get("shadow").getAsBoolean();
             if (o.has("screenNodes")) c.screenNodes = o.get("screenNodes").getAsInt();
             if (o.has("screenMs")) c.screenMs = o.get("screenMs").getAsLong();
+            if (o.has("reachAlpha")) c.reachAlpha = o.get("reachAlpha").getAsDouble();
+            if (o.has("reachMaxNames")) c.reachMaxNames = o.get("reachMaxNames").getAsInt();
             if (o.has("guard")) c.guard = o.get("guard").getAsBoolean();
             if (o.has("pile")) c.pile = o.get("pile").getAsBoolean();
             if (o.has("pileTop")) c.pileTop = o.get("pileTop").getAsInt();
@@ -124,6 +133,10 @@ public final class ChoiceScorer {
             o.addProperty("shadow", shadow);
             o.addProperty("screenNodes", screenNodes);
             o.addProperty("screenMs", screenMs);
+            if (reachAlpha > 0) {
+                o.addProperty("reachAlpha", reachAlpha);
+                o.addProperty("reachMaxNames", reachMaxNames);
+            }
             o.addProperty("guard", guard);
             o.addProperty("pile", pile);
             o.addProperty("pileTop", pileTop);
@@ -237,8 +250,21 @@ public final class ChoiceScorer {
                 if (screenReader == null) {
                     screenReader = forge.ai.simulation.ForcedWinSolver.newSharedReader();
                 }
-                return forge.ai.simulation.ForcedWinSolver.withReader(me, cfg.solverCfg, screenReader).screen(g, top,
-                        cfg.screenNodes, cfg.screenMs);
+                final forge.ai.simulation.ForcedWinSolver sol = forge.ai.simulation.ForcedWinSolver.withReader(me,
+                        cfg.solverCfg, screenReader);
+                if (cfg.reachAlpha > 0) {
+                    // solver-distill-cc-1109: the reach over our next unknown draw; lines = 1 when it is above 0
+                    final forge.ai.simulation.ForcedWinSolver.Reach r = sol.reach(g, top, cfg.screenNodes, cfg.screenMs,
+                            cfg.reachMaxNames, true);
+                    final forge.ai.simulation.ForcedWinSolver.Screen sc = new forge.ai.simulation.ForcedWinSolver.Screen();
+                    sc.failed = r.failed;
+                    sc.reach = r.p;
+                    sc.lines = r.direct ? 1 : 0;
+                    sc.nodes = r.screens;
+                    sc.nanos = r.nanos;
+                    return sc;
+                }
+                return sol.screen(g, top, cfg.screenNodes, cfg.screenMs);
             }
         };
     }
@@ -659,16 +685,24 @@ public final class ChoiceScorer {
                 }
                 o.value = sum / grp.size();
             }
+            if (cfg.reachAlpha > 0 && !Double.isNaN(o.value) && o.screen != null && !Double.isNaN(o.screen.reach)) {
+                final double a = cfg.reachAlpha * o.screen.reach;
+                o.value = a + (1 - a) * o.value; // solver-distill-cc-1109
+            }
             if (o.policy) {
                 own = o;
             }
-            if (!Double.isNaN(o.value) && (best == null || better(o, best))) {
+            if (!Double.isNaN(o.value) && (best == null || (cfg.reachAlpha > 0 ? o.value > best.value : better(o, best)))) {
                 best = o;
             }
         }
         s.chosen = best;
         if (best != null && best.pileIds != null) {
             return best.screen != null && best.screen.lines > 0 ? best.steps : null;
+        }
+        if (cfg.reachAlpha > 0) {
+            return best == null || own == null || Double.isNaN(own.value) || best == own
+                    || best.value <= own.value + cfg.margin ? null : best.steps;
         }
         if (best == null || own == null || Double.isNaN(own.value) || best == own
                 || !(own.screen != null && best.screen != null && best.screen.lines > 0 && own.screen.lines == 0)
@@ -719,6 +753,9 @@ public final class ChoiceScorer {
             if (o.tail > 0) x.addProperty("tail", o.tail);
             if (o.screen != null) {
                 x.addProperty("lines", o.screen.lines);
+                if (!Double.isNaN(o.screen.reach)) {
+                    x.addProperty("reach", Math.round(o.screen.reach * 1000) / 1000.0);
+                }
                 x.addProperty("plan_nodes", o.screen.nodes);
                 x.addProperty("plan_ms", Math.round(o.screen.nanos / 1e4) / 100.0);
                 if (o.screen.exhausted) x.addProperty("plan_exh", true);

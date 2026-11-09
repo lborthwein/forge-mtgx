@@ -3998,6 +3998,8 @@ public final class ForcedWinSolver {
         public boolean exhausted, failed;
         public long nanos;
         public String best;
+        /** solver-distill-cc-1109: set when the screen is a {@link #reach} (NaN otherwise). */
+        public double reach = Double.NaN;
     }
 
     /**
@@ -4012,6 +4014,166 @@ public final class ForcedWinSolver {
             if (pos == null) {
                 s.failed = true;
                 return s;
+            }
+            final ForcedWinPlanner.Limits lim = limits();
+            lim.nodes = nodes;
+            lim.ms = ms;
+            lim.payPolicies = 1;
+            lim.horizon = 1;
+            ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
+            s.nodes = r.nodes;
+            s.exhausted = r.exhausted;
+            if (r.lines.isEmpty() && cfg.horizon >= 2) {
+                lim.horizon = cfg.horizon;
+                r = ForcedWinPlanner.plan(pos, lim);
+                s.nodes += r.nodes;
+                s.exhausted |= r.exhausted;
+            }
+            s.lines = r.lines.size();
+            for (Line l : r.lines) {
+                if (s.bestTurn < 0 || l.winTurn < s.bestTurn || l.winTurn == s.bestTurn && l.steps.size() < s.bestSteps) {
+                    s.bestTurn = l.winTurn;
+                    s.bestSteps = l.steps.size();
+                    s.best = String.valueOf(l);
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            s.failed = true;
+            s.best = String.valueOf(e);
+        } finally {
+            s.nanos = forge.game.WorkClock.nanoTime() - t0;
+        }
+        return s;
+    }
+
+    /** solver-distill-cc-1109: {@link #reach}'s result. */
+    public static final class Reach {
+        /** P(the planner finds an unopposed line by our next turn), over our next unknown draw; NaN = not computed. */
+        public double p = Double.NaN;
+        /** A line with no new card (the plain {@link #screen} found one). */
+        public boolean direct;
+        public boolean failed;
+        public int screens, names, unknown;
+        public long nanos;
+    }
+
+    /**
+     * solver-distill-cc-1109 (REACH): the planner screen, in expectation over the seat's NEXT UNKNOWN DRAW. The planner
+     * sees an unknown library card as a blank, so {@link #screen} only finds lines whose pieces are already in hand. Here
+     * the first unknown library slot is filled, in turn, with each distinct card name the seat's library holds below its
+     * known top, weighted by its count: P = sum_c n_c / N * [a line exists with c as the next card]. Honest: the seat
+     * knows its library's multiset (deck minus seen) and its known top, never the order of the rest. No card or combo
+     * knowledge; count-aware by construction. With {@code window} the phase is read (an upkeep leaf plans through the
+     * draw step). A direct line (no new card needed) is P = 1. Names past {@code maxNames} (most copies first) count 0.
+     */
+    public Reach reach(final Game g, final List<Integer> knownTop, final int nodes, final long ms, final int maxNames,
+            final boolean window) {
+        final Reach out = new Reach();
+        final long t0 = forge.game.WorkClock.nanoTime();
+        try {
+            final Screen s0 = screenAt(g, knownTop, null, nodes, ms, window);
+            out.screens++;
+            if (s0.failed) {
+                out.failed = true;
+                return out;
+            }
+            if (s0.lines > 0) {
+                out.p = 1.0;
+                out.direct = true;
+                return out;
+            }
+            final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+            int k = knownTop == null ? 0 : knownTop.size();
+            if (k > lib.size()) {
+                k = 0;
+            }
+            for (int i = 0; i < k; i++) {
+                if (lib.get(i).getId() != knownTop.get(i)) {
+                    k = 0; // not a prefix: the reader ignores it too
+                    break;
+                }
+            }
+            final java.util.LinkedHashMap<String, List<Card>> byName = new java.util.LinkedHashMap<>();
+            for (int i = k; i < lib.size(); i++) {
+                byName.computeIfAbsent(lib.get(i).getName(), x -> new ArrayList<>()).add(lib.get(i));
+            }
+            out.unknown = lib.size() - k;
+            if (out.unknown <= 0) {
+                out.p = 0.0;
+                return out;
+            }
+            final List<List<Card>> groups = new ArrayList<>(byName.values());
+            groups.sort((a, b) -> Integer.compare(b.size(), a.size()));
+            double p = 0;
+            final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
+            for (int i = 0; i < groups.size() && i < maxNames; i++) {
+                final List<Card> grp = groups.get(i);
+                final Screen s = screenAt(g, top, grp.get(0), nodes, ms, window);
+                out.screens++;
+                out.names++;
+                if (!s.failed && s.lines > 0) {
+                    p += grp.size() / (double) out.unknown;
+                }
+            }
+            out.p = Math.min(1.0, p);
+        } catch (RuntimeException | StackOverflowError e) {
+            out.failed = true;
+        } finally {
+            out.nanos = forge.game.WorkClock.nanoTime() - t0;
+        }
+        return out;
+    }
+
+    /** {@link #screen} with an optional hypothetical next card ({@code next}: placed after the known top) and window. */
+    Screen screenAt(final Game g, final List<Integer> knownTop, final Card next, final int nodes, final long ms,
+            final boolean window) {
+        final Screen s = new Screen();
+        final long t0 = forge.game.WorkClock.nanoTime();
+        try {
+            final Position pos = readPosition(g, knownTop);
+            if (pos == null) {
+                s.failed = true;
+                return s;
+            }
+            if (window) {
+                markWindow(pos, g.getPhaseHandler());
+            }
+            if (next != null) {
+                if (pos.knownTop.size() != (knownTop == null ? 0 : knownTop.size())) {
+                    s.failed = true; // the known top was not read as given
+                    return s;
+                }
+                final ACard nc = reader.card(g, me, next);
+                pos.knownTop.add(nc);
+                boolean chooses = false;
+                for (ForcedWinModel.Abil ab : nc.fromHand) {
+                    chooses |= !ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                }
+                if (chooses && pos.library.isEmpty()) {
+                    // the drawn card searches or piles our library: its contents (as the reader gives them when it chooses)
+                    final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+                    final List<Card> rest = new ArrayList<>(lib.subList(Math.min(lib.size(), pos.knownTop.size() - 1), lib.size()));
+                    rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                    for (Card c : rest) {
+                        pos.library.add(reader.card(g, me, c));
+                    }
+                    if (pos.graveyard.isEmpty()) {
+                        final List<Card> gy = new ArrayList<>(me.getCardsIn(ZoneType.Graveyard));
+                        gy.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                        for (Card c : gy) {
+                            pos.graveyard.add(reader.card(g, me, c));
+                        }
+                    }
+                }
+                final List<Integer> order = pos.knownOrder == null ? new ArrayList<>() : new ArrayList<>(pos.knownOrder);
+                order.add(next.getId());
+                pos.knownOrder = order;
+                for (int i = 0; i < pos.library.size(); i++) {
+                    if (pos.library.get(i).id == next.getId()) {
+                        pos.library.remove(i);
+                        break;
+                    }
+                }
             }
             final ForcedWinPlanner.Limits lim = limits();
             lim.nodes = nodes;
