@@ -92,7 +92,6 @@ public final class ChoiceApply {
         final Runnable leaf;
         boolean missed = false;
         int tail = 0;
-
         Forced(final Game g, final Player p, final forge.LobbyPlayer lp, final List<Integer> picks, final Runnable leaf) {
             super(g, p, lp);
             this.picks = picks;
@@ -445,6 +444,181 @@ public final class ChoiceApply {
                 r.fail = "pickMissed";
                 return r;
             }
+            int steps = 0;
+            while (!g.isGameOver() && !reached[0] && steps < settleSteps) {
+                ph.mainLoopStep();
+                steps++;
+            }
+            r.steps = steps;
+            r.tailAsks = sc.tail;
+            r.runNanos = System.nanoTime() - t1;
+            if (g.isGameOver() || !me.isInGame()) {
+                r.terminal = me.hasWon() ? 1.0 : me.hasLost() || !me.isInGame() ? 0.0 : 0.5;
+                r.payload = null;
+            } else if (!reached[0]) {
+                r.fail = "settle";
+            }
+            return r;
+        } catch (RuntimeException | StackOverflowError e) {
+            r.fail = "error:" + e;
+            return r;
+        } finally {
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /**
+     * choice-search-1109 (COST_CARDS): the cast whose card cost is asked: {@code liveSa}'s root is a spell of
+     * {@code liveMe}, its card on the stack zone (moved there for the cast, not yet a stack entry), cast from the hand.
+     * Null when {@link #applyCost} can replay it, else why not.
+     */
+    public static String castUnsupported(final Game live, final Player liveMe, final SpellAbility liveSa) {
+        if (liveSa == null) {
+            return "noAsk";
+        }
+        final SpellAbility root = liveSa.getRootAbility();
+        final Card host = root.getHostCard();
+        if (!root.isSpell() || host == null || root.getActivatingPlayer() != liveMe) {
+            return "notSpell";
+        }
+        if (host.getZone() == null || !host.getZone().is(ZoneType.Stack)) {
+            return "notCasting";
+        }
+        if (host.getCastFrom() == null || !host.getCastFrom().is(ZoneType.Hand)) {
+            return "castFrom";
+        }
+        if (saIndexOf(host, root) < 0) {
+            return "saIndex";
+        }
+        // the stack is frozen for the cast in progress (that is expected); a held simultaneous entry is not replayed
+        return live.getStack().hasSimultaneousStackEntries() ? "simultaneous" : null;
+    }
+
+    /**
+     * choice-search-1109: the index of a cast's ability among its card's spell abilities: the same object, else the one it
+     * was copied from (Forge copies the ability to add keyword costs), else the first with the same description; -1.
+     */
+    static int saIndexOf(final Card host, final SpellAbility root) {
+        final List<SpellAbility> sas = new ArrayList<>(host.getSpellAbilities());
+        int i = sas.indexOf(root);
+        if (i < 0 && root.getOriginalAbility() != null) {
+            i = sas.indexOf(root.getOriginalAbility());
+        }
+        for (int k = 0; i < 0 && k < sas.size(); k++) {
+            if (sas.get(k).isSpell() && String.valueOf(sas.get(k).getDescription()).equals(String.valueOf(root.getDescription()))) {
+                i = k;
+            }
+        }
+        return i;
+    }
+
+    /**
+     * choice-search-1109 (COST_CARDS): the card cost of a spell being cast, paid on a copy. Forge decides every cost of a
+     * cast before paying any, so the copy (taken at the ask) holds the spell's card on the stack zone with nothing paid.
+     * On the copy the spell's own mana cost is paid by Forge AI, the asked card part with {@code picks} ({@code part}: the
+     * live cost part's class, CostDiscard or CostExile), and the card goes to the graveyard UNRESOLVED: its effects are
+     * not part of a line check, and resolving it could read the opponent's real hidden hand. Then the copy settles to the
+     * next priority (the leaf), as {@link #applyPicks}. A cost with any other non-mana part is not replayed.
+     */
+    public static Result applyCost(final Game live, final Player liveMe, final SpellAbility liveSa, final String part,
+            final List<Integer> picks, final long seed, final int settleSteps, final int fidelity, final Frames frames) {
+        final Result r = new Result();
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 1)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final long t0 = System.nanoTime();
+            String why = castUnsupported(live, liveMe, liveSa);
+            if (why == null && !"CostDiscard".equals(part) && !"CostExile".equals(part)) {
+                why = "costPart:" + part;
+            }
+            if (why == null && liveSa.getRootAbility().getPayCosts() != null) {
+                for (forge.game.cost.CostPart cp : liveSa.getRootAbility().getPayCosts().getCostParts()) {
+                    if (!(cp instanceof forge.game.cost.CostPartMana) && !cp.getClass().getSimpleName().equals(part)) {
+                        why = "costParts:" + cp.getClass().getSimpleName();
+                    }
+                }
+            }
+            if (why != null) {
+                r.fail = why;
+                return r;
+            }
+            final SpellAbility liveRoot = liveSa.getRootAbility();
+            final int saIndex = saIndexOf(liveRoot.getHostCard(), liveRoot);
+            final Game g;
+            final Player me;
+            final Object ctx;
+            synchronized (live) {
+                final GameCopier copier = copier(live, fidelity, false);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+                ctx = frames.onCopy(g, me);
+            }
+            MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 3)));
+            r.copyNanos = System.nanoTime() - t0;
+            final Card host = g.findById(liveRoot.getHostCard().getId());
+            if (host == null || host.getZone() == null || !host.getZone().is(ZoneType.Stack)
+                    || saIndex >= host.getSpellAbilities().size()) {
+                r.fail = "copyHost";
+                return r;
+            }
+            final boolean[] reached = {false};
+            final Runnable leaf = () -> {
+                if (!reached[0]) {
+                    reached[0] = true;
+                    r.payload = frames.capture(ctx, g, me);
+                    r.screen = frames.screen(ctx, g, me);
+                }
+            };
+            final Forced sc = new Forced(g, me, me.getController().getLobbyPlayer(), picks, leaf);
+            me.dangerouslySetController(sc);
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new Other(g, o, o.getController().getLobbyPlayer(), leaf));
+                }
+            }
+            final long t1 = System.nanoTime();
+            final SpellAbility csa = host.getSpellAbilities().get(saIndex);
+            csa.setActivatingPlayer(me);
+            final forge.game.cost.Cost liveCost = liveRoot.getPayCosts();
+            if (liveCost != null && liveCost.hasManaCost()
+                    && !forge.ai.ComputerUtilMana.payManaCost(liveCost, me, csa, false)) {
+                r.fail = "mana";
+                return r;
+            }
+            final CardCollection hand = new CardCollection(me.getCardsIn(ZoneType.Hand));
+            final List<Card> paid = new ArrayList<>();
+            for (int id : picks) {
+                Card c = null;
+                for (Card h : hand) {
+                    if (h.getId() == id) {
+                        c = h;
+                    }
+                }
+                if (c == null) {
+                    r.fail = "pickMissed";
+                    return r;
+                }
+                paid.add(c);
+            }
+            for (Card c : paid) {
+                if ("CostDiscard".equals(part)) {
+                    me.discard(c, csa, false, forge.game.ability.AbilityKey.newMap());
+                } else {
+                    g.getAction().exile(c, csa, forge.game.ability.AbilityKey.newMap());
+                }
+            }
+            g.getAction().moveToGraveyard(host, null);
+            if (g.getStack().isFrozen()) {
+                g.getStack().unfreezeStack(); // the cast is over on the copy (waiting triggers go on its stack)
+            }
+            g.getAction().checkStateEffects(true);
+            final PhaseHandler ph = g.getPhaseHandler();
             int steps = 0;
             while (!g.isGameOver() && !reached[0] && steps < settleSteps) {
                 ph.mainLoopStep();

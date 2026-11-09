@@ -1895,6 +1895,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /** choice-search-1109: the cost part's class among a costCards ask's menu objects ({pool, sa, cpl}), or null. */
+    static String costPartOf(final Object objs) {
+        if (objs instanceof Object[] a) {
+            for (Object o : a) {
+                if (o instanceof forge.game.cost.CostPart cp) {
+                    return cp.getClass().getSimpleName();
+                }
+            }
+        }
+        return null;
+    }
+
     /** choice-search-1109: the asking ability among a bridge ask's menu objects ({validCards, sa, player} for discardFrom). */
     static SpellAbility askSa(final Object objs) {
         if (objs instanceof Object[] a) {
@@ -1922,6 +1934,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long seed = LookaheadSearch.mix(LookaheadSearch.mix(gameSeed, 0xC401CEL), frame.decIdx);
         final String src = ChoiceScorer.srcOf(g);
+        sc.setCostPart(costPartOf(objs)); // choice-search-1109 (COST_CARDS)
         final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed,
                 sc.config().lineOnly ? askSa(objs) : null); // choice-search-1109: the asking ability (lineOnly only)
         final List<byte[]> ps = sc.payloads(s);

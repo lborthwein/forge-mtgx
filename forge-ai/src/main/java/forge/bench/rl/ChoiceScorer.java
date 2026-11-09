@@ -100,7 +100,7 @@ public final class ChoiceScorer {
                 for (String f : o.get("families").getAsString().split(",")) {
                     final int i = RlSchema.FAMILIES.indexOf(f.trim());
                     if (i != RlSchema.F_CARDS && i != RlSchema.F_MULLIGAN && i != RlSchema.F_MULLIGAN_BOTTOM
-                            && i != RlSchema.F_DISCARD_FROM) {
+                            && i != RlSchema.F_DISCARD_FROM && i != RlSchema.F_COST_CARDS) {
                         throw new IllegalArgumentException("choiceScorer: family not supported: " + f);
                     }
                     c.families.add(i);
@@ -315,11 +315,21 @@ public final class ChoiceScorer {
     private int askChain = 0;
     /** choice-search-1109: this ask is the cleanup's discard to hand size (a step, not a resolution). */
     private boolean cleanupMode = false;
+    /** choice-search-1109: this ask is a card cost of a spell being cast (COST_CARDS), and that spell's ability. */
+    private boolean costMode = false;
+    private SpellAbility castSa;
+    /** choice-search-1109 (COST_CARDS): the asked cost part's class (CostDiscard, CostExile, ...), set by the caller. */
+    private String costPart;
+
+    public void setCostPart(final String part) {
+        this.costPart = part;
+    }
 
     /** choice-search-1109: one answer applied on a copy: the resolution from the asking sub-ability, or the cleanup step. */
     private ChoiceApply.Result apply(final Game g, final Player me, final List<Integer> picks, final long seed,
             final ChoiceApply.Frames fr) {
-        return cleanupMode ? ChoiceApply.applyCleanup(g, me, picks, seed, cfg.settleSteps, cfg.fidelity, fr)
+        return costMode ? ChoiceApply.applyCost(g, me, castSa, costPart, picks, seed, cfg.settleSteps, cfg.fidelity, fr)
+                : cleanupMode ? ChoiceApply.applyCleanup(g, me, picks, seed, cfg.settleSteps, cfg.fidelity, fr)
                 : ChoiceApply.applyPicks(g, me, picks, null, seed, cfg.settleSteps, cfg.fidelity, fr, askChain);
     }
 
@@ -456,8 +466,10 @@ public final class ChoiceScorer {
         final long t0 = System.nanoTime();
         screenReader = null; // one reader per ask: its probes are of this position's copies
         // choice-search-1109: an ask from a sub-ability is replayed from that sub-ability (0 = the root, as before)
-        askChain = askSa == null ? 0 : ChoiceApply.chainOf(g, askSa);
         cleanupMode = false;
+        costMode = cfg.lineOnly && m.family == RlSchema.F_COST_CARDS;
+        castSa = costMode ? askSa : null;
+        askChain = askSa == null || costMode ? 0 : ChoiceApply.chainOf(g, askSa);
         if (askChain < 0) {
             s.unsupported = "chain";
             s.totalNanos = System.nanoTime() - t0;
@@ -466,7 +478,7 @@ public final class ChoiceScorer {
         final int seat = g.getRegisteredPlayers().indexOf(me);
         final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
         final long deadline = cfg.budgetMs > 0 ? (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0) + cfg.budgetMs * 1_000_000L : Long.MAX_VALUE;
-        if (m.family == RlSchema.F_CARDS || m.family == RlSchema.F_DISCARD_FROM && cfg.lineOnly) {
+        if (m.family == RlSchema.F_CARDS || (m.family == RlSchema.F_DISCARD_FROM || m.family == RlSchema.F_COST_CARDS) && cfg.lineOnly) {
             cards(g, me, m, greedy, seed, fr, s, deadline);
         } else if (m.family == RlSchema.F_MULLIGAN) {
             mulligan(g, me, m, greedy, seed, fr, s, deadline);
@@ -494,7 +506,7 @@ public final class ChoiceScorer {
         }
         // choice-search-1109: the cleanup's discard to hand size is replayed on a copy of the step, not of a resolution
         cleanupMode = cfg.lineOnly && "chooseCardsToDiscardToMaximumHandSize".equals(m.method) && ChoiceApply.cleanupAsk(g, me);
-        s.unsupported = cleanupMode ? null : ChoiceApply.unsupported(g, null);
+        s.unsupported = costMode ? ChoiceApply.castUnsupported(g, me, castSa) : cleanupMode ? null : ChoiceApply.unsupported(g, null);
         if (s.unsupported != null) {
             return;
         }

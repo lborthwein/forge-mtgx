@@ -124,9 +124,11 @@ public class ChoiceLineRuleTest {
         ChoiceScorer.Config.parse(JsonParser.parseString("{\"lineOnly\":true}").getAsJsonObject());
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class)
-    public void costCardsIsNotAFamilyYet() {
-        ChoiceScorer.Config.parse(JsonParser.parseString("{\"families\":\"COST_CARDS\"}").getAsJsonObject());
+    @Test
+    public void costCardsIsAFamilyNow() {
+        final ChoiceScorer.Config c = ChoiceScorer.Config.parse(JsonParser.parseString(
+                "{\"families\":\"CARDS,DISCARD_FROM,COST_CARDS\",\"screenNodes\":2000,\"lineOnly\":true}").getAsJsonObject());
+        Assert.assertTrue(c.families.contains(RlSchema.F_COST_CARDS));
     }
 
     @Test

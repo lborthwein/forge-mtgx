@@ -243,4 +243,57 @@ public class ChoiceLineTest extends AITest {
         Assert.assertTrue(names(me, ZoneType.Graveyard).contains("Doomsday"), names(me, ZoneType.Graveyard));
         Assert.assertTrue(names(me, ZoneType.Hand).contains("Troll"), names(me, ZoneType.Hand));
     }
+
+    /** The live seat: a spell with a card-discard cost (Tormenting Voice), its discard asked at payment. */
+    static class CostSeat extends PlayerControllerAi implements forge.ai.AiCostDecision.PaymentDecisions {
+        final Game g;
+        final ScreenFrames fr = new ScreenFrames();
+        final List<String> after = new ArrayList<>(), fails = new ArrayList<>();
+        boolean asked = false;
+
+        CostSeat(final Game g, final Player p) {
+            super(g, p, p.getController().getLobbyPlayer());
+            this.g = g;
+        }
+
+        @Override
+        public forge.ai.AiCostDecision costDecisionForPayment(final Player payer, final SpellAbility sa, final boolean effect) {
+            final Player me = getPlayer();
+            return new forge.ai.AiCostDecision(payer, sa, effect) {
+                @Override
+                public forge.game.cost.PaymentDecision visit(final forge.game.cost.CostDiscard cost) {
+                    asked = true;
+                    Assert.assertNull(ChoiceApply.castUnsupported(g, me, sa));
+                    for (String go : new String[] {"Doomsday", "Troll of Khazad-dûm"}) {
+                        final ChoiceApply.Result r = ChoiceApply.applyCost(g, me, sa, "CostDiscard",
+                                List.of(find(me, ZoneType.Hand, go).getId()), 13L, 200, 1, fr);
+                        fails.add(String.valueOf(r.fail));
+                        after.add(fr.hands.isEmpty() ? "-" : fr.hands.get(fr.hands.size() - 1) + " | " + fr.graves.get(fr.graves.size() - 1));
+                    }
+                    return forge.game.cost.PaymentDecision.card(find(me, ZoneType.Hand, "Doomsday"));
+                }
+            };
+        }
+    }
+
+    @Test
+    public void aCastsCardCostIsPaidOnACopyOfTheCast() {
+        final Game g = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(
+                "Tormenting Voice;Doomsday;Troll of Khazad-dûm;Daze", "Mountain;Mountain;Mountain", 20, "", "Island", 20,
+                "human"));
+        final Player me = g.getPlayers().get(0);
+        final CostSeat seat = new CostSeat(g, me);
+        me.dangerouslySetController(seat);
+        final SpellAbility sa = find(me, ZoneType.Hand, "Tormenting Voice").getFirstSpellAbility();
+        sa.setActivatingPlayer(me);
+        seat.playChosenSpellAbility(sa);
+        Assert.assertTrue(seat.asked, "the discard cost was asked; hand " + names(me, ZoneType.Hand) + " stack " + g.getStack().size());
+        Assert.assertEquals(seat.fails, List.of("null", "null"), "applies " + seat.after);
+        // pitch Doomsday: Troll and Daze stay; pitch Troll: Doomsday and Daze stay; the spell is in the copy's graveyard, unresolved
+        Assert.assertEquals(seat.after.get(0), "Daze;Troll of Khazad-dûm | Doomsday;Tormenting Voice", seat.after.get(0));
+        Assert.assertEquals(seat.after.get(1), "Daze;Doomsday | Tormenting Voice;Troll of Khazad-dûm", seat.after.get(1));
+        // the live cast paid with its own answer only
+        Assert.assertEquals(names(me, ZoneType.Hand), "Daze;Troll of Khazad-dûm");
+        Assert.assertEquals(g.getStack().size(), 1);
+    }
 }
