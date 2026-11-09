@@ -4055,6 +4055,36 @@ public final class ForcedWinSolver {
         public boolean failed;
         public int screens, names, unknown;
         public long nanos;
+        /**
+         * Cost (report only): planner nodes over all screens; the no-new-card screen hit its node cap; per-card screens
+         * that hit theirs; the per-card screens were skipped (skipCapped); signature groups screened (sig).
+         */
+        public long nodes;
+        public boolean s0Capped, skipped;
+        public int nameCapped, groups;
+    }
+
+    /**
+     * solver-distill-cc-1109: {@link #reach}'s knobs. Defaults = the first REACH build (every per-card screen at the
+     * no-new-card screen's cap, both horizon passes, one screen per name).
+     */
+    public static final class ReachOpts {
+        public int nodes = 2000;
+        public long ms = 60;
+        public int maxNames = 40;
+        public boolean window = true;
+        /** Node cap of each per-card screen's pass (< 0 = {@link #nodes}). */
+        public int nameNodes = -1;
+        /** Per-card screens plan once, at the solver's horizon (its line set includes this turn's lines). */
+        public boolean nameOnePass;
+        /** The no-new-card screen hit its node cap with no line: reach 0, no per-card screens (they would hit it too). */
+        public boolean skipCapped;
+        /**
+         * Names whose planner model is identical (every observed field but id, name and notes) share one screen, their
+         * counts summed. A name is kept apart when a card of ours already in the position has it, or a tutor's observed
+         * name filter holds it (the planner's only name-dependent paths).
+         */
+        public boolean sig;
     }
 
     /**
@@ -4068,11 +4098,23 @@ public final class ForcedWinSolver {
      */
     public Reach reach(final Game g, final List<Integer> knownTop, final int nodes, final long ms, final int maxNames,
             final boolean window) {
+        final ReachOpts o = new ReachOpts();
+        o.nodes = nodes;
+        o.ms = ms;
+        o.maxNames = maxNames;
+        o.window = window;
+        return reach(g, knownTop, o);
+    }
+
+    /** {@link #reach} with its knobs ({@link ReachOpts}). */
+    public Reach reach(final Game g, final List<Integer> knownTop, final ReachOpts o) {
         final Reach out = new Reach();
         final long t0 = forge.game.WorkClock.nanoTime();
+        final int nameNodes = o.nameNodes < 0 ? o.nodes : o.nameNodes;
         try {
-            final Screen s0 = screenAt(g, knownTop, null, nodes, ms, window);
+            final Screen s0 = screenAt(g, knownTop, null, o.nodes, o.ms, o.window, false);
             out.screens++;
+            out.nodes += s0.nodes;
             if (s0.failed) {
                 out.failed = true;
                 return out;
@@ -4080,6 +4122,12 @@ public final class ForcedWinSolver {
             if (s0.lines > 0) {
                 out.p = 1.0;
                 out.direct = true;
+                return out;
+            }
+            out.s0Capped = s0.exhausted;
+            if (o.skipCapped && s0.exhausted) {
+                out.p = 0.0;
+                out.skipped = true;
                 return out;
             }
             final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
@@ -4102,15 +4150,23 @@ public final class ForcedWinSolver {
                 out.p = 0.0;
                 return out;
             }
-            final List<List<Card>> groups = new ArrayList<>(byName.values());
+            List<List<Card>> groups = new ArrayList<>(byName.values());
+            if (o.sig) {
+                groups = sigGroups(g, groups, lib.subList(0, k));
+            }
             groups.sort((a, b) -> Integer.compare(b.size(), a.size()));
             double p = 0;
             final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
-            for (int i = 0; i < groups.size() && i < maxNames; i++) {
+            for (int i = 0; i < groups.size() && i < o.maxNames; i++) {
                 final List<Card> grp = groups.get(i);
-                final Screen s = screenAt(g, top, grp.get(0), nodes, ms, window);
+                final Screen s = screenAt(g, top, grp.get(0), nameNodes, o.ms, o.window, o.nameOnePass);
                 out.screens++;
                 out.names++;
+                out.groups++;
+                out.nodes += s.nodes;
+                if (s.exhausted) {
+                    out.nameCapped++;
+                }
                 if (!s.failed && s.lines > 0) {
                     p += grp.size() / (double) out.unknown;
                 }
@@ -4127,6 +4183,61 @@ public final class ForcedWinSolver {
     /** {@link #screen} with an optional hypothetical next card ({@code next}: placed after the known top) and window. */
     Screen screenAt(final Game g, final List<Integer> knownTop, final Card next, final int nodes, final long ms,
             final boolean window) {
+        return screenAt(g, knownTop, next, nodes, ms, window, false);
+    }
+
+    /**
+     * The name groups merged by planner model ({@link ReachOpts#sig}): names of the same signature share a group (a
+     * list of all their cards, the first group's first card screened). Kept apart: a name a card of ours in hand, on the
+     * battlefield, in the graveyard or in the known top already has, or one a tutor's observed name filter holds.
+     */
+    private List<List<Card>> sigGroups(final Game g, final List<List<Card>> byName, final List<Card> knownTopCards) {
+        final java.util.Set<String> keep = new java.util.HashSet<>();
+        final List<Card> ours = new ArrayList<>(me.getCardsIn(ZoneType.Hand));
+        ours.addAll(me.getCardsIn(ZoneType.Battlefield));
+        ours.addAll(me.getCardsIn(ZoneType.Graveyard));
+        ours.addAll(knownTopCards);
+        for (Card c : ours) {
+            keep.add(c.getName());
+        }
+        final List<ACard> models = new ArrayList<>();
+        for (List<Card> grp : byName) {
+            models.add(reader.card(g, me, grp.get(0)));
+        }
+        for (Card c : ours) {
+            addFilterNames(reader.card(g, me, c), keep);
+        }
+        for (ACard a : models) {
+            addFilterNames(a, keep);
+        }
+        final java.util.LinkedHashMap<String, List<Card>> bySig = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < byName.size(); i++) {
+            final List<Card> grp = byName.get(i);
+            final String name = grp.get(0).getName();
+            final String key = keep.contains(name) ? "name:" + name : "sig:" + ForcedWinModel.signature(models.get(i));
+            bySig.computeIfAbsent(key, x -> new ArrayList<>()).addAll(grp);
+        }
+        return new ArrayList<>(bySig.values());
+    }
+
+    private static void addFilterNames(final ACard a, final java.util.Set<String> out) {
+        if (a == null) {
+            return;
+        }
+        for (List<ForcedWinModel.Abil> abs : java.util.Arrays.asList(a.fromHand, a.onBattlefield)) {
+            for (ForcedWinModel.Abil ab : abs) {
+                for (ForcedWinModel.Eff e : ab.effects) {
+                    if (e.names != null) {
+                        out.addAll(e.names);
+                    }
+                }
+            }
+        }
+    }
+
+    /** {@link #screenAt}; {@code onePass}: plan once at the solver's horizon (its lines include this turn's). */
+    Screen screenAt(final Game g, final List<Integer> knownTop, final Card next, final int nodes, final long ms,
+            final boolean window, final boolean onePass) {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
@@ -4179,11 +4290,11 @@ public final class ForcedWinSolver {
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
-            lim.horizon = 1;
+            lim.horizon = onePass && cfg.horizon >= 2 ? cfg.horizon : 1;
             ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
             s.nodes = r.nodes;
             s.exhausted = r.exhausted;
-            if (r.lines.isEmpty() && cfg.horizon >= 2) {
+            if (r.lines.isEmpty() && cfg.horizon >= 2 && lim.horizon == 1) {
                 lim.horizon = cfg.horizon;
                 r = ForcedWinPlanner.plan(pos, lim);
                 s.nodes += r.nodes;

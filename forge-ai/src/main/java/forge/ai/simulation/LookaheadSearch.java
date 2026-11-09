@@ -831,6 +831,26 @@ public final class LookaheadSearch {
         /** solver-distill-cc-1109 (REACH): value leaves that carried a reach, and those whose own reach was above 0. */
         public long reachLeaves, reachHits, reachNaN;
         public double reachSum;
+        /** solver-distill-cc-1109 (report only): reach cost: planner nodes, capped no-new-card screens, skipped, per-card screens and capped. */
+        public long reachNodes, reachS0Capped, reachSkipped, reachNameScreens, reachNameCapped;
+
+        /** One leaf's reach (the hooks' array: R_me, R_opp, then cost counters when present). */
+        synchronized void noteReach(final double[] rr) {
+            reachLeaves++;
+            if (rr[0] > 0) {
+                reachHits++;
+                reachSum += rr[0];
+            } else if (Double.isNaN(rr[0])) {
+                reachNaN++;
+            }
+            if (rr.length >= 7) {
+                reachNodes += (long) rr[2];
+                reachS0Capped += (long) rr[3];
+                reachSkipped += (long) rr[4];
+                reachNameScreens += (long) rr[5];
+                reachNameCapped += (long) rr[6];
+            }
+        }
         /** Step-3 hygiene: true-world re-plays refused because fair naming was not on for every player. Always 0 on
          *  research/bvw-step2-keys-1028: the refusal itself is in the excluded hygiene commit 8043ba81bf3; the field
          *  exists only so the S3-3 report (b387c8c1318) compiles. */
@@ -1126,6 +1146,13 @@ public final class LookaheadSearch {
                     s.addProperty("reachHits", reachHits);
                     s.addProperty("reachNaN", reachNaN);
                     s.addProperty("reachSum", Math.round(reachSum * 1000) / 1000.0);
+                    if (reachNodes > 0 || reachNameScreens > 0) {
+                        s.addProperty("reachNodes", reachNodes);
+                        s.addProperty("reachS0Capped", reachS0Capped);
+                        s.addProperty("reachSkipped", reachSkipped);
+                        s.addProperty("reachNameScreens", reachNameScreens);
+                        s.addProperty("reachNameCapped", reachNameCapped);
+                    }
                 }
                 s.addProperty("leafMs", leafNanos / 1e6);
                 s.addProperty("playoutSeatFailures", playoutSeatFailures);
@@ -3620,13 +3647,7 @@ public final class LookaheadSearch {
             final double[] rr = outs[c][w].leafReach;
             values[c][w] = rr == null ? p[i] : hooks.combineReach(p[i], rr);
             if (rr != null) {
-                stats.reachLeaves++;
-                if (rr[0] > 0) {
-                    stats.reachHits++;
-                    stats.reachSum += rr[0];
-                } else if (Double.isNaN(rr[0])) {
-                    stats.reachNaN++;
-                }
+                stats.noteReach(rr);
             }
         }
     }
@@ -3755,13 +3776,7 @@ public final class LookaheadSearch {
             final double[] rr = outs[c][w].leafReach;
             if (rr != null) {
                 values[c][w] = hooks.combineReach(values[c][w], rr);
-                stats.reachLeaves++;
-                if (rr[0] > 0) {
-                    stats.reachHits++;
-                    stats.reachSum += rr[0];
-                } else if (Double.isNaN(rr[0])) {
-                    stats.reachNaN++;
-                }
+                stats.noteReach(rr);
             }
             pairs[0][c][w] = vs;
             pairs[1][c][w] = vo;

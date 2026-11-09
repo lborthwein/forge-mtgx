@@ -67,6 +67,116 @@ public final class ForcedWinModel {
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
     static final int ALL = 99;
 
+    /**
+     * solver-distill-cc-1109 (REACH sig): a card model's identity for the planner: every observed field of the card, its
+     * abilities and their effects, except its id, its name and free-text notes or locators (desc, costKey, notes). Two
+     * cards with equal signatures are the same card to the width search, apart from the name-dependent paths (tutor name
+     * filters, same-name classes), which the caller keeps apart.
+     */
+    static String signature(final ACard a) {
+        final StringBuilder sb = new StringBuilder();
+        sigAppend(sb, a, 0);
+        return sb.toString();
+    }
+
+    private static final java.util.Set<String> SIG_SKIP = java.util.Set.of("id", "name", "note", "desc", "costKey",
+            "probeNote");
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, java.lang.reflect.Field[]> SIG_FIELDS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static java.lang.reflect.Field[] sigFields(final Class<?> c) {
+        return SIG_FIELDS.computeIfAbsent(c, k -> {
+            final List<java.lang.reflect.Field> out = new ArrayList<>();
+            for (Class<?> x = k; x != null && x != Object.class; x = x.getSuperclass()) {
+                for (java.lang.reflect.Field f : x.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers()) || f.isSynthetic()
+                            || SIG_SKIP.contains(f.getName())) {
+                        continue;
+                    }
+                    f.setAccessible(true);
+                    out.add(f);
+                }
+            }
+            out.sort((f1, f2) -> f1.getName().compareTo(f2.getName()));
+            return out.toArray(new java.lang.reflect.Field[0]);
+        });
+    }
+
+    private static void sigAppend(final StringBuilder sb, final Object o, final int depth) {
+        if (o == null) {
+            sb.append('~');
+            return;
+        }
+        if (depth > 8) {
+            sb.append('#');
+            return;
+        }
+        final Class<?> c = o.getClass();
+        if (o instanceof Number || o instanceof Boolean || o instanceof Character || o instanceof CharSequence
+                || c.isEnum()) {
+            sb.append(o);
+            return;
+        }
+        if (c.isArray()) {
+            final int n = java.lang.reflect.Array.getLength(o);
+            sb.append('[');
+            for (int i = 0; i < n; i++) {
+                sigAppend(sb, java.lang.reflect.Array.get(o, i), depth + 1);
+                sb.append(',');
+            }
+            sb.append(']');
+            return;
+        }
+        if (o instanceof java.util.Set) {
+            final List<String> parts = new ArrayList<>();
+            for (Object e : (java.util.Set<?>) o) {
+                final StringBuilder x = new StringBuilder();
+                sigAppend(x, e, depth + 1);
+                parts.add(x.toString());
+            }
+            java.util.Collections.sort(parts);
+            sb.append('{').append(String.join(",", parts)).append('}');
+            return;
+        }
+        if (o instanceof java.util.Map) {
+            final List<String> parts = new ArrayList<>();
+            for (java.util.Map.Entry<?, ?> e : ((java.util.Map<?, ?>) o).entrySet()) {
+                final StringBuilder x = new StringBuilder();
+                sigAppend(x, e.getKey(), depth + 1);
+                x.append('=');
+                sigAppend(x, e.getValue(), depth + 1);
+                parts.add(x.toString());
+            }
+            java.util.Collections.sort(parts);
+            sb.append('<').append(String.join(",", parts)).append('>');
+            return;
+        }
+        if (o instanceof Iterable) {
+            sb.append('[');
+            for (Object e : (Iterable<?>) o) {
+                sigAppend(sb, e, depth + 1);
+                sb.append(',');
+            }
+            sb.append(']');
+            return;
+        }
+        if (!c.getName().startsWith("forge.ai.simulation.ForcedWinModel")) {
+            sb.append(c.getSimpleName()).append('?'); // never expected in a model; stays distinct by type only
+            return;
+        }
+        sb.append(c.getSimpleName()).append('(');
+        for (java.lang.reflect.Field f : sigFields(c)) {
+            sb.append(f.getName()).append('=');
+            try {
+                sigAppend(sb, f.get(o), depth + 1);
+            } catch (IllegalAccessException e) {
+                sb.append('!');
+            }
+            sb.append(';');
+        }
+        sb.append(')');
+    }
+
     /** One effect of an ability's resolution, in observed order. */
     static final class Eff {
         final EffKind kind;

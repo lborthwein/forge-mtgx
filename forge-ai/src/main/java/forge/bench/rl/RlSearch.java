@@ -2827,8 +2827,24 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int nodes = 2000;
         public long ms = 60;
         public int maxNames = 40;
+        /** Cost knobs ({@link forge.ai.simulation.ForcedWinSolver.ReachOpts}; defaults = the first REACH build). */
+        public int nameNodes = -1;
+        public boolean nameOnePass, skipCapped, sig;
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
-                "ms", "maxNames"));
+                "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig"));
+
+        public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
+            final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
+            o.nodes = nodes;
+            o.ms = ms;
+            o.maxNames = maxNames;
+            o.window = true;
+            o.nameNodes = nameNodes;
+            o.nameOnePass = nameOnePass;
+            o.skipCapped = skipCapped;
+            o.sig = sig;
+            return o;
+        }
 
         public static ReachCfg parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -2842,6 +2858,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("nodes")) c.nodes = o.get("nodes").getAsInt();
             if (o.has("ms")) c.ms = o.get("ms").getAsLong();
             if (o.has("maxNames")) c.maxNames = o.get("maxNames").getAsInt();
+            if (o.has("nameNodes")) c.nameNodes = o.get("nameNodes").getAsInt();
+            if (o.has("nameOnePass")) c.nameOnePass = o.get("nameOnePass").getAsBoolean();
+            if (o.has("skipCapped")) c.skipCapped = o.get("skipCapped").getAsBoolean();
+            if (o.has("sig")) c.sig = o.get("sig").getAsBoolean();
             return c;
         }
     }
@@ -2864,6 +2884,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** The reach of {@code p} in {@code g}, with p's known library top from tracker {@code k}. NaN = failed. */
     double reachOf(final RlKnowledge k, final Game g, final Player p) {
+        final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, p);
+        return r.failed ? Double.NaN : r.p;
+    }
+
+    /** {@link #reachOf}'s full result (with its cost counters). */
+    forge.ai.simulation.ForcedWinSolver.Reach reachFull(final RlKnowledge k, final Game g, final Player p) {
         final ReachCfg rc = reachCfg();
         final List<Integer> top = new ArrayList<>();
         if (k != null) {
@@ -2876,9 +2902,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
-        final forge.ai.simulation.ForcedWinSolver.Reach r = forge.ai.simulation.ForcedWinSolver
-                .withReader(p, reachSolverCfg, reader).reach(g, top, rc.nodes, rc.ms, rc.maxNames, true);
-        return r.failed ? Double.NaN : r.p;
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).reach(g, top, rc.opts());
     }
 
     @Override
@@ -2888,11 +2912,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final ReachCfg rc = reachCfg();
         final RlKnowledge k = copyCtx instanceof CopyCtx ? ((CopyCtx) copyCtx).know : null;
-        final double[] out = {reachOf(k, g, me), Double.NaN};
+        // {R_me, R_opp, then cost (report only): planner nodes, s0 capped, skipped, per-card screens, per-card capped}
+        final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0};
+        final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
+        out[0] = r.failed ? Double.NaN : r.p;
+        addCost(out, r);
         if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
-            out[1] = reachOf(k, g, me.getOpponents().get(0));
+            final forge.ai.simulation.ForcedWinSolver.Reach ro = reachFull(k, g, me.getOpponents().get(0));
+            out[1] = ro.failed ? Double.NaN : ro.p;
+            addCost(out, ro);
         }
         return out;
+    }
+
+    private static void addCost(final double[] out, final forge.ai.simulation.ForcedWinSolver.Reach r) {
+        out[2] += r.nodes;
+        out[3] += r.s0Capped ? 1 : 0;
+        out[4] += r.skipped ? 1 : 0;
+        out[5] += r.names;
+        out[6] += r.nameCapped;
     }
 
     @Override

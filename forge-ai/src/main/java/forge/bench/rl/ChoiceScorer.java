@@ -59,6 +59,9 @@ public final class ChoiceScorer {
          */
         public double reachAlpha = 0.0;
         public int reachMaxNames = 40;
+        /** REACH cost knobs (ForcedWinSolver.ReachOpts: nameNodes, nameOnePass, skipCapped, sig; defaults = off). */
+        public int reachNameNodes = -1;
+        public boolean reachOnePass, reachSkipCapped, reachSig;
         /**
          * solver-distill-cc-1109 (0 = off, the default): a CARDS ask whose resolution asks again (put-backs: Brainstorm and
          * the like; the guard's "multiAnswer") is answered as a whole: every ordered sequence of {@code seqs} distinct
@@ -82,7 +85,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "seqs"));
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -114,6 +117,10 @@ public final class ChoiceScorer {
             if (o.has("screenMs")) c.screenMs = o.get("screenMs").getAsLong();
             if (o.has("reachAlpha")) c.reachAlpha = o.get("reachAlpha").getAsDouble();
             if (o.has("reachMaxNames")) c.reachMaxNames = o.get("reachMaxNames").getAsInt();
+            if (o.has("reachNameNodes")) c.reachNameNodes = o.get("reachNameNodes").getAsInt();
+            if (o.has("reachOnePass")) c.reachOnePass = o.get("reachOnePass").getAsBoolean();
+            if (o.has("reachSkipCapped")) c.reachSkipCapped = o.get("reachSkipCapped").getAsBoolean();
+            if (o.has("reachSig")) c.reachSig = o.get("reachSig").getAsBoolean();
             if (o.has("seqs")) c.seqs = o.get("seqs").getAsInt();
             if (o.has("guard")) c.guard = o.get("guard").getAsBoolean();
             if (o.has("pile")) c.pile = o.get("pile").getAsBoolean();
@@ -144,6 +151,18 @@ public final class ChoiceScorer {
             if (reachAlpha > 0) {
                 o.addProperty("reachAlpha", reachAlpha);
                 o.addProperty("reachMaxNames", reachMaxNames);
+                if (reachNameNodes >= 0) {
+                    o.addProperty("reachNameNodes", reachNameNodes);
+                }
+                if (reachOnePass) {
+                    o.addProperty("reachOnePass", true);
+                }
+                if (reachSkipCapped) {
+                    o.addProperty("reachSkipCapped", true);
+                }
+                if (reachSig) {
+                    o.addProperty("reachSig", true);
+                }
             }
             if (seqs > 0) {
                 o.addProperty("seqs", seqs);
@@ -267,8 +286,16 @@ public final class ChoiceScorer {
                         cfg.solverCfg, screenReader);
                 if (cfg.reachAlpha > 0) {
                     // solver-distill-cc-1109: the reach over our next unknown draw; lines = 1 when it is above 0
-                    final forge.ai.simulation.ForcedWinSolver.Reach r = sol.reach(g, top, cfg.screenNodes, cfg.screenMs,
-                            cfg.reachMaxNames, true);
+                    final forge.ai.simulation.ForcedWinSolver.ReachOpts ro = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
+                    ro.nodes = cfg.screenNodes;
+                    ro.ms = cfg.screenMs;
+                    ro.maxNames = cfg.reachMaxNames;
+                    ro.window = true;
+                    ro.nameNodes = cfg.reachNameNodes;
+                    ro.nameOnePass = cfg.reachOnePass;
+                    ro.skipCapped = cfg.reachSkipCapped;
+                    ro.sig = cfg.reachSig;
+                    final forge.ai.simulation.ForcedWinSolver.Reach r = sol.reach(g, top, ro);
                     final forge.ai.simulation.ForcedWinSolver.Screen sc = new forge.ai.simulation.ForcedWinSolver.Screen();
                     sc.failed = r.failed;
                     sc.reach = r.p;
