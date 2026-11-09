@@ -212,6 +212,8 @@ public final class ChoiceScorer {
         /** Further picks of this resolution Forge AI answered. */
         public int tail;
         public forge.ai.simulation.ForcedWinSolver.Screen screen;
+        /** choice-search-1109 pass 3: this option's first-pass apply time (copy, settle, screen), the relax order. */
+        public long passNanos;
         /** A pile option: the cards top first. */
         public List<Integer> pileIds;
     }
@@ -312,9 +314,9 @@ public final class ChoiceScorer {
                 }
                 final forge.ai.simulation.ForcedWinSolver.Screen sc = forge.ai.simulation.ForcedWinSolver.withReader(me,
                         cfg.solverCfg, screenReader).screen(g, top, cfg.screenNodes, cfg.screenMs);
-                if (cfg.relax > 0 && !noCheck && sc != null && sc.lines == 0 && !sc.failed) {
-                    // choice-search-1109 pass 3, inline: the relaxed-planning distance of this (throwaway) leaf copy, up to the
-                    // best distance found so far in this ask (a farther option cannot win), within the pass's budget
+                if (relaxMode && sc != null && sc.lines == 0 && !sc.failed) {
+                    // choice-search-1109 pass 3: the relaxed-planning distance of this (throwaway) leaf copy, up to the best
+                    // distance found so far in this ask (a farther option cannot win), within the pass's budget
                     if (forge.game.WorkClock.nanoTime() <= relaxDeadline) {
                         relaxDistance(g, me, c -> k.knows(st, c), top, sc, Math.min(cfg.relax, relaxBest));
                         if (sc.relaxR >= 0 && sc.relaxR != Integer.MAX_VALUE) {
@@ -499,6 +501,11 @@ public final class ChoiceScorer {
         }
     }
 
+    /** Pass 3: the share of draw samples with a line at the option's distance (1 for lands only; 0 when unknown). */
+    private static double relaxP(final Option o) {
+        return o.screen == null || Double.isNaN(o.screen.relaxP) ? 0.0 : o.screen.relaxP;
+    }
+
     /** The card ids an option answers with (decline: -1). */
     private static List<Integer> picksOf(final RlCandidates.Menu m, final Option o) {
         if (o.steps == null || o.steps.length == 0) {
@@ -524,26 +531,76 @@ public final class ChoiceScorer {
                 return null; // a verified line: the line rule decided
             }
         }
-        Option own = null, best = null;
+        Option own = null;
+        final List<Option> rest = new ArrayList<>();
         for (Option o : s.options) {
             if (o.policy) {
                 own = o;
+            } else if (o.fail == null && Double.isNaN(o.terminal) && (o.screen == null || o.screen.lines == 0)) {
+                rest.add(o);
             }
-            final int r = o.fail != null || o.screen == null ? -1 : o.screen.relaxR;
-            if (r >= 0 && r != Integer.MAX_VALUE) {
-                s.relaxed++;
-                if (best == null || r < best.screen.relaxR || r == best.screen.relaxR && tieValue(o) > tieValue(best)) {
-                    best = o;
+        }
+        // coordinator 11-09: relax in order of the cheapest first pass (the policy's option first: the default to beat)
+        rest.sort((a, b) -> Long.compare(a.passNanos, b.passNanos));
+        final List<Option> cands = new ArrayList<>();
+        if (own != null && own.fail == null && Double.isNaN(own.terminal) && (own.screen == null || own.screen.lines == 0)) {
+            cands.add(own);
+        }
+        for (Option o : rest) {
+            if (cands.size() >= cfg.relaxTop) {
+                break;
+            }
+            cands.add(o);
+        }
+        final long t0 = System.nanoTime();
+        final int seat = g.getRegisteredPlayers().indexOf(me);
+        final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
+        relaxMode = true;
+        noCheck = true;
+        relaxBest = Integer.MAX_VALUE;
+        relaxDeadline = (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : System.nanoTime()) + cfg.relaxMs * 1_000_000L;
+        try {
+            int at = 0;
+            for (Option o : cands) {
+                if (forge.game.WorkClock.nanoTime() > relaxDeadline) {
+                    break;
                 }
-            } else if (r == Integer.MAX_VALUE) {
+                curKey = LookaheadSearch.mix(seed, 0x7E1A0000L + at++);
+                final ChoiceApply.Result r = apply(g, me, picksOf(m, o), seed, fr);
+                if (r.screen != null && r.screen.relaxR >= 0) {
+                    if (o.screen == null) {
+                        o.screen = r.screen;
+                    } else {
+                        o.screen.relaxR = r.screen.relaxR;
+                        o.screen.relaxP = r.screen.relaxP;
+                        o.screen.relaxHow = r.screen.relaxHow;
+                        o.screen.relaxScreens = r.screen.relaxScreens;
+                    }
+                }
                 s.relaxed++;
+            }
+        } finally {
+            relaxMode = false;
+            noCheck = false;
+            relaxDeadline = Long.MAX_VALUE;
+            s.relaxNanos = System.nanoTime() - t0;
+        }
+        Option best = null;
+        for (Option o : cands) {
+            final int r = o.screen == null ? -1 : o.screen.relaxR;
+            if (r < 0 || r == Integer.MAX_VALUE) {
+                continue;
+            }
+            if (best == null || r < best.screen.relaxR || r == best.screen.relaxR && (relaxP(o) > relaxP(best)
+                    || relaxP(o) == relaxP(best) && tieValue(o) > tieValue(best))) {
+                best = o;
             }
         }
         if (best == null || best == own) {
             s.chosen = own;
             return null;
         }
-        if (own != null && own.fail == null && own.screen != null && own.screen.relaxR == best.screen.relaxR
+        if (own != null && own.screen != null && own.screen.relaxR == best.screen.relaxR && relaxP(own) == relaxP(best)
                 && tieValue(own) >= tieValue(best)) {
             s.chosen = own;
             return null;
@@ -716,8 +773,6 @@ public final class ChoiceScorer {
             screenReader = null; // one reader per ask: its probes are of this position's copies
         } // choice-search-1109 pass 3: with relax, one reader per game (the solver's readerPerGame; affordances by card)
         relaxBest = Integer.MAX_VALUE;
-        relaxDeadline = cfg.relax > 0 ? (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : System.nanoTime())
-                + (cfg.budgetMs > 0 ? cfg.budgetMs : 0) * 1_000_000L + cfg.relaxMs * 1_000_000L : Long.MAX_VALUE;
         // choice-search-1109: an ask from a sub-ability is replayed from that sub-ability (0 = the root, as before)
         cleanupMode = false;
         costMode = cfg.lineOnly && m.family == RlSchema.F_COST_CARDS;
@@ -944,7 +999,9 @@ public final class ChoiceScorer {
 
     private void run(final Game g, final Player me, final List<Integer> picks, final long seed,
             final ChoiceApply.Frames fr, final Option o, final Scored s) {
+        final long t = System.nanoTime();
         final ChoiceApply.Result r = apply(g, me, picks, seed, fr);
+        o.passNanos = System.nanoTime() - t;
         note(r, o, s, 0);
     }
 
