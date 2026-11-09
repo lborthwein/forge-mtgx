@@ -3998,6 +3998,15 @@ public final class ForcedWinSolver {
         public boolean exhausted, failed;
         public long nanos;
         public String best;
+        /**
+         * choice-search-1109 (set only when a choice scorer's {@code check} ran on this position; NaN / null otherwise): the
+         * honest win check's p_win over its belief worlds, its label, worlds run, gate and time.
+         */
+        public double pWin = Double.NaN;
+        public String check;
+        public String checkGate;
+        public int checkWorlds = -1;
+        public double checkMs = Double.NaN;
     }
 
     /**

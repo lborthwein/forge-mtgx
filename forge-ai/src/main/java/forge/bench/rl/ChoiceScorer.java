@@ -66,9 +66,27 @@ public final class ChoiceScorer {
          * cards and shuffle its library when none of it is known. A frame that changes reads hidden cards.
          */
         public boolean probeOpp = false;
+        /**
+         * choice-search-1109 (false = off, the default, and then nothing changes): the line-existence rule. Each applied
+         * option's position is screened by the planner (this turn, then by our next turn); an option with a planner line
+         * gets the honest win check ({@link #check}: belief worlds, hidden own library, the adversary). The option with
+         * the highest verified p_win is played, ties broken by the leaf value; with no verified line anywhere the policy's
+         * answer stands. The value alone never moves the answer.
+         */
+        public boolean lineOnly = false;
+        /**
+         * choice-search-1109 (null = no check): the honest win check's label spec ({@link
+         * forge.ai.simulation.HonestLabel.Spec}; belief cube keys default to the search spec's).
+         */
+        public JsonObject check = null;
+        /** choice-search-1109: honest checks per ask at most (the policy's answer is applied first). */
+        public int checkTop = 3;
+        /** choice-search-1109: options per multi-pick ask at most (the policy's set, then one-card swaps of it). */
+        public int subsetCap = 24;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs"));
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs",
+                "lineOnly", "check", "checkTop", "subsetCap"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -81,7 +99,8 @@ public final class ChoiceScorer {
                 c.families = new java.util.TreeSet<>();
                 for (String f : o.get("families").getAsString().split(",")) {
                     final int i = RlSchema.FAMILIES.indexOf(f.trim());
-                    if (i != RlSchema.F_CARDS && i != RlSchema.F_MULLIGAN && i != RlSchema.F_MULLIGAN_BOTTOM) {
+                    if (i != RlSchema.F_CARDS && i != RlSchema.F_MULLIGAN && i != RlSchema.F_MULLIGAN_BOTTOM
+                            && i != RlSchema.F_DISCARD_FROM && i != RlSchema.F_COST_CARDS) {
                         throw new IllegalArgumentException("choiceScorer: family not supported: " + f);
                     }
                     c.families.add(i);
@@ -103,6 +122,16 @@ public final class ChoiceScorer {
             if (o.has("pileTop")) c.pileTop = o.get("pileTop").getAsInt();
             if (o.has("pileNodes")) c.pileNodes = o.get("pileNodes").getAsInt();
             if (o.has("pileMs")) c.pileMs = o.get("pileMs").getAsLong();
+            if (o.has("lineOnly")) c.lineOnly = o.get("lineOnly").getAsBoolean();
+            if (o.has("check") && !o.get("check").isJsonNull()) c.check = o.getAsJsonObject("check");
+            if (o.has("checkTop")) c.checkTop = o.get("checkTop").getAsInt();
+            if (o.has("subsetCap")) c.subsetCap = o.get("subsetCap").getAsInt();
+            if (c.checkTop < 0 || c.subsetCap < 1) {
+                throw new IllegalArgumentException("choiceScorer: checkTop >= 0, subsetCap >= 1");
+            }
+            if (c.lineOnly && c.screenNodes <= 0) {
+                throw new IllegalArgumentException("choiceScorer: lineOnly needs the planner screen (screenNodes > 0)");
+            }
             return c;
         }
 
@@ -129,6 +158,13 @@ public final class ChoiceScorer {
             o.addProperty("pileTop", pileTop);
             o.addProperty("pileNodes", pileNodes);
             o.addProperty("pileMs", pileMs);
+            if (lineOnly || check != null) {
+                // choice-search-1109: written only when on (an old config prints as before)
+                o.addProperty("lineOnly", lineOnly);
+                if (check != null) o.add("check", check);
+                o.addProperty("checkTop", checkTop);
+                o.addProperty("subsetCap", subsetCap);
+            }
             return o;
         }
     }
@@ -159,6 +195,10 @@ public final class ChoiceScorer {
         public long copyNanos, runNanos, featNanos, totalNanos;
         public boolean overBudget;
         public Option chosen;
+        /** choice-search-1109: honest checks run, whether one proved a win (no further check), and their time. */
+        public int checks;
+        public boolean proven;
+        public long checkNanos;
     }
 
     /** Frames at most for one opening-hand ask. */
@@ -237,10 +277,159 @@ public final class ChoiceScorer {
                 if (screenReader == null) {
                     screenReader = forge.ai.simulation.ForcedWinSolver.newSharedReader();
                 }
-                return forge.ai.simulation.ForcedWinSolver.withReader(me, cfg.solverCfg, screenReader).screen(g, top,
-                        cfg.screenNodes, cfg.screenMs);
+                final forge.ai.simulation.ForcedWinSolver.Screen sc = forge.ai.simulation.ForcedWinSolver.withReader(me,
+                        cfg.solverCfg, screenReader).screen(g, top, cfg.screenNodes, cfg.screenMs);
+                if (sc != null && sc.lines > 0 && checker != null && !noCheck && s.checks < cfg.checkTop && !s.proven) {
+                    // choice-search-1109: the planner saw a line here; the honest win check prices it over belief worlds
+                    final java.util.Set<Integer> known = new java.util.HashSet<>();
+                    for (Card c : me.getCardsIn(ZoneType.Library)) {
+                        if (k.knows(st, c)) {
+                            known.add(c.getId());
+                        }
+                    }
+                    final long t = System.nanoTime();
+                    final forge.ai.simulation.HonestLabel.Result r = checker.label(g, me, curKey, known);
+                    s.checkNanos += System.nanoTime() - t;
+                    s.checks++;
+                    sc.pWin = r.pWin;
+                    sc.check = r.label;
+                    sc.checkGate = r.gate;
+                    sc.checkWorlds = r.worldsWin;
+                    sc.checkMs = r.ms;
+                    if ("win".equals(r.label)) {
+                        s.proven = true; // early exit: no later option is checked
+                    }
+                }
+                return sc;
             }
         };
+    }
+
+    /** choice-search-1109: the honest win check of an option's position (null = none). */
+    private forge.ai.simulation.HonestLabel.Seat checker;
+    /** choice-search-1109: the check's world key for the option being applied. */
+    private long curKey;
+    /** choice-search-1109: true while the guard's probe copies run (they never spend a check). */
+    private boolean noCheck = false;
+    /** choice-search-1109: the asking sub-ability's index in the resolving entry's chain (0 = root). */
+    private int askChain = 0;
+    /** choice-search-1109: this ask is the cleanup's discard to hand size (a step, not a resolution). */
+    private boolean cleanupMode = false;
+    /** choice-search-1109: this ask is a card cost of a spell being cast (COST_CARDS), and that spell's ability. */
+    private boolean costMode = false;
+    private SpellAbility castSa;
+    /** choice-search-1109 (COST_CARDS): the asked cost part's class (CostDiscard, CostExile, ...), set by the caller. */
+    private String costPart;
+
+    public void setCostPart(final String part) {
+        this.costPart = part;
+    }
+
+    /** choice-search-1109: one answer applied on a copy: the resolution from the asking sub-ability, or the cleanup step. */
+    private ChoiceApply.Result apply(final Game g, final Player me, final List<Integer> picks, final long seed,
+            final ChoiceApply.Frames fr) {
+        return costMode ? ChoiceApply.applyCost(g, me, castSa, costPart, picks, seed, cfg.settleSteps, cfg.fidelity, fr)
+                : cleanupMode ? ChoiceApply.applyCleanup(g, me, picks, seed, cfg.settleSteps, cfg.fidelity, fr)
+                : ChoiceApply.applyPicks(g, me, picks, null, seed, cfg.settleSteps, cfg.fidelity, fr, askChain);
+    }
+
+    /** choice-search-1109: the card ids of a menu answer's steps (null when a step has no card). */
+    static List<Integer> ids(final RlCandidates.Menu m, final short[] steps) {
+        if (steps == null) {
+            return null;
+        }
+        final List<Integer> out = new ArrayList<>();
+        for (short x : steps) {
+            if (x < 0 || x >= m.C() || m.cands.get(x).host == null) {
+                return null;
+            }
+            out.add(m.cands.get(x).host.getId());
+        }
+        return out;
+    }
+
+    /**
+     * choice-search-1109: a multi-pick ask (a discard of several cards, a put-back in one answer). The options are the
+     * policy's set, then every set one card away from it (one of its cards swapped for a card it left out; cards that
+     * are the same answer, by name, zone and controller, count once), then, when fewer are allowed, the set without
+     * one of its cards; at most {@code subsetCap}. Every "keep this card" answer is one swap away from the policy's.
+     */
+    private void subsets(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final long seed,
+            final ChoiceApply.Frames fr, final Scored s, final long deadline) {
+        if (greedy == null || greedy.length == 0 || m.validate(greedy) != null) {
+            s.unsupported = "noPolicySet";
+            return;
+        }
+        final List<short[]> sets = new ArrayList<>();
+        final Set<String> seen = new java.util.HashSet<>();
+        final java.util.function.Function<short[], String> keyOf = st -> {
+            final List<String> ks = new ArrayList<>();
+            for (short x : st) {
+                ks.add(ChoiceWindow.looseKey(m, x, me));
+            }
+            Collections.sort(ks);
+            return String.join("&", ks);
+        };
+        sets.add(greedy.clone());
+        seen.add(keyOf.apply(greedy));
+        final Set<Integer> in = new java.util.HashSet<>();
+        for (short x : greedy) {
+            in.add((int) x);
+        }
+        for (int a = 0; a < greedy.length && sets.size() < cfg.subsetCap; a++) {
+            for (int q = 0; q < m.C() && sets.size() < cfg.subsetCap; q++) {
+                if (in.contains(q) || m.cands.get(q).kind <= 0 || m.cands.get(q).host == null) {
+                    continue;
+                }
+                final short[] st = greedy.clone();
+                st[a] = (short) q;
+                if (m.validate(st) == null && seen.add(keyOf.apply(st))) {
+                    sets.add(st);
+                }
+            }
+        }
+        if (m.minPick < greedy.length) {
+            for (int a = 0; a < greedy.length && sets.size() < cfg.subsetCap; a++) {
+                final short[] st = new short[greedy.length - 1];
+                for (int i = 0, j = 0; i < greedy.length; i++) {
+                    if (i != a) {
+                        st[j++] = greedy[i];
+                    }
+                }
+                if (m.validate(st) == null && seen.add(keyOf.apply(st))) {
+                    sets.add(st);
+                }
+            }
+        }
+        s.menuOptions = sets.size();
+        int at = 0;
+        for (short[] st : sets) {
+            final Option o = new Option();
+            o.steps = st;
+            final StringBuilder lb = new StringBuilder();
+            for (short x : st) {
+                lb.append(lb.length() == 0 ? "" : "+").append(m.cands.get(x).host.getName());
+            }
+            o.label = lb.length() == 0 ? "none" : lb.toString();
+            o.policy = at == 0;
+            if (forge.game.WorkClock.nanoTime() >= deadline && !o.policy) {
+                o.fail = "budget";
+                s.overBudget = true;
+            } else {
+                curKey = LookaheadSearch.mix(seed, 0x50170000L + at);
+                final List<Integer> picks = ids(m, st);
+                if (picks.isEmpty()) {
+                    picks.add(-1);
+                }
+                run(g, me, picks, seed, fr, o, s);
+            }
+            at++;
+            s.options.add(o);
+        }
+    }
+
+    public void setChecker(final forge.ai.simulation.HonestLabel.Seat c) {
+        this.checker = c;
     }
 
     /** The opponent's unknown hand cards trade places with unknown library cards below the top. Positions stay. */
@@ -276,10 +465,20 @@ public final class ChoiceScorer {
         final Scored s = new Scored();
         final long t0 = System.nanoTime();
         screenReader = null; // one reader per ask: its probes are of this position's copies
+        // choice-search-1109: an ask from a sub-ability is replayed from that sub-ability (0 = the root, as before)
+        cleanupMode = false;
+        costMode = cfg.lineOnly && m.family == RlSchema.F_COST_CARDS;
+        castSa = costMode ? askSa : null;
+        askChain = askSa == null || costMode ? 0 : ChoiceApply.chainOf(g, askSa);
+        if (askChain < 0) {
+            s.unsupported = "chain";
+            s.totalNanos = System.nanoTime() - t0;
+            return s;
+        }
         final int seat = g.getRegisteredPlayers().indexOf(me);
         final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
         final long deadline = cfg.budgetMs > 0 ? (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0) + cfg.budgetMs * 1_000_000L : Long.MAX_VALUE;
-        if (m.family == RlSchema.F_CARDS) {
+        if (m.family == RlSchema.F_CARDS || (m.family == RlSchema.F_DISCARD_FROM || m.family == RlSchema.F_COST_CARDS) && cfg.lineOnly) {
             cards(g, me, m, greedy, seed, fr, s, deadline);
         } else if (m.family == RlSchema.F_MULLIGAN) {
             mulligan(g, me, m, greedy, seed, fr, s, deadline);
@@ -300,16 +499,24 @@ public final class ChoiceScorer {
 
     private void cards(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final long seed,
             final ChoiceApply.Frames fr, final Scored s, final long deadline) {
-        if (!ChoiceWindow.singlePick(m)) {
+        final boolean subset = cfg.lineOnly && !ChoiceWindow.singlePick(m) && m.mode == RlSchema.M_SUBSET;
+        if (!ChoiceWindow.singlePick(m) && !subset) {
             s.unsupported = "multiPick";
             return;
         }
-        s.unsupported = ChoiceApply.unsupported(g, null);
+        // choice-search-1109: the cleanup's discard to hand size is replayed on a copy of the step, not of a resolution
+        cleanupMode = cfg.lineOnly && "chooseCardsToDiscardToMaximumHandSize".equals(m.method) && ChoiceApply.cleanupAsk(g, me);
+        s.unsupported = costMode ? ChoiceApply.castUnsupported(g, me, castSa) : cleanupMode ? null : ChoiceApply.unsupported(g, null);
         if (s.unsupported != null) {
             return;
         }
         if (cfg.guard) {
-            s.unsupported = hiddenGuard(g, me, m, seed, fr, deadline);
+            noCheck = true; // choice-search-1109: the guard's probe copies never spend a check
+            try {
+                s.unsupported = hiddenGuard(g, me, m, seed, fr, deadline, subset ? ids(m, greedy) : null);
+            } finally {
+                noCheck = false;
+            }
             if ("multiAnswer".equals(s.unsupported) && cfg.pile && cfg.solverCfg != null) {
                 piles(g, me, m, seed, fr, s);
                 return;
@@ -317,6 +524,10 @@ public final class ChoiceScorer {
             if (s.unsupported != null) {
                 return;
             }
+        }
+        if (subset) {
+            subsets(g, me, m, greedy, seed, fr, s, deadline);
+            return;
         }
         // one option per distinct card (name, zone, controller: two Islands are one answer)
         final Map<String, Integer> byKey = new LinkedHashMap<>();
@@ -332,6 +543,40 @@ public final class ChoiceScorer {
         }
         s.menuOptions = byKey.size() + (m.minPick == 0 ? 1 : 0);
         final List<Integer> keep = cut(new ArrayList<>(byKey.values()), own, seed, s);
+        if (cfg.lineOnly) {
+            // choice-search-1109: the policy's answer first (it gets the first check), then the menu's order; a decline
+            // (an optional search's "find nothing") is an option like the others
+            final List<Option> opts = new ArrayList<>();
+            if (m.minPick == 0) {
+                final Option no = new Option();
+                no.steps = new short[0];
+                no.label = "decline";
+                no.policy = greedy != null && greedy.length == 0;
+                opts.add(no);
+            }
+            for (int i : keep) {
+                final Option o = new Option();
+                o.steps = new short[] {(short) i};
+                o.label = m.cands.get(i).host.getName();
+                o.policy = i == own;
+                opts.add(o);
+            }
+            opts.sort((a, b) -> Boolean.compare(b.policy, a.policy)); // stable: the policy's answer first
+            int at = 0;
+            for (Option o : opts) {
+                if (forge.game.WorkClock.nanoTime() >= deadline && !o.policy) {
+                    o.fail = "budget";
+                    s.overBudget = true;
+                } else {
+                    curKey = LookaheadSearch.mix(seed, 0x50170000L + at);
+                    run(g, me, o.steps.length == 0 ? Collections.singletonList(-1)
+                            : Collections.singletonList(m.cands.get(o.steps[0]).host.getId()), seed, fr, o, s);
+                }
+                at++;
+                s.options.add(o);
+            }
+            return;
+        }
         if (m.minPick == 0) {
             final Option no = new Option();
             no.steps = new short[0];
@@ -367,18 +612,20 @@ public final class ChoiceScorer {
      * (the opponent acts on hidden cards during the resolution). Null = fine. No card knowledge.
      */
     private String hiddenGuard(final Game g, final Player me, final RlCandidates.Menu m, final long seed,
-            final ChoiceApply.Frames fr, final long deadline) {
+            final ChoiceApply.Frames fr, final long deadline, final List<Integer> probe) {
         int first = -1;
         for (int i = 0; i < m.C() && first < 0; i++) {
             if (m.cands.get(i).kind > 0 && m.cands.get(i).host != null) {
                 first = i;
             }
         }
-        if (first < 0) {
+        if (first < 0 && probe == null) {
             return null;
         }
-        final List<Integer> pick = Collections.singletonList(m.cands.get(first).host.getId());
-        final ChoiceApply.Result a = ChoiceApply.applyPicks(g, me, pick, seed, cfg.settleSteps, cfg.fidelity, fr);
+        // choice-search-1109: a multi-pick ask is probed with the policy's whole answer
+        final List<Integer> pick = probe != null && !probe.isEmpty() ? probe
+                : Collections.singletonList(m.cands.get(first).host.getId());
+        final ChoiceApply.Result a = apply(g, me, pick, seed, fr);
         if (a.fail != null) {
             return null; // the options report their own failures
         }
@@ -388,7 +635,7 @@ public final class ChoiceScorer {
         final boolean was = guardSwap;
         guardSwap = true;
         try {
-            final ChoiceApply.Result b = ChoiceApply.applyPicks(g, me, pick, seed, cfg.settleSteps, cfg.fidelity, fr);
+            final ChoiceApply.Result b = apply(g, me, pick, seed, fr);
             if (b.fail == null && !Arrays.equals(a.payload, b.payload)) {
                 return "oppHidden";
             }
@@ -444,7 +691,7 @@ public final class ChoiceScorer {
 
     private void run(final Game g, final Player me, final List<Integer> picks, final long seed,
             final ChoiceApply.Frames fr, final Option o, final Scored s) {
-        final ChoiceApply.Result r = ChoiceApply.applyPicks(g, me, picks, seed, cfg.settleSteps, cfg.fidelity, fr);
+        final ChoiceApply.Result r = apply(g, me, picks, seed, fr);
         note(r, o, s, 0);
     }
 
@@ -667,6 +914,9 @@ public final class ChoiceScorer {
             }
         }
         s.chosen = best;
+        if (cfg.lineOnly) {
+            return chooseLine(s, own);
+        }
         if (best != null && best.pileIds != null) {
             return best.screen != null && best.screen.lines > 0 ? best.steps : null;
         }
@@ -676,6 +926,57 @@ public final class ChoiceScorer {
             return null;
         }
         return best.steps;
+    }
+
+    /**
+     * choice-search-1109: an option's verified chance of a line: 1 for a copy that ended in our win, the honest check's
+     * p_win where it ran and found a line, else 0 (no line seen, or not verified).
+     */
+    static double pLine(final Option o) {
+        if (o.fail != null) {
+            return 0.0;
+        }
+        if (!Double.isNaN(o.terminal)) {
+            return o.terminal >= 1.0 ? 1.0 : 0.0;
+        }
+        if (o.screen == null || Double.isNaN(o.screen.pWin)) {
+            return 0.0;
+        }
+        return Math.max(0.0, o.screen.pWin);
+    }
+
+    /**
+     * choice-search-1109 (lineOnly): the option with the highest verified p_win, ties broken by the leaf value (an option
+     * whose value failed ranks below); with no verified line anywhere, or the policy's answer among the best, the policy's
+     * answer stands (null). {@link Scored#chosen} is the option played.
+     */
+    short[] chooseLine(final Scored s, final Option own) {
+        Option best = null;
+        double bp = 0.0;
+        for (Option o : s.options) {
+            final double p = pLine(o);
+            if (p <= 0.0) {
+                continue;
+            }
+            if (best == null || p > bp || p == bp && tieValue(o) > tieValue(best)) {
+                best = o;
+                bp = p;
+            }
+        }
+        if (best == null) {
+            s.chosen = own;
+            return null;
+        }
+        if (own != null && (best == own || pLine(own) == bp && tieValue(own) >= tieValue(best))) {
+            s.chosen = own;
+            return null;
+        }
+        s.chosen = best;
+        return best.steps;
+    }
+
+    private static double tieValue(final Option o) {
+        return Double.isNaN(o.value) ? Double.NEGATIVE_INFINITY : o.value;
     }
 
     /** A planner line outranks no line (when the screen ran); then the value. */
@@ -727,10 +1028,25 @@ public final class ChoiceScorer {
                     x.addProperty("win_turn", o.screen.bestTurn);
                     x.addProperty("win_steps", o.screen.bestSteps);
                 }
+                if (o.screen.check != null) {
+                    // choice-search-1109: the honest check of this option's position
+                    x.addProperty("check", o.screen.check);
+                    x.addProperty("check_gate", o.screen.checkGate);
+                    if (!Double.isNaN(o.screen.pWin)) x.addProperty("p_win", Math.round(o.screen.pWin * 1e4) / 1e4);
+                    x.addProperty("check_worlds", o.screen.checkWorlds);
+                    x.addProperty("check_ms", Math.round(o.screen.checkMs * 100) / 100.0);
+                }
             }
+            if (cfg.lineOnly && o == s.chosen) x.addProperty("chosen", true);
             a.add(x);
         }
         r.add("options", a);
+        if (cfg.lineOnly) {
+            r.addProperty("line_only", true);
+            r.addProperty("checks", s.checks);
+            r.addProperty("proven", s.proven);
+            r.addProperty("check_ms", Math.round(s.checkNanos / 1e4) / 100.0);
+        }
         return r;
     }
 
