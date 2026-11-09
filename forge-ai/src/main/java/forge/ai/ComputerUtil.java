@@ -2973,6 +2973,7 @@ public class ComputerUtil {
     public static int evaluateBoardPosition(final Player ai, final Player opponent) {
         AiWork.tick("evaluateBoardPosition"); // rollout-budget-1101: a counted unit, cached or not (no budget = no-op)
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.AI_EVAL); // work-units-1107 (no clock = no-op)
+        CountedAiTime.check("evaluateBoardPosition"); // ai-timeout-1108 (no allowance = no-op)
         return AiCache.getCached("evaluateBoardPosition",
                 () -> evaluateBoardPositionChanged(ai, opponent),
                 List.of(AiCache::identity, AiCache::identity), ai, opponent);

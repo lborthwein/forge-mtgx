@@ -688,8 +688,63 @@ public final class AiTape {
 
     // ------------------------------------------------------------------ FORCED
 
+    /**
+     * ai-timeout-1108 diagnostics, forced replays only ({@code -Dforge.aiTape.traceResync=true}; off = nothing installed): the
+     * game thread's ability/trigger id allocations and RNG draws since the last entry was taken (stack tops, last 6 each),
+     * printed at a resync or drift so the extra work a replay did (or skipped) is named.
+     */
+    static final boolean TRACE_RESYNC = Boolean.getBoolean("forge.aiTape.traceResync");
+    private static final ThreadLocal<ArrayDeque<String>> RING = new ThreadLocal<>();
+
+    static {
+        if (TRACE_RESYNC) {
+            forge.util.IdScope.TRACE = k -> {
+                if (k == forge.util.IdScope.Kind.SPELL_ABILITY || k == forge.util.IdScope.Kind.TRIGGER
+                        || k == forge.util.IdScope.Kind.REPLACEMENT) {
+                    ring("id:" + k);
+                }
+            };
+            PlayoutKeys.TrackedRandom.TRACE = () -> ring("rng");
+        }
+    }
+
+    private static void ring(final String what) {
+        final ArrayDeque<String> r = RING.get();
+        if (r == null) {
+            return;
+        }
+        final StackTraceElement[] st = Thread.currentThread().getStackTrace();
+        final StringBuilder sb = new StringBuilder(what);
+        for (int i = 3, n = 0; i < st.length && n < 16; i++) {
+            final String c = st[i].getClassName();
+            if (c.startsWith("java.") || c.contains("IdScope") || c.contains("TrackedRandom") || c.endsWith("AiTape")) {
+                continue;
+            }
+            sb.append(" < ").append(st[i].getClassName().replaceAll("^.*\\.", "")).append('.').append(st[i].getMethodName())
+                    .append(':').append(st[i].getLineNumber());
+            n++;
+        }
+        r.addLast(sb.toString());
+        while (r.size() > 12) {
+            r.removeFirst();
+        }
+    }
+
     /** The next entry, which must be of kind {@code k} and detail {@code m}; its start state restored. */
     JsonObject take(final String k, final String m) {
+        if (TRACE_RESYNC && RING.get() == null) {
+            RING.set(new ArrayDeque<>());
+        }
+        try {
+            return take0(k, m);
+        } finally {
+            if (TRACE_RESYNC) {
+                RING.get().clear();
+            }
+        }
+    }
+
+    private JsonObject take0(final String k, final String m) {
         if (!LAZY.equals(k)) {
             applyLazyAhead();
         }
@@ -763,6 +818,10 @@ public final class AiTape {
                 if (driftNotes.size() < 8) {
                     driftNotes.add((explicit ? "resync " : "drift ") + (cursors.isEmpty() ? "n" + (forcedTop - 1) : "child") + " "
                             + what(ek, em) + " T" + game.getPhaseHandler().getTurn() + ": " + diff);
+                }
+                if (TRACE_RESYNC && RING.get() != null) {
+                    System.err.println(PREFIX + "resync-trace " + what(ek, em) + " T" + game.getPhaseHandler().getTurn() + " " + diff
+                            + " | since the last entry: " + String.join(" || ", RING.get()));
                 }
                 ahead += restore(pre);
             }

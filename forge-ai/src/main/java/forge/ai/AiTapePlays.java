@@ -130,8 +130,12 @@ final class AiTapePlays {
         final boolean nm = o.has("nm") && o.get("nm").getAsBoolean();
         final int sid0 = o.has("sid") && o.getAsJsonArray("sid").size() > 0 ? o.getAsJsonArray("sid").get(0).getAsInt() : -1;
         final List<SpellAbility> found = IdScope.detached(AiTape.DECODE_BASE, () -> find(host, seat, d, oc, nm));
-        if (found.isEmpty()) {
-            throw new IllegalStateException("card " + hostId + " offers no ability like the record's (" + d + ")");
+        // ai-timeout-1108 (ledger row 77): a record's COPY (cp) need not look like any ability the card offers (the copy's
+        // description is the copy's own); it is rebuilt from its original below (the copied branch), so only a play that is
+        // not a copy is refused here. Before, every such copy diverged here although its original was on the card.
+        if (found.isEmpty() && !o.has("cp")) {
+            throw new IllegalStateException("card " + hostId + " offers no ability like the record's (" + d + ")"
+                    + offered(host, seat));
         }
         // the record's own ability by its id (review forge-mtgx#110 item 6: two abilities may share a description), else a
         // variant rebuilt here; an existing ability of another id is not the record's
@@ -174,7 +178,7 @@ final class AiTapePlays {
             final SpellAbility base = original(host, seat, o.get("cp").getAsInt(), d, found);
             if (base == null) {
                 throw new IllegalStateException("card " + hostId + " no longer has ability " + o.get("cp").getAsInt()
-                        + ", which the record's play (" + d + ") was a copy of");
+                        + ", which the record's play (" + d + ") was a copy of" + offered(host, seat));
             }
             pick = IdScope.detached(AiTape.DECODE_BASE, () -> base.copy(seat));
             if (!AiTapeCodec.descOf(pick).equals(d) && onIdShift != null) {
@@ -190,13 +194,29 @@ final class AiTapePlays {
                         n++;
                     }
                 }
+                if (n == 0) {
+                    // ai-timeout-1108 (ledger row 77, 4 of walk-t1's 9 AiTape games): a play another card lets the AI make
+                    // (Yawgmoth's Will, Lurrus, Serra Paragon, an adventure in exile) that the live game built from such a
+                    // variant again, so its description carries the grant twice ("... by X (n) by X (n)"): the one variant of
+                    // a variant with the record's description
+                    for (SpellAbility a : alts) {
+                        for (SpellAbility a2 : IdScope.detached(AiTape.DECODE_BASE,
+                                () -> GameActionUtil.getAlternativeCosts(a, seat, false))) {
+                            if (AiTapeCodec.descOf(a2).equals(d)) {
+                                only = a2;
+                                n++;
+                            }
+                        }
+                    }
+                }
                 if (n == 1) {
                     pick = only;
                 }
             }
             if (!AiTapeCodec.descOf(pick).equals(d)) {
                 throw new IllegalStateException("card " + hostId + "'s ability " + o.get("cp").getAsInt()
-                        + " copies to another ability than the record's (" + d + ")");
+                        + " copies to another ability than the record's (" + d + "): " + AiTapeCodec.descOf(pick) + " \""
+                        + clip(pick.getDescription()) + "\"" + offered(host, seat));
             }
         }
         if (pick == null && sid0 >= 0 && !idsShifted && onIdShift != null && found.size() == 1) {
@@ -312,6 +332,46 @@ final class AiTapePlays {
                 s.getManaPart().setExpressChoice(ex.get(i).getAsString());
             }
         }
+    }
+
+    /** ai-timeout-1108: a divergence's diagnostics: the card, its zone and what it offers (hash and text). Reads only. */
+    private static String offered(final Card host, final Player seat) {
+        if (host == null) {
+            return "; no such card";
+        }
+        final StringBuilder sb = new StringBuilder("; card ").append(host.getName()).append(" in ").append(host.getZone() == null
+                ? "?" : host.getZone().getZoneType()).append(" offers");
+        try {
+            IdScope.detached(AiTape.DECODE_BASE, () -> {
+                final List<SpellAbility> all = new ArrayList<>(host.getAllPossibleAbilities(seat, false));
+                for (SpellAbility c : host.getSpellAbilities()) {
+                    if (!all.contains(c)) {
+                        all.add(c);
+                    }
+                }
+                int n = 0;
+                for (SpellAbility c : all) {
+                    if (n++ >= 8) {
+                        sb.append(" ...");
+                        break;
+                    }
+                    sb.append(" [").append(c.getId()).append(' ').append(AiTapeCodec.descOf(c)).append(" \"")
+                            .append(clip(c.getDescription())).append("\"]");
+                }
+                return null;
+            });
+        } catch (RuntimeException e) {
+            sb.append(" (unreadable: ").append(e).append(')');
+        }
+        return sb.toString();
+    }
+
+    private static String clip(final String t) {
+        if (t == null) {
+            return "null";
+        }
+        final String one = t.replace('\n', ' ');
+        return one.length() > 120 ? one.substring(0, 120) + "..." : one;
     }
 
     private static List<SpellAbility> find(final Card host, final Player seat, final String d, final List<String> oc, final boolean nm) {

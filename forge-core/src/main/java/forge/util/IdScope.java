@@ -59,8 +59,15 @@ public final class IdScope {
     }
 
     /** The next scoped id of this kind, or {@link #NONE} when no scope is open. */
+    /** ai-timeout-1108 diagnostics (null = off, the default): told of every scoped id handed out, by kind. */
+    public static volatile java.util.function.Consumer<Kind> TRACE;
+
     public static int next(Kind k) {
         AtomicInteger[] a = scope.get();
+        final java.util.function.Consumer<Kind> tr = TRACE;
+        if (tr != null && a != null) {
+            tr.accept(k);
+        }
         if (a == null) {
             if (GameContext.hosting()) {
                 GameContext.noteUnscopedId(k.name()); // lane shared-engine-1103: an id drawn outside every hosted game

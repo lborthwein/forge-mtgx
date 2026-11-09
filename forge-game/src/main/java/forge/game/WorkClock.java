@@ -37,6 +37,114 @@ public final class WorkClock {
     private static final Site[] SITES = Site.values();
 
     /**
+     * Lane ai-timeout-1108 (ledger rows 77/79): ONE default-off JVM key, {@code -Dforge.countedTime=true}, that takes real
+     * time out of every limit that can change a Forge-AI or pilot choice. With it on:
+     * <ul>
+     * <li>Forge AI's priority evaluation ({@code AiController.chooseSpellAbilityToPlayFromList}) stops on a counted
+     * {@link Allowance} of {@code Game.AI_TIMEOUT} seconds of reference work (the {@link #weights()} of the work it does),
+     * not on {@code AI_TIMEOUT} wall seconds;</li>
+     * <li>Forge AI's forced-attacker tasks run on the calling thread in attacker order (the {@code sequentialAi} path), not
+     * in parallel under an {@code AI_TIMEOUT} wall;</li>
+     * <li>the real-time limits that remain (this clock's per-decision safety wall, a search service read timeout, the
+     * evaluation's own last-resort wait) are hang guards only: {@link #guardMs} widens them by {@link #GUARD_FACTOR}, so on
+     * a slow or loaded host the counted budgets bind first. A guard that still fires is logged ({@code [counted-time]}).</li>
+     * </ul>
+     * Off (the default): nothing changes, byte for byte. Turning it on changes Forge AI's play wherever a 5 s wall cut an
+     * evaluation (and the counted budget cuts where the wall did not), so it is a play change, not an identity change.
+     */
+    public static final boolean COUNTED_TIME = Boolean.getBoolean("forge.countedTime");
+    /** The hang guards' widening under {@link #COUNTED_TIME} ({@code -Dforge.countedTime.guard}, default 8). */
+    public static final long GUARD_FACTOR = Math.max(1L, Long.getLong("forge.countedTime.guard", 8L));
+    /** Forge AI's counted allowance per evaluation, x AI_TIMEOUT seconds of reference work ({@code -Dforge.countedTime.aiScale}). */
+    public static final double AI_SCALE = parseScale(System.getProperty("forge.countedTime.aiScale"));
+
+    private static double parseScale(final String v) {
+        final double d = v == null || v.isEmpty() ? 1.0 : Double.parseDouble(v);
+        if (!(d > 0)) {
+            throw new IllegalArgumentException("forge.countedTime.aiScale must be > 0, not " + v);
+        }
+        return d;
+    }
+
+    /** A real-time limit as it binds now: x {@link #GUARD_FACTOR} under {@link #COUNTED_TIME}, else unchanged (0 stays 0). */
+    public static long guardMs(final long ms) {
+        return COUNTED_TIME && ms > 0 ? ms * GUARD_FACTOR : ms;
+    }
+
+    /** The weight in effect for {@code s}, reference ns per unit. */
+    public static long weight(final Site s) {
+        return weights[s.ordinal()];
+    }
+
+    /**
+     * ai-timeout-1108: one Forge-AI evaluation's counted allowance, in reference ns of work ({@link #tick} charges every
+     * site at its weight while one is open on the thread). Opened inside another, it charges the outer one too. Spent
+     * when its own or an outer allowance's work passes its limit; Forge AI's sites then stop the evaluation.
+     */
+    public static final class Allowance {
+        public final long limit;
+        final Allowance parent;
+        private final AtomicLong used = new AtomicLong();
+
+        Allowance(final long limit, final Allowance parent) {
+            this.limit = limit;
+            this.parent = parent;
+        }
+
+        void charge(final long w) {
+            for (Allowance a = this; a != null; a = a.parent) {
+                a.used.addAndGet(w);
+            }
+        }
+
+        public long used() {
+            return used.get();
+        }
+
+        /** This allowance's own work is past its limit. */
+        public boolean ownSpent() {
+            return used.get() > limit;
+        }
+
+        /** This one or an outer one is spent. */
+        public boolean spent() {
+            for (Allowance a = this; a != null; a = a.parent) {
+                if (a.ownSpent()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static final ThreadLocal<Allowance> ALLOW = new ThreadLocal<>();
+
+    /** This thread's open allowance (null = none, always with the key off). */
+    public static Allowance allowance() {
+        return ALLOW.get();
+    }
+
+    /** Open an allowance of {@code limitRefNs} on this thread (inside the current one); returns the previous, for restore. */
+    public static Allowance openAllowance(final long limitRefNs) {
+        final Allowance prev = ALLOW.get();
+        ALLOW.set(new Allowance(Math.max(1L, limitRefNs), prev));
+        return prev;
+    }
+
+    public static void restoreAllowance(final Allowance prev) {
+        if (prev == null) {
+            ALLOW.remove();
+        } else {
+            ALLOW.set(prev);
+        }
+    }
+
+    /** True when this thread meters work: a clock or an allowance (callers that skip computing a tick's count). */
+    public static boolean metering() {
+        return CUR.get() != null || ALLOW.get() != null;
+    }
+
+    /**
      * Default weights, reference nanoseconds per unit (fitted per decision against CPU time on the reference host;
      * work-units-1107 calibration). Override: {@code -Dforge.workClock.weights=mainLoopStep:300,makeCopy:...}.
      * CONTRACT: changing a weight changes where budgets bind; record the weights with every read.
@@ -280,6 +388,10 @@ public final class WorkClock {
         if (c != null && n > 0) {
             c.charge(s, n);
         }
+        final Allowance a = ALLOW.get(); // ai-timeout-1108: none unless forge.countedTime opened one
+        if (a != null && n > 0) {
+            a.charge(n * weights[s.ordinal()]);
+        }
     }
 
     public static void tick(final Site s) {
@@ -350,7 +462,7 @@ public final class WorkClock {
         final boolean arm = c.wall == 0 && wallMs > 0;
         if (arm) {
             c.wallHit = false;
-            c.wall = System.nanoTime() + wallMs * 1_000_000L;
+            c.wall = System.nanoTime() + guardMs(wallMs) * 1_000_000L; // ai-timeout-1108: a hang guard under the key
         }
         return new Span(c, arm);
     }
@@ -370,15 +482,25 @@ public final class WorkClock {
     /** {@code task} run under the CALLING thread's clock on whichever thread runs it (the task itself without one). */
     public static Runnable carried(final Runnable task) {
         final Clock c = CUR.get();
-        if (c == null) {
+        final Allowance a = ALLOW.get(); // ai-timeout-1108: an open allowance goes too (none with the key off)
+        if (c == null && a == null) {
             return task;
         }
         return () -> {
-            final Clock prev = install(c);
+            final Clock prev = c == null ? null : install(c);
+            final Allowance prevA = a == null ? null : ALLOW.get();
+            if (a != null) {
+                ALLOW.set(a);
+            }
             try {
                 task.run();
             } finally {
-                install(prev);
+                if (a != null) {
+                    restoreAllowance(prevA);
+                }
+                if (c != null) {
+                    install(prev);
+                }
             }
         };
     }

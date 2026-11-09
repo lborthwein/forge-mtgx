@@ -66,8 +66,15 @@ public final class PlayoutKeys {
             haveNextNextGaussian = false;
         }
 
+        /** ai-timeout-1108 diagnostics (null = off, the default): told of every draw. */
+        public static volatile Runnable TRACE;
+
         @Override
         protected synchronized int next(int bits) {
+            final Runnable tr = TRACE;
+            if (tr != null) {
+                tr.run();
+            }
             s = (s * MULT + ADD) & MASK;
             return (int) (s >>> (48 - bits));
         }

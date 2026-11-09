@@ -843,6 +843,7 @@ public class AiController {
         final Card host = sa.getHostCard();
         AiWork.tick("canPlayAndPayFor"); // rollout-budget-1101: a counted unit (no budget open = no-op)
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.AI_PLAY); // work-units-1107 (no clock = no-op)
+        CountedAiTime.check("canPlayAndPayFor"); // ai-timeout-1108 (no allowance = no-op)
 
         if (sa instanceof Spell sp) {
             Card altHost = sp.canPlayFromHost();
@@ -1647,6 +1648,71 @@ public class AiController {
         return chosenSa;
     }
 
+    /**
+     * ai-timeout-1108 (forge.countedTime): the evaluation's answer under its counted allowance. A spent allowance (its own
+     * or an outer one) is no play, as the AI_TIMEOUT wall's cut was; the real-time wait is only a hang guard
+     * ({@link forge.game.WorkClock#guardMs}, logged when it fires). A spent solver budget (AiWork) is handed back as before.
+     */
+    private SpellAbility countedResult(final FutureTask<SpellAbility> future, final Thread t,
+            final forge.game.WorkClock.Allowance allowance) {
+        final long guardMs = forge.game.WorkClock.guardMs(game.getAITimeout() * 1000L);
+        try {
+            final SpellAbility chosen = future.get(guardMs, TimeUnit.MILLISECONDS);
+            AiWork.check("chooseSpellAbilityToPlay");
+            if (allowance != null && allowance.spent()) {
+                noteSpent(allowance);
+                return null;
+            }
+            return chosen;
+        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            if (AiWork.spent()) {
+                future.cancel(true);
+                try {
+                    t.join(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                AiWork.check("chooseSpellAbilityToPlay");
+            }
+            if (e instanceof ExecutionException && e.getCause() instanceof CountedAiTime.Spent) {
+                noteSpent(allowance);
+                return null;
+            }
+            if (e instanceof TimeoutException) {
+                CountedAiTime.GUARD_HITS.incrementAndGet();
+                System.err.println("[counted-time] guard: Forge AI's evaluation ran " + guardMs
+                        + " ms real time without spending its allowance (used " + (allowance == null ? -1 : allowance.used())
+                        + " of " + (allowance == null ? -1 : allowance.limit) + " ref ns); no play, nondeterministic");
+                future.cancel(true);
+                try {
+                    t.join(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                if (t.isAlive()) {
+                    try {
+                        t.stop();
+                    } catch (UnsupportedOperationException | NoSuchMethodError ex) {
+                        // as the wall path: Java 20+ cannot stop it
+                    }
+                }
+                return null;
+            }
+            if (allowance != null && allowance.spent()) {
+                noteSpent(allowance);
+                return null;
+            }
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    private static void noteSpent(final forge.game.WorkClock.Allowance allowance) {
+        final long n = CountedAiTime.SPENT.incrementAndGet();
+        System.err.println("[counted-time] spent #" + n + ": Forge AI's evaluation used " + allowance.used() + " of "
+                + allowance.limit + " ref ns; no play");
+    }
+
     private SpellAbility chooseSpellAbilityToPlayFromList(final List<SpellAbility> all, boolean skipCounter) {
         if (all == null || all.isEmpty())
             return null;
@@ -1664,7 +1730,7 @@ public class AiController {
             //avoid ComputerUtil.aiLifeInDanger in loops as it slows down a lot.. call this outside loops will generally be fast...
             boolean isLifeInDanger = useLivingEnd && ComputerUtil.aiLifeInDanger(player, true, 0);
             for (final SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(all, player)) {
-                if (Thread.currentThread().isInterrupted()) {
+                if (Thread.currentThread().isInterrupted() || CountedAiTime.spent()) {
                     break;
                 }
 
@@ -1748,9 +1814,26 @@ public class AiController {
         // rollout-budget-1101: AiWork.carried: the eval thread works under the asking thread's counted budget (none = the
         // task itself, as before); a spent budget is handed back to the asking thread as AiWork.Exhausted, never a pass
         // work-units-1107: and under the asking thread's work clock (none = the same task)
-        Thread t = new Thread(forge.game.WorkClock.carried(AiWork.carried(CpuAccount.charged(future))), "Game AI Eval");
+        // ai-timeout-1108: under forge.countedTime the evaluation runs on a counted allowance (opened here, carried to the
+        // eval thread with the work clock) instead of the AI_TIMEOUT wall; off, none is opened and nothing changes
+        final boolean counted = forge.game.WorkClock.COUNTED_TIME;
+        final forge.game.WorkClock.Allowance prevAllowance = counted
+                ? forge.game.WorkClock.openAllowance(CountedAiTime.allowanceNs(game.getAITimeout())) : null;
+        final forge.game.WorkClock.Allowance allowance = counted ? forge.game.WorkClock.allowance() : null;
+        final Runnable evalTask;
+        try {
+            evalTask = forge.game.WorkClock.carried(AiWork.carried(CpuAccount.charged(future)));
+        } finally {
+            if (counted) {
+                forge.game.WorkClock.restoreAllowance(prevAllowance);
+            }
+        }
+        Thread t = new Thread(evalTask, "Game AI Eval");
         t.setDaemon(true);
         t.start();
+        if (counted) {
+            return countedResult(future, t, allowance);
+        }
         try {
             final SpellAbility chosen = future.get(game.getAITimeout(), TimeUnit.SECONDS);
             AiWork.check("chooseSpellAbilityToPlay");
