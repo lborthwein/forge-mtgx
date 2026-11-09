@@ -83,6 +83,16 @@ public final class OppMin {
          * our loop gained, is no worse for the opponent. A loop's points then cost one iteration's, not n.
          */
         public boolean loopMemo;
+        /**
+         * opp-response-1108 (solverCfg oppResponse; false = off, the default, and then nothing changes): the tree is a
+         * REFUTATION search on a world the line already won against Forge AI's play. No Forge AI root (that branch is the
+         * verification's own play-out); "pass everywhere" first, then the scripts breadth first (one response, then two),
+         * in the cheap order (the highest-impact point, then point order, then the set's own order). A point whose set is
+         * incomplete (a gap), larger than perPoint, or met with the budget spent is not a cap: its enumerated responses are
+         * tried and the rest are left to the node budget. Result: 0 when some legal response sequence beats the line, else 1
+         * (not refuted: the world keeps its verified value); NaN only when no branch resolved.
+         */
+        public boolean refute;
 
         public Cfg(final int nodes, final int perPoint, final int depth) {
             if (perPoint > CHARM_CAP) {
@@ -269,7 +279,7 @@ public final class OppMin {
         final Out out = new Out();
         final java.util.ArrayDeque<Script> stack = new java.util.ArrayDeque<>();
         stack.push(Script.passAll());
-        stack.push(Script.forgeRoot());
+        if (!cfg.refute) stack.push(Script.forgeRoot()); // opp-response-1108: the refutation's world already won Forge AI's play
         final Set<String> memo = new HashSet<>();
         final java.util.Map<String, List<long[]>> loopSeen = new java.util.HashMap<>(); // solver-gaps-1104 (loopMemo)
         double lo = Double.POSITIVE_INFINITY;
@@ -318,7 +328,9 @@ public final class OppMin {
             final List<Integer> kidImpact = new ArrayList<>();
             for (int j = s.last() + 1; j < pts.size(); j++) {
                 final Point p = pts.get(j);
-                if (p.gap != null) {
+                if (p.gap != null && cfg.refute) {
+                    out.caps.merge("gap:" + p.gap, 1, Integer::sum); // opp-response-1108: logged, not a cap
+                } else if (p.gap != null) {
                     // fail closed: an answer this point's set could not enumerate completely makes it a cap hit
                     out.cap("gap:" + p.gap);
                     for (java.util.Map.Entry<String, java.util.TreeSet<String>> e : p.gapCards.entrySet()) {
@@ -327,10 +339,15 @@ public final class OppMin {
                 }
                 if (p.size == 0) continue;
                 out.maxResponses = Math.max(out.maxResponses, p.size);
-                if (p.size > cfg.perPoint) {
+                if (p.size > cfg.perPoint && cfg.refute) {
+                    out.caps.merge("truncated", 1, Integer::sum); // opp-response-1108: all tried, the node budget bounds it
+                } else if (p.size > cfg.perPoint) {
                     out.cap("truncated");
                     out.capCards("truncated", p.answerNames);
                     continue;
+                }
+                if (left <= 0 && cfg.refute) {
+                    continue; // opp-response-1108: the branch's response budget is spent
                 }
                 if (left <= 0) {
                     out.cap("budget");
@@ -370,7 +387,18 @@ public final class OppMin {
                 final int c = Integer.compare(kidImpact.get(y), kidImpact.get(x));
                 return c != 0 ? c : Integer.compare(x, y);
             });
-            for (int i = order.length - 1; i >= 0; i--) stack.push(kids.get(order[i]));
+            if (cfg.refute) {
+                // opp-response-1108: breadth first (every single response before any pair), in the same cheap order
+                for (int i = 0; i < order.length; i++) stack.addLast(kids.get(order[i]));
+            } else {
+                for (int i = order.length - 1; i >= 0; i--) stack.push(kids.get(order[i]));
+            }
+        }
+        if (cfg.refute) {
+            // opp-response-1108: refuted (0), not refuted (1: the world keeps its verified win), or nothing resolved (NaN)
+            out.v = lo <= 0.0 ? 0.0 : lo == Double.POSITIVE_INFINITY ? Double.NaN : 1.0;
+            if (lo <= 0.0) out.cap = null;
+            return out;
         }
         if (lo <= 0.0) {
             out.v = 0.0;
@@ -530,6 +558,39 @@ public final class OppMin {
          * us or a permanent of ours that entered since its previous turn). Read with {@link #reveal}.
          */
         public boolean hold;
+        /** opp-response-1108 (false = off): the opponent's block declarations are decision points ({@link #blocks}). */
+        public boolean blocks;
+        /** opp-response-1108: the most block options per block point. */
+        public int blockCap = 12;
+        /** opp-response-1108 (diagnostics): the response sets met (their sizes summed) and the last response made. */
+        public int responsesSeen;
+        /** opp-response-1108: response points met (priority and block). */
+        public int pointsSeen;
+
+        /**
+         * opp-response-1108: at the opponent's block declaration, after Forge AI declared its blocks: a new block point
+         * records the legal alternatives ({@link OppMin#blockOptions}); the script's choice replaces Forge AI's
+         * declaration, else it stands. Only when {@link #blocks}.
+         */
+        public void blocks(final Game g, final forge.game.combat.Combat combat, final Player defender) {
+            if (!blocks || combat == null || combat.getAttackers().isEmpty()) return;
+            final String pk = "blk:" + g.getPhaseHandler().getTurn() + ":" + combat.getAttackers().size();
+            if (onlyTurn >= 0 && g.getPhaseHandler().getTurn() != onlyTurn || !seen.add(pk)) return;
+            final List<List<int[]>> opts = blockOptions(combat, defender, blockCap);
+            final int idx = points.size();
+            int imp = 0;
+            for (Card a : combat.getAttackers()) imp += Math.max(0, a.getNetCombatDamage());
+            points.add(new Point(opts.size(), stateKey(g) + "|blk", imp, 1));
+            pointsSeen++;
+            responsesSeen += opts.size();
+            if (script.forge || script.policy != null) return;
+            final int r = script.respAt(idx);
+            if (r < 0 || r >= opts.size()) return;
+            apply(combat, defender, opts.get(r));
+            answered = "attack blocked " + blockNames(g, opts.get(r));
+            realized.put(pk, blockSig(opts.get(r)));
+        }
+
         /** opp-belief-1104: the responses made, point signature to answer signature (every script mode). */
         public final java.util.LinkedHashMap<String, String> realized = new java.util.LinkedHashMap<>();
         private final java.util.Map<String, Integer> sigCount = new java.util.HashMap<>();
@@ -615,6 +676,8 @@ public final class OppMin {
                 rs.add(fa);
             }
             points.add(loop(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs), g));
+            pointsSeen++;
+            responsesSeen += rs.size(); // opp-response-1108 (diagnostics)
             if (DEBUG && as.gap() != null) System.err.println("[oppmin] point " + idx + " gap " + as.gap());
             // opp-belief-1104: the point's public signature (n-th occurrence in this play-out)
             final String sig0 = pointSig(g, victim, pk);
@@ -661,6 +724,103 @@ public final class OppMin {
             }
             return new ArrayList<>(Collections.singletonList(sa));
         }
+    }
+
+    /**
+     * opp-response-1108 (Driver#blocks): the opponent's block declaration as a decision point. Its options are block
+     * assignments the rules allow (CombatUtil.canBlock per pair, then CombatUtil.validateBlocks on the whole), built
+     * from the engine only: no blocks; one blocker per attacker, the attackers by power and the blockers by id (the most
+     * damage stopped); and each single legal (blocker, attacker) pair. Forge AI's own declaration is the default (the
+     * point's "pass"), so it is not in the list. At most {@code cap} options, deduplicated by assignment.
+     */
+    public static List<List<int[]>> blockOptions(final forge.game.combat.Combat combat, final Player defender, final int cap) {
+        final List<List<int[]>> out = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        seen.add(blockSig(current(combat)));
+        final List<Card> atk = new ArrayList<>(combat.getAttackers());
+        atk.sort((x, y) -> {
+            final int c = Integer.compare(y.getNetCombatDamage(), x.getNetCombatDamage());
+            return c != 0 ? c : Integer.compare(x.getId(), y.getId());
+        });
+        final List<Card> blk = new ArrayList<>();
+        for (Card c : defender.getCreaturesInPlay()) {
+            if (forge.game.combat.CombatUtil.canBlock(c, combat)) blk.add(c);
+        }
+        blk.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+        final List<List<int[]>> cands = new ArrayList<>();
+        cands.add(new ArrayList<>()); // no blocks
+        final List<int[]> most = new ArrayList<>();
+        final Set<Integer> usedA = new HashSet<>();
+        for (Card b : blk) {
+            for (Card a : atk) {
+                if (!usedA.contains(a.getId()) && forge.game.combat.CombatUtil.canBlock(a, b, combat)) {
+                    most.add(new int[] {b.getId(), a.getId()});
+                    usedA.add(a.getId());
+                    break;
+                }
+            }
+        }
+        cands.add(most);
+        for (Card a : atk) {
+            for (Card b : blk) {
+                if (forge.game.combat.CombatUtil.canBlock(a, b, combat)) {
+                    final List<int[]> one = new ArrayList<>();
+                    one.add(new int[] {b.getId(), a.getId()});
+                    cands.add(one);
+                }
+            }
+        }
+        final List<int[]> mine = current(combat);
+        for (List<int[]> c : cands) {
+            if (out.size() >= cap) break;
+            if (!seen.add(blockSig(c))) continue;
+            boolean ok;
+            try {
+                apply(combat, defender, c);
+                ok = forge.game.combat.CombatUtil.validateBlocks(combat, defender) == null;
+            } catch (RuntimeException e) {
+                ok = false;
+            }
+            if (ok) out.add(c);
+        }
+        apply(combat, defender, mine); // Forge AI's declaration back in place
+        return out;
+    }
+
+    /** opp-response-1108: the combat's current block assignment, as (blocker id, attacker id) pairs. */
+    static List<int[]> current(final forge.game.combat.Combat combat) {
+        final List<int[]> out = new ArrayList<>();
+        for (Card b : combat.getAllBlockers()) {
+            for (Card a : combat.getAttackersBlockedBy(b)) out.add(new int[] {b.getId(), a.getId()});
+        }
+        return out;
+    }
+
+    static String blockSig(final List<int[]> as) {
+        final List<String> k = new ArrayList<>();
+        for (int[] p : as) k.add(p[0] + ">" + p[1]);
+        Collections.sort(k);
+        return k.toString();
+    }
+
+    /** opp-response-1108: replace the combat's blocks by {@code as} (card ids). */
+    static void apply(final forge.game.combat.Combat combat, final Player defender, final List<int[]> as) {
+        for (Card b : new ArrayList<>(combat.getAllBlockers())) combat.undoBlockingAssignment(b);
+        final Game g = defender.getGame();
+        for (int[] p : as) {
+            final Card b = g.findById(p[0]), a = g.findById(p[1]);
+            if (a != null && b != null) combat.addBlocker(a, b);
+        }
+    }
+
+    /** opp-response-1108 (diagnostics): an assignment by names, "blocker>attacker". */
+    static String blockNames(final Game g, final List<int[]> as) {
+        final List<String> k = new ArrayList<>();
+        for (int[] p : as) {
+            final Card b = g.findById(p[0]), a = g.findById(p[1]);
+            k.add((b == null ? "?" : b.getName()) + ">" + (a == null ? "?" : a.getName()));
+        }
+        return k.isEmpty() ? "no-blocks" : String.join(",", k);
     }
 
     /**

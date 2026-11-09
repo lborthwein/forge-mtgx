@@ -519,6 +519,20 @@ public final class ForcedWinSolver {
         public boolean oppMin = false;
         public int oppResponses = 4, oppDepth = 2, oppNodes = 64;
         /**
+         * opp-response-1108 (false = off, the default, and then nothing changes): after a line's verification (every
+         * world played against Forge AI, as before, on the same budget), each world it won is checked against the
+         * opponent's legal actions: at each priority with one of our objects on the stack, our attack, the opponent's
+         * block declaration and (lines that pass the turn) its own main phase, the engine's castable or activatable
+         * actions from that world's hand, board and other zones ({@link OppMin#answers}, {@link OppMin#blockOptions}) are
+         * played out ({@link OppMin.Cfg#refute}). A world some response sequence beats is lost; P(belief) becomes the share
+         * of worlds won against every response tried. The check has its own work allowance per decision
+         * (oppResponseMs, work-clock ms), oppResponseNodes play-outs per world and oppResponseDepth responses per
+         * branch; worlds it has no time for keep their verified value. Read only without oppMin.
+         */
+        public boolean oppResponse = false;
+        public long oppResponseMs = 1500;
+        public int oppResponseNodes = 12, oppResponseDepth = 2;
+        /**
          * covfix-a-1102 (ARCH-PROPOSAL-1102 layer 3; false = off, the default, and then nothing changes): the MIN searches
          * the opponent's mana abilities that have a non-mana part (OppMin.Driver#manaSearch) instead of failing closed
          * on them as the mana-ability gap. A mana ability the copy cannot activate is a cap (mana-sim).
@@ -675,6 +689,13 @@ public final class ForcedWinSolver {
                         + " (review #148: a cut modal set must stay a cap hit)");
             }
             c.oppDepth = intOr(get.apply("oppDepth"), c.oppDepth);
+            c.oppResponse = "true".equals(get.apply("oppResponse")); // opp-response-1108
+            c.oppResponseMs = intOr(get.apply("oppResponseMs"), (int) c.oppResponseMs);
+            c.oppResponseNodes = intOr(get.apply("oppResponseNodes"), c.oppResponseNodes);
+            c.oppResponseDepth = intOr(get.apply("oppResponseDepth"), c.oppResponseDepth);
+            if (c.oppResponse && (c.oppResponseMs <= 0 || c.oppResponseNodes < 1 || c.oppResponseDepth < 1)) {
+                throw new IllegalArgumentException("oppResponseMs > 0, oppResponseNodes >= 1, oppResponseDepth >= 1");
+            }
             c.oppNodes = intOr(get.apply("oppNodes"), c.oppNodes);
             c.oppManaSearch = "true".equals(get.apply("oppManaSearch")); // covfix-a-1102
             c.oppBudgetByDepth = "true".equals(get.apply("oppBudgetByDepth")); // covfix-a-1102 (oppMinRev 3)
@@ -823,7 +844,8 @@ public final class ForcedWinSolver {
                 + (enginePassScale > 0 ? " enginePassScale=" + enginePassScale : "")
                 + (engineAltLines > 0 ? " engineAltLines=" + engineAltLines : "")
                 + (oppBelief > 0 ? " oppBelief=" + oppBelief + " C=" + oppBeliefCands : "") // opp-belief-1104
-                + (oppHoldPoints ? " oppHoldPoints" : "");
+                + (oppHoldPoints ? " oppHoldPoints" : "")
+                + (oppResponse ? " oppResponse ms=" + oppResponseMs + " N=" + oppResponseNodes + " D=" + oppResponseDepth : "");
         }
     }
 
@@ -960,6 +982,11 @@ public final class ForcedWinSolver {
         public long oppMinLoopMemo;
         /** opp-belief-1104 (oppBelief only; non-zero only then): belief MINs, their tree and candidate play-outs, non-Forge picks. */
         public long oppBeliefMins, oppBeliefNodes, oppBeliefNonForge;
+        /**
+         * opp-response-1108 (oppResponse only; non-zero only then): lines checked, worlds checked, worlds refuted, worlds
+         * left unchecked (allowance spent), play-outs, responses enumerated, lines whose P(belief) fell.
+         */
+        public long respLines, respWorlds, respRefuted, respUnchecked, respNodes, respResponses, respLowered;
         /** solver-gaps-1104 (engineAltLines): alternate engine lines verified, and taken; only when non-zero. */
         public long altLines, altTaken;
         /** Review #148: the shared MIN's cap events by reason (process-local diagnostics; never in a label or sha). */
@@ -1061,6 +1088,13 @@ public final class ForcedWinSolver {
             oppMinNodes += sign * o.oppMinNodes;
             oppMinLoopMemo += sign * o.oppMinLoopMemo;
             oppBeliefMins += sign * o.oppBeliefMins;
+            respLines += sign * o.respLines; // opp-response-1108
+            respWorlds += sign * o.respWorlds;
+            respRefuted += sign * o.respRefuted;
+            respUnchecked += sign * o.respUnchecked;
+            respNodes += sign * o.respNodes;
+            respResponses += sign * o.respResponses;
+            respLowered += sign * o.respLowered;
             oppBeliefNodes += sign * o.oppBeliefNodes;
             oppBeliefNonForge += sign * o.oppBeliefNonForge;
             altLines += sign * o.altLines;
@@ -1145,6 +1179,15 @@ public final class ForcedWinSolver {
                 o.addProperty("opp_belief_mins", oppBeliefMins); // opp-belief-1104
                 o.addProperty("opp_belief_nodes", oppBeliefNodes);
                 o.addProperty("opp_belief_non_forge", oppBeliefNonForge);
+            }
+            if (respLines != 0) {
+                o.addProperty("opp_resp_lines", respLines); // opp-response-1108
+                o.addProperty("opp_resp_worlds", respWorlds);
+                o.addProperty("opp_resp_refuted", respRefuted);
+                o.addProperty("opp_resp_unchecked", respUnchecked);
+                o.addProperty("opp_resp_nodes", respNodes);
+                o.addProperty("opp_resp_responses", respResponses);
+                o.addProperty("opp_resp_lowered", respLowered);
             }
             if (oppMinLoopMemo != 0) {
                 o.addProperty("opp_min_loop_memo", oppMinLoopMemo); // solver-gaps-1104
@@ -2241,6 +2284,7 @@ public final class ForcedWinSolver {
         decisionWall = cfg.counter ? 0L
                 : hardDeadline != 0 ? hardDeadline : t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
         decisionStart = t0;
+        respEnd = 0L; // opp-response-1108: the check's allowance opens at its first line of this decision
         decisionSteps0 = meter.playoutSteps;
         meter.offenses++;
         final Position pos = readPosition(live, knownTop(live));
@@ -3447,6 +3491,9 @@ public final class ForcedWinSolver {
             e = em;
             line = em.line;
         }
+        if (e.pUnopposed >= 1.0) {
+            respond(live, e); // opp-response-1108 (no-op when off)
+        }
         final Line taken = e.line;
         if (evalSink != null) {
             evalSink.add(e);
@@ -4071,6 +4118,13 @@ public final class ForcedWinSolver {
         boolean libUncovered;
         /** next-turn-1107: the card id a step of ours after the pass found gone in the unopposed play-out (-1: none). */
         int lostHost = -1;
+        /** opp-response-1108 (oppResponse only): the evaluation's seed and the belief worlds it won (by world index). */
+        long seed;
+        List<Integer> wonWorlds;
+        /** opp-response-1108: P(belief) before the response check (NaN: not checked), worlds checked and refuted, the refutation. */
+        double pBefore = Double.NaN;
+        int respChecked, respRefuted, respNodes, respResponses;
+        String refutedBy;
 
         Eval(Line line) {
             this.line = line;
@@ -4085,7 +4139,10 @@ public final class ForcedWinSolver {
         public String toString() {
             return "P(unopposed)=" + pUnopposed + " P(belief)=" + String.format("%.2f", pBelief) + " worlds=" + worldsRun
                     + " " + line + (protection.isEmpty() ? "" : " protectedBy=" + protection)
-                    + (failures.isEmpty() ? "" : " fails=" + failures);
+                    + (failures.isEmpty() ? "" : " fails=" + failures)
+                    + (Double.isNaN(pBefore) ? "" : " resp=" + String.format("%.2f", pBefore) + "->" + String.format("%.2f", pBelief)
+                            + " checked=" + respChecked + " refuted=" + respRefuted + " nodes=" + respNodes + " responses=" + respResponses
+                            + (refutedBy == null ? "" : " by=" + refutedBy)); // opp-response-1108
         }
     }
 
@@ -4128,6 +4185,9 @@ public final class ForcedWinSolver {
                 break; // rollout-budget-1101: the decision's Forge AI work is spent (a cap hit; offense drops the result)
             }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
+            if (e.pUnopposed >= 1.0 && e.pBelief > (best == null ? 0 : best.pBelief + 1e-9)) {
+                respond(live, e); // opp-response-1108 (no-op when off)
+            }
             receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e);
             if (evalSink != null) {
                 evalSink.add(e);
@@ -4237,6 +4297,9 @@ public final class ForcedWinSolver {
                 continue;
             }
             final Eval e = evaluate(live, l, mix(cfg.seed, index * 1000L + i), deadline);
+            if (e.pUnopposed >= 1.0 && e.pBelief > (best == null ? 0 : best.pBelief + 1e-9)) {
+                respond(live, e); // opp-response-1108 (no-op when off)
+            }
             receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e
                     + (e.lostHost >= 0 ? " lost=" + e.lostHost : "") + " skipped=" + avoidSkipped);
             i++;
@@ -4308,6 +4371,10 @@ public final class ForcedWinSolver {
         final Map<String, Integer> fails = new HashMap<>();
         final Set<String> prot = new HashSet<>();
         final int nWorlds = beliefWorlds(live); // deck-belief-1105 (cfg.worlds when off)
+        if (cfg.oppResponse && !cfg.oppMin) {
+            e.seed = seed; // opp-response-1108
+            e.wonWorlds = new ArrayList<>();
+        }
         for (int w = 1; w <= nWorlds; w++) {
             // unified-search-1106 (hard deadline set): a line that has won every world so far keeps verifying to it
             if (hardDeadline != 0 ? forge.game.WorkClock.nanoTime() > (sum >= n ? hardDeadline : deadline)
@@ -4350,6 +4417,9 @@ public final class ForcedWinSolver {
             }
             sum += worst.won ? 1 : 0;
             n++;
+            if (worst.won && e.wonWorlds != null) {
+                e.wonWorlds.add(w); // opp-response-1108
+            }
             if (!worst.won) {
                 fails.merge(worst.why, 1, Integer::sum);
             }
@@ -4429,6 +4499,9 @@ public final class ForcedWinSolver {
         boolean manaSimFailed;
         /** opp-belief-1104: the responses the opponent made (OppMin.Driver#realized). */
         java.util.Map<String, String> realized;
+        /** opp-response-1108: the responses the driver enumerated (summed over its points), and its last answer. */
+        int respSeen;
+        String answered;
     }
 
     /**
@@ -4439,6 +4512,93 @@ public final class ForcedWinSolver {
      */
     Outcome playout(Game live, Line line, long seed, int world, int counterAt, long wall) {
         return playout(live, line, seed, world, counterAt, wall, null);
+    }
+
+    /** opp-response-1108: the end of this decision's check allowance on the work clock (0 = not opened yet). */
+    private long respEnd;
+    /** opp-response-1108: set while the check's play-outs run (their opponent driver also takes block points). */
+    private boolean respMode;
+
+    /**
+     * opp-response-1108 ({@link Config#oppResponse}): the response check of a verified line. Each belief world the line
+     * won (same world seed as its verification) is replayed against the opponent's legal actions at its decision points
+     * ({@link OppMin.Cfg#refute}, at most oppResponseNodes play-outs, oppResponseDepth responses a branch), cheapest
+     * first, stopping at the first sequence that beats the line. The worlds are checked in order until the decision's
+     * allowance (oppResponseMs on the work clock, opened at its first check) is spent; an unchecked world keeps its
+     * verified win. P(belief) = (worlds won - worlds refuted) / worlds run. No card, deck or answer is named anywhere:
+     * the actions are the engine's (castable and payable now, legal blocks), in the sampled world's own zones.
+     */
+    void respond(Game live, Eval e) {
+        if (!cfg.oppResponse || cfg.oppMin || e.wonWorlds == null || e.worldsRun == 0 || e.pUnopposed < 1.0) {
+            return;
+        }
+        final long now = forge.game.WorkClock.nanoTime();
+        if (respEnd == 0L) {
+            respEnd = now + cfg.oppResponseMs * 1_000_000L;
+        }
+        meter.respLines++;
+        e.pBefore = e.pBelief;
+        final OppMin.Cfg oc = new OppMin.Cfg(cfg.oppResponseNodes, OppMin.CHARM_CAP, cfg.oppResponseDepth);
+        oc.refute = true;
+        oc.budgetByDepth = true;
+        oc.memo = true;
+        int won = e.wonWorlds.size();
+        for (int w : e.wonWorlds) {
+            if (forge.game.WorkClock.nanoTime() > respEnd || forge.ai.AiWork.spent()) {
+                meter.respUnchecked++;
+                continue;
+            }
+            final long ws = mix(e.seed, w);
+            final int[] resp = new int[1];
+            final String[] by = new String[1];
+            final boolean d0 = libDep, uc0 = libUncov, c0 = libCut;
+            final int r0 = libReads;
+            final int wallCuts0 = wallCuts;
+            respMode = true;
+            final OppMin.Out m;
+            try {
+                m = OppMin.min(oc, script -> {
+                    meter.respNodes++;
+                    e.respNodes++;
+                    final Outcome o = playout(live, e.line, ws, w, -1, respEnd, script);
+                    if (o.respSeen > resp[0]) resp[0] = o.respSeen;
+                    if (!o.won && by[0] == null && !"wall".equals(o.why) && !String.valueOf(o.why).startsWith("error")) {
+                        by[0] = (o.answered == null ? "pass" : o.answered) + " " + script + ":" + o.why;
+                    }
+                    if (o.manaSimFailed || "wall".equals(o.why) || forge.ai.AiWork.CAP.equals(o.why)
+                            || String.valueOf(o.why).startsWith("error")) {
+                        return new OppMin.Leaf(Double.NaN, String.valueOf(o.why), o.points); // unresolved, never a refutation
+                    }
+                    return new OppMin.Leaf(o.won ? 1.0 : 0.0, o.why, o.points);
+                });
+            } finally {
+                respMode = false;
+                // the check's play-outs neither mark the evaluation library-dependent nor count as its wall cuts
+                libDep = d0;
+                libUncov = uc0;
+                libCut = c0;
+                libReads = r0;
+                wallCuts = wallCuts0;
+            }
+            e.respChecked++;
+            e.respResponses += resp[0];
+            meter.respWorlds++;
+            meter.respResponses += resp[0];
+            if (m.v == 0.0) {
+                e.respRefuted++;
+                meter.respRefuted++;
+                won--;
+                if (e.refutedBy == null) e.refutedBy = "w" + w + " " + by[0];
+            }
+        }
+        e.pBelief = (double) won / e.worldsRun;
+        if (e.pBelief < e.pBefore - 1e-9) {
+            meter.respLowered++;
+        }
+        receipt("FORCED_WIN oppResponse" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " P " + String.format("%.2f", e.pBefore)
+                + " -> " + String.format("%.2f", e.pBelief) + " worlds=" + e.worldsRun + " won=" + e.wonWorlds.size() + " checked="
+                + e.respChecked + " refuted=" + e.respRefuted + " nodes=" + e.respNodes + " responses=" + e.respResponses
+                + (e.refutedBy == null ? "" : " by=" + e.refutedBy) + " line=" + e.line);
     }
 
     /**
@@ -4636,6 +4796,14 @@ public final class ForcedWinSolver {
                         adv.driver.loopMemo = cfg.oppMinLoopMemo; // solver-gaps-1104
                         adv.driver.reveal = cfg.oppMinRevealPoints || cfg.oppHoldPoints; // solver-gaps-1104
                         adv.driver.hold = cfg.oppHoldPoints; // opp-belief-1104
+                        if (respMode) {
+                            // opp-response-1108: blocks are decision points; a line that passes the turn also meets the
+                            // opponent's own main phase (its hold decision)
+                            adv.driver.blocks = true;
+                            adv.driver.reveal = line.winTurn > 0;
+                            adv.driver.hold = line.winTurn > 0;
+                            adv.driver.manaSearch = false;
+                        }
                         out.points = adv.driver.points;
                         out.realized = adv.driver.realized; // opp-belief-1104
                     }
@@ -4662,6 +4830,10 @@ public final class ForcedWinSolver {
             }
             out.won = cm.hasWon() || cm.getOpponents().stream().anyMatch(Player::hasLost);
             out.manaSimFailed = adv != null && adv.driver != null && adv.driver.manaSimFailed; // covfix-a-1102
+            if (adv != null && adv.driver != null) {
+                out.respSeen = adv.driver.responsesSeen; // opp-response-1108
+                out.answered = adv.driver.answered;
+            }
             out.protectedBy = lineAi.protectedBy;
             if (out.won) {
                 // lane bvw-plr-1023 (read-only): how the copy ended, for label rows
@@ -6097,6 +6269,16 @@ public final class ForcedWinSolver {
 
         /** labeller-v2 (d): the shared MIN's driver for this branch (null = the one-counter adversary). */
         OppMin.Driver driver;
+
+        /** opp-response-1108: Forge AI declares; a driver with block points may replace the declaration (Driver#blocks). */
+        @Override
+        public void declareBlockers(Player defender, forge.game.combat.Combat combat) {
+            super.declareBlockers(defender, combat);
+            if (driver != null && driver.blocks) {
+                driver.blocks(getGame(), combat, defender);
+                if (driver.answered != null) countered = driver.answered;
+            }
+        }
         /** Tests only: pass instead of Forge AI's own answer while one of our objects is on the stack. */
         boolean passive;
 
