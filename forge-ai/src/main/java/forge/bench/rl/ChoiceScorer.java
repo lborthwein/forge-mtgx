@@ -63,6 +63,14 @@ public final class ChoiceScorer {
         public int reachNameNodes = -1;
         public boolean reachOnePass, reachSkipCapped, reachSig;
         /**
+         * solver-distill-cc-1109 (GOLDFISH; gfHorizon 0 = off, the default; read with reachAlpha): an applied option
+         * whose reach is below 1 is also planned over gfHorizon of our turns with gfSamples sampled orders of our unknown
+         * library ({@link forge.ai.simulation.ForcedWinSolver#goldfish}); the option's reach is the larger of the two.
+         */
+        public int gfHorizon = 0, gfSamples = 4, gfNodes = 3000, gfExtra = 2;
+        public long gfMs = 120;
+        public double gfGamma = 0.8;
+        /**
          * solver-distill-cc-1109 (0 = off, the default): a CARDS ask whose resolution asks again (put-backs: Brainstorm and
          * the like; the guard's "multiAnswer") is answered as a whole: every ordered sequence of {@code seqs} distinct
          * menu cards is applied on a copy (no Forge AI tail) and scored like a single pick; the chosen sequence answers the
@@ -85,7 +93,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig"));
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -121,6 +129,12 @@ public final class ChoiceScorer {
             if (o.has("reachOnePass")) c.reachOnePass = o.get("reachOnePass").getAsBoolean();
             if (o.has("reachSkipCapped")) c.reachSkipCapped = o.get("reachSkipCapped").getAsBoolean();
             if (o.has("reachSig")) c.reachSig = o.get("reachSig").getAsBoolean();
+            if (o.has("gfHorizon")) c.gfHorizon = o.get("gfHorizon").getAsInt();
+            if (o.has("gfSamples")) c.gfSamples = o.get("gfSamples").getAsInt();
+            if (o.has("gfNodes")) c.gfNodes = o.get("gfNodes").getAsInt();
+            if (o.has("gfExtra")) c.gfExtra = o.get("gfExtra").getAsInt();
+            if (o.has("gfMs")) c.gfMs = o.get("gfMs").getAsLong();
+            if (o.has("gfGamma")) c.gfGamma = o.get("gfGamma").getAsDouble();
             if (o.has("seqs")) c.seqs = o.get("seqs").getAsInt();
             if (o.has("guard")) c.guard = o.get("guard").getAsBoolean();
             if (o.has("pile")) c.pile = o.get("pile").getAsBoolean();
@@ -162,6 +176,14 @@ public final class ChoiceScorer {
                 }
                 if (reachSig) {
                     o.addProperty("reachSig", true);
+                }
+                if (gfHorizon > 0) {
+                    o.addProperty("gfHorizon", gfHorizon);
+                    o.addProperty("gfSamples", gfSamples);
+                    o.addProperty("gfNodes", gfNodes);
+                    o.addProperty("gfExtra", gfExtra);
+                    o.addProperty("gfMs", gfMs);
+                    o.addProperty("gfGamma", gfGamma);
                 }
             }
             if (seqs > 0) {
@@ -302,6 +324,29 @@ public final class ChoiceScorer {
                     sc.lines = r.direct ? 1 : 0;
                     sc.nodes = r.screens;
                     sc.nanos = r.nanos;
+                    if (cfg.gfHorizon > 0 && !r.failed && !(r.p >= 1.0)) {
+                        // GOLDFISH: several turns, sampled draws; one seed per ask (game, turn, phase), so every option
+                        // of a menu is planned over the same draws
+                        final forge.ai.simulation.ForcedWinSolver.GoldfishOpts go = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                        go.horizon = cfg.gfHorizon;
+                        go.samples = cfg.gfSamples;
+                        go.nodes = cfg.gfNodes;
+                        go.extra = cfg.gfExtra;
+                        go.ms = cfg.gfMs;
+                        go.gamma = cfg.gfGamma;
+                        go.seed = uid * 0x9E3779B97F4A7C15L + g.getPhaseHandler().getTurn() * 64L
+                                + g.getPhaseHandler().getPhase().ordinal();
+                        final forge.ai.simulation.ForcedWinSolver.Goldfish gf = sol.goldfish(g, top, go);
+                        sc.nodes += gf.screens;
+                        sc.nanos += gf.nanos;
+                        if (!gf.failed && !Double.isNaN(gf.g)) {
+                            sc.gf = gf.g;
+                            sc.gfTurn = gf.bestTurn;
+                            if (Double.isNaN(sc.reach) || gf.g > sc.reach) {
+                                sc.reach = gf.g;
+                            }
+                        }
+                    }
                     return sc;
                 }
                 return sol.screen(g, top, cfg.screenNodes, cfg.screenMs);
@@ -903,6 +948,10 @@ public final class ChoiceScorer {
             if (o.tail > 0) x.addProperty("tail", o.tail);
             if (o.screen != null) {
                 x.addProperty("lines", o.screen.lines);
+                if (!Double.isNaN(o.screen.gf)) {
+                    x.addProperty("gf", Math.round(o.screen.gf * 1000) / 1000.0);
+                    x.addProperty("gf_turn", o.screen.gfTurn);
+                }
                 if (!Double.isNaN(o.screen.reach)) {
                     x.addProperty("reach", Math.round(o.screen.reach * 1000) / 1000.0);
                 }

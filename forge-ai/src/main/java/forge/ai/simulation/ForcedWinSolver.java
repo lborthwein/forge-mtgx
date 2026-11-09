@@ -4000,6 +4000,9 @@ public final class ForcedWinSolver {
         public String best;
         /** solver-distill-cc-1109: set when the screen is a {@link #reach} (NaN otherwise). */
         public double reach = Double.NaN;
+        /** solver-distill-cc-1109: the {@link #goldfish} value and its earliest line's turn, when one was planned. */
+        public double gf = Double.NaN;
+        public int gfTurn = -1;
     }
 
     /**
@@ -4178,6 +4181,207 @@ public final class ForcedWinSolver {
             out.nanos = forge.game.WorkClock.nanoTime() - t0;
         }
         return out;
+    }
+
+    /** solver-distill-cc-1109 (GOLDFISH): {@link #goldfish}'s knobs. */
+    public static final class GoldfishOpts {
+        /** Our turns the planner plans over: this turn and {@code horizon - 1} more. */
+        public int horizon = 4;
+        /** Sampled orders of our unknown library (the cards the later turns draw). */
+        public int samples = 4;
+        /** Sampled cards past the one per later turn (what this line's own draw spells would find). */
+        public int extra = 2;
+        public int nodes = 3000;
+        public long ms = 120;
+        /** A win k of our turns from now counts {@code gamma^k}. */
+        public double gamma = 0.8;
+        /** The sampled orders' seed: the options of one menu share it, so they see the same draws. */
+        public long seed;
+        public boolean window = true;
+    }
+
+    /** solver-distill-cc-1109 (GOLDFISH): {@link #goldfish}'s result. */
+    public static final class Goldfish {
+        /** Mean over the samples of gamma^(the earliest line's turn), 0 for a sample with no line; NaN = not computed. */
+        public double g = Double.NaN;
+        /** Share of samples with a line. */
+        public double p;
+        /** The no-new-card screen found a line (no sample was planned). */
+        public boolean direct;
+        public boolean failed;
+        public int samples, screens, capped, bestTurn = -1;
+        public long nodes, nanos;
+        public String best;
+    }
+
+    /**
+     * solver-distill-cc-1109 (GOLDFISH): how soon the planner wins unopposed over several of our turns, for decisions
+     * whose payoff is more than a turn away (a tutor's target, a discard, a put-back). {@link #reach} asks for a line by
+     * our next turn over the one next draw, exactly; this plans {@code horizon} turns and fills the later turns' draws
+     * from sampled orders of the seat's unknown library (its multiset below the known top: honest, the true order is
+     * never read; a card's place in a sample is a hash of the seed and its id, so two copies of a position that differ
+     * by one moved card see the same draws). G = mean over samples of gamma^turn of the earliest line; a line the
+     * no-new-card screen already finds counts for every sample. Optimistic twice over, as a goldfish is: no opponent,
+     * and the planner sees a sample's draws ahead. No card or combo knowledge.
+     */
+    public Goldfish goldfish(final Game g, final List<Integer> knownTop, final GoldfishOpts o) {
+        final Goldfish out = new Goldfish();
+        final long t0 = forge.game.WorkClock.nanoTime();
+        try {
+            final int h = Math.max(1, o.horizon);
+            final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+            int k = knownTop == null ? 0 : knownTop.size();
+            if (k > lib.size()) {
+                k = 0;
+            }
+            for (int i = 0; i < k; i++) {
+                if (lib.get(i).getId() != knownTop.get(i)) {
+                    k = 0; // not a prefix: the reader ignores it too
+                    break;
+                }
+            }
+            final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
+            final Screen s0 = screenSeq(g, top, List.of(), o.nodes, o.ms, o.window, h);
+            out.screens++;
+            out.nodes += s0.nodes;
+            if (s0.exhausted) {
+                out.capped++;
+            }
+            if (s0.failed) {
+                out.failed = true;
+                return out;
+            }
+            if (s0.lines > 0) {
+                out.direct = true;
+                out.p = 1.0;
+                out.bestTurn = s0.bestTurn;
+                out.best = s0.best;
+                out.g = Math.pow(o.gamma, Math.max(0, s0.bestTurn));
+                return out;
+            }
+            final List<Card> rest = new ArrayList<>(lib.subList(k, lib.size()));
+            final int want = Math.min(rest.size(), Math.max(0, h - 1 - k) + Math.max(0, o.extra));
+            if (o.samples <= 0 || want <= 0) {
+                out.g = 0.0;
+                return out;
+            }
+            double sum = 0;
+            int hits = 0;
+            for (int si = 0; si < o.samples; si++) {
+                final long sd = mix(o.seed, 0x51ED270BL + si);
+                final List<Card> order = new ArrayList<>(rest);
+                order.sort(java.util.Comparator.comparingLong((Card c) -> mix(sd, c.getId()))
+                        .thenComparingInt(Card::getId));
+                final Screen sc = screenSeq(g, top, new ArrayList<>(order.subList(0, want)), o.nodes, o.ms, o.window, h);
+                out.screens++;
+                out.samples++;
+                out.nodes += sc.nodes;
+                if (sc.exhausted) {
+                    out.capped++;
+                }
+                if (!sc.failed && sc.lines > 0) {
+                    hits++;
+                    sum += Math.pow(o.gamma, Math.max(0, sc.bestTurn));
+                    if (out.bestTurn < 0 || sc.bestTurn < out.bestTurn) {
+                        out.bestTurn = sc.bestTurn;
+                        out.best = sc.best;
+                    }
+                }
+            }
+            out.p = hits / (double) o.samples;
+            out.g = sum / o.samples;
+        } catch (RuntimeException | StackOverflowError e) {
+            out.failed = true;
+        } finally {
+            out.nanos = forge.game.WorkClock.nanoTime() - t0;
+        }
+        return out;
+    }
+
+    /**
+     * GOLDFISH's screen: {@link #screenAt} with several hypothetical next cards (drawn in this order after the known top)
+     * and its own horizon, planned once. An empty list is the no-new-card screen at that horizon.
+     */
+    Screen screenSeq(final Game g, final List<Integer> knownTop, final List<Card> nexts, final int nodes, final long ms,
+            final boolean window, final int horizon) {
+        final Screen s = new Screen();
+        final long t0 = forge.game.WorkClock.nanoTime();
+        try {
+            final Position pos = readPosition(g, knownTop);
+            if (pos == null) {
+                s.failed = true;
+                return s;
+            }
+            if (window) {
+                markWindow(pos, g.getPhaseHandler());
+            }
+            final int base = knownTop == null ? 0 : knownTop.size();
+            if (pos.knownTop.size() != base) {
+                s.failed = true; // the known top was not read as given
+                return s;
+            }
+            if (!nexts.isEmpty()) {
+                final List<Integer> order = pos.knownOrder == null ? new ArrayList<>() : new ArrayList<>(pos.knownOrder);
+                for (Card next : nexts) {
+                    pos.knownTop.add(reader.card(g, me, next));
+                    order.add(next.getId());
+                }
+                pos.knownOrder = order;
+            }
+            // a card the plan will draw (the known top as given, or a sampled card) may search or pile our library: the
+            // reader loads its contents only for a chooser already in hand or in play
+            boolean chooses = false;
+            for (ACard kc : pos.knownTop) {
+                for (ForcedWinModel.Abil ab : kc.fromHand) {
+                    chooses |= !ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                }
+            }
+            if (chooses && pos.library.isEmpty()) {
+                final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+                final List<Card> rest = new ArrayList<>(lib.subList(Math.min(lib.size(), base), lib.size()));
+                rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                for (Card c : rest) {
+                    pos.library.add(reader.card(g, me, c));
+                }
+                if (pos.graveyard.isEmpty()) {
+                    final List<Card> gy = new ArrayList<>(me.getCardsIn(ZoneType.Graveyard));
+                    gy.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                    for (Card c : gy) {
+                        pos.graveyard.add(reader.card(g, me, c));
+                    }
+                }
+            }
+            for (Card next : nexts) {
+                for (int i = 0; i < pos.library.size(); i++) {
+                    if (pos.library.get(i).id == next.getId()) {
+                        pos.library.remove(i);
+                        break;
+                    }
+                }
+            }
+            final ForcedWinPlanner.Limits lim = limits();
+            lim.nodes = nodes;
+            lim.ms = ms;
+            lim.payPolicies = 1;
+            lim.horizon = Math.max(1, horizon);
+            final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
+            s.nodes = r.nodes;
+            s.exhausted = r.exhausted;
+            s.lines = r.lines.size();
+            for (Line l : r.lines) {
+                if (s.bestTurn < 0 || l.winTurn < s.bestTurn || l.winTurn == s.bestTurn && l.steps.size() < s.bestSteps) {
+                    s.bestTurn = l.winTurn;
+                    s.bestSteps = l.steps.size();
+                    s.best = String.valueOf(l);
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            s.failed = true;
+            s.best = String.valueOf(e);
+        } finally {
+            s.nanos = forge.game.WorkClock.nanoTime() - t0;
+        }
+        return s;
     }
 
     /** {@link #screen} with an optional hypothetical next card ({@code next}: placed after the known top) and window. */
