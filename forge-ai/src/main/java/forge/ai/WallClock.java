@@ -36,6 +36,11 @@ public final class WallClock {
 
     /** A socket read timeout as it binds now (same rule; 0 = infinite stays 0). */
     public static int readTimeoutMs(final int configured) {
-        return configured > 0 && rebuilding ? (int) Math.max(configured, REBUILD_BUDGET_MS) : configured;
+        if (configured > 0 && rebuilding) {
+            return (int) Math.max(configured, REBUILD_BUDGET_MS);
+        }
+        // ai-timeout-1108: under forge.countedTime a search service read timeout is a hang guard (x GUARD_FACTOR), so a
+        // slow or loaded host does not turn a late score into "keep the policy's choice"; off, unchanged
+        return (int) Math.min(Integer.MAX_VALUE, forge.game.WorkClock.guardMs(configured));
     }
 }

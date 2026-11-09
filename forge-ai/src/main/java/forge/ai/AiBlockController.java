@@ -88,13 +88,14 @@ public class AiBlockController {
 
         // work-units-1107: one work unit per (attacker, blocker) pair (no clock = no-op). AMEND-2: the 1 + attackers charge
         // overweighted wide boards (block prediction 63-74 % of a capped decision's span, real time about half of it)
-        final long clockWork = forge.game.WorkClock.active() ? 1L : 0;
+        final long clockWork = forge.game.WorkClock.metering() ? 1L : 0; // ai-timeout-1108: or a counted AI allowance
         for (final Card blocker : blockersLeft) {
             if (work > 0) {
                 AiWork.tick("getPossibleBlockers", work);
             }
             if (clockWork > 0) {
                 forge.game.WorkClock.tick(forge.game.WorkClock.Site.AI_BLOCK, clockWork);
+                CountedAiTime.check("getPossibleBlockers"); // ai-timeout-1108 (no allowance = no-op)
             }
             // if the blocker can block a creature with lure it can't block a creature without
             if (CombatUtil.canBlock(attacker, blocker, combat)) {
