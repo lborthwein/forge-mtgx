@@ -562,6 +562,48 @@ public final class OppMin {
         public boolean blocks;
         /** opp-response-1108: the most block options per block point. */
         public int blockCap = 12;
+        /**
+         * oppturn-1108 (false = off): the opponent's own attack declaration is a decision point ({@link #attacks}): after
+         * Forge AI declared, its options are every creature that can attack us (no attack cost) and no attack.
+         */
+        public boolean attacks;
+
+        /**
+         * oppturn-1108: at the opponent's attack declaration (after Forge AI declared): a new attack point records the
+         * alternatives ({@link OppMin#attackOptions}); the script's choice (or the policy's, by the same public key)
+         * replaces Forge AI's declaration, else it stands. Only when {@link #attacks}. A declaration the rules refuse is
+         * asked again and answered by Forge AI (GuardedAi's attack guard).
+         */
+        public void attacks(final Game g, final forge.game.combat.Combat combat, final Player attacker) {
+            if (!attacks || combat == null || attacker != opp) return;
+            final String pk = "oatk:" + g.getPhaseHandler().getTurn();
+            if (onlyTurn >= 0 && g.getPhaseHandler().getTurn() != onlyTurn || !seen.add(pk)) return;
+            final List<List<Integer>> opts = attackOptions(g, combat, opp, victim);
+            final int idx = points.size();
+            int imp = 0;
+            for (Card c : opp.getCreaturesInPlay()) imp += Math.max(0, c.getNetCombatDamage());
+            points.add(new Point(opts.size(), stateKey(g) + "|oatk", imp, 1));
+            pointsSeen++;
+            responsesSeen += opts.size();
+            if (script.forge) return;
+            int r = -1;
+            if (script.policy != null) {
+                final String want = script.policy.get(pk);
+                for (int i = 0; i < opts.size() && r < 0 && want != null; i++) {
+                    if (want.equals(opts.get(i).toString())) r = i;
+                }
+            } else {
+                r = script.respAt(idx);
+            }
+            if (r < 0 || r >= opts.size()) return;
+            combat.clearAttackers();
+            for (int id : opts.get(r)) {
+                final Card c = g.findById(id);
+                if (c != null) combat.addAttacker(c, victim);
+            }
+            answered = "attack declared " + (opts.get(r).isEmpty() ? "none" : opts.get(r).size() + " attackers");
+            realized.put(pk, opts.get(r).toString());
+        }
         /** opp-response-1108 (diagnostics): the response sets met (their sizes summed) and the last response made. */
         public int responsesSeen;
         /** opp-response-1108: response points met (priority and block). */
@@ -583,8 +625,17 @@ public final class OppMin {
             points.add(new Point(opts.size(), stateKey(g) + "|blk", imp, 1));
             pointsSeen++;
             responsesSeen += opts.size();
-            if (script.forge || script.policy != null) return;
-            final int r = script.respAt(idx);
+            if (script.forge || script.policy != null && !attacks) return;
+            int r = -1;
+            if (script.policy != null) {
+                // oppturn-1108 (attack points on): a policy replays its block choice by the same key
+                final String want = script.policy.get(pk);
+                for (int i = 0; i < opts.size() && r < 0 && want != null; i++) {
+                    if (want.equals(blockSig(opts.get(i)))) r = i;
+                }
+            } else {
+                r = script.respAt(idx);
+            }
             if (r < 0 || r >= opts.size()) return;
             apply(combat, defender, opts.get(r));
             answered = "attack blocked " + blockNames(g, opts.get(r));
@@ -784,6 +835,34 @@ public final class OppMin {
             if (ok) out.add(c);
         }
         apply(combat, defender, mine); // Forge AI's declaration back in place
+        return out;
+    }
+
+    /**
+     * oppturn-1108 (Driver#attacks): the opponent's attack declarations besides Forge AI's own (the point's "pass"): every
+     * creature it controls that can attack the victim with no attack cost (by id), and no attack. Deduplicated against
+     * Forge AI's declaration. Engine rules only (CombatUtil.canAttack, getAttackCost); no card is named.
+     */
+    static List<List<Integer>> attackOptions(final Game g, final forge.game.combat.Combat combat, final Player opp,
+            final Player victim) {
+        final List<Integer> mine = new ArrayList<>();
+        for (Card a : combat.getAttackers()) mine.add(a.getId());
+        Collections.sort(mine);
+        final List<Integer> all = new ArrayList<>();
+        for (Card c : opp.getCreaturesInPlay()) {
+            try {
+                if (forge.game.combat.CombatUtil.canAttack(c, victim)
+                        && forge.game.combat.CombatUtil.getAttackCost(g, c, victim) == null) {
+                    all.add(c.getId());
+                }
+            } catch (RuntimeException e) {
+                // not an option
+            }
+        }
+        Collections.sort(all);
+        final List<List<Integer>> out = new ArrayList<>();
+        if (!all.isEmpty() && !all.equals(mine)) out.add(all);
+        if (!mine.isEmpty()) out.add(new ArrayList<>());
         return out;
     }
 

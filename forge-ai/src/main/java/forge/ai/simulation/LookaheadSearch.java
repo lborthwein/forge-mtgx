@@ -725,6 +725,8 @@ public final class LookaheadSearch {
         public long capped, rolloutsAborted;
         /** search-bones-1015 (S-b): decisions over the budget decided on the worlds every candidate finished in. */
         public long partialDecisions;
+        /** oppturn-1108 (planValueCap set only): plan play-out values lowered to the plan's cap. */
+        public long planValueCaps;
         /**
          * Hard wall (lane sc-wallguard-1009): searched decisions whose wait for their play-outs the wall cut short
          * (budget + {@link #WALL_GRACE_MS}), and the play-outs still running at the cut (told to stop; their results are
@@ -957,6 +959,9 @@ public final class LookaheadSearch {
             if (partialDecisions > 0) {
                 // search-bones-1015: only when S-b decided a capped search on its finished worlds
                 o.addProperty("partialDecisions", partialDecisions);
+            }
+            if (planValueCaps > 0) {
+                o.addProperty("planValueCaps", planValueCaps); // oppturn-1108 (only when non-zero)
             }
             o.addProperty("attackDecisions", attackDecisions);
             o.addProperty("attackSearched", attackSearched);
@@ -2459,6 +2464,11 @@ public final class LookaheadSearch {
 
     /** S-b: the plan candidates of the decision in progress ({@link #decideGivenPlans}; null otherwise). */
     private List<Object> pendingPlans = null;
+    /**
+     * oppturn-1108 (null = off, the default): a turn-plan candidate's value cap (NaN = none). Each of the plan's play-out
+     * values above its cap is lowered to it before the candidates are compared (a solver line valued at its own P).
+     */
+    public java.util.function.ToDoubleFunction<Object> planValueCap;
     private List<String> pendingPlanLabels = null;
     /** S-b: proven-win / proven-loss flags take part in the choice (off = S-c's choice exactly). */
     private boolean proof = false;
@@ -3090,6 +3100,20 @@ public final class LookaheadSearch {
             }
         } finally {
             forceFidelity = false;
+        }
+        if (planValueCap != null) {
+            // oppturn-1108: a plan candidate is worth at most its cap in every world
+            for (int c = 0; c < n; c++) {
+                final Object pl = cands.get(c).plan;
+                final double cap = pl == null ? Double.NaN : planValueCap.applyAsDouble(pl);
+                if (Double.isNaN(cap)) continue;
+                for (int w = 0; w < k; w++) {
+                    if (values[c][w] > cap) {
+                        values[c][w] = cap;
+                        stats.planValueCaps++;
+                    }
+                }
+            }
         }
         // unified-search-1106 (anytime): which play-outs finished; null = the plain path
         final boolean[][] finished = proof && cfg.anytime ? finishedWorlds(outs, n, k) : null;
