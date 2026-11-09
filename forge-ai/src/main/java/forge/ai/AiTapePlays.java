@@ -194,6 +194,21 @@ final class AiTapePlays {
                         n++;
                     }
                 }
+                if (n == 0) {
+                    // ai-timeout-1108 (ledger row 77, 4 of walk-t1's 9 AiTape games): a play another card lets the AI make
+                    // (Yawgmoth's Will, Lurrus, Serra Paragon, an adventure in exile) that the live game built from such a
+                    // variant again, so its description carries the grant twice ("... by X (n) by X (n)"): the one variant of
+                    // a variant with the record's description
+                    for (SpellAbility a : alts) {
+                        for (SpellAbility a2 : IdScope.detached(AiTape.DECODE_BASE,
+                                () -> GameActionUtil.getAlternativeCosts(a, seat, false))) {
+                            if (AiTapeCodec.descOf(a2).equals(d)) {
+                                only = a2;
+                                n++;
+                            }
+                        }
+                    }
+                }
                 if (n == 1) {
                     pick = only;
                 }
