@@ -1952,6 +1952,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         short[] alt = v == null ? null : sc.choose(s, v, greedy);
+        if (alt == null && v != null && sc.config().relax > 0) {
+            alt = sc.relax(g, me, m, greedy, liveKnow, seed, s); // choice-search-1109 pass 3 (off unless relax > 0)
+        }
         final boolean scored = v != null;
         if (sc.config().shadow) {
             alt = null;

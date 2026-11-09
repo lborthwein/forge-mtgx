@@ -83,10 +83,22 @@ public final class ChoiceScorer {
         public int checkTop = 3;
         /** choice-search-1109: options per multi-pick ask at most (the policy's set, then one-card swaps of it). */
         public int subsetCap = 24;
+        /**
+         * choice-search-1109 pass 3 (0 = off, the default, and then nothing changes): with lineOnly, when no option has a
+         * verified line, the relaxed-planning distance of up to {@code relaxTop} options (the policy's first, then by value):
+         * on each option's position, R = 1..relax generic relaxations (an extra untapped land of the seat's own, the one
+         * making the most colors; a card drawn from the seat's unknown library, {@code relaxDraws} samples) until the
+         * planner finds a line. The option with the fewest is played, ties to the value, then to the policy's answer; with
+         * no relaxed line anywhere the policy's answer stands. {@code relaxMs}: the pass's budget per ask (work clock).
+         */
+        public int relax = 0;
+        public int relaxTop = 6;
+        public long relaxMs = 3000;
+        public int relaxDraws = 2;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
                 "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs",
-                "lineOnly", "check", "checkTop", "subsetCap"));
+                "lineOnly", "check", "checkTop", "subsetCap", "relax", "relaxTop", "relaxMs", "relaxDraws"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -126,6 +138,16 @@ public final class ChoiceScorer {
             if (o.has("check") && !o.get("check").isJsonNull()) c.check = o.getAsJsonObject("check");
             if (o.has("checkTop")) c.checkTop = o.get("checkTop").getAsInt();
             if (o.has("subsetCap")) c.subsetCap = o.get("subsetCap").getAsInt();
+            if (o.has("relax")) c.relax = o.get("relax").getAsInt();
+            if (o.has("relaxTop")) c.relaxTop = o.get("relaxTop").getAsInt();
+            if (o.has("relaxMs")) c.relaxMs = o.get("relaxMs").getAsLong();
+            if (o.has("relaxDraws")) c.relaxDraws = o.get("relaxDraws").getAsInt();
+            if (c.relax < 0 || c.relax > 6 || c.relaxTop < 1 || c.relaxDraws < 1) {
+                throw new IllegalArgumentException("choiceScorer: relax in [0, 6], relaxTop >= 1, relaxDraws >= 1");
+            }
+            if (c.relax > 0 && !c.lineOnly) {
+                throw new IllegalArgumentException("choiceScorer: relax needs lineOnly");
+            }
             if (c.checkTop < 0 || c.subsetCap < 1) {
                 throw new IllegalArgumentException("choiceScorer: checkTop >= 0, subsetCap >= 1");
             }
@@ -165,6 +187,13 @@ public final class ChoiceScorer {
                 o.addProperty("checkTop", checkTop);
                 o.addProperty("subsetCap", subsetCap);
             }
+            if (relax > 0) {
+                // choice-search-1109 pass 3: written only when on
+                o.addProperty("relax", relax);
+                o.addProperty("relaxTop", relaxTop);
+                o.addProperty("relaxMs", relaxMs);
+                o.addProperty("relaxDraws", relaxDraws);
+            }
             return o;
         }
     }
@@ -199,6 +228,10 @@ public final class ChoiceScorer {
         public int checks;
         public boolean proven;
         public long checkNanos;
+        /** choice-search-1109 pass 3: options the relax pass screened, its time, and whether it moved the answer. */
+        public int relaxed;
+        public long relaxNanos;
+        public boolean relaxDeparted;
     }
 
     /** Frames at most for one opening-hand ask. */
@@ -279,6 +312,11 @@ public final class ChoiceScorer {
                 }
                 final forge.ai.simulation.ForcedWinSolver.Screen sc = forge.ai.simulation.ForcedWinSolver.withReader(me,
                         cfg.solverCfg, screenReader).screen(g, top, cfg.screenNodes, cfg.screenMs);
+                if (relaxMode && sc != null && sc.lines == 0 && !sc.failed) {
+                    // choice-search-1109 pass 3: the relaxed-planning distance of this (throwaway) leaf copy
+                    relaxDistance(g, me, k, st, top, sc);
+                    return sc;
+                }
                 if (sc != null && sc.lines > 0 && checker != null && !noCheck && s.checks < cfg.checkTop && !s.proven) {
                     // choice-search-1109: the planner saw a line here; the honest win check prices it over belief worlds
                     final java.util.Set<Integer> known = new java.util.HashSet<>();
@@ -303,6 +341,265 @@ public final class ChoiceScorer {
                 return sc;
             }
         };
+    }
+
+    // ------------------------------------------------------------------ choice-search-1109 pass 3: relaxed-planning distance
+
+    /** True while the relax pass re-applies options (their leaf screens compute the distance, no check). */
+    private boolean relaxMode = false;
+    private long relaxDeadline = Long.MAX_VALUE;
+
+    /** The trigger kinds silenced while a relaxation moves a card (as the near-miss edits do). */
+    private static final forge.game.trigger.TriggerType[] QUIET = {forge.game.trigger.TriggerType.ChangesZone,
+            forge.game.trigger.TriggerType.ChangesZoneAll, forge.game.trigger.TriggerType.Taps,
+            forge.game.trigger.TriggerType.Untaps, forge.game.trigger.TriggerType.Drawn};
+
+    /** Run {@code r} on {@code g} with QUIET triggers suppressed, then re-apply static abilities. */
+    static void quietly(final Game g, final Runnable r) {
+        final forge.game.trigger.TriggerHandler th = g.getTriggerHandler();
+        final List<forge.game.trigger.TriggerType> added = new ArrayList<>();
+        for (forge.game.trigger.TriggerType t : QUIET) {
+            if (!th.isTriggerSuppressed(t)) {
+                th.suppressMode(t);
+                added.add(t);
+            }
+        }
+        try {
+            r.run();
+        } finally {
+            for (forge.game.trigger.TriggerType t : added) {
+                th.clearSuppression(t);
+            }
+            g.getAction().checkStaticAbilities(false);
+        }
+    }
+
+    /** The colors a land's mana abilities make (Any = 5); engine reads only. */
+    static int colorsOf(final Card c) {
+        final Set<Character> cs = new java.util.HashSet<>();
+        for (SpellAbility sa : c.getManaAbilities()) {
+            final String p = sa.getManaPart() == null ? "" : String.valueOf(sa.getManaPart().getOrigProduced());
+            if (p.contains("Any")) {
+                return 5;
+            }
+            for (char ch : p.toCharArray()) {
+                if ("WUBRG".indexOf(ch) >= 0) {
+                    cs.add(ch);
+                }
+            }
+        }
+        return cs.size();
+    }
+
+    /**
+     * Pass 3 on a throwaway leaf copy: R = 1..relax; at each R first the draw relaxation on top of the R-1 lands added so
+     * far (relaxDraws samples of a uniformly random card of the seat's unknown library, moved to hand and back), then one
+     * more land (the seat's own off-battlefield land making the most colors: library first, then graveyard, then hand)
+     * entering untapped. The first R whose screen finds a line is the distance; the share of draw samples with a line is
+     * its p (1 for a land-only relaxation). No card names: zones, types and mana abilities only.
+     */
+    private void relaxDistance(final Game g, final Player me, final RlKnowledge k, final int st, final List<Integer> top,
+            final forge.ai.simulation.ForcedWinSolver.Screen out) {
+        relaxDistance(g, me, c -> k.knows(st, c), top, out);
+    }
+
+    /**
+     * Tests only: the relaxed-planning distance of {@code g}'s position for {@code me} under {@code cfg} (its solverCfg set),
+     * {@code known} = the seat's known library cards. The position is edited (pass a throwaway game).
+     */
+    public static forge.ai.simulation.ForcedWinSolver.Screen relaxDistanceForTest(final Config cfg, final Game g, final Player me,
+            final java.util.function.Predicate<Card> known, final long key) {
+        final ChoiceScorer sc = new ChoiceScorer(cfg, null, 2, 1L);
+        sc.curKey = key;
+        sc.relaxDeadline = Long.MAX_VALUE;
+        sc.screenReader = forge.ai.simulation.ForcedWinSolver.newSharedReader();
+        final forge.ai.simulation.ForcedWinSolver.Screen out = new forge.ai.simulation.ForcedWinSolver.Screen();
+        sc.relaxDistance(g, me, known, new ArrayList<>(), out);
+        return out;
+    }
+
+    private void relaxDistance(final Game g, final Player me, final java.util.function.Predicate<Card> known,
+            final List<Integer> top, final forge.ai.simulation.ForcedWinSolver.Screen out) {
+        out.relaxR = Integer.MAX_VALUE;
+        out.relaxScreens = 0;
+        final Random rng = new Random(LookaheadSearch.mix(curKey, 0x7E1AL));
+        final List<Card> lands = new ArrayList<>();
+        for (ZoneType z : new ZoneType[] {ZoneType.Library, ZoneType.Graveyard, ZoneType.Hand}) {
+            final List<Card> zl = new ArrayList<>();
+            for (Card c : me.getCardsIn(z)) {
+                if (c.isLand() && colorsOf(c) > 0) {
+                    zl.add(c);
+                }
+            }
+            zl.sort((a, b) -> a.getId() - b.getId());
+            zl.sort((a, b) -> Integer.compare(colorsOf(b), colorsOf(a))); // stable: most colors first, then id
+            lands.addAll(zl);
+        }
+        int added = 0;
+        for (int r = 1; r <= cfg.relax; r++) {
+            if (forge.game.WorkClock.nanoTime() > relaxDeadline) {
+                out.relaxHow = "budget";
+                return;
+            }
+            // (a) L^(r-1) + one draw
+            final List<Card> unknown = new ArrayList<>();
+            for (Card c : me.getCardsIn(ZoneType.Library)) {
+                if (!known.test(c)) {
+                    unknown.add(c);
+                }
+            }
+            if (!unknown.isEmpty()) {
+                int hits = 0;
+                for (int d = 0; d < cfg.relaxDraws; d++) {
+                    final Card c = unknown.get(rng.nextInt(unknown.size()));
+                    final int at = new ArrayList<>(me.getCardsIn(ZoneType.Library)).indexOf(c);
+                    final Card[] inHand = new Card[1];
+                    quietly(g, () -> inHand[0] = g.getAction().moveTo(ZoneType.Hand, c, null, forge.game.ability.AbilityKey.newMap()));
+                    final forge.ai.simulation.ForcedWinSolver.Screen x = forge.ai.simulation.ForcedWinSolver.withReader(me,
+                            cfg.solverCfg, screenReader).screen(g, top, cfg.screenNodes, cfg.screenMs);
+                    out.relaxScreens++;
+                    if (x.lines > 0) {
+                        hits++;
+                    }
+                    if (inHand[0] != null) {
+                        quietly(g, () -> g.getAction().moveToLibrary(inHand[0], Math.max(0, at), null,
+                                forge.game.ability.AbilityKey.newMap()));
+                    }
+                }
+                if (hits > 0) {
+                    out.relaxR = r;
+                    out.relaxP = hits / (double) cfg.relaxDraws;
+                    out.relaxHow = "L" + (r - 1) + "D1";
+                    return;
+                }
+            }
+            // (b) L^r
+            if (added < lands.size()) {
+                final Card c = lands.get(added++);
+                quietly(g, () -> {
+                    final Card nc = g.getAction().moveToPlay(c, me, null, forge.game.ability.AbilityKey.newMap());
+                    if (nc != null) {
+                        nc.setTapped(false);
+                    }
+                });
+                final forge.ai.simulation.ForcedWinSolver.Screen x = forge.ai.simulation.ForcedWinSolver.withReader(me,
+                        cfg.solverCfg, screenReader).screen(g, top, cfg.screenNodes, cfg.screenMs);
+                out.relaxScreens++;
+                if (x.lines > 0) {
+                    out.relaxR = r;
+                    out.relaxP = 1.0;
+                    out.relaxHow = "L" + r;
+                    return;
+                }
+            }
+        }
+    }
+
+    /** The card ids an option answers with (decline: -1). */
+    private static List<Integer> picksOf(final RlCandidates.Menu m, final Option o) {
+        if (o.steps == null || o.steps.length == 0) {
+            return Collections.singletonList(-1);
+        }
+        final List<Integer> ids = ids(m, o.steps);
+        return ids == null ? Collections.singletonList(-1) : ids;
+    }
+
+    /**
+     * Pass 3 (relax > 0, lineOnly): when no option has a verified line, the relaxed-planning distance of the policy's option
+     * and the best-valued others (relaxTop in all; options whose plain screen saw a line are left out: the check priced
+     * them), within relaxMs. Returns the steps to play instead of {@code greedy}, or null (no relaxed line anywhere, or
+     * the policy's answer is among the closest and valued no lower). Call after {@link #choose}.
+     */
+    public short[] relax(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final RlKnowledge know,
+            final long seed, final Scored s) {
+        if (cfg.relax <= 0 || !cfg.lineOnly || s.unsupported != null || s.options.isEmpty()) {
+            return null;
+        }
+        for (Option o : s.options) {
+            if (pLine(o) > 0) {
+                return null; // a verified line: the line rule decided
+            }
+        }
+        final List<Option> cands = new ArrayList<>();
+        Option own = null;
+        for (Option o : s.options) {
+            if (o.policy) {
+                own = o;
+            }
+        }
+        final List<Option> rest = new ArrayList<>();
+        for (Option o : s.options) {
+            if (o.fail == null && Double.isNaN(o.terminal) && (o.screen == null || o.screen.lines == 0)) {
+                if (o == own) {
+                    cands.add(0, o);
+                } else {
+                    rest.add(o);
+                }
+            }
+        }
+        rest.sort((a, b) -> Double.compare(tieValue(b), tieValue(a)));
+        for (Option o : rest) {
+            if (cands.size() >= cfg.relaxTop) {
+                break;
+            }
+            cands.add(o);
+        }
+        final long t0 = System.nanoTime();
+        final int seat = g.getRegisteredPlayers().indexOf(me);
+        final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
+        relaxMode = true;
+        noCheck = true;
+        relaxDeadline = (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : System.nanoTime()) + cfg.relaxMs * 1_000_000L;
+        try {
+            int at = 0;
+            for (Option o : cands) {
+                if (forge.game.WorkClock.nanoTime() > relaxDeadline) {
+                    break;
+                }
+                curKey = LookaheadSearch.mix(seed, 0x7E1A0000L + at++);
+                final ChoiceApply.Result r = apply(g, me, picksOf(m, o), seed, fr);
+                if (r.screen != null && r.screen.relaxR >= 0) {
+                    if (o.screen == null) {
+                        o.screen = r.screen;
+                    } else {
+                        o.screen.relaxR = r.screen.relaxR;
+                        o.screen.relaxP = r.screen.relaxP;
+                        o.screen.relaxHow = r.screen.relaxHow;
+                        o.screen.relaxScreens = r.screen.relaxScreens;
+                    }
+                }
+                s.relaxed++;
+            }
+        } finally {
+            relaxMode = false;
+            noCheck = false;
+            relaxDeadline = Long.MAX_VALUE;
+            s.relaxNanos = System.nanoTime() - t0;
+        }
+        Option best = null;
+        for (Option o : cands) {
+            final int r = o.screen == null ? -1 : o.screen.relaxR;
+            if (r < 0 || r == Integer.MAX_VALUE) {
+                continue;
+            }
+            if (best == null || r < best.screen.relaxR || r == best.screen.relaxR && tieValue(o) > tieValue(best)) {
+                best = o;
+            }
+        }
+        if (best == null) {
+            return null;
+        }
+        if (own != null && own.screen != null && own.screen.relaxR == best.screen.relaxR && tieValue(own) >= tieValue(best)) {
+            s.chosen = own;
+            return null;
+        }
+        if (best == own) {
+            s.chosen = own;
+            return null;
+        }
+        s.chosen = best;
+        s.relaxDeparted = true;
+        return best.steps;
     }
 
     /** choice-search-1109: the honest win check of an option's position (null = none). */
@@ -1028,6 +1325,13 @@ public final class ChoiceScorer {
                     x.addProperty("win_turn", o.screen.bestTurn);
                     x.addProperty("win_steps", o.screen.bestSteps);
                 }
+                if (o.screen.relaxR >= 0) {
+                    // choice-search-1109 pass 3
+                    x.addProperty("relax_r", o.screen.relaxR == Integer.MAX_VALUE ? -1 : o.screen.relaxR);
+                    if (!Double.isNaN(o.screen.relaxP)) x.addProperty("relax_p", o.screen.relaxP);
+                    if (o.screen.relaxHow != null) x.addProperty("relax_how", o.screen.relaxHow);
+                    x.addProperty("relax_screens", o.screen.relaxScreens);
+                }
                 if (o.screen.check != null) {
                     // choice-search-1109: the honest check of this option's position
                     x.addProperty("check", o.screen.check);
@@ -1046,6 +1350,11 @@ public final class ChoiceScorer {
             r.addProperty("checks", s.checks);
             r.addProperty("proven", s.proven);
             r.addProperty("check_ms", Math.round(s.checkNanos / 1e4) / 100.0);
+        }
+        if (cfg.relax > 0) {
+            r.addProperty("relaxed", s.relaxed);
+            r.addProperty("relax_ms", Math.round(s.relaxNanos / 1e4) / 100.0);
+            r.addProperty("relax_departed", s.relaxDeparted);
         }
         return r;
     }
