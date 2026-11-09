@@ -4201,9 +4201,10 @@ public final class ForcedWinSolver {
          */
         public int active = 3;
         /**
-         * The land-drop relaxation: every land of our unknown library is planned as if in hand (one drop a turn, as
-         * always; the library's size is not changed). A line that plays one of them counts {@link #lambda} of a line
-         * that does not.
+         * The land-drop relaxation: the plan holds one extra land per later turn (one drop a turn, as always; the
+         * library is not changed). That land is the union of the lands of our unknown library: every colour any of
+         * them makes and every land type any of them has, untapped if any enters untapped. A line that plays one counts
+         * {@link #lambda} of a line that does not.
          */
         public boolean lands = true;
         public double lambda = 0.6;
@@ -4269,12 +4270,11 @@ public final class ForcedWinSolver {
             final List<Card> rest = new ArrayList<>(lib.subList(k, lib.size()));
             rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
             final List<Card> grant = new ArrayList<>();
-            if (o.lands) {
-                // at most one land per later turn and name (a turn takes one drop)
-                final java.util.Map<String, Integer> perName = new java.util.HashMap<>();
+            if (o.lands && h > 1) {
+                final java.util.Set<String> names = new java.util.HashSet<>();
                 for (Card c : rest) {
-                    if (c.isLand() && perName.merge(c.getName(), 1, Integer::sum) <= h - 1) {
-                        grant.add(c);
+                    if (c.isLand() && names.add(c.getName())) {
+                        grant.add(c); // one of each land name: the relaxation's land is their union
                     }
                 }
             }
@@ -4301,7 +4301,7 @@ public final class ForcedWinSolver {
                         out.cut = true;
                         break runs;
                     }
-                    final Screen sc = screenSeq(g, top, nexts, grant, o.nodes, o.ms, o.window, Math.min(h, j + w), j,
+                    final Screen sc = screenSeq(g, top, nexts, grant, h - 1, o.nodes, o.ms, o.window, Math.min(h, j + w), j,
                             o.gamma, o.lambda);
                     out.screens++;
                     out.nodes += sc.nodes;
@@ -4348,13 +4348,13 @@ public final class ForcedWinSolver {
 
     /**
      * GOLDFISH's screen: {@link #screenAt} with several hypothetical next cards (drawn in this order after the known top),
-     * granted cards (copies planned as if in hand; the library keeps the real ones), its own horizon and quiet turns,
-     * planned once.
+     * the land-drop relaxation ({@code grants} union lands of {@code grant}, planned as if in hand), its own horizon
+     * and quiet turns, planned once.
      * {@code score} = the best line's gamma^turn, times lambda when it plays a granted card.
      */
     Screen screenSeq(final Game g, final List<Integer> knownTop, final List<Card> nexts, final List<Card> grant,
-            final int nodes, final long ms, final boolean window, final int horizon, final int quiet, final double gamma,
-            final double lambda) {
+            final int grants, final int nodes, final long ms, final boolean window, final int horizon, final int quiet,
+            final double gamma, final double lambda) {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
@@ -4402,10 +4402,34 @@ public final class ForcedWinSolver {
                     }
                 }
             }
-            // granted cards are copies under their own ids: the library (a pile's pool, its size) keeps the real ones
-            int gi = 0;
+            // the land-drop relaxation: `grants` copies, under their own ids and name, of the union of the given lands (the
+            // library, a pile's pool and its size, keeps the real ones)
+            ACard plain = null;
+            int colors = 0;
+            boolean untapped = false;
+            final java.util.Set<String> types = new java.util.LinkedHashSet<>();
             for (Card c : grant) {
-                pos.hand.add(reader.card(g, me, c).instance(GRANT_ID + gi++));
+                final ACard a = reader.card(g, me, c);
+                if (!a.land) {
+                    continue;
+                }
+                colors |= a.sourceColors;
+                untapped |= !a.entersTapped;
+                types.addAll(a.subtypes);
+                if (plain == null || a.onBattlefield.size() < plain.onBattlefield.size()) {
+                    plain = a; // the plainest land carries the copy
+                }
+            }
+            for (int gi = 0; plain != null && gi < grants; gi++) {
+                final ACard wl = plain.instance(GRANT_ID + gi);
+                wl.name = "(land)";
+                wl.sourceColors = colors;
+                wl.entersTapped = !untapped;
+                wl.landLife = 0;
+                wl.sourceSac = false;
+                wl.subtypes.clear();
+                wl.subtypes.addAll(types);
+                pos.hand.add(wl);
             }
             for (Card c : nexts) {
                 for (int i = 0; i < pos.library.size(); i++) {

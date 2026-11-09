@@ -1614,6 +1614,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (cfg.reach != null) {
                     // solver labels of the ROOT position itself, for the seat (its own zones and library multiset; the
                     // opponent's is not screened here: the live game holds its true hand)
+                    final forge.game.WorkClock.Clock clock = forge.game.WorkClock.install(null); // label work is not the pilot's
                     try {
                         final forge.ai.simulation.ForcedWinSolver.Reach rr = reachFull(liveKnow, g, me);
                         if (!rr.failed && !Double.isNaN(rr.p)) {
@@ -1627,6 +1628,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                         }
                     } catch (RuntimeException e) {
                         System.err.println("[rlsearch] value root labels failed: " + e);
+                    } finally {
+                        forge.game.WorkClock.install(clock);
                     }
                 }
                 valueRecs.add(labelRecord(h, payload));
@@ -2944,6 +2947,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
         final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
         o.maxNodes = 4L * o.nodes;
+        o.ms = 10_000L; // node caps only: the caller runs it off the work clock
         return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).goldfish(g, top, o);
     }
 
@@ -2954,8 +2958,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final ReachCfg rc = reachCfg();
         final RlKnowledge k = copyCtx instanceof CopyCtx ? ((CopyCtx) copyCtx).know : null;
-        // {R_me, R_opp, then cost (report only): planner nodes, s0 capped, skipped, per-card screens, per-card capped}
-        final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0};
+        // {R_me, R_opp, then cost (report only): planner nodes, s0 capped, skipped, per-card screens, per-card capped; then
+        // the value sink's leaf row (labels only, never read to decide): goldfish, its turn, 1 = this leaf is a sink row}
+        final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0};
         final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
         out[0] = r.failed ? Double.NaN : r.p;
         addCost(out, r);
@@ -2963,6 +2968,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final forge.ai.simulation.ForcedWinSolver.Reach ro = reachFull(k, g, me.getOpponents().get(0));
             out[1] = ro.failed ? Double.NaN : ro.p;
             addCost(out, ro);
+        }
+        if (cfg.valueSink != null && (out[0] > 0 || out[1] > 0 || leafSeen.getAndIncrement() % LEAF_KEEP == 0)) {
+            // a sink row: every leaf with a reach above 0 (either seat) and one in LEAF_KEEP of the others, with the
+            // seat's goldfish there
+            out[9] = 1;
+            final forge.game.WorkClock.Clock clock = forge.game.WorkClock.install(null); // label work is not the pilot's
+            try {
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gf = goldfishFull(k, g, me);
+                if (!gf.failed && !Double.isNaN(gf.g)) {
+                    out[7] = gf.g;
+                    out[8] = gf.bestTurn;
+                }
+            } catch (RuntimeException e) {
+                // no label
+            } finally {
+                forge.game.WorkClock.install(clock);
+            }
         }
         return out;
     }
@@ -2977,7 +2999,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** The value sink's leaf rows: every leaf with a reach above 0 (either seat), and one in LEAF_KEEP of the others. */
     static final int LEAF_KEEP = 8;
-    private long leafSeen;
+    private final java.util.concurrent.atomic.AtomicLong leafSeen = new java.util.concurrent.atomic.AtomicLong();
     /** The decision being searched (set in decide0), for the leaf rows' headers. */
     private int sinkDecIdx = -1, sinkSeat = -1, sinkTurn = -1;
 
@@ -2987,10 +3009,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return;
         }
         final byte[] payload = (byte[]) payload0;
-        final boolean hit = r[0] > 0 || r.length > 1 && r[1] > 0;
-        if (!hit && leafSeen++ % LEAF_KEEP != 0) {
-            return;
+        if (r.length < 10 || r[9] != 1) {
+            return; // leafReach chose the sink rows (and computed their goldfish)
         }
+        final boolean hit = r[0] > 0 || r[1] > 0;
         final JsonObject h = new JsonObject();
         h.addProperty("kind", "vleaf");
         h.addProperty("game_uid", Long.toUnsignedString(uid));
@@ -3008,8 +3030,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (!Double.isNaN(r[0])) {
             h.addProperty("reach", r[0]);
         }
-        if (r.length > 1 && !Double.isNaN(r[1])) {
+        if (!Double.isNaN(r[1])) {
             h.addProperty("reach_opp", r[1]);
+        }
+        if (!Double.isNaN(r[7])) {
+            h.addProperty("gf", r[7]);
+            h.addProperty("gf_turn", (int) r[8]);
         }
         h.addProperty("w", hit ? 1 : LEAF_KEEP);
         valueRecs.add(labelRecord(h, payload));

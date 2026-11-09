@@ -13,7 +13,7 @@ import forge.game.zone.ZoneType;
 
 /**
  * solver-distill-cc-1109 (GOLDFISH): the planner over several of our turns. The later turns' cards come from the
- * land-drop relaxation (the library's lands planned as if in hand) or from sampled orders of our unknown library. The
+ * land-drop relaxation (one extra land a turn: the union of the library's lands) or from sampled orders of our unknown library. The
  * frames are card facts used as tests only (Thassa's Oracle wins when our library is at most our devotion to blue;
  * Doomsday piles five cards; Gush returns two Islands and draws two).
  */
@@ -107,21 +107,46 @@ public class GoldfishTest extends forge.ai.AITest {
         Assert.assertEquals(sampled.bestTurn, 3);
     }
 
+    /** The rest of a 40-card Doomsday list below a tutored top card (a turn-one tutor: one land in play, five cards in hand). */
+    static final String DECK = "Bayou;Bazaar of Baghdad;Botanical Sanctum;Brain Freeze;Brainstorm;Cabal Ritual;Chromatic Star;"
+            + "Consider;Dark Ritual;Echo of Eons;Gush;Island;Island;Island;Jace, the Mind Sculptor;Jace, Vryn's Prodigy;"
+            + "Library of Alexandria;Liliana of the Veil;Lotus Petal;Marsh Flats;Mishra's Bauble;Mox Emerald;Raffine's Tower;"
+            + "Remand;Spellseeker;Swamp;Swamp;Thassa's Oracle;Tolarian Academy;Troll of Khazad-dûm;Underground Sea;"
+            + "Urborg, Tomb of Yawgmoth";
+
     /**
-     * Three lands short, with one Island: Doomsday on the third turn from now, the kill on the fourth (the second Island
-     * for Gush). The first window (turns 0-2) has no line; the second (a quiet turn, then turns 1-3) finds it.
+     * The tutor menu's question on a real list: with Doomsday on top the relaxed goldfish finds a kill inside the menu's
+     * node allowance; with a land or a creature on top it finds none.
+     */
+    @Test
+    public void tutorTargetOnARealList() {
+        final String hand = "Emry, Lurker of the Loch;Daze;Gitaxian Probe;Kaito Shizuki;Chart a Course";
+        final ForcedWinSolver.GoldfishOpts o = opts(5, 3, true, 0, 1500);
+        o.maxNodes = 3000;
+        final ForcedWinSolver.Goldfish dd = fish("Swamp", hand, "Doomsday;" + DECK, true, o);
+        Assert.assertTrue(dd.g > 0, "Doomsday on top: a relaxed line");
+        Assert.assertFalse(dd.direct);
+        Assert.assertEquals(fish("Swamp", hand, "Tolarian Academy;Doomsday;" + DECK.replace("Tolarian Academy;", ""), true, o).g,
+                0.0, 1e-9, "a land on top: Doomsday is an unknown draw");
+        Assert.assertEquals(fish("Swamp", hand, "Troll of Khazad-dûm;Doomsday;" + DECK.replace("Troll of Khazad-dûm;", ""), true, o).g,
+                0.0, 1e-9);
+    }
+
+    /**
+     * No land in play: with a land drop a turn Doomsday is cast on the third turn from now and the kill is on the fourth.
+     * The first window (turns 0-2) has no line; the second (a quiet turn, then turns 1-3) finds it.
      */
     @Test
     public void quietTurnsThenTheWindow() {
         final String lib = "Doomsday;Gush;Thassa's Oracle;Island;Island;Swamp;Swamp;Swamp;Swamp";
-        final ForcedWinSolver.Goldfish r = fish("Swamp", "", lib, true, opts(5, 3, true, 0, 1500));
+        final ForcedWinSolver.Goldfish r = fish("", "", lib, true, opts(5, 3, true, 0, 1500));
         Assert.assertEquals(r.bestTurn, 3);
         Assert.assertEquals(r.screens, 2);
         Assert.assertEquals(r.g, 0.6 * 0.512, 1e-9);
         // a call cap below one screen's nodes stops after the first screen
         final ForcedWinSolver.GoldfishOpts o = opts(5, 3, true, 0, 1500);
         o.maxNodes = 1;
-        final ForcedWinSolver.Goldfish cut = fish("Swamp", "", lib, true, o);
+        final ForcedWinSolver.Goldfish cut = fish("", "", lib, true, o);
         Assert.assertTrue(cut.cut);
         Assert.assertEquals(cut.screens, 1);
     }
