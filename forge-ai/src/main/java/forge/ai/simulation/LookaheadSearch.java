@@ -1615,6 +1615,13 @@ public final class LookaheadSearch {
             return v;
         }
 
+        /**
+         * solver-distill-cc-1109 (report only; nothing by default): decision thread, one value leaf with its frame, its
+         * value before the reach and its reach, for a sink of (leaf frame, reach) rows.
+         */
+        default void noteLeaf(Object payload, double v, double[] reach) {
+        }
+
         /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
         default String leafError() {
             return null;
@@ -3648,6 +3655,7 @@ public final class LookaheadSearch {
             values[c][w] = rr == null ? p[i] : hooks.combineReach(p[i], rr);
             if (rr != null) {
                 stats.noteReach(rr);
+                hooks.noteLeaf(outs[c][w].leafPayload, p[i], rr);
             }
         }
     }
@@ -3775,6 +3783,7 @@ public final class LookaheadSearch {
             values[c][w] = cfg.leafSym ? (vs + 1.0 - vo) / 2.0 : vs;
             final double[] rr = outs[c][w].leafReach;
             if (rr != null) {
+                hooks.noteLeaf(outs[c][w].leafPayload, values[c][w], rr);
                 values[c][w] = hooks.combineReach(values[c][w], rr);
                 stats.noteReach(rr);
             }

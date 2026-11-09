@@ -1342,6 +1342,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lastForced = false;
         lastForcedMiss = false;
         priorityAsks++;
+        sinkDecIdx = frame.decIdx;
+        sinkSeat = frame.seat;
+        sinkTurn = g.getPhaseHandler().getTurn();
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
             tap("cpu_cap", null, null, 0, VOID);
@@ -1608,6 +1611,24 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 h.addProperty("chosen", r.chosen);
                 h.addProperty("outcome", r.outcome);
                 h.addProperty("leaf_fallback", r.leafFallback);
+                if (cfg.reach != null) {
+                    // solver labels of the ROOT position itself, for the seat (its own zones and library multiset; the
+                    // opponent's is not screened here: the live game holds its true hand)
+                    try {
+                        final forge.ai.simulation.ForcedWinSolver.Reach rr = reachFull(liveKnow, g, me);
+                        if (!rr.failed && !Double.isNaN(rr.p)) {
+                            h.addProperty("reach", rr.p);
+                        }
+                        final forge.ai.simulation.ForcedWinSolver.Goldfish gf = goldfishFull(liveKnow, g, me);
+                        if (!gf.failed && !Double.isNaN(gf.g)) {
+                            h.addProperty("gf", gf.g);
+                            h.addProperty("gf_turn", gf.bestTurn);
+                            h.addProperty("gf_direct", gf.direct);
+                        }
+                    } catch (RuntimeException e) {
+                        System.err.println("[rlsearch] value root labels failed: " + e);
+                    }
+                }
                 valueRecs.add(labelRecord(h, payload));
             } catch (RuntimeException e) {
                 System.err.println("[rlsearch] value root record failed: " + e);
@@ -2905,6 +2926,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).reach(g, top, rc.opts());
     }
 
+    /**
+     * The value sink's goldfish label of a position ({@link forge.ai.simulation.ForcedWinSolver#goldfish}: five turns,
+     * windows of three, the land-drop relaxation; a call cap of four screens' nodes). Labels only: never read to decide.
+     */
+    forge.ai.simulation.ForcedWinSolver.Goldfish goldfishFull(final RlKnowledge k, final Game g, final Player p) {
+        final List<Integer> top = new ArrayList<>();
+        if (k != null) {
+            final int st = k.seatOf(p);
+            for (forge.game.card.Card c : p.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                if (st < 0 || !k.knows(st, c)) {
+                    break;
+                }
+                top.add(c.getId());
+            }
+        }
+        final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+        o.maxNodes = 4L * o.nodes;
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).goldfish(g, top, o);
+    }
+
     @Override
     public double[] leafReach(final Object copyCtx, final Game g, final Player me) {
         if (cfg.reach == null) {
@@ -2931,6 +2973,46 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         out[4] += r.skipped ? 1 : 0;
         out[5] += r.names;
         out[6] += r.nameCapped;
+    }
+
+    /** The value sink's leaf rows: every leaf with a reach above 0 (either seat), and one in LEAF_KEEP of the others. */
+    static final int LEAF_KEEP = 8;
+    private long leafSeen;
+    /** The decision being searched (set in decide0), for the leaf rows' headers. */
+    private int sinkDecIdx = -1, sinkSeat = -1, sinkTurn = -1;
+
+    @Override
+    public void noteLeaf(final Object payload0, final double v, final double[] r) {
+        if (cfg.valueSink == null || !(payload0 instanceof byte[]) || r == null || sinkSeat < 0) {
+            return;
+        }
+        final byte[] payload = (byte[]) payload0;
+        final boolean hit = r[0] > 0 || r.length > 1 && r[1] > 0;
+        if (!hit && leafSeen++ % LEAF_KEEP != 0) {
+            return;
+        }
+        final JsonObject h = new JsonObject();
+        h.addProperty("kind", "vleaf");
+        h.addProperty("game_uid", Long.toUnsignedString(uid));
+        h.addProperty("seed", gameSeed);
+        h.addProperty("seat", sinkSeat);
+        h.addProperty("dec_idx", sinkDecIdx);
+        h.addProperty("turn", sinkTurn);
+        h.addProperty("obs", obsVersion);
+        h.addProperty("policy_sha", servedPolicySha);
+        h.addProperty("jar_sha", jarSha);
+        h.addProperty("actor", actorId);
+        if (!Double.isNaN(v)) {
+            h.addProperty("v", v);
+        }
+        if (!Double.isNaN(r[0])) {
+            h.addProperty("reach", r[0]);
+        }
+        if (r.length > 1 && !Double.isNaN(r[1])) {
+            h.addProperty("reach_opp", r[1]);
+        }
+        h.addProperty("w", hit ? 1 : LEAF_KEEP);
+        valueRecs.add(labelRecord(h, payload));
     }
 
     @Override

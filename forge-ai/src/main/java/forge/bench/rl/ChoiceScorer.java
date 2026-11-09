@@ -354,6 +354,9 @@ public final class ChoiceScorer {
                         final forge.ai.simulation.ForcedWinSolver.Goldfish gf = sol.goldfish(g, top, go);
                         sc.nodes += gf.screens;
                         sc.nanos += gf.nanos;
+                        sc.gfNodes = gf.nodes;
+                        sc.gfScreens = gf.screens;
+                        sc.gfCut = gf.cut;
                         if (!gf.failed && !Double.isNaN(gf.g)) {
                             sc.gf = gf.g;
                             sc.gfTurn = gf.bestTurn;
@@ -966,6 +969,13 @@ public final class ChoiceScorer {
                 if (!Double.isNaN(o.screen.gf)) {
                     x.addProperty("gf", Math.round(o.screen.gf * 1000) / 1000.0);
                     x.addProperty("gf_turn", o.screen.gfTurn);
+                }
+                if (o.screen.gfScreens > 0) {
+                    x.addProperty("gf_nodes", o.screen.gfNodes);
+                    x.addProperty("gf_screens", o.screen.gfScreens);
+                    if (o.screen.gfCut) {
+                        x.addProperty("gf_cut", true);
+                    }
                 }
                 if (!Double.isNaN(o.screen.reach)) {
                     x.addProperty("reach", Math.round(o.screen.reach * 1000) / 1000.0);

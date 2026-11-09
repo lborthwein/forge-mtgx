@@ -4006,6 +4006,10 @@ public final class ForcedWinSolver {
         /** GOLDFISH's screen: the best line's value and whether it plays no granted card. */
         public double score = Double.NaN;
         public boolean scoreDirect;
+        /** GOLDFISH (report only): planner nodes, screens, and whether the call's node cap cut it. */
+        public long gfNodes;
+        public int gfScreens;
+        public boolean gfCut;
     }
 
     /**
