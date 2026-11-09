@@ -38,6 +38,50 @@ import forge.ai.simulation.ForcedWinModel.Position;
  */
 public final class ForcedWinPlanner {
 
+    /**
+     * nearmiss-gen-1109 (read only; nothing decides on it): the card ids a line touches and their role, in step order:
+     * 1 cast (SPELL, CYCLE), 2 activate (ACTIVATE, ENGINE, REPEAT), 3 land (LAND), 4 mana (FLOAT steps and payment
+     * floats), 5 tutor pick, 6 put back. Ids are the copy's, which are the live game's (GameCopier keeps card ids).
+     */
+    public static List<int[]> touched(final Object line) {
+        final List<int[]> out = new ArrayList<>();
+        if (!(line instanceof Line)) {
+            return out;
+        }
+        for (Step s : ((Line) line).steps) {
+            if (s.pass) {
+                continue;
+            }
+            int role = 0;
+            if (s.kind != null) {
+                switch (s.kind) {
+                    case SPELL: case CYCLE: role = 1; break;
+                    case ACTIVATE: case ENGINE: case REPEAT: role = 2; break;
+                    case LAND: role = 3; break;
+                    case FLOAT: role = 4; break;
+                    default: role = 0;
+                }
+            }
+            if (role > 0 && s.hostId >= 0) {
+                out.add(new int[] {s.hostId, role});
+            }
+            if (s.payFloats != null) {
+                for (Step f : s.payFloats) {
+                    if (f.hostId >= 0) {
+                        out.add(new int[] {f.hostId, 4});
+                    }
+                }
+            }
+            for (int id : s.picks) {
+                out.add(new int[] {id, 5});
+            }
+            for (int id : s.putBack) {
+                out.add(new int[] {id, 6});
+            }
+        }
+        return out;
+    }
+
     /** One step of a line, addressable in any game copy by its host card id and ability description. */
     static final class Step {
         final AbilKind kind;

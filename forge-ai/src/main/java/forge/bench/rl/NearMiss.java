@@ -40,6 +40,11 @@ public final class NearMiss {
     public static final int K = Integer.getInteger("forge.bench.label.nearMiss", 0);
     /** The edit seed (registry: nearmiss-gen-1109 offset 2,000 = 747,633,000). */
     public static final long SEED = Long.getLong("forge.bench.label.nearMissSeed", 0L);
+    /**
+     * coordinator 11-09: the share of copies whose edit is aimed (at a position with a line: a card the check's best line
+     * touches; at a loss-check position: the defender's interaction by engine type); the rest are random.
+     */
+    public static final double TARGET_SHARE = Double.parseDouble(System.getProperty("forge.bench.label.nearMissTarget", "0.6"));
     /** Largest life change. */
     public static final int LIFE_MAX = Integer.getInteger("forge.bench.label.nearMissLife", 5);
     /** Worlds of the second check (0 = none): run on rows whose own verdict is fractional (and see W2_LIB). */
@@ -147,9 +152,11 @@ public final class NearMiss {
                         break;
                     }
                     case "land:remove":
+                    case "line:remove":
+                    case "def:land:remove":
                         g.getAction().moveToGraveyard(c, null, AbilityKey.newMap());
                         break;
-                    default: // move:A>B
+                    default: // move:A>B, line:A>B, def:A>B
                         if (to == ZoneType.Library) {
                             g.getAction().moveToLibrary(c, Math.min(libPos, me.getCardsIn(ZoneType.Library).size()), null,
                                     AbilityKey.newMap());
@@ -182,8 +189,119 @@ public final class NearMiss {
 
     /** Choose copy {@code k}'s edit for {@code me} in the live game (read only). Never null: life always applies. */
     public static Edit choose(final Game live, final Player me, final long gameSeed, final int ord, final int k) {
+        return choose(live, me, gameSeed, ord, k, null, null);
+    }
+
+    static final String[] ROLE = {"?", "cast", "activate", "land", "mana", "pick", "putback"};
+
+    /**
+     * As above; with {@code lineCards} (the win check's best line's {card id, role}, {@link
+     * forge.ai.simulation.ForcedWinPlanner#touched}) or {@code check} "loss", a TARGET_SHARE of copies get an aimed
+     * edit: a card the line touches (in hand: to the library at a uniform depth or to the graveyard; on the battlefield:
+     * removed to the graveyard; in the library: to the graveyard; in the graveyard: to the library), or at a loss-check
+     * position the defender's interaction (an instant or flash card in hand: to the library or the graveyard; else an
+     * untapped land removed). Engine types and keywords only; never a card name. The rest are random edits.
+     */
+    public static Edit choose(final Game live, final Player me, final long gameSeed, final int ord, final int k,
+            final String check, final List<int[]> lineCards) {
         final int seat = live.getRegisteredPlayers().indexOf(me);
         final Random r = rng(gameSeed, seat, ord, k);
+        final boolean aim = r.nextDouble() < TARGET_SHARE;
+        if (aim && lineCards != null && !lineCards.isEmpty()) {
+            final Edit e = lineEdit(live, me, seat, r, lineCards);
+            if (e != null) {
+                return e;
+            }
+        } else if (aim && "loss".equals(check)) {
+            final Edit e = defenseEdit(me, seat, r);
+            if (e != null) {
+                return e;
+            }
+        }
+        return randomEdit(live, me, seat, r);
+    }
+
+    static Edit lineEdit(final Game live, final Player me, final int seat, final Random r, final List<int[]> lineCards) {
+        final List<int[]> cands = new ArrayList<>();
+        final java.util.Set<Integer> seen = new java.util.HashSet<>();
+        for (int[] x : lineCards) {
+            final Card c = live.findById(x[0]);
+            if (c == null || !seen.add(x[0]) || c.getZone() == null) {
+                continue;
+            }
+            final ZoneType z = c.getZone().getZoneType();
+            final boolean mine = c.getOwner() == me || c.getController() == me;
+            if (mine && (z == ZoneType.Hand && c.getOwner() == me || z == ZoneType.Battlefield && c.getController() == me
+                    || z == ZoneType.Library && c.getOwner() == me || z == ZoneType.Graveyard && c.getOwner() == me)) {
+                cands.add(x);
+            }
+        }
+        if (cands.isEmpty()) {
+            return null;
+        }
+        final int[] x = cands.get(r.nextInt(cands.size()));
+        final Card c = live.findById(x[0]);
+        final ZoneType z = c.getZone().getZoneType();
+        final String role = x[1] >= 0 && x[1] < ROLE.length ? ROLE[x[1]] : "?";
+        final int libN = me.getCardsIn(ZoneType.Library).size();
+        if (z == ZoneType.Hand) {
+            if (r.nextBoolean()) {
+                final int pos = r.nextInt(libN + 1);
+                return new Edit("line:H>L", seat, c.getId(), ZoneType.Hand, ZoneType.Library, pos, 0, "line:H>L (" + role + ") "
+                        + c.getName() + " (" + c.getId() + ") to library index " + pos + "/" + (libN + 1));
+            }
+            return new Edit("line:H>G", seat, c.getId(), ZoneType.Hand, ZoneType.Graveyard, -1, 0, "line:H>G (" + role + ") "
+                    + c.getName() + " (" + c.getId() + ")");
+        }
+        if (z == ZoneType.Battlefield) {
+            return new Edit("line:remove", seat, c.getId(), ZoneType.Battlefield, ZoneType.Graveyard, -1, 0, "line:remove ("
+                    + role + ") " + c.getName() + " (" + c.getId() + ")");
+        }
+        if (z == ZoneType.Library) {
+            return new Edit("line:L>G", seat, c.getId(), ZoneType.Library, ZoneType.Graveyard, -1, 0, "line:L>G (" + role + ") "
+                    + c.getName() + " (" + c.getId() + ")");
+        }
+        final int pos = r.nextInt(libN + 1);
+        return new Edit("line:G>L", seat, c.getId(), ZoneType.Graveyard, ZoneType.Library, pos, 0, "line:G>L (" + role + ") "
+                + c.getName() + " (" + c.getId() + ") to library index " + pos + "/" + (libN + 1));
+    }
+
+    static boolean interaction(final Card c) {
+        return c.isInstant() || c.hasKeyword(forge.game.keyword.Keyword.FLASH);
+    }
+
+    static Edit defenseEdit(final Player me, final int seat, final Random r) {
+        final List<Card> inter = new ArrayList<>(), lands = new ArrayList<>();
+        for (Card c : me.getCardsIn(ZoneType.Hand)) {
+            if (interaction(c)) {
+                inter.add(c);
+            }
+        }
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isLand() && c.getController() == me && !c.isTapped()) {
+                lands.add(c);
+            }
+        }
+        if (inter.isEmpty() && lands.isEmpty()) {
+            return null;
+        }
+        if (!inter.isEmpty() && (lands.isEmpty() || r.nextBoolean())) {
+            final Card c = inter.get(r.nextInt(inter.size()));
+            if (r.nextBoolean()) {
+                final int libN = me.getCardsIn(ZoneType.Library).size();
+                final int pos = r.nextInt(libN + 1);
+                return new Edit("def:H>L", seat, c.getId(), ZoneType.Hand, ZoneType.Library, pos, 0, "def:H>L " + c.getName()
+                        + " (" + c.getId() + ") to library index " + pos + "/" + (libN + 1));
+            }
+            return new Edit("def:H>G", seat, c.getId(), ZoneType.Hand, ZoneType.Graveyard, -1, 0, "def:H>G " + c.getName() + " ("
+                    + c.getId() + ")");
+        }
+        final Card c = lands.get(r.nextInt(lands.size()));
+        return new Edit("def:land:remove", seat, c.getId(), ZoneType.Battlefield, ZoneType.Graveyard, -1, 0, "def:land:remove "
+                + c.getName() + " (" + c.getId() + ")");
+    }
+
+    static Edit randomEdit(final Game live, final Player me, final int seat, final Random r) {
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         final List<Card> hand = new ArrayList<>(me.getCardsIn(ZoneType.Hand));
         final List<Card> gy = new ArrayList<>(me.getCardsIn(ZoneType.Graveyard));

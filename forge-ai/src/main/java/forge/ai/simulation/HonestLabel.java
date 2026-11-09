@@ -435,6 +435,11 @@ public final class HonestLabel {
         public double pWin = Double.NaN, pLoss = Double.NaN;
         /** Win check: the worlds the best line ran (K when complete). Loss check: the worlds run, and lost. */
         public int worldsWin, worldsLoss, lostWorlds;
+        /**
+         * nearmiss-gen-1109 (Java only, never written to a row): the win check's best line's touched cards, {card id, role}
+         * ({@link ForcedWinPlanner#touched}); null when no line won unopposed.
+         */
+        public List<int[]> lineCards;
         /** Win check: proposals that won unopposed. */
         public int proposals;
         /** The proven line's end: the loser's GameLossReason name, its class, the line's kind and steps. */
@@ -880,6 +885,9 @@ public final class HonestLabel {
                 if (p.proven(spec.worlds) && (proven == null || p.endTurn >= 0 && p.endTurn < proven.endTurn)) {
                     proven = p;
                 }
+            }
+            if (best != null) {
+                r.lineCards = ForcedWinPlanner.touched((proven != null ? proven : best).line); // nearmiss-gen-1109 (read only)
             }
             if (best != null && Boolean.getBoolean("forge.bench.lineText")) {
                 r.lineText = (proven != null ? proven : best).text; // endstep-rows-1103 (diagnostics only)

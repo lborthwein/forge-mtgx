@@ -528,7 +528,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             final Object[] got;
             try {
                 got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
-                    final NearMiss.Edit e = kk == 0 ? null : NearMiss.choose(g, p, gseed, ord, kk);
+                    // coordinator 11-09: a share of copies aimed at the check's own line (win) or the defender's interaction (loss)
+                    final NearMiss.Edit e = kk == 0 ? null : NearMiss.choose(g, p, gseed, ord, kk, r0.check, r0.lineCards);
                     final Game c;
                     final Player pc;
                     synchronized (g) {

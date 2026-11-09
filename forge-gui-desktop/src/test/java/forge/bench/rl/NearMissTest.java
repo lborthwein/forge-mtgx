@@ -132,6 +132,49 @@ public class NearMissTest extends SimulationTest {
     }
 
     @Test
+    public void aimedEditsHitTheLinesCardsOrTheDefendersInteraction() {
+        final Game g = position();
+        final Player me = g.getPlayers().get(0);
+        Card ritual = null, swamp = null, libCard = null;
+        for (Card c : me.getCardsIn(ZoneType.Hand)) {
+            if ("Dark Ritual".equals(c.getName())) ritual = c;
+        }
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if ("Swamp".equals(c.getName())) swamp = c;
+        }
+        libCard = me.getCardsIn(ZoneType.Library).get(3);
+        final java.util.Set<Integer> ids = java.util.Set.of(ritual.getId(), swamp.getId(), libCard.getId());
+        final List<int[]> line = List.of(new int[] {ritual.getId(), 1}, new int[] {swamp.getId(), 4},
+                new int[] {libCard.getId(), 5});
+        int aimed = 0;
+        for (int k = 1; k <= 100; k++) {
+            final NearMiss.Edit e = NearMiss.choose(g, me, 5L, 9, k, "win", line);
+            assertEquals(NearMiss.choose(g, me, 5L, 9, k, "win", line).desc, e.desc, "reproducible");
+            if (!e.kind.startsWith("line:")) {
+                continue;
+            }
+            aimed++;
+            assertTrue(ids.contains(e.cardId), e.desc);
+            final GameCopier copier = new GameCopier(g, true);
+            final Game c = copier.makeCopy();
+            assertNull(e.apply(c), e.desc);
+            assertTrue(c.findById(e.cardId).isInZone(e.to), e.desc);
+        }
+        assertTrue(aimed >= 40 && aimed <= 80, "about 60 % aimed: " + aimed);
+        int def = 0;
+        for (int k = 1; k <= 100; k++) {
+            final NearMiss.Edit e = NearMiss.choose(g, me, 5L, 9, k, "loss", null);
+            if (!e.kind.startsWith("def:")) {
+                continue;
+            }
+            def++;
+            final Card c = g.findById(e.cardId);
+            assertTrue("def:land:remove".equals(e.kind) ? c.isLand() && !c.isTapped() : NearMiss.interaction(c), e.desc);
+        }
+        assertTrue(def >= 40 && def <= 80, "about 60 % aimed at the defender: " + def);
+    }
+
+    @Test
     public void aMissingCardIsReportedAndChangesNothing() {
         final Game g = position();
         final Player me = g.getPlayers().get(0);
