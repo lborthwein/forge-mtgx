@@ -539,6 +539,11 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                         }
                         c = copier.makeCopy();
                         pc = (Player) copier.find(p);
+                        // the copy's priority player as the live game's (GameCopier does not carry it; the frame reads it)
+                        final Player pp = g.getPhaseHandler().getPriorityPlayer();
+                        if (pp != null) {
+                            c.getPhaseHandler().setPriority((Player) copier.find(pp));
+                        }
                     }
                     final String why = e == null ? null : e.apply(c);
                     if (why != null) {
