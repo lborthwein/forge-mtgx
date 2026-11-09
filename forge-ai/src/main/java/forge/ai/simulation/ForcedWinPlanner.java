@@ -551,6 +551,8 @@ public final class ForcedWinPlanner {
     }
 
     private long deadline = Long.MAX_VALUE;
+    /** blockers-1109: passes whose blocker count differs from the pre-fix count (every creature); diagnostic only. */
+    private int blockerDiffs;
 
     Result run() {
         deadline = lim.ms < 0 ? Long.MAX_VALUE : forge.game.WorkClock.nanoTime() + lim.ms * 1_000_000L;
@@ -600,6 +602,11 @@ public final class ForcedWinPlanner {
         result.exhausted |= nodes >= lim.nodes; // kill-line-1106: a stop at the node limit counts as exhausted (report only)
         for (Line l : result.lines) {
             l.knownTop = pos.knownTop.size();
+        }
+        if (blockerDiffs > 0) {
+            // blockers-1109 (ledger row 81): this plan saw a pass where a tapped or can't-block creature no longer blocks
+            System.err.println("FORCED_WIN blockers1109 diffs=" + blockerDiffs + " turn=" + pos.turn + " life=" + pos.life
+                    + " lines=" + result.lines.size());
         }
         return result;
     }
@@ -961,6 +968,9 @@ public final class ForcedWinPlanner {
         final List<S> out = new ArrayList<>();
         if (s.oppLib > 0 && !pos.oppPowers.isEmpty()) {
             final int blockers = blockers(s);
+            if (blockers != s.bf.stream().filter(p -> cards.get(p.card).creature).count()) {
+                blockerDiffs++; // blockers-1109: a pass where the old count (every creature) differs; logged once per plan
+            }
             int damage = 0;
             for (int i = blockers; i < pos.oppPowers.size(); i++) {
                 damage += pos.oppPowers.get(i);
