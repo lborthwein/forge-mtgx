@@ -976,6 +976,25 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return true;
     }
 
+    /** oppturn-1108: solverCfg oppTurn is on. */
+    boolean oppTurn() {
+        return spec.solver && spec.solverCfg.has("oppTurn") && "true".equals(spec.solverCfg.get("oppTurn").getAsString());
+    }
+
+    /**
+     * oppturn-1108 (solverCfg oppTurn): a solver line whose P(belief) the opponent-turn check set is worth at most that P in
+     * the root comparison: each of its play-out values is capped at it (LookaheadSearch#planValueCap). NaN: no cap.
+     */
+    static double lineCap(final Object plan) {
+        if (plan instanceof LinePlan) {
+            final ForcedWinSolver.Proposal pr = ((LinePlan) plan).proposal;
+            if (!Double.isNaN(pr.pTurnBefore)) {
+                return pr.pBelief;
+            }
+        }
+        return Double.NaN;
+    }
+
     /** line-adoption-1107: solverCfg anyWindow is on (the solver proposes at any window of ours). */
     boolean anyWindow() {
         return spec.solver && spec.solverCfg.has("anyWindow") && "true".equals(spec.solverCfg.get("anyWindow").getAsString());
@@ -1125,9 +1144,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     break;
                 }
                 st.plans.add(new LinePlan(pr));
-                st.labels.add("line#" + n + " P=" + Math.round(pr.pBelief * 100) + "% steps=" + pr.steps);
+                st.labels.add("line#" + n + " P=" + Math.round(pr.pBelief * 100) + "% steps=" + pr.steps
+                        + (oppTurn() ? " k=" + pr.winTurn + (Double.isNaN(pr.pTurnBefore) ? "" : " P0="
+                        + Math.round(pr.pTurnBefore * 100) + "%") : "")); // oppturn-1108 (report only)
                 n++;
                 lineCands++;
+            }
+            if (oppTurn()) {
+                rs.ls().planValueCap = PlanSearch::lineCap; // oppturn-1108
             }
             if (spec.lineHorizon) {
                 st.horizonTurn = lineHorizonTurn(g, me, st.plans, rs.horizonTurns());
