@@ -274,6 +274,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /** solver-distill-cc-1109 (REACH; null = off, the default, and then nothing changes): {@link ReachCfg}. */
         public JsonObject reach = null;
         /**
+         * solver-distill-cc-1109 (null = off): per searched decision a lean {@code mtgx-rl-labelsink/1} record of kind
+         * {@code vroot} (the root frame, each searched candidate's mean value, the best mean), appended per game. Set by the
+         * harness, never part of the teacher's spec; it only records. Works with plans (the label sink does not).
+         */
+        public String valueSink = null;
+        /**
          * mull-off (owner 2026-11-06; off by default and then absent from the JSON): this search's seat keeps every opening
          * hand, whatever the policy answers. Generic: no card or deck logic. The policy's answer is logged.
          */
@@ -339,7 +345,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
-                "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach"));
+                "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -394,6 +400,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 c.basicsByType = true;
                 forge.ai.simulation.BeliefSampler.BASICS_BY_TYPE = true; // bugfix-basics: process-wide, same names on a real DB
             }
+            if (o.has("valueSink") && !o.get("valueSink").isJsonNull()) c.valueSink = o.get("valueSink").getAsString();
             if (o.has("reach") && !o.get("reach").isJsonNull()) {
                 c.reach = o.getAsJsonObject("reach");
                 ReachCfg.parse(c.reach); // a bad key fails at parse
@@ -912,6 +919,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private volatile String servedPolicySha;
     /** This game's label records (encoded), written at game end. */
     private final List<byte[]> labelRecs = new ArrayList<>();
+    /** solver-distill-cc-1109: this game's value-sink records (cfg.valueSink). */
+    private final List<byte[]> valueRecs = new ArrayList<>();
     /** The live macro departure whose schedule the seat answers (set by decide, read by scheduledAsk). */
     private LiveMacro liveMacro = null;
     private int labelRoots = 0, labelChoices = 0, labelFailures = 0;
@@ -1565,6 +1574,43 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 hook.searched(g, r, by.size(), (System.nanoTime() - t0) / 1e6 - r.ms);
             } catch (RuntimeException e) {
                 System.err.println("[rlsearch] onSearched failed: " + e);
+            }
+        }
+        if (cfg.valueSink != null && r.givenIndex.length > 0) {
+            try {
+                final JsonObject h = new JsonObject();
+                h.addProperty("kind", "vroot");
+                provenance(h, g, frame, sc.policyVersion);
+                h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+                final JsonArray means = new JsonArray();
+                double best = Double.NaN;
+                for (int j = 0; j < r.values.length; j++) {
+                    double sum = 0;
+                    int n = 0;
+                    for (double v : r.values[j]) {
+                        if (!Double.isNaN(v) && !Double.isInfinite(v)) {
+                            sum += v;
+                            n++;
+                        }
+                    }
+                    final double mu = n == 0 ? Double.NaN : sum / n;
+                    if (Double.isNaN(mu)) {
+                        means.add(com.google.gson.JsonNull.INSTANCE);
+                    } else {
+                        means.add(mu);
+                        best = Double.isNaN(best) ? mu : Math.max(best, mu);
+                    }
+                }
+                h.add("means", means);
+                if (!Double.isNaN(best)) {
+                    h.addProperty("root", best);
+                }
+                h.addProperty("chosen", r.chosen);
+                h.addProperty("outcome", r.outcome);
+                h.addProperty("leaf_fallback", r.leafFallback);
+                valueRecs.add(labelRecord(h, payload));
+            } catch (RuntimeException e) {
+                System.err.println("[rlsearch] value root record failed: " + e);
             }
         }
         if (cfg.labelSink != null && r.givenIndex.length > 0) {
@@ -2634,6 +2680,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * records to {@code cfg.labelSink} as one gzip member (r3-distill-1010).
      */
     public void flushLog() {
+        if (cfg.valueSink != null && !valueRecs.isEmpty()) {
+            final String path = cfg.valueSink.replace("{actor}", actorId == null ? "actor" : actorId)
+                    .replace("{pid}", String.valueOf(ProcessHandle.current().pid()));
+            synchronized (RlSearch.class) {
+                try {
+                    appendGame(path, valueRecs);
+                } catch (IOException e) {
+                    System.err.println("[rlsearch] value sink failed: " + e);
+                }
+            }
+            valueRecs.clear();
+        }
         if (cfg.labelSink != null && !labelRecs.isEmpty()) {
             final String path = cfg.labelSink.replace("{actor}", actorId == null ? "actor" : actorId)
                     .replace("{pid}", String.valueOf(ProcessHandle.current().pid()));
