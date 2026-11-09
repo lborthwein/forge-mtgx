@@ -4430,8 +4430,8 @@ public final class LookaheadSearch {
         int best = 0;
         double bestGain = margin;
         for (int c = 1; c < n; c++) {
-            if (!ok[c] || kc[c] == 0 || !(mean[c] > 0)) {
-                continue;
+            if (!ok[c] || kc[c] == 0 || !ValueTol.pos(mean[c])) {
+                continue; // deadband-1108: a gain within the dead-band is none
             }
             if (z > 0 && k >= 2) {
                 final double s2;
@@ -4446,7 +4446,7 @@ public final class LookaheadSearch {
                     continue;
                 }
             }
-            if (mean[c] > bestGain) {
+            if (ValueTol.gt(mean[c], bestGain)) {
                 best = c;
                 bestGain = mean[c];
             }
@@ -4472,8 +4472,8 @@ public final class LookaheadSearch {
                 stats.departGated++;
                 continue;
             }
-            if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
-                best = c;
+            if (ValueTol.gt(ev[c], ev[best] + (best == 0 ? cfg.margin : 0))) {
+                best = c; // deadband-1108: better by more than the dead-band; within it the lower index stays
             }
         }
         return best;
@@ -4506,12 +4506,12 @@ public final class LookaheadSearch {
             if (cfg.departZ > 0 && ok[c] && !confident(values, c, k, cfg.departZ)) {
                 continue;
             }
-            if (ok[c] && !(medianDiff(values, c, k) > 0)) {
+            if (ok[c] && !ValueTol.pos(medianDiff(values, c, k))) {
                 stats.departMedianGated++;
                 continue;
             }
-            if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
-                best = c;
+            if (ValueTol.gt(ev[c], ev[best] + (best == 0 ? cfg.margin : 0))) {
+                best = c; // deadband-1108: better by more than the dead-band; within it the lower index stays
             }
         }
         return best;
@@ -4537,8 +4537,8 @@ public final class LookaheadSearch {
             sum += values[c][w] - values[0][w];
         }
         final double mean = sum / k;
-        if (!(mean > 0)) {
-            return false;
+        if (!ValueTol.pos(mean)) {
+            return false; // deadband-1108: a mean gain within the dead-band (e.g. every world tied, zero spread) is none
         }
         if (k < 2) {
             return true;
@@ -5286,10 +5286,18 @@ public final class LookaheadSearch {
                 idx.add(i);
             }
         }
-        idx.sort((x, y) -> {
-            final int c = Double.compare(p[y], p[x]);
-            return c != 0 ? c : Integer.compare(x, y);
-        });
+        // deadband-1108: by p, largest first, priors within the dead-band in index order (ValueTol.orderDesc; off = as before)
+        final double[] pv = new double[idx.size()];
+        for (int j = 0; j < pv.length; j++) {
+            pv[j] = p[idx.get(j)];
+        }
+        final int[] po = ValueTol.orderDesc(pv);
+        final List<Integer> byP = new ArrayList<>(po.length);
+        for (int j : po) {
+            byP.add(idx.get(j));
+        }
+        idx.clear();
+        idx.addAll(byP);
         final int m = Math.max(0, Math.min(n, idx.size()));
         final int[] out = new int[m];
         for (int j = 0; j < m; j++) {
@@ -7024,7 +7032,7 @@ public final class LookaheadSearch {
             double ev = ok[c] ? s2 / k : Double.NEGATIVE_INFINITY;
             if (c == 0) {
                 bestEv = ev;
-            } else if (ev > bestEv + cfg.margin) {
+            } else if (ValueTol.gt(ev, bestEv + cfg.margin)) {
                 best = c;
                 bestEv = ev;
             }
@@ -7611,10 +7619,12 @@ public final class LookaheadSearch {
         for (int i = 0; i < order.length; i++) {
             order[i] = i;
         }
-        Arrays.sort(order, (x, y) -> {
-            final int c = Double.compare(sc[y], sc[x]);
-            return c != 0 ? c : Integer.compare(x, y);
-        });
+        {
+            final int[] to = ValueTol.orderDesc(sc); // deadband-1108 (off: by score, ties to the lower index, as before)
+            for (int i = 0; i < order.length; i++) {
+                order[i] = to[i];
+            }
+        }
         final String forgeName = def.getName();
         if (names.get(order[0]).equals(forgeName)) {
             stats.tutorTop1IsForge++;
