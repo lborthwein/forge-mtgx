@@ -644,6 +644,17 @@ public final class HonestLabel {
             final JsonObject o = spec.toJson();
             o.remove("oppMinVersion"); // derived from the cfgs, never a parse key
             o.addProperty("worlds", k);
+            // the win check's evaluation budgets are per decision and every candidate line is evaluated in every world:
+            // with k worlds instead of K, evalSteps and aiWork scale by k / K, so the same lines are evaluated (a check at
+            // 32 worlds on the 8-world budgets ran out before the line the 8-world check found). The engine (line-finding)
+            // budgets stay; the loss check's budgets are per world (one solver per world) and stay.
+            final JsonObject sc = o.getAsJsonObject("solverCfg");
+            for (String key : new String[] {"evalSteps", "aiWork"}) {
+                if (sc != null && sc.has(key) && spec.worlds > 0) {
+                    final long v = Long.parseLong(sc.get(key).getAsString());
+                    sc.addProperty(key, String.valueOf(Math.max(1L, v * k / spec.worlds)));
+                }
+            }
             final Spec s2 = Spec.parse(o);
             s2.sequentialAi = spec.sequentialAi;
             s2.aiTimeoutSec = spec.aiTimeoutSec;
