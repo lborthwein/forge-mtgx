@@ -4003,6 +4003,9 @@ public final class ForcedWinSolver {
         /** solver-distill-cc-1109: the {@link #goldfish} value and its earliest line's turn, when one was planned. */
         public double gf = Double.NaN;
         public int gfTurn = -1;
+        /** GOLDFISH's screen: the best line's value and whether it plays no granted card. */
+        public double score = Double.NaN;
+        public boolean scoreDirect;
     }
 
     /**
@@ -4185,14 +4188,29 @@ public final class ForcedWinSolver {
 
     /** solver-distill-cc-1109 (GOLDFISH): {@link #goldfish}'s knobs. */
     public static final class GoldfishOpts {
-        /** Our turns the planner plans over: this turn and {@code horizon - 1} more. */
-        public int horizon = 4;
-        /** Sampled orders of our unknown library (the cards the later turns draw). */
-        public int samples = 4;
+        /** Our turns the plan may span: this turn and {@code horizon - 1} more. */
+        public int horizon = 5;
+        /**
+         * Turns of one screen in which every move is open; the turns before them are quiet (a land drop and the pass
+         * only). The screens slide this window from now to the horizon's end, earliest first. {@code >= horizon}: one
+         * screen, every turn open.
+         */
+        public int active = 3;
+        /**
+         * The land-drop relaxation: every land of our unknown library is planned as if in hand (one drop a turn, as
+         * always; the library's size is not changed). A line that plays one of them counts {@link #lambda} of a line
+         * that does not.
+         */
+        public boolean lands = true;
+        public double lambda = 0.6;
+        /** Sampled orders of our unknown library as the later turns' draws (0 = none; the relaxation needs none). */
+        public int samples = 0;
         /** Sampled cards past the one per later turn (what this line's own draw spells would find). */
         public int extra = 2;
-        public int nodes = 3000;
-        public long ms = 120;
+        /** Node cap of one screen, and of the whole call (0 = no call cap): past it no further screen starts. */
+        public int nodes = 1500;
+        public long maxNodes = 0;
+        public long ms = 60;
         /** A win k of our turns from now counts {@code gamma^k}. */
         public double gamma = 0.8;
         /** The sampled orders' seed: the options of one menu share it, so they see the same draws. */
@@ -4202,14 +4220,16 @@ public final class ForcedWinSolver {
 
     /** solver-distill-cc-1109 (GOLDFISH): {@link #goldfish}'s result. */
     public static final class Goldfish {
-        /** Mean over the samples of gamma^(the earliest line's turn), 0 for a sample with no line; NaN = not computed. */
+        /** The value: gamma^turn of the best line (times lambda when it plays a granted land), the mean over samples when sampled; NaN = not computed. */
         public double g = Double.NaN;
-        /** Share of samples with a line. */
+        /** Share of samples with a line (1 or 0 when not sampled). */
         public double p;
-        /** The no-new-card screen found a line (no sample was planned). */
+        /** The best line plays no granted land and needs no sampled card. */
         public boolean direct;
+        /** The call's node cap stopped it before every screen ran. */
+        public boolean cut;
         public boolean failed;
-        public int samples, screens, capped, bestTurn = -1;
+        public int samples, screens, capped, bestTurn = -1, granted;
         public long nodes, nanos;
         public String best;
     }
@@ -4217,18 +4237,19 @@ public final class ForcedWinSolver {
     /**
      * solver-distill-cc-1109 (GOLDFISH): how soon the planner wins unopposed over several of our turns, for decisions
      * whose payoff is more than a turn away (a tutor's target, a discard, a put-back). {@link #reach} asks for a line by
-     * our next turn over the one next draw, exactly; this plans {@code horizon} turns and fills the later turns' draws
-     * from sampled orders of the seat's unknown library (its multiset below the known top: honest, the true order is
-     * never read; a card's place in a sample is a hash of the seed and its id, so two copies of a position that differ
-     * by one moved card see the same draws). G = mean over samples of gamma^turn of the earliest line; a line the
-     * no-new-card screen already finds counts for every sample. Optimistic twice over, as a goldfish is: no opponent,
-     * and the planner sees a sample's draws ahead. No card or combo knowledge.
+     * our next turn over the one next draw, exactly; this plans up to {@code horizon} turns, in screens of {@code active}
+     * open turns after quiet ones (the wait for mana, then the turns that decide it). The later turns' cards: the
+     * land-drop relaxation ({@link GoldfishOpts#lands}: a goldfish makes its land drops) or sampled orders of the seat's
+     * unknown library (its multiset below the known top; a card's place in a sample is a hash of the seed and its id,
+     * so two copies of a position that differ by one moved card see the same draws). Honest: the true order of the
+     * library is never read. Optimistic, as a goldfish is: no opponent. No card or combo knowledge.
      */
     public Goldfish goldfish(final Game g, final List<Integer> knownTop, final GoldfishOpts o) {
         final Goldfish out = new Goldfish();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
             final int h = Math.max(1, o.horizon);
+            final int w = Math.max(1, Math.min(h, o.active));
             final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
             int k = knownTop == null ? 0 : knownTop.size();
             if (k > lib.size()) {
@@ -4241,55 +4262,75 @@ public final class ForcedWinSolver {
                 }
             }
             final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
-            final Screen s0 = screenSeq(g, top, List.of(), o.nodes, o.ms, o.window, h);
-            out.screens++;
-            out.nodes += s0.nodes;
-            if (s0.exhausted) {
-                out.capped++;
-            }
-            if (s0.failed) {
-                out.failed = true;
-                return out;
-            }
-            if (s0.lines > 0) {
-                out.direct = true;
-                out.p = 1.0;
-                out.bestTurn = s0.bestTurn;
-                out.best = s0.best;
-                out.g = Math.pow(o.gamma, Math.max(0, s0.bestTurn));
-                return out;
-            }
             final List<Card> rest = new ArrayList<>(lib.subList(k, lib.size()));
-            final int want = Math.min(rest.size(), Math.max(0, h - 1 - k) + Math.max(0, o.extra));
-            if (o.samples <= 0 || want <= 0) {
-                out.g = 0.0;
-                return out;
-            }
-            double sum = 0;
-            int hits = 0;
-            for (int si = 0; si < o.samples; si++) {
-                final long sd = mix(o.seed, 0x51ED270BL + si);
-                final List<Card> order = new ArrayList<>(rest);
-                order.sort(java.util.Comparator.comparingLong((Card c) -> mix(sd, c.getId()))
-                        .thenComparingInt(Card::getId));
-                final Screen sc = screenSeq(g, top, new ArrayList<>(order.subList(0, want)), o.nodes, o.ms, o.window, h);
-                out.screens++;
-                out.samples++;
-                out.nodes += sc.nodes;
-                if (sc.exhausted) {
-                    out.capped++;
-                }
-                if (!sc.failed && sc.lines > 0) {
-                    hits++;
-                    sum += Math.pow(o.gamma, Math.max(0, sc.bestTurn));
-                    if (out.bestTurn < 0 || sc.bestTurn < out.bestTurn) {
-                        out.bestTurn = sc.bestTurn;
-                        out.best = sc.best;
+            rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+            final List<Card> grant = new ArrayList<>();
+            if (o.lands) {
+                // at most one land per later turn and name (a turn takes one drop)
+                final java.util.Map<String, Integer> perName = new java.util.HashMap<>();
+                for (Card c : rest) {
+                    if (c.isLand() && perName.merge(c.getName(), 1, Integer::sum) <= h - 1) {
+                        grant.add(c);
                     }
                 }
             }
-            out.p = hits / (double) o.samples;
-            out.g = sum / o.samples;
+            out.granted = grant.size();
+            final int want = Math.min(rest.size(), Math.max(0, h - 1 - k) + Math.max(0, o.extra));
+            final int runs = o.samples > 0 && want > 0 ? o.samples : 1;
+            double sum = 0;
+            int hits = 0;
+            boolean allDirect = true;
+            runs:
+            for (int si = 0; si < runs; si++) {
+                List<Card> nexts = List.of();
+                if (o.samples > 0 && want > 0) {
+                    final long sd = mix(o.seed, 0x51ED270BL + si);
+                    final List<Card> order = new ArrayList<>(rest);
+                    order.removeAll(grant);
+                    order.sort(java.util.Comparator.comparingLong((Card c) -> mix(sd, c.getId()))
+                            .thenComparingInt(Card::getId));
+                    nexts = new ArrayList<>(order.subList(0, Math.min(order.size(), want)));
+                }
+                double best = 0;
+                for (int j = 0; j + w <= h || j == 0; j++) {
+                    if (o.maxNodes > 0 && out.nodes >= o.maxNodes) {
+                        out.cut = true;
+                        break runs;
+                    }
+                    final Screen sc = screenSeq(g, top, nexts, grant, o.nodes, o.ms, o.window, Math.min(h, j + w), j,
+                            o.gamma, o.lambda);
+                    out.screens++;
+                    out.nodes += sc.nodes;
+                    if (sc.exhausted) {
+                        out.capped++;
+                    }
+                    if (sc.failed) {
+                        out.failed = true;
+                        return out;
+                    }
+                    if (sc.lines > 0) {
+                        best = sc.score;
+                        allDirect &= sc.scoreDirect && nexts.isEmpty();
+                        if (out.bestTurn < 0 || sc.bestTurn < out.bestTurn) {
+                            out.bestTurn = sc.bestTurn;
+                            out.best = sc.best;
+                        }
+                        break; // the earliest window with a line
+                    }
+                }
+                out.samples++;
+                if (best > 0) {
+                    hits++;
+                    sum += best;
+                }
+            }
+            if (out.samples > 0) {
+                out.p = hits / (double) out.samples;
+                out.g = sum / out.samples;
+                out.direct = hits > 0 && allDirect;
+            } else {
+                out.g = 0.0;
+            }
         } catch (RuntimeException | StackOverflowError e) {
             out.failed = true;
         } finally {
@@ -4298,12 +4339,18 @@ public final class ForcedWinSolver {
         return out;
     }
 
+    /** GOLDFISH: the ids of granted copies start here (above any game's card ids). */
+    static final int GRANT_ID = 1_000_000_000;
+
     /**
-     * GOLDFISH's screen: {@link #screenAt} with several hypothetical next cards (drawn in this order after the known top)
-     * and its own horizon, planned once. An empty list is the no-new-card screen at that horizon.
+     * GOLDFISH's screen: {@link #screenAt} with several hypothetical next cards (drawn in this order after the known top),
+     * granted cards (copies planned as if in hand; the library keeps the real ones), its own horizon and quiet turns,
+     * planned once.
+     * {@code score} = the best line's gamma^turn, times lambda when it plays a granted card.
      */
-    Screen screenSeq(final Game g, final List<Integer> knownTop, final List<Card> nexts, final int nodes, final long ms,
-            final boolean window, final int horizon) {
+    Screen screenSeq(final Game g, final List<Integer> knownTop, final List<Card> nexts, final List<Card> grant,
+            final int nodes, final long ms, final boolean window, final int horizon, final int quiet, final double gamma,
+            final double lambda) {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
@@ -4351,9 +4398,14 @@ public final class ForcedWinSolver {
                     }
                 }
             }
-            for (Card next : nexts) {
+            // granted cards are copies under their own ids: the library (a pile's pool, its size) keeps the real ones
+            int gi = 0;
+            for (Card c : grant) {
+                pos.hand.add(reader.card(g, me, c).instance(GRANT_ID + gi++));
+            }
+            for (Card c : nexts) {
                 for (int i = 0; i < pos.library.size(); i++) {
-                    if (pos.library.get(i).id == next.getId()) {
+                    if (pos.library.get(i).id == c.getId()) {
                         pos.library.remove(i);
                         break;
                     }
@@ -4364,12 +4416,21 @@ public final class ForcedWinSolver {
             lim.ms = ms;
             lim.payPolicies = 1;
             lim.horizon = Math.max(1, horizon);
+            lim.quietTurns = Math.max(0, quiet);
             final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
             s.nodes = r.nodes;
             s.exhausted = r.exhausted;
             s.lines = r.lines.size();
+            s.score = 0;
             for (Line l : r.lines) {
-                if (s.bestTurn < 0 || l.winTurn < s.bestTurn || l.winTurn == s.bestTurn && l.steps.size() < s.bestSteps) {
+                boolean relaxed = false;
+                for (ForcedWinPlanner.Step st : l.steps) {
+                    relaxed |= st.hostId >= GRANT_ID;
+                }
+                final double v = Math.pow(gamma, Math.max(0, l.winTurn)) * (relaxed ? lambda : 1.0);
+                if (v > s.score || v == s.score && l.steps.size() < s.bestSteps) {
+                    s.score = v;
+                    s.scoreDirect = !relaxed;
                     s.bestTurn = l.winTurn;
                     s.bestSteps = l.steps.size();
                     s.best = String.valueOf(l);

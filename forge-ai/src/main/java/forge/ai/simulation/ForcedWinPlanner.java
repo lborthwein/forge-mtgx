@@ -329,6 +329,11 @@ public final class ForcedWinPlanner {
         int maxLines = 120;
         /** 1: this turn only; 2: this turn and our next turn. */
         int horizon = 2;
+        /**
+         * solver-distill-cc-1109 (GOLDFISH; 0 = off, nothing changes): on the first quietTurns turns of the plan the only
+         * moves are a land drop and the pass, so a plan of several turns spends its nodes on the turns that decide it.
+         */
+        int quietTurns = 0;
         int classes = 14;
 
         long ms = 1500;
@@ -674,6 +679,7 @@ public final class ForcedWinPlanner {
         final List<S> first = new ArrayList<>(), second = new ArrayList<>(), third = new ArrayList<>();
         final Set<String> tried = new HashSet<>();
         final boolean pending = pos.pendingId >= 0 && s.steps.isEmpty();
+        final boolean quiet = !pending && s.turnIdx < lim.quietTurns; // GOLDFISH: lands and the pass only
         for (int hi = 0; hi < s.hand.size(); hi++) {
             final int h = s.hand.get(hi);
             final ACard a = cards.get(h);
@@ -687,6 +693,9 @@ public final class ForcedWinPlanner {
                 if (pending && ab.kind != AbilKind.SPELL) {
                     continue;
                 }
+                if (quiet && ab.kind != AbilKind.LAND) {
+                    continue;
+                }
                 final String k = a.name + "|" + ab.kind + "|" + ab.costKey + "|" + ab.desc + "|" + ab.targetVariant;
                 if (!tried.add(k) || !pending && !allowed(s, a, ab)) {
                     continue;
@@ -696,7 +705,7 @@ public final class ForcedWinPlanner {
                 into.addAll(apply(s, hi, -1, a, ab));
             }
         }
-        for (int bi = 0; bi < s.bf.size(); bi++) {
+        for (int bi = 0; bi < s.bf.size() && !quiet; bi++) {
             final Perm p = s.bf.get(bi);
             final ACard a = cards.get(p.card);
             for (Abil ab : a.onBattlefield) {

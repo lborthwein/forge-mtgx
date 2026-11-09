@@ -67,9 +67,12 @@ public final class ChoiceScorer {
          * whose reach is below 1 is also planned over gfHorizon of our turns with gfSamples sampled orders of our unknown
          * library ({@link forge.ai.simulation.ForcedWinSolver#goldfish}); the option's reach is the larger of the two.
          */
-        public int gfHorizon = 0, gfSamples = 4, gfNodes = 3000, gfExtra = 2;
-        public long gfMs = 120;
-        public double gfGamma = 0.8;
+        public int gfHorizon = 0, gfSamples = 0, gfNodes = 1500, gfExtra = 2, gfActive = 3;
+        public long gfMs = 60;
+        public double gfGamma = 0.8, gfLambda = 0.6;
+        /** The land-drop relaxation, and one ask's node allowance for its options' goldfish (shared evenly; 0 = none). */
+        public boolean gfLands = true;
+        public long gfAskNodes = 120_000;
         /**
          * solver-distill-cc-1109 (0 = off, the default): a CARDS ask whose resolution asks again (put-backs: Brainstorm and
          * the like; the guard's "multiAnswer") is answered as a whole: every ordered sequence of {@code seqs} distinct
@@ -93,7 +96,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig"));
+                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -135,6 +138,10 @@ public final class ChoiceScorer {
             if (o.has("gfExtra")) c.gfExtra = o.get("gfExtra").getAsInt();
             if (o.has("gfMs")) c.gfMs = o.get("gfMs").getAsLong();
             if (o.has("gfGamma")) c.gfGamma = o.get("gfGamma").getAsDouble();
+            if (o.has("gfActive")) c.gfActive = o.get("gfActive").getAsInt();
+            if (o.has("gfLambda")) c.gfLambda = o.get("gfLambda").getAsDouble();
+            if (o.has("gfLands")) c.gfLands = o.get("gfLands").getAsBoolean();
+            if (o.has("gfAskNodes")) c.gfAskNodes = o.get("gfAskNodes").getAsLong();
             if (o.has("seqs")) c.seqs = o.get("seqs").getAsInt();
             if (o.has("guard")) c.guard = o.get("guard").getAsBoolean();
             if (o.has("pile")) c.pile = o.get("pile").getAsBoolean();
@@ -184,6 +191,10 @@ public final class ChoiceScorer {
                     o.addProperty("gfExtra", gfExtra);
                     o.addProperty("gfMs", gfMs);
                     o.addProperty("gfGamma", gfGamma);
+                    o.addProperty("gfActive", gfActive);
+                    o.addProperty("gfLambda", gfLambda);
+                    o.addProperty("gfLands", gfLands);
+                    o.addProperty("gfAskNodes", gfAskNodes);
                 }
             }
             if (seqs > 0) {
@@ -334,6 +345,10 @@ public final class ChoiceScorer {
                         go.extra = cfg.gfExtra;
                         go.ms = cfg.gfMs;
                         go.gamma = cfg.gfGamma;
+                        go.active = cfg.gfActive;
+                        go.lambda = cfg.gfLambda;
+                        go.lands = cfg.gfLands;
+                        go.maxNodes = cfg.gfAskNodes <= 0 ? 0 : Math.max(cfg.gfNodes, cfg.gfAskNodes / Math.max(1, s.menuOptions));
                         go.seed = uid * 0x9E3779B97F4A7C15L + g.getPhaseHandler().getTurn() * 64L
                                 + g.getPhaseHandler().getPhase().ordinal();
                         final forge.ai.simulation.ForcedWinSolver.Goldfish gf = sol.goldfish(g, top, go);
