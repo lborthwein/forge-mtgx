@@ -312,9 +312,15 @@ public final class ChoiceScorer {
                 }
                 final forge.ai.simulation.ForcedWinSolver.Screen sc = forge.ai.simulation.ForcedWinSolver.withReader(me,
                         cfg.solverCfg, screenReader).screen(g, top, cfg.screenNodes, cfg.screenMs);
-                if (relaxMode && sc != null && sc.lines == 0 && !sc.failed) {
-                    // choice-search-1109 pass 3: the relaxed-planning distance of this (throwaway) leaf copy
-                    relaxDistance(g, me, k, st, top, sc);
+                if (cfg.relax > 0 && !noCheck && sc != null && sc.lines == 0 && !sc.failed) {
+                    // choice-search-1109 pass 3, inline: the relaxed-planning distance of this (throwaway) leaf copy, up to the
+                    // best distance found so far in this ask (a farther option cannot win), within the pass's budget
+                    if (forge.game.WorkClock.nanoTime() <= relaxDeadline) {
+                        relaxDistance(g, me, c -> k.knows(st, c), top, sc, Math.min(cfg.relax, relaxBest));
+                        if (sc.relaxR >= 0 && sc.relaxR != Integer.MAX_VALUE) {
+                            relaxBest = Math.min(relaxBest, sc.relaxR);
+                        }
+                    }
                     return sc;
                 }
                 if (sc != null && sc.lines > 0 && checker != null && !noCheck && s.checks < cfg.checkTop && !s.proven) {
@@ -348,6 +354,8 @@ public final class ChoiceScorer {
     /** True while the relax pass re-applies options (their leaf screens compute the distance, no check). */
     private boolean relaxMode = false;
     private long relaxDeadline = Long.MAX_VALUE;
+    /** The fewest relaxations an option of this ask needed so far (later options are searched no deeper). */
+    private int relaxBest = Integer.MAX_VALUE;
 
     /** The trigger kinds silenced while a relaxation moves a card (as the near-miss edits do). */
     private static final forge.game.trigger.TriggerType[] QUIET = {forge.game.trigger.TriggerType.ChangesZone,
@@ -398,10 +406,6 @@ public final class ChoiceScorer {
      * entering untapped. The first R whose screen finds a line is the distance; the share of draw samples with a line is
      * its p (1 for a land-only relaxation). No card names: zones, types and mana abilities only.
      */
-    private void relaxDistance(final Game g, final Player me, final RlKnowledge k, final int st, final List<Integer> top,
-            final forge.ai.simulation.ForcedWinSolver.Screen out) {
-        relaxDistance(g, me, c -> k.knows(st, c), top, out);
-    }
 
     /**
      * Tests only: the relaxed-planning distance of {@code g}'s position for {@code me} under {@code cfg} (its solverCfg set),
@@ -414,12 +418,12 @@ public final class ChoiceScorer {
         sc.relaxDeadline = Long.MAX_VALUE;
         sc.screenReader = forge.ai.simulation.ForcedWinSolver.newSharedReader();
         final forge.ai.simulation.ForcedWinSolver.Screen out = new forge.ai.simulation.ForcedWinSolver.Screen();
-        sc.relaxDistance(g, me, known, new ArrayList<>(), out);
+        sc.relaxDistance(g, me, known, new ArrayList<>(), out, cfg.relax);
         return out;
     }
 
     private void relaxDistance(final Game g, final Player me, final java.util.function.Predicate<Card> known,
-            final List<Integer> top, final forge.ai.simulation.ForcedWinSolver.Screen out) {
+            final List<Integer> top, final forge.ai.simulation.ForcedWinSolver.Screen out, final int maxR) {
         out.relaxR = Integer.MAX_VALUE;
         out.relaxScreens = 0;
         final Random rng = new Random(LookaheadSearch.mix(curKey, 0x7E1AL));
@@ -436,7 +440,7 @@ public final class ChoiceScorer {
             lands.addAll(zl);
         }
         int added = 0;
-        for (int r = 1; r <= cfg.relax; r++) {
+        for (int r = 1; r <= maxR; r++) {
             if (forge.game.WorkClock.nanoTime() > relaxDeadline) {
                 out.relaxHow = "budget";
                 return;
@@ -520,80 +524,27 @@ public final class ChoiceScorer {
                 return null; // a verified line: the line rule decided
             }
         }
-        final List<Option> cands = new ArrayList<>();
-        Option own = null;
+        Option own = null, best = null;
         for (Option o : s.options) {
             if (o.policy) {
                 own = o;
             }
-        }
-        final List<Option> rest = new ArrayList<>();
-        for (Option o : s.options) {
-            if (o.fail == null && Double.isNaN(o.terminal) && (o.screen == null || o.screen.lines == 0)) {
-                if (o == own) {
-                    cands.add(0, o);
-                } else {
-                    rest.add(o);
+            final int r = o.fail != null || o.screen == null ? -1 : o.screen.relaxR;
+            if (r >= 0 && r != Integer.MAX_VALUE) {
+                s.relaxed++;
+                if (best == null || r < best.screen.relaxR || r == best.screen.relaxR && tieValue(o) > tieValue(best)) {
+                    best = o;
                 }
-            }
-        }
-        rest.sort((a, b) -> Double.compare(tieValue(b), tieValue(a)));
-        for (Option o : rest) {
-            if (cands.size() >= cfg.relaxTop) {
-                break;
-            }
-            cands.add(o);
-        }
-        final long t0 = System.nanoTime();
-        final int seat = g.getRegisteredPlayers().indexOf(me);
-        final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
-        relaxMode = true;
-        noCheck = true;
-        relaxDeadline = (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : System.nanoTime()) + cfg.relaxMs * 1_000_000L;
-        try {
-            int at = 0;
-            for (Option o : cands) {
-                if (forge.game.WorkClock.nanoTime() > relaxDeadline) {
-                    break;
-                }
-                curKey = LookaheadSearch.mix(seed, 0x7E1A0000L + at++);
-                final ChoiceApply.Result r = apply(g, me, picksOf(m, o), seed, fr);
-                if (r.screen != null && r.screen.relaxR >= 0) {
-                    if (o.screen == null) {
-                        o.screen = r.screen;
-                    } else {
-                        o.screen.relaxR = r.screen.relaxR;
-                        o.screen.relaxP = r.screen.relaxP;
-                        o.screen.relaxHow = r.screen.relaxHow;
-                        o.screen.relaxScreens = r.screen.relaxScreens;
-                    }
-                }
+            } else if (r == Integer.MAX_VALUE) {
                 s.relaxed++;
             }
-        } finally {
-            relaxMode = false;
-            noCheck = false;
-            relaxDeadline = Long.MAX_VALUE;
-            s.relaxNanos = System.nanoTime() - t0;
         }
-        Option best = null;
-        for (Option o : cands) {
-            final int r = o.screen == null ? -1 : o.screen.relaxR;
-            if (r < 0 || r == Integer.MAX_VALUE) {
-                continue;
-            }
-            if (best == null || r < best.screen.relaxR || r == best.screen.relaxR && tieValue(o) > tieValue(best)) {
-                best = o;
-            }
-        }
-        if (best == null) {
-            return null;
-        }
-        if (own != null && own.screen != null && own.screen.relaxR == best.screen.relaxR && tieValue(own) >= tieValue(best)) {
+        if (best == null || best == own) {
             s.chosen = own;
             return null;
         }
-        if (best == own) {
+        if (own != null && own.fail == null && own.screen != null && own.screen.relaxR == best.screen.relaxR
+                && tieValue(own) >= tieValue(best)) {
             s.chosen = own;
             return null;
         }
@@ -761,7 +712,12 @@ public final class ChoiceScorer {
             final RlKnowledge know, final long seed, final SpellAbility askSa) {
         final Scored s = new Scored();
         final long t0 = System.nanoTime();
-        screenReader = null; // one reader per ask: its probes are of this position's copies
+        if (cfg.relax <= 0) {
+            screenReader = null; // one reader per ask: its probes are of this position's copies
+        } // choice-search-1109 pass 3: with relax, one reader per game (the solver's readerPerGame; affordances by card)
+        relaxBest = Integer.MAX_VALUE;
+        relaxDeadline = cfg.relax > 0 ? (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : System.nanoTime())
+                + (cfg.budgetMs > 0 ? cfg.budgetMs : 0) * 1_000_000L + cfg.relaxMs * 1_000_000L : Long.MAX_VALUE;
         // choice-search-1109: an ask from a sub-ability is replayed from that sub-ability (0 = the root, as before)
         cleanupMode = false;
         costMode = cfg.lineOnly && m.family == RlSchema.F_COST_CARDS;
