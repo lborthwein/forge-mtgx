@@ -30,6 +30,50 @@ public class ReachTest extends forge.ai.AITest {
         return r.p;
     }
 
+    /** The knobs' variant of {@link #reach}: the same frame, with {@code o}. */
+    private static ForcedWinSolver.Reach reachWith(final String library, final ForcedWinSolver.ReachOpts o) {
+        final String frame = ForcedWinSolverTest.frame("", "Island;Island", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + library);
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+        final ForcedWinSolver.Reach r = s.reach(g, s.knownTop(g), o);
+        Assert.assertFalse(r.failed, library);
+        return r;
+    }
+
+    private static ForcedWinSolver.ReachOpts opts(final boolean onePass, final boolean sig, final int nameNodes) {
+        final ForcedWinSolver.ReachOpts o = new ForcedWinSolver.ReachOpts();
+        o.nodes = 4000;
+        o.ms = -1L;
+        o.maxNames = 40;
+        o.window = true;
+        o.nameOnePass = onePass;
+        o.sig = sig;
+        o.nameNodes = nameNodes;
+        return o;
+    }
+
+    /**
+     * The cost knobs keep reach on these frames (three cards: after next turn's draw two are left, devotion 2 wins); sig
+     * screens two vanilla bears once and sums their counts.
+     */
+    @Test
+    public void knobsKeepReach() {
+        final String lib = "Thassa's Oracle;Grizzly Bears;Balduvian Bears";
+        final ForcedWinSolver.Reach base = reachWith(lib, opts(false, false, -1));
+        Assert.assertEquals(base.p, 1 / 3.0, 1e-9);
+        Assert.assertEquals(base.names, 3);
+        Assert.assertTrue(base.nodes > 0);
+        Assert.assertEquals(reachWith(lib, opts(true, false, -1)).p, 1 / 3.0, 1e-9, "one pass");
+        final ForcedWinSolver.Reach sig = reachWith(lib, opts(true, true, 1000));
+        Assert.assertEquals(sig.p, 1 / 3.0, 1e-9, "sig");
+        Assert.assertEquals(sig.groups, 2, "bears share a screen");
+        Assert.assertEquals(reachWith("Grizzly Bears;Thassa's Oracle;Thassa's Oracle", opts(true, true, 1000)).p, 2 / 3.0,
+                1e-9, "counts");
+        Assert.assertEquals(reachWith("Grizzly Bears;Balduvian Bears;Island", opts(true, true, 1000)).p, 0.0, 1e-9);
+    }
+
     @Test
     public void reachIsTheShareOfWinningDraws() {
         Assert.assertEquals(reach("Island;Island"), 0.0, 1e-9);
