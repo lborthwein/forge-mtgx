@@ -4060,6 +4060,8 @@ public final class ForcedWinSolver {
     public static final class Reach {
         /** P(the planner finds an unopposed line by our next turn), over our next unknown draw; NaN = not computed. */
         public double p = Double.NaN;
+        /** {@link #p} with each line counted gamma^(its turn: 0 = this turn, 1 = our next turn); = p when gamma is 1. */
+        public double pd = Double.NaN;
         /** A line with no new card (the plain {@link #screen} found one). */
         public boolean direct;
         public boolean failed;
@@ -4089,6 +4091,8 @@ public final class ForcedWinSolver {
         public boolean nameOnePass;
         /** The no-new-card screen hit its node cap with no line: reach 0, no per-card screens (they would hit it too). */
         public boolean skipCapped;
+        /** A line that wins k turns from now counts gamma^k in {@link Reach#pd} (1 = no discount). */
+        public double gamma = 1.0;
         /**
          * Names whose planner model is identical (every observed field but id, name and notes) share one screen, their
          * counts summed. A name is kept apart when a card of ours already in the position has it, or a tutor's observed
@@ -4131,12 +4135,14 @@ public final class ForcedWinSolver {
             }
             if (s0.lines > 0) {
                 out.p = 1.0;
+                out.pd = Math.pow(o.gamma, Math.max(0, s0.bestTurn));
                 out.direct = true;
                 return out;
             }
             out.s0Capped = s0.exhausted;
             if (o.skipCapped && s0.exhausted) {
                 out.p = 0.0;
+                out.pd = 0.0;
                 out.skipped = true;
                 return out;
             }
@@ -4158,6 +4164,7 @@ public final class ForcedWinSolver {
             out.unknown = lib.size() - k;
             if (out.unknown <= 0) {
                 out.p = 0.0;
+                out.pd = 0.0;
                 return out;
             }
             List<List<Card>> groups = new ArrayList<>(byName.values());
@@ -4165,7 +4172,7 @@ public final class ForcedWinSolver {
                 groups = sigGroups(g, groups, lib.subList(0, k));
             }
             groups.sort((a, b) -> Integer.compare(b.size(), a.size()));
-            double p = 0;
+            double p = 0, pd = 0;
             final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
             for (int i = 0; i < groups.size() && i < o.maxNames; i++) {
                 final List<Card> grp = groups.get(i);
@@ -4179,9 +4186,11 @@ public final class ForcedWinSolver {
                 }
                 if (!s.failed && s.lines > 0) {
                     p += grp.size() / (double) out.unknown;
+                    pd += grp.size() / (double) out.unknown * Math.pow(o.gamma, Math.max(0, s.bestTurn));
                 }
             }
             out.p = Math.min(1.0, p);
+            out.pd = Math.min(1.0, pd);
         } catch (RuntimeException | StackOverflowError e) {
             out.failed = true;
         } finally {
@@ -4341,6 +4350,85 @@ public final class ForcedWinSolver {
             out.nanos = forge.game.WorkClock.nanoTime() - t0;
         }
         return out;
+    }
+
+    /**
+     * solver-distill-cc-1109 (the reach gate): does this seat have ANY line within the goldfish's horizon, with its land
+     * drops, either as it stands or with one card of its unknown library as the next draw? One goldfish with no new
+     * card, then one per name (most copies first; names of one planner model share a screen with {@code sig}), each over
+     * the same windows, until the first line or {@code maxNodes}. False = no single card makes a line: a search from here
+     * skips the seat's own reach at its leaves. Never throws; a failed read counts as potential (the gate stays open).
+     */
+    public boolean potential(final Game g, final List<Integer> knownTop, final GoldfishOpts o, final int maxNames,
+            final boolean sig, final long maxNodes) {
+        try {
+            final GoldfishOpts b = new GoldfishOpts();
+            b.horizon = o.horizon;
+            b.active = o.active;
+            b.lands = o.lands;
+            b.lambda = o.lambda;
+            b.samples = 0;
+            b.nodes = o.nodes;
+            b.ms = o.ms;
+            b.gamma = o.gamma;
+            b.window = o.window;
+            b.maxNodes = maxNodes;
+            final Goldfish blank = goldfish(g, knownTop, b);
+            if (blank.failed || blank.g > 0) {
+                return true;
+            }
+            long nodes = blank.nodes;
+            final int h = Math.max(1, o.horizon);
+            final int w = Math.max(1, Math.min(h, o.active));
+            final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+            int k = knownTop == null ? 0 : knownTop.size();
+            if (k > lib.size()) {
+                k = 0;
+            }
+            for (int i = 0; i < k; i++) {
+                if (lib.get(i).getId() != knownTop.get(i)) {
+                    k = 0;
+                    break;
+                }
+            }
+            final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
+            final List<Card> rest = new ArrayList<>(lib.subList(k, lib.size()));
+            rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+            final List<Card> grant = new ArrayList<>();
+            final java.util.LinkedHashMap<String, List<Card>> byName = new java.util.LinkedHashMap<>();
+            final java.util.Set<String> lands = new java.util.HashSet<>();
+            for (Card c : rest) {
+                byName.computeIfAbsent(c.getName(), x -> new ArrayList<>()).add(c);
+                if (o.lands && h > 1 && c.isLand() && lands.add(c.getName())) {
+                    grant.add(c);
+                }
+            }
+            List<List<Card>> groups = new ArrayList<>(byName.values());
+            if (sig) {
+                groups = sigGroups(g, groups, lib.subList(0, k));
+            }
+            groups.sort((a, c) -> Integer.compare(c.size(), a.size()));
+            for (int i = 0; i < groups.size() && i < maxNames; i++) {
+                final Card next = groups.get(i).get(0);
+                if (next.isLand() && o.lands) {
+                    continue; // the relaxation already plays a land a turn
+                }
+                for (int j = 0; j + w <= h || j == 0; j++) {
+                    if (maxNodes > 0 && nodes >= maxNodes) {
+                        return true; // out of allowance before every name was planned: the gate stays open
+                    }
+                    final Screen sc = screenSeq(g, top, List.of(next), grant, h - 1, o.nodes, o.ms, o.window, Math.min(h, j + w), j,
+                            o.gamma, o.lambda);
+                    nodes += sc.nodes;
+                    if (sc.failed || sc.lines > 0) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } catch (RuntimeException | StackOverflowError e) {
+            return true;
+        }
     }
 
     /** GOLDFISH: the ids of granted copies start here (above any game's card ids). */

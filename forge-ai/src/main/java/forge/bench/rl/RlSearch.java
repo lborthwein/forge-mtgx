@@ -1345,6 +1345,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         sinkDecIdx = frame.decIdx;
         sinkSeat = frame.seat;
         sinkTurn = g.getPhaseHandler().getTurn();
+        if (cfg.reach != null) {
+            try {
+                reachGate(g, me);
+            } catch (RuntimeException e) {
+                reachOn = true;
+            }
+        }
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
             tap("cpu_cap", null, null, 0, VOID);
@@ -1656,6 +1663,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("C", c);
             row.addProperty("entries", by.size());
             row.addProperty("v_root", sc.valueObs);
+            if (cfg.reach != null && reachCfg().gate) {
+                row.addProperty("reach_on", reachOn);
+            }
             final JsonArray pr = new JsonArray();
             final JsonArray ix = new JsonArray();
             final JsonArray ev = new JsonArray();
@@ -2854,8 +2864,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /** Cost knobs ({@link forge.ai.simulation.ForcedWinSolver.ReachOpts}; defaults = the first REACH build). */
         public int nameNodes = -1;
         public boolean nameOnePass, skipCapped, sig;
+        /**
+         * The gate (false = off): a decision whose root shows no potential for the seat
+         * ({@link forge.ai.simulation.ForcedWinSolver#potential}: no line within five turns as it stands or with any one
+         * library card next) skips the seat's own reach at its leaves; once a game's root shows potential the gate stays
+         * open. A deck with no combo then pays (almost) nothing for the reach.
+         */
+        public boolean gate;
+        /** The opponent's reach at a leaf is its no-new-card line only (one screen, not one per name). */
+        public boolean oppDirect;
+        /** A line k turns from the leaf counts gamma^k (1 = off): a line now outranks the same line a turn later. */
+        public double gamma = 1.0;
+        /**
+         * The departure rule for reach (0 = off): a candidate whose reach part (alpha x reach) is never below the default's
+         * in a world both finished, and above it by this much on average, needs no z test to replace the default. A line
+         * the planner found in a world is a fact about that world, not a noisy estimate.
+         */
+        public double depart = 0.0;
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
-                "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig"));
+                "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart"));
 
         public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
             final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
@@ -2867,6 +2894,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.nameOnePass = nameOnePass;
             o.skipCapped = skipCapped;
             o.sig = sig;
+            o.gamma = gamma;
             return o;
         }
 
@@ -2886,6 +2914,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("nameOnePass")) c.nameOnePass = o.get("nameOnePass").getAsBoolean();
             if (o.has("skipCapped")) c.skipCapped = o.get("skipCapped").getAsBoolean();
             if (o.has("sig")) c.sig = o.get("sig").getAsBoolean();
+            if (o.has("gate")) c.gate = o.get("gate").getAsBoolean();
+            if (o.has("oppDirect")) c.oppDirect = o.get("oppDirect").getAsBoolean();
+            if (o.has("gamma")) c.gamma = o.get("gamma").getAsDouble();
+            if (o.has("depart")) c.depart = o.get("depart").getAsDouble();
             return c;
         }
     }
@@ -2910,6 +2942,74 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     double reachOf(final RlKnowledge k, final Game g, final Player p) {
         final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, p);
         return r.failed ? Double.NaN : r.p;
+    }
+
+    /** The seat's known library top (top first), by its knowledge. */
+    private static List<Integer> knownTopOf(final RlKnowledge k, final Player p) {
+        final List<Integer> top = new ArrayList<>();
+        if (k != null) {
+            final int st = k.seatOf(p);
+            for (forge.game.card.Card c : p.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                if (st < 0 || !k.knows(st, c)) {
+                    break;
+                }
+                top.add(c.getId());
+            }
+        }
+        return top;
+    }
+
+    /** The opponent's reach at a leaf: {@link #reachFull}, or with oppDirect its no-new-card line only. */
+    private forge.ai.simulation.ForcedWinSolver.Reach reachOpp(final RlKnowledge k, final Game g, final Player opp, final ReachCfg rc) {
+        if (!rc.oppDirect) {
+            return reachFull(k, g, opp);
+        }
+        final forge.ai.simulation.ForcedWinSolver.ReachOpts o = rc.opts();
+        o.maxNames = 0;
+        final Object reader = reachReaders.computeIfAbsent(opp.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        return forge.ai.simulation.ForcedWinSolver.withReader(opp, reachSolverCfg, reader).reach(g, knownTopOf(k, opp), o);
+    }
+
+    /** The gate: this decision's own reach is on; the game has shown potential; the root state the last check read. */
+    private volatile boolean reachOn = true;
+    private boolean reachSeen;
+    private long reachGateKey = Long.MIN_VALUE;
+    public int reachGateChecks, reachGateOff;
+
+    /** {@link ReachCfg#gate}: read the root's potential (once per change of the seat's zones) and set this decision's gate. */
+    private void reachGate(final Game g, final Player me) {
+        final ReachCfg rc = reachCfg();
+        if (!rc.gate) {
+            reachOn = true;
+            return;
+        }
+        if (!reachSeen) {
+            final long key = g.getPhaseHandler().getTurn() * 1_000_003L + me.getCardsIn(forge.game.zone.ZoneType.Hand).size() * 10_007L
+                    + me.getCardsIn(forge.game.zone.ZoneType.Library).size() * 101L + me.getCardsIn(forge.game.zone.ZoneType.Battlefield).size() * 7L
+                    + me.getCardsIn(forge.game.zone.ZoneType.Graveyard).size();
+            if (key != reachGateKey) {
+                reachGateKey = key;
+                reachGateChecks++;
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                reachSeen = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader)
+                        .potential(g, knownTopOf(liveKnow, me), o, rc.maxNames, rc.sig, 40_000L);
+            }
+        }
+        reachOn = reachSeen;
+        if (!reachOn) {
+            reachGateOff++;
+        }
+    }
+
+    @Override
+    public double reachPart(final double[] r) {
+        return cfg.reach == null || r == null || Double.isNaN(r[0]) ? 0.0 : reachCfg().alpha * r[0];
+    }
+
+    @Override
+    public double reachDepart() {
+        return cfg.reach == null ? 0.0 : reachCfg().depart;
     }
 
     /** {@link #reachOf}'s full result (with its cost counters). */
@@ -2961,11 +3061,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         // {R_me, R_opp, then cost (report only): planner nodes, s0 capped, skipped, per-card screens, per-card capped; then
         // the value sink's leaf row (labels only, never read to decide): goldfish, its turn, 1 = this leaf is a sink row}
         final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0};
-        final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
-        out[0] = r.failed ? Double.NaN : r.p;
-        addCost(out, r);
+        if (rc.gate && !reachOn) {
+            out[0] = 0.0; // the root showed no potential: no screens for the seat at this decision's leaves
+        } else {
+            final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
+            out[0] = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
+            addCost(out, r);
+        }
         if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
-            final forge.ai.simulation.ForcedWinSolver.Reach ro = reachFull(k, g, me.getOpponents().get(0));
+            final forge.ai.simulation.ForcedWinSolver.Reach ro = reachOpp(k, g, me.getOpponents().get(0), rc);
             out[1] = ro.failed ? Double.NaN : ro.p;
             addCost(out, ro);
         }

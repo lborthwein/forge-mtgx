@@ -74,6 +74,19 @@ public class ReachTest extends forge.ai.AITest {
         Assert.assertEquals(reachWith("Grizzly Bears;Balduvian Bears;Island", opts(true, true, 1000)).p, 0.0, 1e-9);
     }
 
+    /** A line on our next turn counts gamma in the discounted reach; with gamma 1 it is the reach. */
+    @Test
+    public void discountByTheLinesTurn() {
+        final ForcedWinSolver.ReachOpts o = opts(true, false, -1);
+        final ForcedWinSolver.Reach plain = reachWith("Thassa's Oracle;Island", o);
+        Assert.assertEquals(plain.p, 0.5, 1e-9);
+        Assert.assertEquals(plain.pd, 0.5, 1e-9);
+        o.gamma = 0.5;
+        final ForcedWinSolver.Reach disc = reachWith("Thassa's Oracle;Island", o);
+        Assert.assertEquals(disc.p, 0.5, 1e-9);
+        Assert.assertEquals(disc.pd, 0.25, 1e-9, "the Oracle is cast on our next turn");
+    }
+
     @Test
     public void reachIsTheShareOfWinningDraws() {
         Assert.assertEquals(reach("Island;Island"), 0.0, 1e-9);

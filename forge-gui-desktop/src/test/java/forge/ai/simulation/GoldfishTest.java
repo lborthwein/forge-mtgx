@@ -132,6 +132,27 @@ public class GoldfishTest extends forge.ai.AITest {
                 0.0, 1e-9);
     }
 
+    private static boolean potential(final String battlefield, final String hand, final String library) {
+        final String frame = ForcedWinSolverTest.frame(hand, battlefield, 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + library);
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+        final ForcedWinSolver.GoldfishOpts o = new ForcedWinSolver.GoldfishOpts();
+        o.ms = -1L;
+        return s.potential(g, s.knownTop(g), o, 40, true, 40_000L);
+    }
+
+    /** The reach gate: a seat has potential when some single library card (with its land drops) makes a line. */
+    @Test
+    public void potentialIsOneCardFromALine() {
+        Assert.assertFalse(potential("Island;Island", "", "Island;Island;Island"), "lands only");
+        Assert.assertFalse(potential("Island;Island", "Grizzly Bears", "Island;Balduvian Bears;Island;Forest"), "no line with any card");
+        Assert.assertTrue(potential("Island;Island", "", "Island;Thassa's Oracle;Island"), "the Oracle as the next draw");
+        Assert.assertTrue(potential("Swamp", "Emry, Lurker of the Loch;Daze;Kaito Shizuki", "Bayou;Doomsday;" + DECK.replace("Bayou;", "")),
+                "a Doomsday list with Doomsday somewhere in the library");
+    }
+
     /**
      * No land in play: with a land drop a turn Doomsday is cast on the third turn from now and the kill is on the fourth.
      * The first window (turns 0-2) has no line; the second (a quiet turn, then turns 1-3) finds it.

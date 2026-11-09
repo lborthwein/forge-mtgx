@@ -833,6 +833,8 @@ public final class LookaheadSearch {
         public double reachSum;
         /** solver-distill-cc-1109 (report only): reach cost: planner nodes, capped no-new-card screens, skipped, per-card screens and capped. */
         public long reachNodes, reachS0Capped, reachSkipped, reachNameScreens, reachNameCapped;
+        /** solver-distill-cc-1109: departures the reach rule allowed past a failed z test. */
+        public int reachDeparts;
 
         /** One leaf's reach (the hooks' array: R_me, R_opp, then cost counters when present). */
         synchronized void noteReach(final double[] rr) {
@@ -1152,6 +1154,9 @@ public final class LookaheadSearch {
                         s.addProperty("reachSkipped", reachSkipped);
                         s.addProperty("reachNameScreens", reachNameScreens);
                         s.addProperty("reachNameCapped", reachNameCapped);
+                    }
+                    if (reachDeparts > 0) {
+                        s.addProperty("reachDeparts", reachDeparts);
                     }
                 }
                 s.addProperty("leafMs", leafNanos / 1e6);
@@ -1620,6 +1625,16 @@ public final class LookaheadSearch {
          * value before the reach and its reach, for a sink of (leaf frame, reach) rows.
          */
         default void noteLeaf(Object payload, double v, double[] reach) {
+        }
+
+        /** solver-distill-cc-1109: the part of a leaf's value its own reach contributes (0 by default). */
+        default double reachPart(double[] reach) {
+            return 0.0;
+        }
+
+        /** solver-distill-cc-1109: the mean reach-part gain that departs without the z test (0 = off, the default). */
+        default double reachDepart() {
+            return 0.0;
         }
 
         /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
@@ -3315,7 +3330,8 @@ public final class LookaheadSearch {
             res.planBroken = planBroken;
         }
         final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick
-                : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP)
+                : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP,
+                        hooks.reachDepart() > 0 ? reachPart : null, hooks.reachDepart(), stats)
                 : argmax(values, okArg, n, k);
         int best = plainBest;
         if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0 && finished == null) {
@@ -3591,12 +3607,16 @@ public final class LookaheadSearch {
      * values (all of them: a decision never mixes the two scales) and the fallback is counted. Every fallback is said on
      * stderr with its cause ("[lookahead] value leaf failed, static fallback: ...", bvw-p3-batch-1023).
      */
+    /** solver-distill-cc-1109: the last valued decision's reach part per candidate and world (null = the rule is off). */
+    private double[][] reachPart;
+
     private void valueLeaves(double[][] values, Rollout[][] outs, boolean[] ok, int k) {
         if (cfg.leafOpp) {
             valueLeavesS2t(values, outs, ok, k, null);
             return;
         }
         final int n = values.length;
+        reachPart = hooks.reachDepart() > 0 ? new double[n][k] : null;
         final List<Object> leaves = new ArrayList<>();
         final List<int[]> where = new ArrayList<>();
         for (int w = 0; w < k; w++) {
@@ -3656,6 +3676,9 @@ public final class LookaheadSearch {
             if (rr != null) {
                 stats.noteReach(rr);
                 hooks.noteLeaf(outs[c][w].leafPayload, p[i], rr);
+                if (reachPart != null && c < reachPart.length && w < reachPart[c].length) {
+                    reachPart[c][w] = hooks.reachPart(rr);
+                }
             }
         }
     }
@@ -3671,6 +3694,7 @@ public final class LookaheadSearch {
      */
     private void valueLeavesS2t(double[][] values, Rollout[][] outs, boolean[] ok, int k, double[][][][] pairsOut) {
         final int n = values.length;
+        reachPart = hooks.reachDepart() > 0 ? new double[n][k] : null;
         final double[][][] pairs = new double[3][n][k];
         for (double[][] a : pairs) {
             for (double[] b : a) {
@@ -3786,6 +3810,9 @@ public final class LookaheadSearch {
                 hooks.noteLeaf(outs[c][w].leafPayload, values[c][w], rr);
                 values[c][w] = hooks.combineReach(values[c][w], rr);
                 stats.noteReach(rr);
+                if (reachPart != null && c < reachPart.length && w < reachPart[c].length) {
+                    reachPart[c][w] = hooks.reachPart(rr);
+                }
             }
             pairs[0][c][w] = vs;
             pairs[1][c][w] = vo;
@@ -4464,6 +4491,35 @@ public final class LookaheadSearch {
      * With every world finished this is {@link #argmax}.
      */
     static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP) {
+        return chooseAnytime(v, f, ok, n, k, z, margin, rootP, null, 0.0, null);
+    }
+
+    /**
+     * solver-distill-cc-1109: is candidate c's reach part never below the default's in a world both finished, and above
+     * it by {@code depart} on average? Such a candidate replaces the default without the z test.
+     */
+    static boolean reachExempt(double[][] rp, boolean[][] f, int c, int k, double depart) {
+        if (rp == null || c >= rp.length || !(depart > 0)) {
+            return false;
+        }
+        double sum = 0;
+        int cnt = 0;
+        for (int w = 0; w < k; w++) {
+            if (f[c][w] && f[0][w]) {
+                final double d = rp[c][w] - rp[0][w];
+                if (d < -1e-9) {
+                    return false;
+                }
+                sum += d;
+                cnt++;
+            }
+        }
+        return cnt > 0 && sum / cnt >= depart;
+    }
+
+    /** {@link #chooseAnytime} with the reach departure rule ({@code rp}: each candidate's reach part per world, or null). */
+    static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP,
+            double[][] rp, double depart, Stats st) {
         double defSum = 0;
         int defN = 0;
         for (int w = 0; w < k; w++) {
@@ -4509,27 +4565,39 @@ public final class LookaheadSearch {
         final double pooled = poolDof > 0 ? poolSs / poolDof : Double.NaN;
         int best = 0;
         double bestGain = margin;
+        boolean bestByReach = false;
         for (int c = 1; c < n; c++) {
             if (!ok[c] || kc[c] == 0 || !(mean[c] > 0)) {
                 continue;
             }
+            boolean byReach = false;
             if (z > 0 && k >= 2) {
                 final double s2;
+                boolean pass;
                 if (kc[c] == k) {
                     s2 = var[c];
+                    pass = mean[c] > z * Math.sqrt(s2 / kc[c]);
                 } else if (Double.isNaN(pooled)) {
-                    continue; // nothing to measure a thin sample's uncertainty by
+                    pass = false; // nothing to measure a thin sample's uncertainty by
                 } else {
                     s2 = Double.isNaN(var[c]) ? pooled : Math.max(var[c], pooled);
+                    pass = mean[c] > z * Math.sqrt(s2 / kc[c]);
                 }
-                if (!(mean[c] > z * Math.sqrt(s2 / kc[c]))) {
-                    continue;
+                if (!pass) {
+                    if (!reachExempt(rp, f, c, k, depart)) {
+                        continue;
+                    }
+                    byReach = true;
                 }
             }
             if (mean[c] > bestGain) {
                 best = c;
                 bestGain = mean[c];
+                bestByReach = byReach;
             }
+        }
+        if (bestByReach && st != null) {
+            st.reachDeparts++;
         }
         return best;
     }
