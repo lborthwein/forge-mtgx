@@ -829,7 +829,8 @@ public final class LookaheadSearch {
         /** bvw-step2-fork-1027 (S2T): logging-only opponent leaf calls that failed (reported only when > 0). */
         public long leafOppFailures;
         /** solver-distill-cc-1109 (REACH): value leaves that carried a reach, and those whose own reach was above 0. */
-        public long reachLeaves, reachHits;
+        public long reachLeaves, reachHits, reachNaN;
+        public double reachSum;
         /** Step-3 hygiene: true-world re-plays refused because fair naming was not on for every player. Always 0 on
          *  research/bvw-step2-keys-1028: the refusal itself is in the excluded hygiene commit 8043ba81bf3; the field
          *  exists only so the S3-3 report (b387c8c1318) compiles. */
@@ -1123,6 +1124,8 @@ public final class LookaheadSearch {
                 if (reachLeaves > 0) {
                     s.addProperty("reachLeaves", reachLeaves);
                     s.addProperty("reachHits", reachHits);
+                    s.addProperty("reachNaN", reachNaN);
+                    s.addProperty("reachSum", Math.round(reachSum * 1000) / 1000.0);
                 }
                 s.addProperty("leafMs", leafNanos / 1e6);
                 s.addProperty("playoutSeatFailures", playoutSeatFailures);
@@ -3620,6 +3623,9 @@ public final class LookaheadSearch {
                 stats.reachLeaves++;
                 if (rr[0] > 0) {
                     stats.reachHits++;
+                    stats.reachSum += rr[0];
+                } else if (Double.isNaN(rr[0])) {
+                    stats.reachNaN++;
                 }
             }
         }
@@ -3752,6 +3758,9 @@ public final class LookaheadSearch {
                 stats.reachLeaves++;
                 if (rr[0] > 0) {
                     stats.reachHits++;
+                    stats.reachSum += rr[0];
+                } else if (Double.isNaN(rr[0])) {
+                    stats.reachNaN++;
                 }
             }
             pairs[0][c][w] = vs;
