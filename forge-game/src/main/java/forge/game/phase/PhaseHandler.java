@@ -1286,6 +1286,15 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
     }
 
     /**
+     * mtgx lane choice-search-1109 (research; only ChoiceApply calls it, on a game COPY): the current step's turn-based
+     * actions again. The copy was taken while the live game was inside them (the cleanup's discard to hand size), so the
+     * copy has not done them yet; this replays them there, asking the copy's controllers as the live game asked its own.
+     */
+    public final void devReplayPhaseBegin() {
+        onPhaseBegin();
+    }
+
+    /**
      * mtgx lane lessons-forge-jar-1027 (J3, a lesson position installed in a running game; nothing else calls it): the
      * counters, extra turns and phases and the no-progress guard a fresh game starts without, before the position's
      * {@code devModeSet}. The turn number, the phase and the priority are the position's (GameState sets them).

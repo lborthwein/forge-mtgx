@@ -471,6 +471,97 @@ public final class ChoiceApply {
     }
 
     /**
+     * choice-search-1109: the live game is inside {@code liveMe}'s own cleanup step (CR 514.1, discard to hand size), with
+     * nothing on the stack: the ask {@link #applyCleanup} replays.
+     */
+    public static boolean cleanupAsk(final Game live, final Player liveMe) {
+        final PhaseHandler ph = live.getPhaseHandler();
+        return ph.is(forge.game.phase.PhaseType.CLEANUP) && ph.isPlayerTurn(liveMe) && live.getStack().isEmpty();
+    }
+
+    /**
+     * choice-search-1109: the cleanup's discard to hand size, replayed on a copy with {@code picks} forced (the copy was
+     * taken inside the live step's turn-based actions, so it replays them: {@link PhaseHandler#devReplayPhaseBegin}), then
+     * settled to the next priority of either seat (the leaf), as {@link #applyPicks}.
+     */
+    public static Result applyCleanup(final Game live, final Player liveMe, final List<Integer> picks, final long seed,
+            final int settleSteps, final int fidelity, final Frames frames) {
+        final Result r = new Result();
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 1)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final long t0 = System.nanoTime();
+            if (!cleanupAsk(live, liveMe)) {
+                r.fail = "notCleanup";
+                return r;
+            }
+            final Game g;
+            final Player me;
+            final Object ctx;
+            synchronized (live) {
+                final GameCopier copier = copier(live, fidelity, false);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+                ctx = frames.onCopy(g, me);
+            }
+            MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 3)));
+            r.copyNanos = System.nanoTime() - t0;
+            final boolean[] reached = {false};
+            final Runnable leaf = () -> {
+                if (!reached[0]) {
+                    reached[0] = true;
+                    r.payload = frames.capture(ctx, g, me);
+                    r.screen = frames.screen(ctx, g, me);
+                }
+            };
+            final Forced sc = new Forced(g, me, me.getController().getLobbyPlayer(), picks, leaf);
+            me.dangerouslySetController(sc);
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new Other(g, o, o.getController().getLobbyPlayer(), leaf));
+                }
+            }
+            final long t1 = System.nanoTime();
+            final PhaseHandler ph = g.getPhaseHandler();
+            if (!ph.is(forge.game.phase.PhaseType.CLEANUP)) {
+                r.fail = "copyPhase";
+                return r;
+            }
+            ph.devReplayPhaseBegin();
+            if (sc.missed || sc.next < picks.size()) {
+                r.fail = "pickMissed";
+                return r;
+            }
+            int steps = 0;
+            while (!g.isGameOver() && !reached[0] && steps < settleSteps) {
+                ph.mainLoopStep();
+                steps++;
+            }
+            r.steps = steps;
+            r.tailAsks = sc.tail;
+            r.runNanos = System.nanoTime() - t1;
+            if (g.isGameOver() || !me.isInGame()) {
+                r.terminal = me.hasWon() ? 1.0 : me.hasLost() || !me.isInGame() ? 0.0 : 0.5;
+                r.payload = null;
+            } else if (!reached[0]) {
+                r.fail = "settle";
+            }
+            return r;
+        } catch (RuntimeException | StackOverflowError e) {
+            r.fail = "error:" + e;
+            return r;
+        } finally {
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /**
      * Opening-hand asks, before the game loop. A copy of the position, optionally the London mulligan's new hand
      * ({@code redraw}: the hand shuffled back, the library shuffled by this seed, seven drawn), then {@code bottoms}:
      * the hand cards at these indices in the hand's order go to the library's bottom. One frame of the seat.

@@ -313,6 +313,15 @@ public final class ChoiceScorer {
     private boolean noCheck = false;
     /** choice-search-1109: the asking sub-ability's index in the resolving entry's chain (0 = root). */
     private int askChain = 0;
+    /** choice-search-1109: this ask is the cleanup's discard to hand size (a step, not a resolution). */
+    private boolean cleanupMode = false;
+
+    /** choice-search-1109: one answer applied on a copy: the resolution from the asking sub-ability, or the cleanup step. */
+    private ChoiceApply.Result apply(final Game g, final Player me, final List<Integer> picks, final long seed,
+            final ChoiceApply.Frames fr) {
+        return cleanupMode ? ChoiceApply.applyCleanup(g, me, picks, seed, cfg.settleSteps, cfg.fidelity, fr)
+                : ChoiceApply.applyPicks(g, me, picks, null, seed, cfg.settleSteps, cfg.fidelity, fr, askChain);
+    }
 
     /** choice-search-1109: the card ids of a menu answer's steps (null when a step has no card). */
     static List<Integer> ids(final RlCandidates.Menu m, final short[] steps) {
@@ -448,6 +457,7 @@ public final class ChoiceScorer {
         screenReader = null; // one reader per ask: its probes are of this position's copies
         // choice-search-1109: an ask from a sub-ability is replayed from that sub-ability (0 = the root, as before)
         askChain = askSa == null ? 0 : ChoiceApply.chainOf(g, askSa);
+        cleanupMode = false;
         if (askChain < 0) {
             s.unsupported = "chain";
             s.totalNanos = System.nanoTime() - t0;
@@ -482,7 +492,9 @@ public final class ChoiceScorer {
             s.unsupported = "multiPick";
             return;
         }
-        s.unsupported = ChoiceApply.unsupported(g, null);
+        // choice-search-1109: the cleanup's discard to hand size is replayed on a copy of the step, not of a resolution
+        cleanupMode = cfg.lineOnly && "chooseCardsToDiscardToMaximumHandSize".equals(m.method) && ChoiceApply.cleanupAsk(g, me);
+        s.unsupported = cleanupMode ? null : ChoiceApply.unsupported(g, null);
         if (s.unsupported != null) {
             return;
         }
@@ -601,7 +613,7 @@ public final class ChoiceScorer {
         // choice-search-1109: a multi-pick ask is probed with the policy's whole answer
         final List<Integer> pick = probe != null && !probe.isEmpty() ? probe
                 : Collections.singletonList(m.cands.get(first).host.getId());
-        final ChoiceApply.Result a = ChoiceApply.applyPicks(g, me, pick, null, seed, cfg.settleSteps, cfg.fidelity, fr, askChain);
+        final ChoiceApply.Result a = apply(g, me, pick, seed, fr);
         if (a.fail != null) {
             return null; // the options report their own failures
         }
@@ -611,7 +623,7 @@ public final class ChoiceScorer {
         final boolean was = guardSwap;
         guardSwap = true;
         try {
-            final ChoiceApply.Result b = ChoiceApply.applyPicks(g, me, pick, null, seed, cfg.settleSteps, cfg.fidelity, fr, askChain);
+            final ChoiceApply.Result b = apply(g, me, pick, seed, fr);
             if (b.fail == null && !Arrays.equals(a.payload, b.payload)) {
                 return "oppHidden";
             }
@@ -667,7 +679,7 @@ public final class ChoiceScorer {
 
     private void run(final Game g, final Player me, final List<Integer> picks, final long seed,
             final ChoiceApply.Frames fr, final Option o, final Scored s) {
-        final ChoiceApply.Result r = ChoiceApply.applyPicks(g, me, picks, null, seed, cfg.settleSteps, cfg.fidelity, fr, askChain);
+        final ChoiceApply.Result r = apply(g, me, picks, seed, fr);
         note(r, o, s, 0);
     }
 

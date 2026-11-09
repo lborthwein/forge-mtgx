@@ -194,4 +194,53 @@ public class ChoiceLineTest extends AITest {
         Assert.assertEquals(after.get(1), "Thassa's Oracle;Troll of Khazad-dûm", "keep Troll");
         Assert.assertEquals(names(me, ZoneType.Hand), "Thassa's Oracle;Troll of Khazad-dûm", "the live answer only");
     }
+
+    @Test
+    public void theCleanupDiscardIsReplayedOnACopyOfTheStep() {
+        final Game g = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(
+                "Doomsday;Troll of Khazad-dûm;Island;Island;Island;Island;Island;Island;Island", "Island", 20, "", "Island", 20,
+                "human").replace("activephase=MAIN1", "activephase=MAIN2"));
+        final Player me = g.getPlayers().get(0);
+        final ScreenFrames fr = new ScreenFrames();
+        final List<String> after = new ArrayList<>();
+        final List<String> fails = new ArrayList<>();
+        final boolean[] asked = {false};
+        me.dangerouslySetController(new PlayerControllerAi(g, me, me.getController().getLobbyPlayer()) {
+            @Override
+            public List<SpellAbility> chooseSpellAbilityToPlay() {
+                return null; // pass to the cleanup
+            }
+
+            @Override
+            public CardCollectionView chooseCardsToDiscardToMaximumHandSize(final int numDiscard) {
+                asked[0] = true;
+                Assert.assertEquals(numDiscard, 2);
+                Assert.assertTrue(ChoiceApply.cleanupAsk(g, me));
+                final Card island = find(me, ZoneType.Hand, "Island");
+                for (String keep : new String[] {"Troll of Khazad-dûm", "Doomsday"}) {
+                    final String go = keep.equals("Doomsday") ? "Troll of Khazad-dûm" : "Doomsday";
+                    final ChoiceApply.Result r = ChoiceApply.applyCleanup(g, me,
+                            List.of(find(me, ZoneType.Hand, go).getId(), island.getId()), 11L, 200, 1, fr);
+                    fails.add(String.valueOf(r.fail));
+                    after.add(fr.hands.isEmpty() ? "-" : fr.hands.get(fr.hands.size() - 1));
+                }
+                // the live answer: Doomsday and an Island (as the audit's policy did)
+                final CardCollection out = new CardCollection();
+                out.add(find(me, ZoneType.Hand, "Doomsday"));
+                out.add(island);
+                return out;
+            }
+        });
+        int steps = 0;
+        while (!asked[0] && !g.isGameOver() && steps++ < 400) {
+            g.getPhaseHandler().mainLoopStep();
+        }
+        Assert.assertTrue(asked[0], "the cleanup asked");
+        Assert.assertEquals(fails, List.of("null", "null"), "applies");
+        Assert.assertEquals(after.get(0), "Island;Island;Island;Island;Island;Island;Troll of Khazad-dûm", "keep Troll");
+        Assert.assertEquals(after.get(1), "Doomsday;Island;Island;Island;Island;Island;Island", "keep Doomsday");
+        // the copies never moved the live game: its own answer only
+        Assert.assertTrue(names(me, ZoneType.Graveyard).contains("Doomsday"), names(me, ZoneType.Graveyard));
+        Assert.assertTrue(names(me, ZoneType.Hand).contains("Troll"), names(me, ZoneType.Hand));
+    }
 }
