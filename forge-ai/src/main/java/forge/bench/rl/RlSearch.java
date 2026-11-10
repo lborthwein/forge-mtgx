@@ -310,6 +310,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * ender (false; true = the rule applies only to a seat one of whose cards can end the game in the planner's
          * model, {@link forge.ai.simulation.ForcedWinSolver#hasEnder}; needs {@code reach}; every other seat's mulligans
          * are the policy's). With {@code reach} on, the planner's verdict is logged in every row either way.
+         * force0 / force1 ("keep" | "mull"; data generation only): the seat with that index answers its FIRST keep
+         * decision (a full hand) as forced, whatever the policy and the rule say; later decisions are the policy's. Two
+         * games of one deal that differ only in a seat's forced answer are an outcome pair for that hand.
          */
         public JsonObject mullKeep;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
@@ -450,8 +453,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("mullKeep") && !o.get("mullKeep").isJsonNull()) {
                 c.mullKeep = o.getAsJsonObject("mullKeep");
                 for (String k : c.mullKeep.keySet()) {
-                    if (!k.equals("shadow") && !k.equals("stopUnfired") && !k.equals("ender")) {
+                    if (!k.equals("shadow") && !k.equals("stopUnfired") && !k.equals("ender") && !k.equals("force0")
+                            && !k.equals("force1")) {
                         throw new IllegalArgumentException("mullKeep: unknown key " + k);
+                    }
+                    if (k.startsWith("force") && !"keep".equals(c.mullKeep.get(k).getAsString())
+                            && !"mull".equals(c.mullKeep.get(k).getAsString())) {
+                        throw new IllegalArgumentException("mullKeep." + k + ": keep | mull");
                     }
                 }
             }
@@ -2299,6 +2307,42 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         final boolean gated = mullKeepFlag("ender") && !Boolean.TRUE.equals(mullKeepEnder);
+        final int seatIdx = g.getRegisteredPlayers().indexOf(me);
+        final String fkey = "force" + seatIdx;
+        final String force = cfg.mullKeep.has(fkey) && back == 0 && keep >= 0 && m.C() == 2 ? cfg.mullKeep.get(fkey).getAsString() : null;
+        if (force != null) {
+            // data generation: this seat's first keep decision is forced; the row says what the policy and the rule held
+            if (cfg.decisionLog != null || rowsWanted) {
+                final JsonObject row = new JsonObject();
+                row.addProperty("game_uid", Long.toUnsignedString(uid));
+                row.addProperty("dec_idx", frame.decIdx);
+                row.addProperty("seat", seatIdx);
+                row.addProperty("kind", "mullKeep");
+                row.addProperty("forced", force);
+                row.addProperty("would_mulligan", would);
+                row.addProperty("stock_mulligan", stock);
+                if (mullKeepEnder != null) {
+                    row.addProperty("has_ender", mullKeepEnder);
+                }
+                final JsonArray hand = new JsonArray();
+                int lands = 0;
+                int free = 0;
+                for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                    hand.add(c.getName());
+                    if (c.isLand()) {
+                        lands++;
+                    } else if (c.isArtifact() && c.getManaCost().getCMC() <= 0) {
+                        free++;
+                    }
+                }
+                row.add("hand", hand);
+                row.addProperty("lands", lands);
+                row.addProperty("free_artifacts", free);
+                row.addProperty("on_play", g.getPhaseHandler().getPlayerTurn() == me || g.getStartingPlayer() == me);
+                addRow(row);
+            }
+            return new short[] {"keep".equals(force) ? keep : (short) (1 - keep)};
+        }
         final boolean fire = would && keep >= 0 && err == null && !stock && !gated;
         final boolean shadow = mullKeepFlag("shadow");
         if (would) {
