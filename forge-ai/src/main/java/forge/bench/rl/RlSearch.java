@@ -330,6 +330,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          */
         public double lineGo = 0.0;
         /**
+         * solver-distill-cc-1109 (false = off, the default, and then absent from the JSON; with provenOnly): the solver
+         * runs at every empty-stack priority of our main phases, not once a phase. Generic: no card or deck logic.
+         */
+        public boolean planEvery = false;
+        /**
          * solver-distill-cc-1109 (null = off, the default, and then absent from the JSON): exploration, for training-game
          * generation only. {"eps": 0.1, "families": "CARDS,TARGETS,...", "priorityEps": 0.0}. At an ask of a listed family
          * whose menu is a single pick or a subset, with probability eps the seat answers a uniformly drawn NEIGHBOUR of
@@ -402,7 +407,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo"));
+                "provenOnly", "explore", "lineGo", "planEvery"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -434,6 +439,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
             if (o.has("provenOnly")) c.provenOnly = o.get("provenOnly").getAsBoolean();
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
+            if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
             if (o.has("explore") && !o.get("explore").isJsonNull()) {
                 c.explore = o.getAsJsonObject("explore");
                 for (String k : c.explore.keySet()) {
@@ -761,6 +767,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (lineGo > 0) {
                 o.addProperty("lineGo", lineGo); // solver-distill-cc-1109: only when on
             }
+            if (planEvery) {
+                o.addProperty("planEvery", true); // solver-distill-cc-1109: only when on
+            }
             if (explore != null) {
                 o.add("explore", explore); // solver-distill-cc-1109: only when on
             }
@@ -966,6 +975,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 final PlanSearch ps1 = new PlanSearch(PlanSearch.Spec.parse(cfg.plans), this, p, seat, d);
                 ps1.provenOnly = cfg.provenOnly;
                 ps1.lineGo = cfg.provenOnly ? cfg.lineGo : 0.0;
+                ps1.planEvery = cfg.provenOnly && cfg.planEvery;
                 planSearches.put(p.getId(), ps1);
                 b.planHook = ps1;
             }

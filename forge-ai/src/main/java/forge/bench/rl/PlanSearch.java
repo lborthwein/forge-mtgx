@@ -1003,6 +1003,18 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
         final String phase = String.valueOf(ph.getPhase());
         final java.util.Set<Integer> mine = spec.replanOnEntry ? ourNonlandIds(g) : null;
+        if (planEvery && ourMain) {
+            // solver-distill-cc-1109 (RlSearch cfg.planEvery): every empty-stack priority of our main phases is a plan
+            // point, so a line that only shows after a cantrip or a tutor resolved is seen the same turn
+            if (ph.getTurn() == lastPointTurn && phase.equals(lastPointPhase) && !pointAgain) {
+                everyPoints++;
+            }
+            lastPointTurn = ph.getTurn();
+            lastPointPhase = phase;
+            pointAgain = false;
+            lastPointIds = mine;
+            return true;
+        }
         if (ph.getTurn() == lastPointTurn && phase.equals(lastPointPhase) && !pointAgain) {
             if (mine == null || !ourMain || lastPointIds == null || lastPointIds.containsAll(mine)) {
                 return false;
@@ -1083,6 +1095,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     boolean provenOnly;
     /** solver-distill-cc-1109: RlSearch cfg.lineGo (0 = off): with provenOnly, the belief share at which a line is taken. */
     double lineGo;
+    /** solver-distill-cc-1109: RlSearch cfg.planEvery (with provenOnly); plan points it added beyond one a phase. */
+    boolean planEvery;
+    int everyPoints;
     int likelyLinesTaken;
     final List<Integer> likelyTurns = new ArrayList<>();
     final List<Double> likelyBelief = new ArrayList<>();
@@ -1620,6 +1635,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("planPoints", planPoints);
         o.addProperty("solverRuns", solverRuns);
         o.addProperty("provenLinesTaken", provenLinesTaken);
+        if (planEvery) {
+            o.addProperty("everyPoints", everyPoints); // solver-distill-cc-1109: only when on
+        }
         if (lineGo > 0) {
             o.addProperty("likelyLinesTaken", likelyLinesTaken); // solver-distill-cc-1109: only when on
             o.add("likelyTurns", ints(likelyTurns));
