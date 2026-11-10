@@ -2097,35 +2097,91 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             mullValueAsks++;
             try {
                 final long seed0 = splitmix(uid ^ 0x4D554C4C56414CL ^ (0x9E3779B97F4A7C15L * n));
-                final List<Object> ps = new ArrayList<>();
-                for (int k = 0; k <= samples && err == null; k++) {
-                    final int draw = k == 0 ? -1 : n - 1;
-                    final Object pl = forge.ai.simulation.ForcedWinProbe.handSandbox(g, me, splitmix(seed0 + k), (c, cm) -> {
-                        final Object ctx = onCopy(c, cm);
-                        if (draw >= 0) {
-                            forge.ai.simulation.ForcedWinProbe.redraw(c, cm, draw);
+                // the mulligan as it is played: seven new cards from our shuffled library, then one more card to the
+                // bottom than this hand gave up (the best card to give up, by the same value, one at a time)
+                final int full = Math.max(n, me.getMaxHandSize());
+                final int tucks = full - n + 1;
+                final Object keepPl = forge.ai.simulation.ForcedWinProbe.handSandbox(g, me, seed0, (c, cm) -> {
+                    final Object ctx = onCopy(c, cm);
+                    forge.ai.simulation.ForcedWinProbe.toFirstMain(c, cm);
+                    return captureLeaf(ctx, c, cm);
+                });
+                if (keepPl == null) {
+                    err = "sandbox keep";
+                }
+                final int[][] tucked = new int[samples][0];
+                final double[] best = new double[samples];
+                for (int round = 0; round < tucks && err == null; round++) {
+                    final List<Object> ps = new ArrayList<>();
+                    final List<int[]> at = new ArrayList<>();
+                    if (round == 0) {
+                        ps.add(keepPl);
+                        at.add(new int[] {-1, -1});
+                    }
+                    for (int k = 0; k < samples && err == null; k++) {
+                        for (int j = 0; j < full && err == null; j++) {
+                            boolean used = false;
+                            for (int x : tucked[k]) {
+                                used |= x == j;
+                            }
+                            if (used) {
+                                continue;
+                            }
+                            final int[] t = java.util.Arrays.copyOf(tucked[k], tucked[k].length + 1);
+                            t[t.length - 1] = j;
+                            final Object pl = forge.ai.simulation.ForcedWinProbe.handSandbox(g, me, splitmix(seed0 + 1 + k), (c, cm) -> {
+                                final Object ctx = onCopy(c, cm);
+                                forge.ai.simulation.ForcedWinProbe.redraw(c, cm, full);
+                                forge.ai.simulation.ForcedWinProbe.tuck(c, cm, t);
+                                forge.ai.simulation.ForcedWinProbe.toFirstMain(c, cm);
+                                return captureLeaf(ctx, c, cm);
+                            });
+                            if (pl == null) {
+                                err = "sandbox " + k + "/" + j;
+                            } else {
+                                ps.add(pl);
+                                at.add(new int[] {k, j});
+                            }
                         }
-                        forge.ai.simulation.ForcedWinProbe.toFirstMain(c, cm);
-                        return captureLeaf(ctx, c, cm);
-                    });
-                    if (pl == null) {
-                        err = "sandbox " + k;
-                    } else {
-                        ps.add(pl);
+                    }
+                    if (err != null) {
+                        break;
+                    }
+                    final double[] v = leafValues(ps);
+                    if (v == null || v.length != ps.size()) {
+                        err = "values";
+                        break;
+                    }
+                    final int[] pick = new int[samples];
+                    java.util.Arrays.fill(pick, -1);
+                    java.util.Arrays.fill(best, -1.0);
+                    for (int i = 0; i < v.length; i++) {
+                        final int k = at.get(i)[0];
+                        if (k < 0) {
+                            vKeep = v[i];
+                        } else if (v[i] > best[k]) {
+                            best[k] = v[i];
+                            pick[k] = at.get(i)[1];
+                        }
+                    }
+                    for (int k = 0; k < samples; k++) {
+                        if (pick[k] < 0) {
+                            err = "no pick";
+                            break;
+                        }
+                        tucked[k] = java.util.Arrays.copyOf(tucked[k], tucked[k].length + 1);
+                        tucked[k][tucked[k].length - 1] = pick[k];
                     }
                 }
                 if (err == null) {
-                    vs = leafValues(ps);
-                    if (vs == null || vs.length != samples + 1) {
-                        err = "values";
-                    } else {
-                        vKeep = vs[0];
-                        double sum = 0;
-                        for (int k = 1; k <= samples; k++) {
-                            sum += vs[k];
-                        }
-                        vMull = sum / samples;
+                    double sum = 0;
+                    for (int k = 0; k < samples; k++) {
+                        sum += best[k];
                     }
+                    vMull = sum / samples;
+                    vs = new double[samples + 1];
+                    vs[0] = vKeep;
+                    System.arraycopy(best, 0, vs, 1, samples);
                 }
             } catch (RuntimeException e) {
                 err = String.valueOf(e);

@@ -295,6 +295,16 @@ public class GoldfishTest extends forge.ai.AITest {
             ForcedWinProbe.toFirstMain(c, cm);
             return cm.getCardsIn(forge.game.zone.ZoneType.Hand).size() + "|" + cm.getCardsIn(forge.game.zone.ZoneType.Library).size();
         });
+        // the mulligan as it is played: seven new cards, then two of them (hand positions 0 and 3) to the bottom
+        final String tucked = ForcedWinProbe.handSandbox(g, me, 11L, (c, cm) -> {
+            ForcedWinProbe.redraw(c, cm, 7);
+            final String first = cm.getCardsIn(forge.game.zone.ZoneType.Hand).get(0).getName();
+            ForcedWinProbe.tuck(c, cm, new int[] {0, 3});
+            final forge.game.card.CardCollectionView l = cm.getCardsIn(forge.game.zone.ZoneType.Library);
+            return cm.getCardsIn(forge.game.zone.ZoneType.Hand).size() + "|" + l.size() + "|"
+                    + (l.get(l.size() - 1).getName().equals(first) || l.get(l.size() - 2).getName().equals(first));
+        });
+        Assert.assertEquals(tucked, "5|" + (lib + 2) + "|true", "two cards on the bottom, five in hand");
         System.out.println("MULLVALUE sandbox a=" + a + " b=" + b + " kept=" + kept);
         Assert.assertNotNull(a);
         Assert.assertTrue(a.startsWith("6|" + (lib + 1) + "|Play|MAIN1|true|"), a);

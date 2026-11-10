@@ -1230,6 +1230,16 @@ public final class ForcedWinProbe {
         me.drawCards(n);
     }
 
+    /** mullValue: in a sandbox, the hand cards at these positions (hand order) go to the bottom of our library. */
+    public static void tuck(final Game copy, final Player me, final int[] handIdx) {
+        final List<Card> hand = new ArrayList<>(me.getCardsIn(ZoneType.Hand));
+        for (int i : handIdx) {
+            if (i >= 0 && i < hand.size()) {
+                copy.getAction().moveToLibrary(hand.get(i), -1, null);
+            }
+        }
+    }
+
     /** mullValue: a sandbox of a game that has not started stands at our first main phase (the stage becomes Play). */
     public static void toFirstMain(final Game copy, final Player me) {
         inPlay(copy);
