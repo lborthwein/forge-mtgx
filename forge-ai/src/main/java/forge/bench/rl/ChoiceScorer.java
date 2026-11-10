@@ -454,7 +454,37 @@ public final class ChoiceScorer {
                     unknown.add(c);
                 }
             }
-            if (!unknown.isEmpty()) {
+            if (!unknown.isEmpty() && cfg.relaxDraws <= 0) {
+                // relax-label-1110 (labeller only; relaxDraws <= 0): every distinct unknown card name, weighted by its
+                // count, instead of sampled draws. p = the share of the unknown library whose draw gives a line.
+                final java.util.Map<String, List<Card>> byName = new java.util.TreeMap<>();
+                for (Card c : unknown) {
+                    byName.computeIfAbsent(c.getName(), k -> new ArrayList<>()).add(c);
+                }
+                double wHit = 0;
+                for (List<Card> same : byName.values()) {
+                    final Card c = same.get(0);
+                    final int at = new ArrayList<>(me.getCardsIn(ZoneType.Library)).indexOf(c);
+                    final Card[] inHand = new Card[1];
+                    quietly(g, () -> inHand[0] = g.getAction().moveTo(ZoneType.Hand, c, null, forge.game.ability.AbilityKey.newMap()));
+                    final forge.ai.simulation.ForcedWinSolver.Screen x = forge.ai.simulation.ForcedWinSolver.withReader(me,
+                            cfg.solverCfg, screenReader).screen(g, top, cfg.screenNodes, cfg.screenMs);
+                    out.relaxScreens++;
+                    if (x.lines > 0) {
+                        wHit += same.size();
+                    }
+                    if (inHand[0] != null) {
+                        quietly(g, () -> g.getAction().moveToLibrary(inHand[0], Math.max(0, at), null,
+                                forge.game.ability.AbilityKey.newMap()));
+                    }
+                }
+                if (wHit > 0) {
+                    out.relaxR = r;
+                    out.relaxP = wHit / unknown.size();
+                    out.relaxHow = "L" + (r - 1) + "D1x";
+                    return;
+                }
+            } else if (!unknown.isEmpty()) {
                 int hits = 0;
                 for (int d = 0; d < cfg.relaxDraws; d++) {
                     final Card c = unknown.get(rng.nextInt(unknown.size()));
