@@ -159,6 +159,8 @@ public class ReachDiscardsTest extends AITest {
         List<String> altNames;
         double ms;
         String family;
+        /** The ask's decision-log row, as RlSearch writes it (before its own game and turn fields). */
+        JsonObject row;
 
         String dump() {
             final StringBuilder b = new StringBuilder(family + " unsupported=" + s.unsupported + " options=" + s.options.size()
@@ -192,6 +194,7 @@ public class ReachDiscardsTest extends AITest {
             a.alt = sc.choose(a.s, v, greedy);
         }
         a.ms = (System.nanoTime() - t0) / 1e6;
+        a.row = sc.row(a.s, "test");
         a.altNames = a.alt == null ? null : namesOf(pool, a.alt);
         System.out.println("REACHDISCARDS " + a.dump());
         return a;
@@ -285,12 +288,31 @@ public class ReachDiscardsTest extends AITest {
             }
         }
         Assert.assertEquals(keeps, 2, "Doomsday swapped for either card the policy kept: " + a.dump());
+        // the row a read counts these asks by: the flag, the policy's option, the option played with its reach part
+        Assert.assertTrue(a.row.get("reach_discards").getAsBoolean(), a.row.toString());
+        int policy = 0, chosen = 0;
+        for (com.google.gson.JsonElement e : a.row.getAsJsonArray("options")) {
+            final JsonObject o = e.getAsJsonObject();
+            if (o.has("policy")) {
+                policy++;
+                Assert.assertFalse(o.has("chosen"), o.toString());
+                Assert.assertEquals(o.get("reach").getAsDouble(), 0.0, 1e-9, o.toString());
+            }
+            if (o.has("chosen")) {
+                chosen++;
+                Assert.assertTrue(o.get("reach").getAsDouble() > 0 && o.get("gf").getAsDouble() > 0, o.toString());
+                Assert.assertFalse(o.get("o").getAsString().contains("Doomsday"), o.toString());
+            }
+        }
+        Assert.assertEquals(policy, 1, a.row.toString());
+        Assert.assertEquals(chosen, 1, a.row.toString());
     }
 
     @Test
     public void withTheKeyOffADiscardIsNotScored() {
         final Ask a = bazaar(false, KILL, null);
         Assert.assertEquals(a.s.unsupported, "family", "the pilot arm today: a DISCARD_FROM ask is not the scorer's");
+        Assert.assertFalse(a.row.has("reach_discards"), "no new field in a row with the key off: " + a.row);
         Assert.assertTrue(a.s.options.isEmpty());
         Assert.assertNull(a.alt);
         Assert.assertFalse(a.s.reachDiscards);
