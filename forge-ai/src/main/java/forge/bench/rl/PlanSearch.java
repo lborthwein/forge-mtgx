@@ -1081,6 +1081,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     /** solver-distill-cc-1109: set by RlSearch with cfg.provenOnly; {@link #propose} then stops after the proven check. */
     boolean provenOnly;
+    /** solver-distill-cc-1109: RlSearch cfg.lineGo (0 = off): with provenOnly, the belief share at which a line is taken. */
+    double lineGo;
+    int likelyLinesTaken;
+    final List<Integer> likelyTurns = new ArrayList<>();
+    final List<Double> likelyBelief = new ArrayList<>();
 
     /** What the plan stage decided before (or instead of) S-c's play-outs. */
     static final class Stage {
@@ -1167,6 +1172,30 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             }
             if (provenOnly) {
                 // solver-distill-cc-1109 (RlSearch cfg.provenOnly): only a proven line is taken; nothing else is proposed
+                if (lineGo > 0) {
+                    // RlSearch cfg.lineGo: a line that wins unopposed and in at least this share of the solver's
+                    // belief worlds is taken as a proven one is (the most likely first, then the shortest)
+                    ForcedWinSolver.Proposal likely = null;
+                    for (ForcedWinSolver.Proposal pr : props) {
+                        if (pr.pUnopposed >= 1.0 && pr.pBelief >= lineGo && pr.worldsRun >= 1
+                                && (likely == null || pr.pBelief > likely.pBelief
+                                        || pr.pBelief == likely.pBelief && pr.steps < likely.steps)) {
+                            likely = pr;
+                        }
+                    }
+                    if (likely != null) {
+                        solver.adopt(likely.line);
+                        handoff = true;
+                        likelyLinesTaken++;
+                        likelyTurns.add(g.getPhaseHandler().getTurn());
+                        likelyBelief.add(likely.pBelief);
+                        st.hook = true;
+                        st.note = "likely-line P=" + likely.pBelief + " turn+" + likely.winTurn + " " + likely.text;
+                        st.ms = (System.nanoTime() - t0) / 1e6;
+                        proposeMs.add(st.ms);
+                        return st;
+                    }
+                }
                 st.ms = (System.nanoTime() - t0) / 1e6;
                 proposeMs.add(st.ms);
                 return st;
@@ -1591,6 +1620,15 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("planPoints", planPoints);
         o.addProperty("solverRuns", solverRuns);
         o.addProperty("provenLinesTaken", provenLinesTaken);
+        if (lineGo > 0) {
+            o.addProperty("likelyLinesTaken", likelyLinesTaken); // solver-distill-cc-1109: only when on
+            o.add("likelyTurns", ints(likelyTurns));
+            final JsonArray lb = new JsonArray();
+            for (double x : likelyBelief) {
+                lb.add(Math.round(x * 1000) / 1000.0);
+            }
+            o.add("likelyBelief", lb);
+        }
         if (solverCaps > 0) {
             o.addProperty("solverCaps", solverCaps); // rollout-budget-1101
         }
