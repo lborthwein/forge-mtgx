@@ -377,4 +377,36 @@ public class GoldfishTest extends forge.ai.AITest {
                     + " -> " + (p == null ? "none" : "gf=" + p.gf + " turn+" + p.winTurn + " steps=" + p.steps + " | " + String.valueOf(p.line).substring(0, Math.min(200, String.valueOf(p.line).length()))));
         }
     }
+
+    /**
+     * The leaf after the tutor (D3 pair 2, one turn on): Doomsday drawn, two lands in play and a third in hand. What does
+     * the leaf's reach read with the pilot's allowance (2,000 nodes, 1,000 a name), and with more?
+     */
+    @Test
+    public void leafReachAfterTheTutor() {
+        final String hand = "Doomsday;Chart a Course;Troll of Khazad-dûm;Wishclaw Talisman;Counterspell;Overgrown Tomb;Verdant Catacombs";
+        final String rest = DD1010.replace("Doomsday;", "").replace("Chart a Course;", "").replace("Mystical Tutor;", "")
+                .replace("Troll of Khazad-dûm;", "").replace("Wishclaw Talisman;", "").replace("Counterspell;", "").replace("Overgrown Tomb;", "");
+        final String frame = ForcedWinSolverTest.frame(hand, "Raffine's Tower;Urborg, Tomb of Yawgmoth", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + rest);
+        for (int[] b : new int[][] {{2000, 1000}, {6000, 3000}, {12000, 6000}, {20000, 10000}, {40000, 20000}}) {
+            final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+            final ForcedWinSolver.ReachOpts o = new ForcedWinSolver.ReachOpts();
+            o.nodes = b[0];
+            o.ms = -1L;
+            o.maxNames = 40;
+            o.window = true;
+            o.nameNodes = b[1];
+            o.nameOnePass = true;
+            o.skipCapped = true;
+            o.sig = true;
+            o.gamma = 0.9;
+            final long t0 = System.nanoTime();
+            final ForcedWinSolver.Reach r = s.reach(g, s.knownTop(g), o);
+            System.out.println("GOLDFISH leafReach nodes=" + b[0] + " name=" + b[1] + " -> p=" + r.p + " pd=" + r.pd + " direct=" + r.direct
+                    + " nodes=" + r.nodes + " s0Capped=" + r.s0Capped + " skipped=" + r.skipped + " names=" + r.names + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+        }
+    }
 }
