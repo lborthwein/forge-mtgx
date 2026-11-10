@@ -284,6 +284,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * hand, whatever the policy answers. Generic: no card or deck logic. The policy's answer is logged.
          */
         public boolean alwaysKeep = false;
+        /**
+         * solver-distill-cc-1109 (off by default and then absent from the JSON): an opening hand the policy would mulligan is
+         * kept when the planner sees a kill within reach from it ({@link forge.ai.simulation.ForcedWinSolver#potential}: a
+         * line within five turns with its land drops, as it stands or with one library card next). A seat whose cards
+         * cannot end the game in the planner's model is never asked: its mulligans are the policy's, as before. alwaysKeep
+         * read on R4 (11-07) helped Doomsday holdings and harmed fair play; this is that key gated by the planner. Needs
+         * {@code reach}.
+         */
+        public boolean keepGate = false;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -341,7 +350,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep",
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
@@ -410,6 +419,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 ChoiceScorer.Config.parse(c.choiceScorer); // a bad key fails at parse, not at the first ask
             }
             if (o.has("alwaysKeep")) c.alwaysKeep = o.get("alwaysKeep").getAsBoolean();
+            if (o.has("keepGate")) c.keepGate = o.get("keepGate").getAsBoolean();
             if (o.has("chooseACard") && !o.get("chooseACard").isJsonNull()) {
                 c.cac = o.getAsJsonObject("chooseACard");
                 // review #143 S3: every refusal at parse time (never at the first priority of a game)
@@ -637,6 +647,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (reach != null) {
                 o.add("reach", reach); // solver-distill-cc-1109: only when on
+            }
+            if (keepGate) {
+                o.addProperty("keepGate", true); // solver-distill-cc-1109: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -1988,6 +2001,61 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private int blockAsks = 0, blockSearched = 0, blockDepartures = 0, blockCapped = 0, blockForgeMissing = 0,
             blockSampleFailures = 0;
 
+    /** keepGate (report only): mulligans the policy asked for, and those the planner's potential turned into a keep. */
+    public int keepGateAsks, keepGateKeeps;
+
+    /**
+     * keepGate: the policy's answer stands (null) unless it would mulligan and the planner sees a kill within reach from
+     * this hand; then keep. Logged either way.
+     */
+    private short[] keepGateAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        final boolean would = greedy == null || greedy.length != 1 || greedy[0] != keep;
+        boolean pot = false;
+        String err = null;
+        if (would && keep >= 0) {
+            keepGateAsks++;
+            try {
+                final ReachCfg rc = reachCfg();
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                o.window = false; // before the first turn: plan as from our first main phase
+                pot = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader)
+                        .potential(g, new ArrayList<>(), o, rc.maxNames, rc.sig, 12_000L);
+            } catch (RuntimeException e) {
+                err = String.valueOf(e);
+            }
+            if (pot) {
+                keepGateKeeps++;
+            }
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "keepGate");
+            row.addProperty("would_mulligan", would);
+            row.addProperty("potential", pot);
+            if (err != null) {
+                row.addProperty("error", err);
+            }
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            addRow(row);
+        }
+        return would && pot && keep >= 0 ? new short[] {keep} : null;
+    }
+
     /** mull-off: the keep answer, with the policy's own answer and the hand logged. */
     private short[] keepAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
@@ -2036,7 +2104,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public boolean choiceAsk(final int family) {
-        if (cfg.alwaysKeep && family == RlSchema.F_MULLIGAN) {
+        if ((cfg.alwaysKeep || cfg.keepGate && cfg.reach != null) && family == RlSchema.F_MULLIGAN) {
             return true;
         }
         return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
@@ -2058,6 +2126,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final short[] greedy) {
         if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
             return keepAnswer(g, me, m, frame, greedy);
+        }
+        if (m.family == RlSchema.F_MULLIGAN) {
+            return cfg.keepGate && cfg.reach != null ? keepGateAnswer(g, me, m, frame, greedy) : null;
         }
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
