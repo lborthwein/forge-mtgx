@@ -300,6 +300,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * knowledge: the same value the search reads at its leaves. Keys: samples (6), margin (0).
          */
         public JsonObject mullValue;
+        /**
+         * integrate-1110 (nestedChoice; null = off, the default, and then nothing changes; needs {@code reach}): the card
+         * picks of the searching seat INSIDE its look-ahead play-outs. Today a play-out answers a tutor's menu with the
+         * policy's pick, so to the search "cast the tutor" is worth what the policy would fetch. With this key, once per
+         * root decision (our main phase, an empty stack, the reach gate open) the planner's goldfish is run from the root
+         * with a large node allowance ({@link forge.ai.simulation.ForcedWinSolver#setup}: this turn's steps of its best
+         * line more than a turn away, each tutor with its pick). In every play-out of that decision a CARDS ask of the
+         * searching seat whose resolving card is one of those steps is answered with the line's pick, and the play-out's
+         * leaf potential is at least floorW x the line's goldfish value (it joins the leaf's reach, as the teacher's
+         * goldfish does). No line, or the pick not on the menu: the policy's answer, no floor. The opponent's asks are
+         * untouched. Keys: nodes (one screen's planner nodes, 12000), maxNodes (the call's, 36000), ms (work-clock cap of
+         * the call, 4000), floorW (1.0).
+         */
+        public JsonObject nestedChoice;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -357,7 +371,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue",
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "nestedChoice",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
@@ -427,6 +441,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (o.has("alwaysKeep")) c.alwaysKeep = o.get("alwaysKeep").getAsBoolean();
             if (o.has("keepGate")) c.keepGate = o.get("keepGate").getAsBoolean();
+            if (o.has("nestedChoice") && !o.get("nestedChoice").isJsonNull()) {
+                // integrate-1110
+                c.nestedChoice = o.getAsJsonObject("nestedChoice");
+                NestedCfg.parse(c.nestedChoice); // a bad key fails at parse
+                if (!o.has("reach") || o.get("reach").isJsonNull()) {
+                    throw new IllegalArgumentException("nestedChoice needs reach (its floor joins the leaf's reach)");
+                }
+            }
             if (o.has("mullValue") && !o.get("mullValue").isJsonNull()) {
                 c.mullValue = o.getAsJsonObject("mullValue");
                 for (String k : c.mullValue.keySet()) {
@@ -668,6 +690,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (mullValue != null) {
                 o.add("mullValue", mullValue); // solver-distill-cc-1109: only when on
+            }
+            if (nestedChoice != null) {
+                o.add("nestedChoice", nestedChoice); // integrate-1110: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -1448,6 +1473,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 reachOn = true;
             }
         }
+        nestedPlan = null; // integrate-1110: one root decision's only
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
             tap("cpu_cap", null, null, 0, VOID);
@@ -1471,6 +1497,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        if (cfg.nestedChoice != null) {
+            // integrate-1110: this decision's plan for its play-outs' card picks, after the budget's start: its planner
+            // nodes are this decision's work and count against its budget like the search's own
+            nestedPlan = planNested(g, me, knownTopOf(liveKnow, me));
+        }
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
         try {
@@ -2454,6 +2485,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        nestedPlan = null; // integrate-1110: a block search's play-outs have no plan of this kind
         blockAsks++;
         lastProposeMs = -1;
         if (m.family != RlSchema.F_BLOCK || greedy == null || greedy.length != m.S() || m.S() == 0
@@ -3050,6 +3082,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             mv.addProperty("fails", mullValueFails);
             o.add("mull_value", mv);
         }
+        if (cfg.nestedChoice != null) {
+            // integrate-1110: only with nestedChoice, so every other summary is unchanged
+            final JsonObject ne = new JsonObject();
+            ne.addProperty("plans", nestedPlans.get());
+            ne.addProperty("lines", nestedLines.get());
+            ne.addProperty("plan_nodes", nestedNodes.get());
+            ne.addProperty("plan_ms", nestedNanos.get() / 1_000_000L);
+            ne.addProperty("asks", nestedAsks.get());
+            ne.addProperty("answered", nestedAnswered.get());
+            ne.addProperty("changed", nestedChanged.get());
+            ne.addProperty("floors", nestedFloors.get());
+            o.add("nested", ne);
+        }
         if (teachLeaves.get() > 0) {
             // solver-distill-cc-1109: only with the teacher at the leaves, so every other summary is unchanged
             final JsonObject te = new JsonObject();
@@ -3186,6 +3231,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     static final class CopyCtx {
         final RlKnowledge know;
         final RlFeaturizer feat;
+        /** integrate-1110 (nestedChoice): this copy's leaf potential floor (0 = none), and its picks given so far by host. */
+        volatile double nestedPot;
+        final java.util.Map<Integer, Integer> nestedSeen = new java.util.HashMap<>();
 
         CopyCtx(final RlKnowledge know, final RlFeaturizer feat) {
             this.know = know;
@@ -3557,6 +3605,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 leafTeacher(rc, k, g, me, out);
             }
         }
+        if (copyCtx instanceof CopyCtx && ((CopyCtx) copyCtx).nestedPot > 0) {
+            // integrate-1110 (nestedChoice): the plan whose pick this play-out took is this leaf's potential at least
+            final double f = ((CopyCtx) copyCtx).nestedPot;
+            if (Double.isNaN(out[0]) || f > out[0]) {
+                out[0] = f;
+                nestedFloors.incrementAndGet();
+            }
+        }
         if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
             final forge.ai.simulation.ForcedWinSolver.Reach ro = reachOpp(k, g, me.getOpponents().get(0), rc);
             out[1] = ro.failed ? Double.NaN : ro.p;
@@ -3588,6 +3644,178 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         return out;
+    }
+
+    // ------------------------------------------------------------------ integrate-1110: nestedChoice
+
+    /** {@link Config#nestedChoice}'s keys. */
+    public static final class NestedCfg {
+        /** One goldfish screen's planner nodes, the whole call's, and the call's cap on the work clock (ms). */
+        public int nodes = 12_000;
+        public long maxNodes = 36_000;
+        public long ms = 4_000;
+        /** The share of the line's goldfish value a play-out that took its pick carries to its leaf as potential. */
+        public double floorW = 1.0;
+
+        public static NestedCfg parse(final JsonObject o) {
+            final NestedCfg c = new NestedCfg();
+            for (String k : o.keySet()) {
+                switch (k) {
+                    case "nodes": c.nodes = o.get(k).getAsInt(); break;
+                    case "maxNodes": c.maxNodes = o.get(k).getAsLong(); break;
+                    case "ms": c.ms = o.get(k).getAsLong(); break;
+                    case "floorW": c.floorW = o.get(k).getAsDouble(); break;
+                    default: throw new IllegalArgumentException("nestedChoice: unknown key " + k);
+                }
+            }
+            if (c.nodes < 1 || c.maxNodes < c.nodes || !(c.floorW >= 0 && c.floorW <= 1)) {
+                throw new IllegalArgumentException("nestedChoice: nodes >= 1, maxNodes >= nodes, floorW in [0, 1]");
+            }
+            return c;
+        }
+    }
+
+    /** One root decision's plan: the picks of its steps by the step's card, and the potential a play-out that takes one carries. */
+    public static final class NestedPlan {
+        public final java.util.Map<Integer, List<Integer>> picks = new java.util.LinkedHashMap<>();
+        public double gf, pot;
+        public int winTurn;
+        public long nodes;
+        public String text;
+    }
+
+    private NestedCfg nestedCfg;
+    /** The plan of the root decision in progress (null = none: every nested ask keeps the policy's answer). */
+    private volatile NestedPlan nestedPlan;
+    /**
+     * nestedChoice (report only): root decisions that asked for a plan, those that got a line with a pick, the planner
+     * nodes and time of those calls; play-out asks seen, answered from the plan, answered differently from the policy;
+     * leaves whose potential the floor raised.
+     */
+    public final java.util.concurrent.atomic.AtomicLong nestedPlans = new java.util.concurrent.atomic.AtomicLong(),
+            nestedLines = new java.util.concurrent.atomic.AtomicLong(), nestedNodes = new java.util.concurrent.atomic.AtomicLong(),
+            nestedNanos = new java.util.concurrent.atomic.AtomicLong(), nestedAsks = new java.util.concurrent.atomic.AtomicLong(),
+            nestedAnswered = new java.util.concurrent.atomic.AtomicLong(), nestedChanged = new java.util.concurrent.atomic.AtomicLong(),
+            nestedFloors = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * nestedChoice, decision thread, on this decision's work clock: the planner's play for this turn from the root, with
+     * the picks of its steps. null = the gate is closed, not our main phase with an empty stack, no line more than a turn
+     * away, or a line with no pick. Never throws.
+     */
+    public NestedPlan planNested(final Game g, final Player me, final List<Integer> knownTop) {
+        if (cfg.nestedChoice == null || cfg.reach == null || !reachGateOpen()) {
+            return null;
+        }
+        final long t0 = System.nanoTime();
+        try {
+            if (nestedCfg == null) {
+                nestedCfg = NestedCfg.parse(cfg.nestedChoice);
+            }
+            nestedPlans.incrementAndGet();
+            final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+            final forge.ai.simulation.ForcedWinSolver sol = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader);
+            final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+            o.nodes = nestedCfg.nodes;
+            o.maxNodes = nestedCfg.maxNodes;
+            o.ms = nestedCfg.ms;
+            final forge.ai.simulation.ForcedWinSolver.Proposal p = sol.setup(g, knownTop, o);
+            nestedNodes.addAndGet(sol.setupNodesLast());
+            if (p == null || !(p.gf > 0)) {
+                return null;
+            }
+            final NestedPlan np = new NestedPlan();
+            int host = -1;
+            for (int[] t : forge.ai.simulation.ForcedWinPlanner.touched(p.line)) {
+                if (t[1] == 1 || t[1] == 2) {
+                    host = t[0]; // a cast or an activation: the picks that follow are its own
+                } else if (t[1] == 5 && host >= 0) {
+                    np.picks.computeIfAbsent(host, x -> new ArrayList<>()).add(t[0]);
+                }
+            }
+            if (np.picks.isEmpty()) {
+                return null;
+            }
+            np.gf = p.gf;
+            np.pot = Math.max(0.0, Math.min(1.0, nestedCfg.floorW * p.gf));
+            np.winTurn = p.winTurn;
+            np.nodes = sol.setupNodesLast();
+            np.text = String.valueOf(p.line);
+            nestedLines.incrementAndGet();
+            return np;
+        } catch (RuntimeException | StackOverflowError e) {
+            return null;
+        } finally {
+            nestedNanos.addAndGet(System.nanoTime() - t0);
+        }
+    }
+
+    /** Tests: the plan of the root decision in progress, and setting one. */
+    public NestedPlan nestedPlan() {
+        return nestedPlan;
+    }
+
+    public void setNestedPlan(final NestedPlan np) {
+        nestedPlan = np;
+    }
+
+    /**
+     * nestedChoice, play-out thread: the searching seat's CARDS ask in play-out {@code g}. When the resolving card is a
+     * step of this root decision's plan, the plan's next pick for it (the steps to answer with), and the play-out's leaf
+     * floor is set; else null (the policy's answer stands, no floor). A lookup: no planner work here.
+     */
+    public short[] nestedAnswer(final Object copyCtx, final Game g, final Player me, final RlCandidates.Menu m,
+            final short[] greedy) {
+        final NestedPlan np = nestedPlan;
+        if (np == null || !(copyCtx instanceof CopyCtx) || m.family != RlSchema.F_CARDS || !ChoiceWindow.singlePick(m)) {
+            return null;
+        }
+        nestedAsks.incrementAndGet();
+        try {
+            if (g.getStack().isEmpty() || !g.getStack().isResolving()) {
+                return null;
+            }
+            final forge.game.card.Card host = g.getStack().peekAbility().getHostCard();
+            final List<Integer> picks = host == null ? null : np.picks.get(host.getId());
+            if (picks == null) {
+                return null;
+            }
+            final CopyCtx cc = (CopyCtx) copyCtx;
+            final int at = cc.nestedSeen.merge(host.getId(), 1, Integer::sum) - 1;
+            if (at >= picks.size()) {
+                return null;
+            }
+            final int want = picks.get(at);
+            final forge.game.card.Card wc = g.findById(want);
+            int hit = -1;
+            for (int i = 0; i < m.C() && hit < 0; i++) {
+                if (m.cands.get(i).kind > 0 && m.cands.get(i).host != null && m.cands.get(i).host.getId() == want) {
+                    hit = i;
+                }
+            }
+            for (int i = 0; i < m.C() && hit < 0 && wc != null; i++) {
+                // the same card by another copy of it (two cards of one name are one answer)
+                if (m.cands.get(i).kind > 0 && m.cands.get(i).host != null && m.cands.get(i).host.getName().equals(wc.getName())) {
+                    hit = i;
+                }
+            }
+            if (hit < 0) {
+                return null;
+            }
+            nestedAnswered.incrementAndGet();
+            if (greedy == null || greedy.length != 1 || greedy[0] != hit) {
+                nestedChanged.incrementAndGet();
+            }
+            cc.nestedPot = Math.max(cc.nestedPot, np.pot);
+            return new short[] {(short) hit};
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** Tests: a play-out copy's context as {@link #onCopy} makes it, and its nested floor. */
+    public static double nestedPotOf(final Object copyCtx) {
+        return copyCtx instanceof CopyCtx ? ((CopyCtx) copyCtx).nestedPot : 0.0;
     }
 
     /** {@link ReachCfg#leafGf}, {@link ReachCfg#leafGfs}: the teacher's potential at this leaf joins its reach. */
@@ -3946,6 +4174,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final RlSeat rs = new RlSeat(cc.feat, ep, sc, seed, ctl, TEST_LEAK_PRIV);
         rs.setGame(g);
         rs.seenNames = cc.know::opponentSeen;
+        if (cfg.nestedChoice != null) {
+            rs.nestedChoice = (gg, p, mm, greedy, objs) -> nestedAnswer(cc, gg, p, mm, greedy); // integrate-1110
+        }
         final String[] why = {null};
         // search-bones-1015 (S-b): a recording play-out or a plan candidate has no forced first action
         // block-search-1019: a block candidate has no forced priority action either (its seat declares the blocks)

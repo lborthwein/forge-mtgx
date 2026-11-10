@@ -2563,6 +2563,12 @@ public final class ForcedWinSolver {
      * proposed nothing here), and those that proposed steps for this turn.
      */
     public int setupCalls, setupLines, setupWinNow, setupProposals;
+    /** integrate-1110 (report only): the planner nodes of the last {@link #setup} call's goldfish (0 = it did not run). */
+    private long setupNodesLast;
+
+    public long setupNodesLast() {
+        return setupNodesLast;
+    }
 
     /**
      * solver-distill-cc-1109 (SETUP): the planner's own play for this turn when its kill is more than a turn away: the
@@ -2578,6 +2584,7 @@ public final class ForcedWinSolver {
 
     /** As above, on the given known top (tests). */
     public Proposal setup(final Game live, final List<Integer> knownTop, final GoldfishOpts o) {
+        setupNodesLast = 0;
         try {
             final PhaseHandler ph = live.getPhaseHandler();
             if (lineActive() || !live.getStack().isEmpty()
@@ -2586,6 +2593,7 @@ public final class ForcedWinSolver {
             }
             setupCalls++;
             final Goldfish gf = goldfish(live, knownTop, o);
+            setupNodesLast = gf.nodes;
             if (gf.failed || gf.bestLine == null || !(gf.g > 0)) {
                 return null;
             }

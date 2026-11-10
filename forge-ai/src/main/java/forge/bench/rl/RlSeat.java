@@ -234,6 +234,19 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     public PlayoutFirst playoutFirst;
 
     /**
+     * integrate-1110 (search spec key {@code nestedChoice}; null by default, and then nothing changes): a play-out seat's
+     * answer to one of its own choice asks, in place of the policy's. Asked after the policy's DECISION; null = keep it.
+     */
+    public NestedChoice nestedChoice;
+    /** integrate-1110: choice asks {@link #nestedChoice} answered differently from the policy. */
+    public int nestedChanges = 0;
+
+    /** integrate-1110: see {@link #nestedChoice}. */
+    public interface NestedChoice {
+        short[] answer(Game g, Player p, RlCandidates.Menu m, short[] greedy, Object objs);
+    }
+
+    /**
      * Lane search-bones-1015 (S-b, null by default): a turn-plan the seat follows inside a play-out. At each PRIORITY ask
      * of this seat the cursor may name the candidate to answer with (never sent); -1 = the policy decides.
      */
@@ -717,6 +730,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             if (alt != null && m.validate(alt) == null) {
                 d.steps = alt;
                 searchDepartures++;
+            }
+        }
+        if (nestedChoice != null && d.status == RlWire.ST_OK) {
+            // integrate-1110: a play-out seat's own card menu, answered by the search's plan for this root decision
+            final short[] alt = nestedChoice.answer(g, player, m, d.steps, objs);
+            if (alt != null && m.validate(alt) == null && !java.util.Arrays.equals(alt, d.steps)) {
+                d.steps = alt;
+                nestedChanges++;
             }
         }
         if (wAsk != null && !(d.status == RlWire.ST_OK && d.steps.length <= 1)) {
