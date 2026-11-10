@@ -293,6 +293,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * {@code reach}.
          */
         public boolean keepGate = false;
+        /**
+         * solver-distill-cc-1109 (mullValue; null = off): a mulligan the policy asks for is turned into a keep when the
+         * leaf value of this hand at our first main phase is at least the mean value of {@code samples} hands of one card
+         * fewer drawn from our own shuffled library, less {@code margin}. Never turns a keep into a mulligan. No card
+         * knowledge: the same value the search reads at its leaves. Keys: samples (6), margin (0).
+         */
+        public JsonObject mullValue;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -350,7 +357,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate",
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
@@ -420,6 +427,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (o.has("alwaysKeep")) c.alwaysKeep = o.get("alwaysKeep").getAsBoolean();
             if (o.has("keepGate")) c.keepGate = o.get("keepGate").getAsBoolean();
+            if (o.has("mullValue") && !o.get("mullValue").isJsonNull()) {
+                c.mullValue = o.getAsJsonObject("mullValue");
+                for (String k : c.mullValue.keySet()) {
+                    if (!k.equals("samples") && !k.equals("margin")) {
+                        throw new IllegalArgumentException("mullValue: unknown key " + k);
+                    }
+                }
+            }
             if (o.has("chooseACard") && !o.get("chooseACard").isJsonNull()) {
                 c.cac = o.getAsJsonObject("chooseACard");
                 // review #143 S3: every refusal at parse time (never at the first priority of a game)
@@ -650,6 +665,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (keepGate) {
                 o.addProperty("keepGate", true); // solver-distill-cc-1109: only when on
+            }
+            if (mullValue != null) {
+                o.add("mullValue", mullValue); // solver-distill-cc-1109: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -2057,6 +2075,161 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return would && pot && keep >= 0 ? new short[] {keep} : null;
     }
 
+    /** mullValue (report only): mulligans the policy asked for, those the value turned into a keep, failed asks. */
+    public int mullValueAsks, mullValueKeeps, mullValueFails;
+
+    /**
+     * mullValue: the policy's answer stands (null) unless it would mulligan and this hand's value at our first main phase
+     * is at least the mean value of sampled hands of one card fewer; then keep. Logged either way.
+     */
+    private short[] mullValueAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        final boolean would = greedy == null || greedy.length != 1 || greedy[0] != keep;
+        final int n = me.getCardsIn(forge.game.zone.ZoneType.Hand).size();
+        final int samples = cfg.mullValue.has("samples") ? cfg.mullValue.get("samples").getAsInt() : 6;
+        final double margin = cfg.mullValue.has("margin") ? cfg.mullValue.get("margin").getAsDouble() : 0.0;
+        double vKeep = Double.NaN, vMull = Double.NaN;
+        double[] vs = null;
+        String err = null;
+        final long t0 = System.nanoTime();
+        if (would && keep >= 0 && n >= 2) {
+            mullValueAsks++;
+            try {
+                final long seed0 = splitmix(uid ^ 0x4D554C4C56414CL ^ (0x9E3779B97F4A7C15L * n));
+                // the mulligan as it is played: seven new cards from our shuffled library, then one more card to the
+                // bottom than this hand gave up (the best card to give up, by the same value, one at a time)
+                final int full = Math.max(n, me.getMaxHandSize());
+                final int tucks = full - n + 1;
+                final Object keepPl = forge.ai.simulation.ForcedWinProbe.handSandbox(g, me, seed0, (c, cm) -> {
+                    final Object ctx = onCopy(c, cm);
+                    forge.ai.simulation.ForcedWinProbe.toFirstMain(c, cm);
+                    return captureLeaf(ctx, c, cm);
+                });
+                if (keepPl == null) {
+                    err = "sandbox keep";
+                }
+                final int[][] tucked = new int[samples][0];
+                final double[] best = new double[samples];
+                for (int round = 0; round < tucks && err == null; round++) {
+                    final List<Object> ps = new ArrayList<>();
+                    final List<int[]> at = new ArrayList<>();
+                    if (round == 0) {
+                        ps.add(keepPl);
+                        at.add(new int[] {-1, -1});
+                    }
+                    for (int k = 0; k < samples && err == null; k++) {
+                        for (int j = 0; j < full && err == null; j++) {
+                            boolean used = false;
+                            for (int x : tucked[k]) {
+                                used |= x == j;
+                            }
+                            if (used) {
+                                continue;
+                            }
+                            final int[] t = java.util.Arrays.copyOf(tucked[k], tucked[k].length + 1);
+                            t[t.length - 1] = j;
+                            final Object pl = forge.ai.simulation.ForcedWinProbe.handSandbox(g, me, splitmix(seed0 + 1 + k), (c, cm) -> {
+                                final Object ctx = onCopy(c, cm);
+                                forge.ai.simulation.ForcedWinProbe.redraw(c, cm, full);
+                                forge.ai.simulation.ForcedWinProbe.tuck(c, cm, t);
+                                forge.ai.simulation.ForcedWinProbe.toFirstMain(c, cm);
+                                return captureLeaf(ctx, c, cm);
+                            });
+                            if (pl == null) {
+                                err = "sandbox " + k + "/" + j;
+                            } else {
+                                ps.add(pl);
+                                at.add(new int[] {k, j});
+                            }
+                        }
+                    }
+                    if (err != null) {
+                        break;
+                    }
+                    final double[] v = leafValues(ps);
+                    if (v == null || v.length != ps.size()) {
+                        err = "values";
+                        break;
+                    }
+                    final int[] pick = new int[samples];
+                    java.util.Arrays.fill(pick, -1);
+                    java.util.Arrays.fill(best, -1.0);
+                    for (int i = 0; i < v.length; i++) {
+                        final int k = at.get(i)[0];
+                        if (k < 0) {
+                            vKeep = v[i];
+                        } else if (v[i] > best[k]) {
+                            best[k] = v[i];
+                            pick[k] = at.get(i)[1];
+                        }
+                    }
+                    for (int k = 0; k < samples; k++) {
+                        if (pick[k] < 0) {
+                            err = "no pick";
+                            break;
+                        }
+                        tucked[k] = java.util.Arrays.copyOf(tucked[k], tucked[k].length + 1);
+                        tucked[k][tucked[k].length - 1] = pick[k];
+                    }
+                }
+                if (err == null) {
+                    double sum = 0;
+                    for (int k = 0; k < samples; k++) {
+                        sum += best[k];
+                    }
+                    vMull = sum / samples;
+                    vs = new double[samples + 1];
+                    vs[0] = vKeep;
+                    System.arraycopy(best, 0, vs, 1, samples);
+                }
+            } catch (RuntimeException e) {
+                err = String.valueOf(e);
+            }
+            if (err != null) {
+                mullValueFails++;
+            }
+        }
+        final boolean keepIt = would && keep >= 0 && err == null && !Double.isNaN(vKeep) && vKeep + margin >= vMull;
+        if (keepIt) {
+            mullValueKeeps++;
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "mullValue");
+            row.addProperty("would_mulligan", would);
+            row.addProperty("kept", keepIt);
+            if (!Double.isNaN(vKeep)) {
+                row.addProperty("v_keep", Math.round(vKeep * 1e4) / 1e4);
+                row.addProperty("v_mull", Math.round(vMull * 1e4) / 1e4);
+                final JsonArray va = new JsonArray();
+                for (int k = 1; k < vs.length; k++) {
+                    va.add(Math.round(vs[k] * 1e4) / 1e4);
+                }
+                row.add("v_samples", va);
+            }
+            if (err != null) {
+                row.addProperty("error", err);
+            }
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
+            addRow(row);
+        }
+        return keepIt ? new short[] {keep} : null;
+    }
+
     /** mull-off: the keep answer, with the policy's own answer and the hand logged. */
     private short[] keepAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
@@ -2117,7 +2290,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public boolean choiceAsk(final int family) {
-        if ((cfg.alwaysKeep || cfg.keepGate && cfg.reach != null) && family == RlSchema.F_MULLIGAN) {
+        if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.keepGate && cfg.reach != null) && family == RlSchema.F_MULLIGAN) {
             return true;
         }
         return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
@@ -2184,8 +2357,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return keepAnswer(g, me, m, frame, greedy);
         }
         // integrate-1110: solver-distill-cc-1109 returned here for EVERY mulligan ask, so a choiceScorer whose families
-        // hold MULLIGAN never scored one any more, also with keepGate off. Only the keepGate answers here now; with it
-        // off the ask goes on to the scorer as it does on the live branch.
+        // hold MULLIGAN never scored one any more, also with its mulligan keys off. Only those keys answer here now
+        // (mullValue first, as on that lane; then the keepGate); with both off the ask goes on to the scorer as it does
+        // on the live branch.
+        if (m.family == RlSchema.F_MULLIGAN && cfg.mullValue != null) {
+            return mullValueAnswer(g, me, m, frame, greedy);
+        }
         if (m.family == RlSchema.F_MULLIGAN && cfg.keepGate && cfg.reach != null) {
             return keepGateAnswer(g, me, m, frame, greedy);
         }
@@ -2865,6 +3042,24 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             po.addProperty("max_sent_finished", ps[3]);
             o.add("playout_seats", po);
         }
+        if (cfg.mullValue != null) {
+            // solver-distill-cc-1109: only with mullValue, so every other summary is unchanged
+            final JsonObject mv = new JsonObject();
+            mv.addProperty("asks", mullValueAsks);
+            mv.addProperty("keeps", mullValueKeeps);
+            mv.addProperty("fails", mullValueFails);
+            o.add("mull_value", mv);
+        }
+        if (teachLeaves.get() > 0) {
+            // solver-distill-cc-1109: only with the teacher at the leaves, so every other summary is unchanged
+            final JsonObject te = new JsonObject();
+            te.addProperty("leaves", teachLeaves.get());
+            te.addProperty("gf_hits", teachGfHits.get());
+            te.addProperty("gfs_hits", teachGfsHits.get());
+            te.addProperty("raised", teachRaised.get());
+            te.addProperty("ms", teachNanos.get() / 1_000_000L);
+            o.add("teacher", te);
+        }
         if (voided != null) {
             o.addProperty("voided", voided);
         }
@@ -3102,6 +3297,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * open. A deck with no combo then pays (almost) nothing for the reach.
          */
         public boolean gate;
+        /**
+         * With {@link #gate}: the gate is the list's, not the position's. It opens at the seat's first decision when any
+         * of its cards can end the game in the planner's model ({@link forge.ai.simulation.ForcedWinSolver#hasEnder}),
+         * with no planner search. The position gate was found closed on half of the decisions at which a Doomsday seat
+         * held a tutor (its check runs at the turn's first decision, before the land drop, on a node allowance).
+         */
+        public boolean gateEnder;
         /** The opponent's reach at a leaf is its no-new-card line only (one screen, not one per name). */
         public boolean oppDirect;
         /** A line k turns from the leaf counts gamma^k (1 = off): a line now outranks the same line a turn later. */
@@ -3119,9 +3321,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * partners' draws are worth; the unsampled goldfish scores it 0.
          */
         public int sinkSamples = 0;
+        /**
+         * The teacher at the leaves (off by default): a leaf's potential is also the seat's goldfish there (leafGf: the
+         * planner's gamma^turn over five turns with the land-drop relaxation, unknown draws blank) and leafGfsW x its
+         * sampled goldfish (leafGfs orders of the seat's unknown library; every leaf of a game sees the same orders).
+         * These are the value tower's teacher labels, computed exactly. leafGfFree (the default) runs them off the work
+         * clock: a ceiling read of what a perfectly distilled value would give at no cost; false charges the pilot.
+         */
+        public boolean leafGf;
+        public int leafGfs = 0;
+        public double leafGfsW = 0.5;
+        public boolean leafGfFree = true;
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
                 "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart",
-                "sinkSamples"));
+                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree", "gateEnder"));
 
         public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
             final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
@@ -3158,6 +3371,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("gamma")) c.gamma = o.get("gamma").getAsDouble();
             if (o.has("depart")) c.depart = o.get("depart").getAsDouble();
             if (o.has("sinkSamples")) c.sinkSamples = o.get("sinkSamples").getAsInt();
+            if (o.has("gateEnder")) c.gateEnder = o.get("gateEnder").getAsBoolean();
+            if (o.has("leafGf")) c.leafGf = o.get("leafGf").getAsBoolean();
+            if (o.has("leafGfs")) c.leafGfs = o.get("leafGfs").getAsInt();
+            if (o.has("leafGfsW")) c.leafGfsW = o.get("leafGfsW").getAsDouble();
+            if (o.has("leafGfFree")) c.leafGfFree = o.get("leafGfFree").getAsBoolean();
             return c;
         }
     }
@@ -3228,7 +3446,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             reachOn = true;
             return;
         }
-        if (!reachSeen) {
+        if (rc.gateEnder) {
+            if (!reachSeen && reachGateKey == Long.MIN_VALUE) {
+                reachGateKey = 0L; // asked once per game
+                reachGateChecks++;
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                reachSeen = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader).hasEnder(g);
+            }
+        } else if (!reachSeen) {
             // one check per turn and library size (a draw or a search re-reads it)
             final long key = g.getPhaseHandler().getTurn() * 1_000L + me.getCardsIn(forge.game.zone.ZoneType.Library).size();
             if (key != reachGateKey) {
@@ -3328,6 +3553,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
             out[0] = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
             addCost(out, r);
+            if (rc.leafGf || rc.leafGfs > 0) {
+                leafTeacher(rc, k, g, me, out);
+            }
         }
         if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
             final forge.ai.simulation.ForcedWinSolver.Reach ro = reachOpp(k, g, me.getOpponents().get(0), rc);
@@ -3360,6 +3588,55 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         return out;
+    }
+
+    /** {@link ReachCfg#leafGf}, {@link ReachCfg#leafGfs}: the teacher's potential at this leaf joins its reach. */
+    public final java.util.concurrent.atomic.AtomicLong teachLeaves = new java.util.concurrent.atomic.AtomicLong(),
+            teachGfHits = new java.util.concurrent.atomic.AtomicLong(), teachGfsHits = new java.util.concurrent.atomic.AtomicLong(),
+            teachRaised = new java.util.concurrent.atomic.AtomicLong(), teachNanos = new java.util.concurrent.atomic.AtomicLong();
+    /** The sampled orders' salt: one for the whole game, so every leaf (and every candidate) sees the same draws. */
+    static final long LEAF_GFS_SALT = 0x51DCC1109L;
+
+    private void leafTeacher(final ReachCfg rc, final RlKnowledge k, final Game g, final Player me, final double[] out) {
+        final long t0 = System.nanoTime();
+        final forge.game.WorkClock.Clock clock = rc.leafGfFree ? forge.game.WorkClock.install(null) : null;
+        try {
+            double pot = Double.isNaN(out[0]) ? 0.0 : out[0];
+            final double before = pot;
+            teachLeaves.incrementAndGet();
+            if (rc.leafGf) {
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gf = goldfishFull(k, g, me);
+                if (!gf.failed && !Double.isNaN(gf.g) && gf.g > 0) {
+                    teachGfHits.incrementAndGet();
+                    pot = Math.max(pot, gf.g);
+                }
+            }
+            if (rc.leafGfs > 0) {
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                o.samples = rc.leafGfs;
+                o.maxNodes = 4L * o.nodes * rc.leafGfs;
+                o.ms = 10_000L; // node caps only
+                o.seed = splitmix(uid ^ LEAF_GFS_SALT);
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gs = forge.ai.simulation.ForcedWinSolver
+                        .withReader(me, reachSolverCfg, reader).goldfish(g, knownTopOf(k, me), o);
+                if (!gs.failed && !Double.isNaN(gs.g) && gs.g > 0) {
+                    teachGfsHits.incrementAndGet();
+                    pot = Math.max(pot, Math.min(1.0, rc.leafGfsW * gs.g / Math.max(1e-9, rc.alpha)));
+                }
+            }
+            if (pot > before) {
+                teachRaised.incrementAndGet();
+                out[0] = pot;
+            }
+        } catch (RuntimeException e) {
+            // the leaf keeps its reach
+        } finally {
+            if (rc.leafGfFree) {
+                forge.game.WorkClock.install(clock);
+            }
+            teachNanos.addAndGet(System.nanoTime() - t0);
+        }
     }
 
     private static void addCost(final double[] out, final forge.ai.simulation.ForcedWinSolver.Reach r) {

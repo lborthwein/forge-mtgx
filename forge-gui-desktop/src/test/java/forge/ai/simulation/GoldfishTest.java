@@ -243,6 +243,9 @@ public class GoldfishTest extends forge.ai.AITest {
         g2.setAge(forge.game.GameStage.Mulligan);
         final ForcedWinSolver s2 = ((CubeComboPlayerController) g2.getPlayers().get(0).getController()).cubeCombo().forcedWin();
         Assert.assertFalse(s2.potential(g2, new java.util.ArrayList<>(), o, 40, true, 12_000L), "no kill in the deck: the policy's mulligan stands");
+        // the deck-level gate: a list with a card that ends the game, against one with none
+        Assert.assertTrue(s.hasEnder(g), "the Doomsday list holds a kill");
+        Assert.assertFalse(s2.hasEnder(g2), "lands and bears hold none");
     }
 
     /**
@@ -262,5 +265,116 @@ public class GoldfishTest extends forge.ai.AITest {
         final ForcedWinSolver.Goldfish cut = fish("", "", lib, true, o);
         Assert.assertTrue(cut.cut);
         Assert.assertEquals(cut.screens, 1);
+    }
+
+    /**
+     * mullValue's sandbox: before the game starts, another hand of one card fewer from our own shuffled library, standing
+     * at our first main phase; the hand is a function of the seed and the live game is untouched.
+     */
+    @Test
+    public void handSandboxRedraws() {
+        final String hand = "Verdant Catacombs;Cabal Ritual;Urborg, Tomb of Yawgmoth;Raffine's Tower;Mind Stone;Thassa's Oracle;Swamp";
+        final String frame = ForcedWinSolverTest.frame(hand, "", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + DD1010);
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        g.setAge(forge.game.GameStage.Mulligan);
+        final Player me = g.getPlayers().get(0);
+        final int lib = me.getCardsIn(forge.game.zone.ZoneType.Library).size();
+        final ForcedWinProbe.SandboxUse<String> read = (c, cm) -> {
+            ForcedWinProbe.redraw(c, cm, 6);
+            ForcedWinProbe.toFirstMain(c, cm);
+            final java.util.List<String> names = new java.util.ArrayList<>();
+            for (forge.game.card.Card x : cm.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                names.add(x.getName());
+            }
+            java.util.Collections.sort(names);
+            return names.size() + "|" + cm.getCardsIn(forge.game.zone.ZoneType.Library).size() + "|" + c.getAge() + "|"
+                    + c.getPhaseHandler().getPhase() + "|" + (c.getPhaseHandler().getPlayerTurn() == cm) + "|" + names;
+        };
+        final String a = ForcedWinProbe.handSandbox(g, me, 11L, read);
+        final String a2 = ForcedWinProbe.handSandbox(g, me, 11L, read);
+        final String b = ForcedWinProbe.handSandbox(g, me, 12L, read);
+        final String kept = ForcedWinProbe.handSandbox(g, me, 13L, (c, cm) -> {
+            ForcedWinProbe.toFirstMain(c, cm);
+            return cm.getCardsIn(forge.game.zone.ZoneType.Hand).size() + "|" + cm.getCardsIn(forge.game.zone.ZoneType.Library).size();
+        });
+        // the mulligan as it is played: seven new cards, then two of them (hand positions 0 and 3) to the bottom
+        final String tucked = ForcedWinProbe.handSandbox(g, me, 11L, (c, cm) -> {
+            ForcedWinProbe.redraw(c, cm, 7);
+            final String first = cm.getCardsIn(forge.game.zone.ZoneType.Hand).get(0).getName();
+            ForcedWinProbe.tuck(c, cm, new int[] {0, 3});
+            final forge.game.card.CardCollectionView l = cm.getCardsIn(forge.game.zone.ZoneType.Library);
+            return cm.getCardsIn(forge.game.zone.ZoneType.Hand).size() + "|" + l.size() + "|"
+                    + (l.get(l.size() - 1).getName().equals(first) || l.get(l.size() - 2).getName().equals(first));
+        });
+        Assert.assertEquals(tucked, "5|" + (lib + 2) + "|true", "two cards on the bottom, five in hand");
+        System.out.println("MULLVALUE sandbox a=" + a + " b=" + b + " kept=" + kept);
+        Assert.assertNotNull(a);
+        Assert.assertTrue(a.startsWith("6|" + (lib + 1) + "|Play|MAIN1|true|"), a);
+        Assert.assertEquals(a2, a, "the redrawn hand is a function of the seed");
+        Assert.assertNotEquals(b, a, "another seed, another hand");
+        Assert.assertEquals(kept, "7|" + lib, "the hand as dealt");
+        Assert.assertEquals(me.getCardsIn(forge.game.zone.ZoneType.Hand).size(), 7, "the live hand is untouched");
+        Assert.assertEquals(me.getCardsIn(forge.game.zone.ZoneType.Library).size(), lib);
+        Assert.assertEquals(g.getAge(), forge.game.GameStage.Mulligan, "the live game is untouched");
+    }
+
+    /**
+     * The reach gate on a real position (D3 pair 2, our second turn): two lands in play, Mystical Tutor and Wishclaw
+     * Talisman in hand, Doomsday in the library. How many planner nodes does the potential check need to see the line?
+     */
+    @Test
+    public void tutorHandPotential() {
+        final String hand = "Chart a Course;Mystical Tutor;Troll of Khazad-dûm;Wishclaw Talisman;Counterspell";
+        final String rest = DD1010.replace("Chart a Course;", "").replace("Mystical Tutor;", "").replace("Troll of Khazad-dûm;", "")
+                .replace("Wishclaw Talisman;", "").replace("Counterspell;", "") + ";Verdant Catacombs;Urborg, Tomb of Yawgmoth".replace(";Urborg, Tomb of Yawgmoth", "");
+        final String frame = ForcedWinSolverTest.frame(hand, "Raffine's Tower;Urborg, Tomb of Yawgmoth", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + rest);
+        for (int[] b : new int[][] {{1500, 12000}, {1500, 48000}, {6000, 48000}, {6000, 160000}, {20000, 400000}}) {
+            final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+            final ForcedWinSolver.GoldfishOpts o = new ForcedWinSolver.GoldfishOpts();
+            o.ms = -1L;
+            o.nodes = b[0];
+            final long t0 = System.nanoTime();
+            final boolean pot = s.potential(g, new java.util.ArrayList<>(), o, 40, true, b[1]);
+            final ForcedWinSolver.GoldfishOpts o2 = new ForcedWinSolver.GoldfishOpts();
+            o2.ms = -1L;
+            o2.nodes = b[0];
+            o2.maxNodes = b[1];
+            final ForcedWinSolver.Goldfish gf = s.goldfish(g, new java.util.ArrayList<>(), o2);
+            System.out.println("GOLDFISH tutorHand nodes/screen=" + b[0] + " cap=" + b[1] + " potential=" + pot + " ms="
+                    + (System.nanoTime() - t0) / 1_000_000 + " goldfish g=" + gf.g + " turn=" + gf.bestTurn + " nodes=" + gf.nodes
+                    + " capped=" + gf.capped + " | " + (gf.best == null ? null : String.valueOf(gf.best).substring(0, Math.min(260, String.valueOf(gf.best).length()))));
+        }
+    }
+
+    /**
+     * SETUP on the same real position (D3 pair 2: two lands, Mystical Tutor and Wishclaw Talisman in hand): the planner's
+     * play for this turn as the node allowance grows. With enough nodes it is the tutor with Doomsday as its pick.
+     */
+    @Test
+    public void tutorHandSetup() {
+        final String hand = "Chart a Course;Mystical Tutor;Troll of Khazad-dûm;Wishclaw Talisman;Counterspell";
+        final String rest = DD1010.replace("Chart a Course;", "").replace("Mystical Tutor;", "").replace("Troll of Khazad-dûm;", "")
+                .replace("Wishclaw Talisman;", "").replace("Counterspell;", "") + ";Verdant Catacombs";
+        final String frame = ForcedWinSolverTest.frame(hand, "Raffine's Tower;Urborg, Tomb of Yawgmoth", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + rest);
+        for (int[] b : new int[][] {{4000, 12000}, {8000, 32000}, {12000, 48000}, {20000, 80000}, {40000, 160000}}) {
+            final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+            final ForcedWinSolver.GoldfishOpts o = new ForcedWinSolver.GoldfishOpts();
+            o.horizon = 5;
+            o.active = 3;
+            o.nodes = b[0];
+            o.maxNodes = b[1];
+            o.ms = -1L;
+            final long t0 = System.nanoTime();
+            final ForcedWinSolver.Proposal p = s.setup(g, s.knownTop(g), o);
+            System.out.println("GOLDFISH tutorHandSetup nodes/screen=" + b[0] + " cap=" + b[1] + " ms=" + (System.nanoTime() - t0) / 1_000_000
+                    + " -> " + (p == null ? "none" : "gf=" + p.gf + " turn+" + p.winTurn + " steps=" + p.steps + " | " + String.valueOf(p.line).substring(0, Math.min(200, String.valueOf(p.line).length()))));
+        }
     }
 }
