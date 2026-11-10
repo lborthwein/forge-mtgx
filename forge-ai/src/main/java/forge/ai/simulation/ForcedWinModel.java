@@ -61,7 +61,14 @@ public final class ForcedWinModel {
         /** solver-gaps-1015: our whole hand / graveyard goes into our library (Timetwister, Echo of Eons); our hand is exiled (Memory Jar). */
         HAND_TO_LIBRARY, GRAVEYARD_TO_LIBRARY, EXILE_HAND,
         /** labeller-v2 (c): scry n / surveil n of our library (observed only by a planScry reader). */
-        SCRY, SURVEIL
+        SCRY, SURVEIL,
+        /**
+         * sdcc-tutorcast-1110 (observed only by a tutorCast reader): search our library for a card, which its controller
+         * then casts at once without paying its mana cost. {@link Eff#names}: the card names the engine offered to cast
+         * that way in the sandbox (one run per card name of ours); {@link Eff#n} = 1: a searched card that is not cast
+         * goes to our hand (observed), 0: it does not (such a pick is not planned).
+         */
+        TUTOR_CAST
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
@@ -268,6 +275,17 @@ public final class ForcedWinModel {
         /** The ability could not be played in the sandbox (illegal, unaffordable, or the probe failed). */
         boolean unplayable;
         String probeNote = "";
+        /**
+         * sdcc-tutorcast-1110 (set only by a tutorCast reader; 0 / null / false otherwise, and then nothing changes).
+         * sacN: other permanents of ours sacrificed as a cost (1 or 0); sacNames: the names of our cards the engine's
+         * own validity check accepts for it. optCosts: the optional additional costs this variant of the spell pays (the
+         * engine's type names), by which the follower builds the ability again. alt: an alternative cost of the card,
+         * never the spell an effect casts without paying its mana cost.
+         */
+        int sacN;
+        java.util.Set<String> sacNames;
+        List<String> optCosts;
+        boolean alt;
 
         boolean has(EffKind k) {
             for (Eff e : effects) {
@@ -306,6 +324,9 @@ public final class ForcedWinModel {
             if (sacSelf) {
                 sb.append(" sac");
             }
+            if (sacN > 0) {
+                sb.append(" sacOther").append(sacN).append(sacNames == null ? "" : sacNames.toString());
+            }
             if (discardHand) {
                 sb.append(" discardHand");
             }
@@ -339,6 +360,10 @@ public final class ForcedWinModel {
             a.loyaltyDelta = loyaltyDelta;
             a.storm = storm;
             a.instant = instant;
+            a.sacN = sacN;
+            a.sacNames = sacNames;
+            a.optCosts = optCosts;
+            a.alt = alt;
             return a;
         }
 
@@ -470,7 +495,7 @@ public final class ForcedWinModel {
         boolean useful() {
             return land || wins() || draws() || mana() || counter
                     || fromHand.stream().anyMatch(a -> !a.unplayable && (a.has(EffKind.PILE) || a.has(EffKind.TUTOR)
-                            || a.has(EffKind.TUTOR_TOP)));
+                            || a.has(EffKind.TUTOR_TOP) || a.has(EffKind.TUTOR_CAST)));
         }
 
         /** A coarse class for ordering only (never a rule): win, draw, mana, land, protection, other. */
@@ -530,6 +555,14 @@ public final class ForcedWinModel {
 
     /** The printed cost of an ability, or null when it is outside the model (exile a card, sacrifice another, X). */
     static Abil readCost(SpellAbility sa, AbilKind kind) {
+        return readCost(sa, kind, false);
+    }
+
+    /**
+     * As above. sdcc-tutorcast-1110, {@code sacOther} (false = exactly the above): a cost part "sacrifice one other
+     * permanent" is in the model ({@link Abil#sacN}; the caller fills {@link Abil#sacNames}).
+     */
+    static Abil readCost(SpellAbility sa, AbilKind kind, boolean sacOther) {
         final Abil ab = new Abil();
         ab.kind = kind;
         ab.desc = sa.getDescription();
@@ -565,6 +598,9 @@ public final class ForcedWinModel {
                 ab.tapSelf = true;
             } else if (p instanceof CostSacrifice s && s.payCostFromSource()) {
                 ab.sacSelf = true;
+            } else if (sacOther && p instanceof CostSacrifice s && ab.sacN == 0 && s.getType() != null
+                    && Integer.valueOf(1).equals(s.convertAmount())) {
+                ab.sacN = 1;
             } else if (p instanceof CostDiscard d && d.payCostFromSource()) {
                 continue; // cycling: discard this card
             } else if (p instanceof CostDiscard d && "Hand".equals(d.getType())) {
@@ -858,15 +894,18 @@ public final class ForcedWinModel {
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         synchronized ACard card(Game live, Player me, Card c) {
             // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
-            final String key = planScry ? "scry|" + c.getName() : c.getName();
+            // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
+            final String key = (tutorCast ? "tc|" : "") + (planScry ? "scry|" + c.getName() : c.getName());
             ACard t = templates.get(key);
             if (t == null) {
-                final boolean prev = ForcedWinProbe.PLAN_SCRY.get();
+                final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevTc = ForcedWinProbe.TUTOR_CAST.get();
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
+                ForcedWinProbe.TUTOR_CAST.set(tutorCast);
                 try {
                     t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
                 } finally {
                     ForcedWinProbe.PLAN_SCRY.set(prev);
+                    ForcedWinProbe.TUTOR_CAST.set(prevTc);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
@@ -885,6 +924,14 @@ public final class ForcedWinModel {
 
         /** labeller-v2 (c): observe scry / surveil as SCRY / SURVEIL effects (false = v1). */
         boolean planScry;
+
+        /**
+         * sdcc-tutorcast-1110 (solver key tutorCast; false = off, and then nothing changes): the probes also observe a
+         * spell that searches our library for a card and lets us cast it without paying its mana cost
+         * ({@link EffKind#TUTOR_CAST}), with the optional additional costs that unlock it and what the engine accepts
+         * as their payment, and a search that puts the card into our hand by way of exile (a TUTOR).
+         */
+        boolean tutorCast;
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
         interface LoopProbe {
@@ -988,7 +1035,8 @@ public final class ForcedWinModel {
             }
             for (ACard a : p.hand) {
                 for (Abil ab : a.fromHand) {
-                    chooses |= !ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                    chooses |= !ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                            || ab.has(EffKind.TUTOR_CAST));
                 }
             }
             for (ACard a : p.battlefield) {

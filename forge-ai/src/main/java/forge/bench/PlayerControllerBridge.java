@@ -2517,6 +2517,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
                     relatedPlayer, params);
         }
+        final T lineCard = linePlayChoice(optionList, sa); // sdcc-tutorcast-1110 (no followed line: null)
+        if (lineCard != null) {
+            if (delayedReveal != null) {
+                reveal(delayedReveal);
+            }
+            return lineCard;
+        }
         final List<T> options = Lists.newArrayList(optionList);
         final JsonObject body = envelope(true);
         body.addProperty("title", String.valueOf(title));
@@ -4471,6 +4478,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     private boolean bridgedPlayFromEffect(final SpellAbility tgtSA) {
         if (!localAnswers() || tgtSA == null) {
             return super.playSaFromPlayEffect(tgtSA);
+        }
+        final Boolean lineCast = lineCastFromEffect(tgtSA); // sdcc-tutorcast-1110 (no followed line: null)
+        if (lineCast != null) {
+            return lineCast;
         }
         boolean optional;
         try {

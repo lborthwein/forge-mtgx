@@ -222,6 +222,51 @@ public class PlayerControllerAi extends PlayerController {
         this.cacHook = hook;
     }
 
+    /**
+     * sdcc-tutorcast-1110 (null = none, the default, and then every answer is as before): the line this seat follows
+     * answers an effect's offer to cast a card, a play effect's card choice and a cost part's cards ({@link LineAnswers}).
+     */
+    private LineAnswers lineAnswers = null;
+
+    public void setLineAnswers(final LineAnswers answers) {
+        this.lineAnswers = answers;
+    }
+
+    public LineAnswers getLineAnswers() {
+        return lineAnswers;
+    }
+
+    /** sdcc-tutorcast-1110: the followed line's card for a play effect's "which card", or null (no line, or not its ask). */
+    protected final <T extends GameEntity> T linePlayChoice(final FCollectionView<T> optionList, final SpellAbility sa) {
+        if (lineAnswers == null || sa == null || optionList == null || sa.getApi() != ApiType.Play) {
+            return null;
+        }
+        final Card c = lineAnswers.playChoice(sa, optionList);
+        if (c != null) {
+            for (T t : optionList) {
+                if (t == c) {
+                    return t;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * sdcc-tutorcast-1110: the followed line's answer to an effect's offer to cast {@code tgtSA}: cast (true when it was
+     * put on the stack) or declined (false); null = no line, or not its card.
+     */
+    protected final Boolean lineCastFromEffect(final SpellAbility tgtSA) {
+        if (lineAnswers == null || tgtSA == null) {
+            return null;
+        }
+        final Boolean b = lineAnswers.castFromEffect(tgtSA);
+        if (b == null) {
+            return null;
+        }
+        return b && ComputerUtil.playStack(tgtSA, player, getGame());
+    }
+
     public CacHook getCacHook() {
         return cacHook;
     }
@@ -566,6 +611,10 @@ public class PlayerControllerAi extends PlayerController {
     public <T extends GameEntity> T chooseSingleEntityForEffect(FCollectionView<T> optionList, DelayedReveal delayedReveal, SpellAbility sa, String title, boolean isOptional, Player targetedPlayer, Map<String, Object> params) {
         if (delayedReveal != null) {
             reveal(delayedReveal);
+        }
+        final T lineCard = linePlayChoice(optionList, sa); // sdcc-tutorcast-1110 (no line: null)
+        if (lineCard != null) {
+            return lineCard;
         }
         // r3-inline-choices-1030: the legend rule's keep goes to the choose-a-card hook (no hook: Forge AI's)
         return dp(Kind.SELECT, "chooseSingleEntityForEffect", sa, optionList, isOptional ? 0 : 1, 1,
@@ -1987,6 +2036,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean playSaFromPlayEffect(SpellAbility tgtSA) {
+        final Boolean lineCast = lineCastFromEffect(tgtSA); // sdcc-tutorcast-1110 (no line: null)
+        if (lineCast != null) {
+            return lineCast;
+        }
         boolean optional = !tgtSA.getPayCosts().isMandatory();
         boolean noManaCost = tgtSA.hasParam("WithoutManaCost");
         if (tgtSA instanceof Spell spell) { // Isn't it ALWAYS a spell?

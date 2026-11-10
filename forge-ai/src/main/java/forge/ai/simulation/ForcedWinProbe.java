@@ -77,10 +77,24 @@ public final class ForcedWinProbe {
         int unmapped;
         /** solver-gaps-1015: our hand (without the probed card) and graveyard sizes when it was played. */
         int handBefore, gyBefore;
+        /**
+         * sdcc-tutorcast-1110 (a tutorCast probe only; -1 / false otherwise): the id of the card a search of our library
+         * exiled, whether the engine then offered to cast it without paying its mana cost, and whether it ended in our
+         * hand.
+         */
+        int exilePick = -1;
+        boolean freeCast, pickToHand;
+        /** The effect read for that card (a TUTOR or TUTOR_CAST), or null. */
+        Eff exileEff;
     }
 
     /** labeller-v2 (c): set by a planScry reader around its learning (false = v1). */
     static final ThreadLocal<Boolean> PLAN_SCRY = ThreadLocal.withInitial(() -> false);
+
+    /** sdcc-tutorcast-1110: set by a tutorCast reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> TUTOR_CAST = ThreadLocal.withInitial(() -> false);
+    /** sdcc-tutorcast-1110: the most cards a search-and-cast spell is observed with (one sandbox each), and of those tried first. */
+    static final int CAST_SWEEP = 48, CAST_DISCOVER = 4;
 
     /**
      * ledger-sweep-1107, ledger row 45 ({@code -Dforge.probeEmptyDraw=true}, off by default). A probe runs in a copy of
@@ -164,6 +178,16 @@ public final class ForcedWinProbe {
             this.trace = trace;
         }
 
+        /**
+         * sdcc-tutorcast-1110 (false = off: every answer below is Forge AI's, as before). On: the card a search of our
+         * library takes is noted ("PICK id"; {@link #forcePick} names it when set); when the engine then offers to cast
+         * that very card, the offer is noted ("FREECAST id" without its mana cost, "PAYCAST id" otherwise) and declined,
+         * so the run observes the search and the offer and not what the cast card would do.
+         */
+        boolean tutorCast;
+        String forcePick;
+        int libPick = -1;
+
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             return null;
@@ -178,8 +202,52 @@ public final class ForcedWinProbe {
                 names.append(names.length() == 0 ? "" : "|").append(c.getName());
             }
             trace.add("ASK pick " + destination + " " + origin + " " + fetchList.size() + " names=" + names);
+            if (tutorCast && decider == getPlayer() && origin != null && origin.contains(ZoneType.Library)) {
+                Card pick = null;
+                for (Card c : fetchList) {
+                    if (forcePick != null && pick == null && c.getName().equals(forcePick) && c.getOwner() == getPlayer()) {
+                        pick = c;
+                    }
+                }
+                if (pick == null) {
+                    pick = super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
+                            selectPrompt, isOptional, decider);
+                }
+                libPick = pick == null ? -1 : pick.getId();
+                trace.add("PICK " + libPick + " " + (pick == null ? "-" : pick.getName()));
+                return pick;
+            }
             return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt,
                     isOptional, decider);
+        }
+
+        /** sdcc-tutorcast-1110: the engine's "which card to play" of a play effect: the card our search just took. */
+        @Override
+        public <T extends forge.game.GameEntity> T chooseSingleEntityForEffect(forge.util.collect.FCollectionView<T> optionList,
+                DelayedReveal delayedReveal, SpellAbility sa, String title, boolean isOptional, Player targetedPlayer,
+                Map<String, Object> params) {
+            if (tutorCast && libPick >= 0 && sa != null && sa.getApi() == forge.game.ability.ApiType.Play && optionList != null) {
+                for (T t : optionList) {
+                    if (t instanceof Card c && c.getId() == libPick) {
+                        return t;
+                    }
+                }
+            }
+            return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, targetedPlayer, params);
+        }
+
+        /** sdcc-tutorcast-1110: the offer to cast the card our search just took is noted and declined (see {@link #tutorCast}). */
+        @Override
+        public boolean playSaFromPlayEffect(SpellAbility tgtSA) {
+            if (tutorCast && libPick >= 0 && tgtSA != null && tgtSA.getHostCard() != null
+                    && tgtSA.getHostCard().getId() == libPick) {
+                final forge.game.cost.Cost cost = tgtSA.getPayCosts();
+                final boolean noMana = cost == null || !cost.hasManaCost() || cost.getTotalMana() == null
+                        || cost.getTotalMana().isZero();
+                trace.add((noMana && tgtSA.isSpell() ? "FREECAST " : "PAYCAST ") + libPick);
+                return false;
+            }
+            return super.playSaFromPlayEffect(tgtSA);
         }
 
         @Override
@@ -194,6 +262,10 @@ public final class ForcedWinProbe {
                 Card cardToShow, Map<String, Object> params) {
             if (message != null && message.toLowerCase().contains("shuffle")) {
                 return false;
+            }
+            if (tutorCast && libPick >= 0 && sa != null && sa.getApi() == forge.game.ability.ApiType.Play
+                    && cardToShow != null && cardToShow.getId() == libPick) {
+                return true; // sdcc-tutorcast-1110: on to the offer itself (playSaFromPlayEffect notes and declines it)
             }
             return super.confirmAction(sa, mode, message, options, cardToShow, params);
         }
@@ -274,6 +346,12 @@ public final class ForcedWinProbe {
     // ------------------------------------------------------------------ one sandbox run
 
     static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st) {
+        return run(live, liveMe, cardId, setup, act, seed, st, null);
+    }
+
+    /** As above; sdcc-tutorcast-1110: {@code tune} (null = none) sets up the sandbox's controller for our seat first. */
+    static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st,
+            java.util.function.Consumer<ProbeAi> tune) {
         final Obs o = new Obs();
         final long t0 = System.nanoTime();
         final Random prev = MyRandom.getThreadRandom();
@@ -300,6 +378,10 @@ public final class ForcedWinProbe {
             g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
             final ProbeAi probeAi = new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace);
             probeAi.planScry = PLAN_SCRY.get();
+            probeAi.tutorCast = TUTOR_CAST.get();
+            if (tune != null) {
+                tune.accept(probeAi);
+            }
             me.dangerouslySetController(probeAi);
             for (Player p : g.getPlayers()) {
                 if (p != me) {
@@ -432,6 +514,80 @@ public final class ForcedWinProbe {
         return costKey == null ? loose : null;
     }
 
+    /**
+     * sdcc-tutorcast-1110: the spell of {@code card} matching the template with exactly the optional additional costs
+     * {@code optCosts} added (the engine's own list, {@link GameActionUtil#getOptionalCostValues}, by type name), or null.
+     * A fresh copy for {@code me}: the cost text of the ability with those costs is the template's {@code costKey}.
+     */
+    static SpellAbility locateOpt(Card card, Player me, String desc, String costKey, List<String> optCosts) {
+        for (SpellAbility sa0 : card.getSpellAbilities()) {
+            if (!sa0.isSpell() || !desc.equals(sa0.getDescription())) {
+                continue;
+            }
+            final SpellAbility sa = sa0.copy(me);
+            sa.setActivatingPlayer(me);
+            final List<forge.game.spellability.OptionalCostValue> chosen = new ArrayList<>();
+            try {
+                for (forge.game.spellability.OptionalCostValue v : GameActionUtil.getOptionalCostValues(sa)) {
+                    if (optCosts.contains(v.getType().name())) {
+                        chosen.add(v);
+                    }
+                }
+            } catch (RuntimeException e) {
+                continue;
+            }
+            if (chosen.size() != optCosts.size()) {
+                continue;
+            }
+            final SpellAbility with = GameActionUtil.addOptionalCosts(sa, chosen);
+            final String ck = with.getPayCosts() == null ? "" : with.getPayCosts().toString();
+            if (ck.equals(costKey)) {
+                with.setActivatingPlayer(me);
+                return with;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * sdcc-tutorcast-1110: the names of our cards (wherever they are) that the engine's validity check accepts for the
+     * ability's "sacrifice another permanent" cost part; and that part's valid permanents in play now.
+     */
+    static java.util.Set<String> sacNames(SpellAbility sa, Player me) {
+        final java.util.Set<String> out = new java.util.TreeSet<>();
+        for (forge.game.cost.CostPart p : sa.getPayCosts().getCostParts()) {
+            if (!(p instanceof forge.game.cost.CostSacrifice s) || s.payCostFromSource() || s.getType() == null) {
+                continue;
+            }
+            final String[] valid = s.getType().split(";");
+            for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard,
+                    ZoneType.Exile}) {
+                for (Card c : me.getCardsIn(z)) {
+                    if (c.getOwner() == me && c != sa.getHostCard() && c.isValid(valid, me, sa.getHostCard(), sa)) {
+                        out.add(c.getName());
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    static CardCollection sacValid(SpellAbility sa, Player me) {
+        final CardCollection out = new CardCollection();
+        for (forge.game.cost.CostPart p : sa.getPayCosts().getCostParts()) {
+            if (!(p instanceof forge.game.cost.CostSacrifice s) || s.payCostFromSource() || s.getType() == null) {
+                continue;
+            }
+            for (Card c : forge.game.card.CardLists.getValidCards(me.getCardsIn(ZoneType.Battlefield), s.getType().split(";"), me,
+                    sa.getHostCard(), sa)) {
+                if (c.canBeSacrificedBy(sa, false)) {
+                    out.add(c);
+                }
+            }
+        }
+        return out;
+    }
+
     /** Set an ability's player targets: every targeting link at us ("self") or the opponent ("opp"). */
     static boolean setPlayerTargets(SpellAbility sa, Player me, String variant) {
         Player opp = null;
@@ -523,7 +679,30 @@ public final class ForcedWinProbe {
         int run = 0;
         java.util.Set<String> tutorNames = null, topNames = null;
         final int mark = out.size();
+        // sdcc-tutorcast-1110 (a tutorCast probe only): the card a search of our library exiled, and what became of it
+        final boolean tc = TUTOR_CAST.get();
+        int exilePick = -1, castAt = -1;
+        java.util.Set<String> exileNames = null;
+        final List<Eff> viaExile = new ArrayList<>();
         for (String line : o.trace) {
+            if (tc && (line.startsWith("PICK ") || line.startsWith("PAYCAST "))) {
+                continue;
+            }
+            if (tc && line.startsWith("FREECAST ")) {
+                // the engine offered to cast the searched card without paying its mana cost
+                if (Integer.parseInt(line.substring(9)) == exilePick && castAt < 0) {
+                    if (last != null) {
+                        out.add(new Eff(last, run, 0));
+                        last = null;
+                        run = 0;
+                    }
+                    castAt = out.size();
+                    o.exileEff = new Eff(EffKind.TUTOR_CAST, 0, 0);
+                    out.add(o.exileEff);
+                    o.freeCast = true;
+                }
+                continue;
+            }
             if (line.equals("SHUFFLE")) {
                 // our library was shuffled: what is on top afterwards is unknown
                 if (last != null) {
@@ -580,6 +759,36 @@ public final class ForcedWinProbe {
                 continue;
             }
             final String from = p[2], to = p[3];
+            if (tc && exilePick < 0 && from.equals("Library@me") && to.equals("Exile@me") && pendingAsk != null
+                    && pendingAsk.startsWith("ASK pick Exile [Library")) {
+                // sdcc-tutorcast-1110: the searched card, exiled (it is cast, or put into our hand, from there)
+                exilePick = id;
+                o.exilePick = id;
+                final int ni = pendingAsk.indexOf(" names=");
+                exileNames = ni < 0 ? null : new java.util.HashSet<>(java.util.Arrays.asList(pendingAsk.substring(ni + 7).split("\\|")));
+                pendingAsk = null;
+                continue;
+            }
+            if (tc && id == exilePick && from.equals("Exile@me") && to.equals("Hand@me")) {
+                o.pickToHand = true;
+                if (castAt >= 0) {
+                    o.exileEff = new Eff(EffKind.TUTOR_CAST, 1, 0); // an uncast pick goes to our hand
+                    out.set(castAt, o.exileEff);
+                } else {
+                    // a search that puts the card into our hand by way of exile: a tutor
+                    if (last != null) {
+                        out.add(new Eff(last, run, 0));
+                        last = null;
+                        run = 0;
+                    }
+                    final Eff tutor = new Eff(EffKind.TUTOR, 1, 0, 0, exileNames);
+                    viaExile.add(tutor);
+                    o.exileEff = tutor;
+                    out.add(tutor);
+                }
+                exilePick = -2;
+                continue;
+            }
             EffKind k = null;
             if (from.equals("Library@me") && to.equals("Hand@me")) {
                 k = pendingAsk != null && pendingAsk.contains("Hand [Library") ? EffKind.TUTOR : EffKind.DRAW;
@@ -650,7 +859,7 @@ public final class ForcedWinProbe {
                 }
             } else if (e.kind == EffKind.DISCARD && e.n >= 2 && e.n == o.handBefore) {
                 out.set(i, new Eff(EffKind.DISCARD, ForcedWinModel.ALL, 0));
-            } else if (e.kind == EffKind.TUTOR && tutorNames != null) {
+            } else if (e.kind == EffKind.TUTOR && tutorNames != null && !viaExile.contains(e)) {
                 out.set(i, new Eff(EffKind.TUTOR, e.n, 0, 0, tutorNames));
             }
         }
@@ -824,6 +1033,11 @@ public final class ForcedWinProbe {
                     }, replay, ForcedWinSolver.mix(seed, id * 31L + 500 + variant), st);
                     fitLife(ab, o, o2, base.life);
                 }
+                final boolean tutorCast = TUTOR_CAST.get() && sa0.isSpell();
+                if (tutorCast) {
+                    // sdcc-tutorcast-1110: a search of our library into exile: is the card then offered as a free cast?
+                    searchCast(ab, o, live, me, card, avoid -> inHand, castIt, null, ForcedWinSolver.mix(seed, id * 59L + 11), st);
+                }
                 t.fromHand.add(ab);
                 if (o.won && !o.libraryEmptied && t.permanent) {
                     t.winsOnEntry = true;
@@ -846,7 +1060,13 @@ public final class ForcedWinProbe {
                     a2.effects.addAll(ab.effects);
                     a2.unplayable = ab.unplayable;
                     a2.cardTargets = ab.cardTargets;
+                    a2.alt = tutorCast; // sdcc-tutorcast-1110: never the spell an effect casts for free
                     t.fromHand.add(a2);
+                }
+                if (tutorCast && !ab.unplayable && !ab.cardTargets) {
+                    // sdcc-tutorcast-1110: the spell with each of its optional additional costs paid, kept when that
+                    // unlocks a search-and-cast
+                    learnOptional(t, live, me, card, sa0, base, v, inHand, ForcedWinSolver.mix(seed, id * 61L + 13), st);
                 }
             }
         }
@@ -1052,6 +1272,247 @@ public final class ForcedWinProbe {
                     if (ctl.won) {
                         t.emptyDrawWin = false;
                         t.note += " emptyDrawWin:control-wins";
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ sdcc-tutorcast-1110: search-and-cast
+
+    /** Our cards a search of our library could find, one per name (library, then hand and graveyard), without {@code selfId}. */
+    static List<Card> searchCandidates(Player me, int selfId) {
+        final List<Card> out = new ArrayList<>();
+        final java.util.Set<String> names = new java.util.HashSet<>();
+        for (ZoneType z : new ZoneType[] {ZoneType.Library, ZoneType.Hand, ZoneType.Graveyard}) {
+            final List<Card> cs = new ArrayList<>(me.getCardsIn(z));
+            cs.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+            for (Card c : cs) {
+                if (c.getId() != selfId && c.getOwner() == me && out.size() < CAST_SWEEP && names.add(c.getName())) {
+                    out.add(c);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The few candidates tried first, to see whether the ability offers a free cast at all: the cheapest nonland card, the
+     * cheapest creature, the cheapest instant or sorcery, and a land (an order of trial only, never a rule: what the
+     * engine offers is observed).
+     */
+    static List<Card> discover(List<Card> cands) {
+        final List<Card> sorted = new ArrayList<>(cands);
+        sorted.sort((x, y) -> x.getCMC() != y.getCMC() ? Integer.compare(x.getCMC(), y.getCMC()) : Integer.compare(x.getId(), y.getId()));
+        final List<Card> out = new ArrayList<>();
+        final List<java.util.function.Predicate<Card>> kinds = List.of(c -> !c.isLand(), Card::isCreature,
+                c -> c.isInstant() || c.isSorcery(), Card::isLand);
+        for (java.util.function.Predicate<Card> k : kinds) {
+            for (Card c : sorted) {
+                if (k.test(c)) {
+                    if (!out.contains(c) && out.size() < CAST_DISCOVER) {
+                        out.add(c);
+                    }
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * One sandbox run of a searching ability with the search told to take the card named as {@code d} (moved into our
+     * library first when it is elsewhere; {@code setupFor} gets its id, to leave it there): {offered as a free cast,
+     * ended in our hand}, as observed; {false, false} when the search did not take it.
+     */
+    static boolean[] castOffer(Game live, Player me, int id, java.util.function.IntFunction<Setup> setupFor, Act act,
+            java.util.function.Consumer<ProbeAi> tune, Card d, long seed, Stats st) {
+        final int did = d.getId();
+        final String name = d.getName();
+        final Setup setup = setupFor.apply(did);
+        final Obs o = run(live, me, id, (g, m, c) -> {
+            if (setup != null) {
+                setup.apply(g, m, c);
+            }
+            final Card x = g.findById(did);
+            if (x != null && !x.isInZone(ZoneType.Library)) {
+                g.getAction().moveToLibrary(x, -1, null);
+            }
+        }, act, seed, st, ai -> {
+            if (tune != null) {
+                tune.accept(ai);
+            }
+            ai.forcePick = name;
+        });
+        int pick = -1;
+        boolean offered = false, toHand = false;
+        for (String line : o.trace) {
+            if (line.startsWith("PICK ")) {
+                final int sp = line.indexOf(' ', 5);
+                pick = sp > 0 && name.equals(line.substring(sp + 1)) ? Integer.parseInt(line.substring(5, sp)) : -1;
+            } else if (pick >= 0 && line.equals("FREECAST " + pick)) {
+                offered = true;
+            } else if (pick >= 0 && line.startsWith("MOVE " + pick + " Exile@me Hand@me")) {
+                toHand = true;
+            }
+        }
+        return new boolean[] {offered, toHand};
+    }
+
+    /**
+     * An ability whose run ({@code first}) searched our library for a card and exiled it: when the engine offers to cast
+     * such a card without paying its mana cost (in that run, or for one of a few candidates tried next), the ability is
+     * run once per card name of ours with the search told to take that card, and its search effect becomes
+     * {@link EffKind#TUTOR_CAST} with the names the engine offered. Nothing is read from the card: what is offered,
+     * and where an uncast card goes, is what the sandbox showed.
+     */
+    static void searchCast(Abil ab, Obs first, Game live, Player me, Card card, java.util.function.IntFunction<Setup> setupFor,
+            Act act, java.util.function.Consumer<ProbeAi> tune, long seed, Stats st) {
+        if (ab.unplayable || first.exilePick < 0) {
+            return;
+        }
+        final List<Card> cands = searchCandidates(me, card.getId());
+        boolean offered = first.freeCast;
+        long k = 0;
+        if (!offered) {
+            for (Card d : discover(cands)) {
+                if (castOffer(live, me, card.getId(), setupFor, act, tune, d, ForcedWinSolver.mix(seed, k++), st)[0]) {
+                    offered = true;
+                    break;
+                }
+            }
+        }
+        if (!offered) {
+            return;
+        }
+        final java.util.Set<String> names = new java.util.TreeSet<>();
+        boolean toHand = false;
+        for (Card d : cands) {
+            final boolean[] r = castOffer(live, me, card.getId(), setupFor, act, tune, d, ForcedWinSolver.mix(seed, 100 + k++), st);
+            if (r[0]) {
+                names.add(d.getName());
+            }
+            toHand |= r[1];
+        }
+        final Eff eff = new Eff(EffKind.TUTOR_CAST, toHand ? 1 : 0, 0, 0, names);
+        final int at = first.exileEff == null ? -1 : ab.effects.indexOf(first.exileEff);
+        if (at >= 0) {
+            ab.effects.set(at, eff);
+        } else if (!ab.has(EffKind.WIN)) {
+            ab.effects.add(eff);
+        }
+        ForcedWinSolver.receipt("FORCED_WIN probe-search-cast card=" + card.getName() + " cost=" + ab.costString() + " tried="
+                + cands.size() + " offered=" + names + " uncastToHand=" + toHand);
+    }
+
+    /**
+     * The spell with each of its optional additional costs paid (the engine's list, one cost at a time, at most three):
+     * a variant whose cost is in the model and whose run offers a free cast of a searched card joins the card's abilities
+     * with that cost, the cost's type name (for the follower) and, for a sacrifice, the names of our cards the engine's
+     * validity check accepts. Any other variant is left out, as before.
+     */
+    static void learnOptional(ACard t, Game live, Player me, Card card, SpellAbility sa0, Abil base, String v, Setup inHand,
+            long seed, Stats st) {
+        final List<forge.game.spellability.OptionalCostValue> opts;
+        try {
+            opts = GameActionUtil.getOptionalCostValues(sa0);
+        } catch (RuntimeException e) {
+            return;
+        }
+        final int id = card.getId();
+        int k = 0;
+        for (forge.game.spellability.OptionalCostValue ov : opts) {
+            if (k++ >= 3) {
+                break;
+            }
+            final List<String> types = List.of(ov.getType().name());
+            final SpellAbility with;
+            final Abil cost;
+            try {
+                with = GameActionUtil.addOptionalCosts(sa0, List.of(ov));
+                cost = ForcedWinModel.readCost(with, AbilKind.SPELL, true);
+            } catch (RuntimeException e) {
+                continue;
+            }
+            if (cost == null || cost.costKey.equals(base.costKey)) {
+                continue;
+            }
+            cost.optCosts = types;
+            if (cost.sacN > 0) {
+                cost.sacNames = sacNames(with, me);
+                if (cost.sacNames.isEmpty()) {
+                    continue; // nothing of ours could ever pay it
+                }
+            }
+            final String desc = sa0.getDescription(), costKey = cost.costKey;
+            // a card the search is told to take (avoid) is never the permanent put into play to be sacrificed
+            final java.util.function.IntFunction<Setup> setupFor = avoid -> (g, m, c) -> {
+                inHand.apply(g, m, c);
+                ensureSacrifice(g, m, c, desc, costKey, types, avoid);
+            };
+            final Act act = (g, m, c) -> {
+                final Card hc = g.findById(c.getId());
+                final SpellAbility sa = hc == null ? null : locateOpt(hc, m, desc, costKey, types);
+                if (sa == null || v != null && !setPlayerTargets(sa, m, v) || v == null && targetsAnything(sa)) {
+                    return false;
+                }
+                return play(g, m, sa);
+            };
+            // the sandbox pays a sacrifice with a permanent that has no leaves-play trigger of its own when it can
+            final java.util.function.Consumer<ProbeAi> tune = cost.sacN == 0 ? null : ai -> ai.setCacHook(new forge.ai.CacHook() {
+                @Override
+                public CardCollectionView costCards(PlayerControllerAi c, SpellAbility sa, String part, CardCollectionView valid,
+                        int amount, CardCollectionView def) {
+                    if (amount == 1 && valid != null) {
+                        for (Card x : valid) {
+                            if (!hasDiesTrigger(x)) {
+                                return new CardCollection(x);
+                            }
+                        }
+                    }
+                    return def;
+                }
+            });
+            final long s2 = ForcedWinSolver.mix(seed, k);
+            final Obs o = run(live, me, id, setupFor.apply(-1), act, s2, st, tune);
+            final Abil ab = withEffects(cost, o, id, with, v);
+            if (ab.unplayable) {
+                continue;
+            }
+            searchCast(ab, o, live, me, card, setupFor, act, tune, ForcedWinSolver.mix(s2, 7), st);
+            if (!ab.has(EffKind.TUTOR_CAST) || o.unmapped > 0) {
+                continue;
+            }
+            ab.handMask = base.handMask;
+            t.fromHand.add(ab);
+        }
+    }
+
+    /**
+     * In a sandbox: when nothing in play could pay the ability's sacrifice, one of our other cards that could (not
+     * {@code avoid}) is put into play.
+     */
+    static void ensureSacrifice(Game g, Player m, Card c, String desc, String costKey, List<String> types, int avoid) {
+        final Card hc = g.findById(c.getId());
+        final SpellAbility sa = hc == null ? null : locateOpt(hc, m, desc, costKey, types);
+        if (sa == null) {
+            return;
+        }
+        for (forge.game.cost.CostPart p : sa.getPayCosts().getCostParts()) {
+            if (!(p instanceof forge.game.cost.CostSacrifice s) || s.payCostFromSource() || s.getType() == null
+                    || !sacValid(sa, m).isEmpty()) {
+                continue;
+            }
+            final String[] valid = s.getType().split(";");
+            // a card with no trigger or replacement effect of its own first: its entering then shows nothing in the run
+            for (int pass = 0; pass < 2; pass++) {
+                for (ZoneType z : new ZoneType[] {ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile, ZoneType.Hand}) {
+                    for (Card x : new ArrayList<>(m.getCardsIn(z))) {
+                        if (x.getId() != hc.getId() && x.getId() != avoid && x.getOwner() == m && x.isValid(valid, m, hc, sa)
+                                && (pass == 1 || x.getTriggers().isEmpty() && x.getReplacementEffects().isEmpty())) {
+                            g.getAction().moveToPlay(x, m, null, null);
+                            return;
+                        }
                     }
                 }
             }
