@@ -300,6 +300,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * knowledge: the same value the search reads at its leaves. Keys: samples (6), margin (0).
          */
         public JsonObject mullValue;
+        /**
+         * solver-distill-cc-1109 (mullKeep; null = off): a mulligan the policy asks for is turned into a keep unless the
+         * engine's stock mulligan rule ({@link forge.ai.ComputerUtil#wantMulligan}: fewer than two lands or free mana
+         * permanents, only lands, six lands of seven) asks for it too. Generic: land counts, no card or deck logic; never
+         * turns a keep into a mulligan. Keys: shadow (false; true = the verdict is logged and nothing changes),
+         * stopUnfired (false; true = a game in which the rule has not fired for this seat ends as a draw at the seat's
+         * first priority decision, so a paired read of the rule against its shadow plays out only the games it touches).
+         */
+        public JsonObject mullKeep;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -357,7 +366,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue",
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
@@ -432,6 +441,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 for (String k : c.mullValue.keySet()) {
                     if (!k.equals("samples") && !k.equals("margin")) {
                         throw new IllegalArgumentException("mullValue: unknown key " + k);
+                    }
+                }
+            }
+            if (o.has("mullKeep") && !o.get("mullKeep").isJsonNull()) {
+                c.mullKeep = o.getAsJsonObject("mullKeep");
+                for (String k : c.mullKeep.keySet()) {
+                    if (!k.equals("shadow") && !k.equals("stopUnfired")) {
+                        throw new IllegalArgumentException("mullKeep: unknown key " + k);
                     }
                 }
             }
@@ -668,6 +685,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (mullValue != null) {
                 o.add("mullValue", mullValue); // solver-distill-cc-1109: only when on
+            }
+            if (mullKeep != null) {
+                o.add("mullKeep", mullKeep); // solver-distill-cc-1109: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -1447,6 +1467,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             } catch (RuntimeException e) {
                 reachOn = true;
             }
+        }
+        if (cfg.mullKeep != null && mullKeepFires == 0 && mullKeepFlag("stopUnfired")) {
+            // solver-distill-cc-1109: the rule changes nothing for this seat in this game; a paired read skips it
+            mullKeepStopped = true;
+            return STOP;
         }
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
@@ -2230,6 +2255,74 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return keepIt ? new short[] {keep} : null;
     }
 
+    /** mullKeep (report only): mulligans the policy asked for, and those the rule turned (or, in shadow, would turn) into a keep. */
+    public int mullKeepAsks, mullKeepFires;
+    /** mullKeep.stopUnfired: this game was ended at the seat's first priority decision (the rule had not fired). */
+    public boolean mullKeepStopped;
+
+    private boolean mullKeepFlag(final String key) {
+        return cfg.mullKeep != null && cfg.mullKeep.has(key) && cfg.mullKeep.get(key).getAsBoolean();
+    }
+
+    /**
+     * mullKeep: the policy's answer stands (null) unless it would mulligan and the engine's stock rule would keep; then
+     * keep (in shadow: logged only). Logged either way, with the stock rule's verdict on the hands the policy keeps too.
+     */
+    private short[] mullKeepAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        final boolean would = greedy == null || greedy.length != 1 || greedy[0] != keep;
+        final int n = me.getCardsIn(forge.game.zone.ZoneType.Hand).size();
+        // the engine asks its own rule with the count of cards already put back (LondonMulligan tucks at the redraw)
+        final int back = Math.max(0, me.getMaxHandSize() - n);
+        boolean stock = false;
+        String err = null;
+        try {
+            stock = forge.ai.ComputerUtil.wantMulligan(me, back);
+        } catch (RuntimeException e) {
+            err = String.valueOf(e);
+        }
+        final boolean fire = would && keep >= 0 && err == null && !stock;
+        final boolean shadow = mullKeepFlag("shadow");
+        if (would) {
+            mullKeepAsks++;
+        }
+        if (fire) {
+            mullKeepFires++;
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "mullKeep");
+            row.addProperty("would_mulligan", would);
+            row.addProperty("stock_mulligan", stock);
+            row.addProperty("fired", fire);
+            row.addProperty("kept", fire && !shadow);
+            if (err != null) {
+                row.addProperty("error", err);
+            }
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            int free = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                } else if (c.isArtifact() && c.getManaCost().getCMC() <= 0) {
+                    free++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            row.addProperty("free_artifacts", free);
+            row.addProperty("back", back);
+            addRow(row);
+        }
+        return fire && !shadow ? new short[] {keep} : null;
+    }
+
     /** mull-off: the keep answer, with the policy's own answer and the hand logged. */
     private short[] keepAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
@@ -2278,7 +2371,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public boolean choiceAsk(final int family) {
-        if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.keepGate && cfg.reach != null) && family == RlSchema.F_MULLIGAN) {
+        if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.mullKeep != null || cfg.keepGate && cfg.reach != null)
+                && family == RlSchema.F_MULLIGAN) {
             return true;
         }
         return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
@@ -2302,6 +2396,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return keepAnswer(g, me, m, frame, greedy);
         }
         if (m.family == RlSchema.F_MULLIGAN) {
+            if (cfg.mullKeep != null) {
+                return mullKeepAnswer(g, me, m, frame, greedy);
+            }
             if (cfg.mullValue != null) {
                 return mullValueAnswer(g, me, m, frame, greedy);
             }
@@ -2970,6 +3067,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             po.addProperty("default_cap_ends", ps[2]);
             po.addProperty("max_sent_finished", ps[3]);
             o.add("playout_seats", po);
+        }
+        if (cfg.mullKeep != null) {
+            // solver-distill-cc-1109: only with mullKeep, so every other summary is unchanged
+            final JsonObject mk = new JsonObject();
+            mk.addProperty("asks", mullKeepAsks);
+            mk.addProperty("fires", mullKeepFires);
+            mk.addProperty("stopped", mullKeepStopped);
+            o.add("mull_keep", mk);
         }
         if (cfg.mullValue != null) {
             // solver-distill-cc-1109: only with mullValue, so every other summary is unchanged

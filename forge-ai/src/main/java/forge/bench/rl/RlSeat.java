@@ -152,6 +152,12 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         int HOOK = -3;
 
         /**
+         * solver-distill-cc-1109 (mullKeep.stopUnfired): the game ends here as a draw, not a void: the arm's rule changes
+         * nothing in it, and a paired read plays out only the games the rule touches. Never returned unless that key is on.
+         */
+        int STOP = -4;
+
+        /**
          * S-t (lane cm-choice-search-1009): after {@link #decide}, the forced answers of a macro departure (the window
          * the seat answers its next choice asks from), or null (always null unless the spec's {@code choices} > 0).
          */
@@ -660,6 +666,12 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             final int alt = search.decide(g, player, m, frame, d.steps[0], menuObjs);
             if (alt == PrioritySearch.VOID) {
                 endGame("cpu_cap");
+                return null;
+            }
+            if (alt == PrioritySearch.STOP) {
+                if (!g.isGameOver()) {
+                    g.setGameOver(GameEndReason.Draw);
+                }
                 return null;
             }
             if (alt == PrioritySearch.HOOK) {
