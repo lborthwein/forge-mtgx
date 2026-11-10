@@ -158,9 +158,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          */
         public int setupMinWorlds = 0, setupBreadth = 0;
         public double setupMaxLoss = 0.0;
+        /** SETUP v4 (0 = v1: any failed play-out vetoes): the share of the setup's worlds that must fail to veto it (at least two). */
+        public double setupFailShare = 0.0;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("setup", "setupNodes", "setupMaxNodes",
-                "setupMs", "setupHorizon", "setupActive", "setupMargin", "setupMinWorlds", "setupMaxLoss", "setupBreadth",
+                "setupMs", "setupHorizon", "setupActive", "setupMargin", "setupMinWorlds", "setupMaxLoss", "setupBreadth", "setupFailShare",
                 "samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
                 "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX",
@@ -207,6 +209,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("setupMargin")) s.setupMargin = o.get("setupMargin").getAsDouble();
             if (o.has("setupMinWorlds")) s.setupMinWorlds = o.get("setupMinWorlds").getAsInt();
             if (o.has("setupMaxLoss")) s.setupMaxLoss = o.get("setupMaxLoss").getAsDouble();
+            if (o.has("setupFailShare")) s.setupFailShare = o.get("setupFailShare").getAsDouble();
             if (o.has("setupBreadth")) s.setupBreadth = o.get("setupBreadth").getAsInt();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
@@ -1298,9 +1301,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             double sum = 0, sq = 0;
             boolean failedWorld = false;
             if (js >= 0 && js < r.values.length) {
+                int fails = 0, known = 0;
                 for (double b : r.values[js]) {
-                    failedWorld |= b == Double.NEGATIVE_INFINITY; // a play-out of the setup failed: the search never plays it
+                    if (b == Double.NEGATIVE_INFINITY) {
+                        fails++; // a play-out of the setup failed
+                    }
+                    if (!Double.isNaN(b)) {
+                        known++;
+                    }
                 }
+                // v1 / v2 (setupFailShare 0): one failed play-out and the search never plays it. v4: a failure is a
+                // world like the others (an unfinished play-out reads as one too); the veto needs a share of them.
+                failedWorld = spec.setupFailShare > 0 ? fails >= Math.max(2, (int) Math.ceil(spec.setupFailShare * known))
+                        : fails > 0;
             }
             if (js >= 0 && jc >= 0 && js < r.values.length && jc < r.values.length) {
                 for (int w = 0; w < Math.min(r.values[js].length, r.values[jc].length); w++) {

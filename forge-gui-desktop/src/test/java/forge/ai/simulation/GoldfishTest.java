@@ -349,4 +349,32 @@ public class GoldfishTest extends forge.ai.AITest {
                     + " capped=" + gf.capped + " | " + (gf.best == null ? null : String.valueOf(gf.best).substring(0, Math.min(260, String.valueOf(gf.best).length()))));
         }
     }
+
+    /**
+     * SETUP on the same real position (D3 pair 2: two lands, Mystical Tutor and Wishclaw Talisman in hand): the planner's
+     * play for this turn as the node allowance grows. With enough nodes it is the tutor with Doomsday as its pick.
+     */
+    @Test
+    public void tutorHandSetup() {
+        final String hand = "Chart a Course;Mystical Tutor;Troll of Khazad-dûm;Wishclaw Talisman;Counterspell";
+        final String rest = DD1010.replace("Chart a Course;", "").replace("Mystical Tutor;", "").replace("Troll of Khazad-dûm;", "")
+                .replace("Wishclaw Talisman;", "").replace("Counterspell;", "") + ";Verdant Catacombs";
+        final String frame = ForcedWinSolverTest.frame(hand, "Raffine's Tower;Urborg, Tomb of Yawgmoth", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + rest);
+        for (int[] b : new int[][] {{4000, 12000}, {8000, 32000}, {12000, 48000}, {20000, 80000}, {40000, 160000}}) {
+            final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+            final ForcedWinSolver.GoldfishOpts o = new ForcedWinSolver.GoldfishOpts();
+            o.horizon = 5;
+            o.active = 3;
+            o.nodes = b[0];
+            o.maxNodes = b[1];
+            o.ms = -1L;
+            final long t0 = System.nanoTime();
+            final ForcedWinSolver.Proposal p = s.setup(g, s.knownTop(g), o);
+            System.out.println("GOLDFISH tutorHandSetup nodes/screen=" + b[0] + " cap=" + b[1] + " ms=" + (System.nanoTime() - t0) / 1_000_000
+                    + " -> " + (p == null ? "none" : "gf=" + p.gf + " turn+" + p.winTurn + " steps=" + p.steps + " | " + String.valueOf(p.line).substring(0, Math.min(200, String.valueOf(p.line).length()))));
+        }
+    }
 }
