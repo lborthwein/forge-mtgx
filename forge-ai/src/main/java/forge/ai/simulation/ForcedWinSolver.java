@@ -68,6 +68,12 @@ public final class ForcedWinSolver {
         public int top = 3;
         public double threshold = 0.5;
         public int nodes = 30_000;
+        /**
+         * solver-distill-cc-1109 (18 = the width search's own default, and then nothing changes): the depth-first width
+         * search's depth cap, in steps (a land drop, each mana tap, each cast and the pass are steps). A line that
+         * casts a pile spell now and wins on our next turn needs more than 18.
+         */
+        public int planDepth = 18;
         public int horizon = 2;
         public long budgetMs = 8000;
         public boolean adversary = true;
@@ -735,6 +741,7 @@ public final class ForcedWinSolver {
             c.top = intOr(get.apply("top"), c.top);
             c.threshold = dblOr(get.apply("threshold"), c.threshold);
             c.nodes = intOr(get.apply("nodes"), c.nodes);
+            c.planDepth = intOr(get.apply("planDepth"), c.planDepth);
             c.horizon = intOr(get.apply("horizon"), c.horizon);
             c.budgetMs = intOr(get.apply("budgetMs"), (int) c.budgetMs);
             c.adversary = !"false".equals(get.apply("adversary"));
@@ -3858,6 +3865,7 @@ public final class ForcedWinSolver {
     private ForcedWinPlanner.Limits limits() {
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.expandCap = cfg.planExpandCap;
+        lim.depth = cfg.planDepth; // solver-distill-cc-1109 (18 = the default)
         return lim;
     }
 

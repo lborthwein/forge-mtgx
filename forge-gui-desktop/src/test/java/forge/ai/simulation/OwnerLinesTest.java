@@ -69,7 +69,7 @@ public class OwnerLinesTest extends forge.ai.AITest {
                 System.out.println("OWNERLINES " + id + " PROPOSE ms=" + (System.nanoTime() - t0) / 1_000_000 + " lines=" + props.size()
                         + (best == null ? " none" : " proven=" + best.proven(1) + " pUnopposed=" + best.pUnopposed + " pBelief=" + best.pBelief
                                 + " steps=" + best.steps + " winTurn=" + best.winTurn + " how=" + best.how + " | " + cut(best.text, 260))
-                        + " cap=" + s.lastCap());
+                        + " cap=" + s.lastCap() + " || " + s.summary());
             } catch (RuntimeException | Error ex) {
                 System.out.println("OWNERLINES " + id + " PROPOSE failed: " + cut(ex, 200));
             }
