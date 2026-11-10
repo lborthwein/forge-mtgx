@@ -3760,8 +3760,31 @@ public final class ForcedWinSolver {
     }
 
     /** planLoops: the most partners one permanent is probed with, and one sandbox search's nodes and counted time. */
-    static final int LOOP_PARTNERS = 16, LOOP_NODES = 300;
+    static final int LOOP_PARTNERS = 12, LOOP_NODES = 300;
     static final long LOOP_NANOS = 3_000_000_000L;
+
+    /**
+     * planLoops: the card has an ability of Forge's CopyPermanent effect type, its own or one it grants (an Aura's script
+     * variable). The probe is a sandbox search per partner; without this filter every permanent with a tap ability that
+     * targets a card (a creature that gives protection, say) would pay for it.
+     */
+    static boolean makesCopies(final Card c) {
+        try {
+            for (SpellAbility sa : c.getAllSpellAbilities()) {
+                if (sa.getApi() == forge.game.ability.ApiType.CopyPermanent) {
+                    return true;
+                }
+            }
+            for (String v : c.getSVars().values()) {
+                if (v != null && v.contains("CopyPermanent")) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException e) {
+            return false;
+        }
+        return false;
+    }
 
     /** planLoops: an engine search's limits for the loop sandbox: this turn only, the solver's loop and move options. */
     static ForcedWinEngine.Limits loopLimits(final Config cfg) {
@@ -3806,8 +3829,8 @@ public final class ForcedWinSolver {
      * mana); none when the card wins there alone.
      */
     static void fillLoops(final Config cfg, final Game live, final Player me, final Card c, final ACard t) {
-        if (!c.isPermanent() || c.isLand()) {
-            return;
+        if (!c.isPermanent() || c.isLand() || !makesCopies(c)) {
+            return; // only a card whose own or granted ability makes a copy of a permanent is probed (an effect type, no name)
         }
         boolean taps = false;
         for (ForcedWinModel.Abil ab : t.onBattlefield) {
