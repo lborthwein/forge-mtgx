@@ -4250,6 +4250,7 @@ public final class ForcedWinSolver {
         public boolean exhausted, failed;
         public long nanos;
         public String best;
+        // integrate-1110: both lanes added fields here; they are independent, so both sets stay (solver-distill-cc's first)
         /** solver-distill-cc-1109: set when the screen is a {@link #reach} (NaN otherwise). */
         public double reach = Double.NaN;
         /** solver-distill-cc-1109: the {@link #goldfish} value and its earliest line's turn, when one was planned. */
@@ -4264,6 +4265,25 @@ public final class ForcedWinSolver {
         public boolean gfCut;
         /** SETUP: the best line itself (opaque outside this package; {@link #screenSeq} only). */
         Line bestLine;
+        /**
+         * choice-search-1109 (set only when a choice scorer's {@code check} ran on this position; NaN / null otherwise): the
+         * honest win check's p_win over its belief worlds, its label, worlds run, gate and time.
+         */
+        public double pWin = Double.NaN;
+        public String check;
+        public String checkGate;
+        public int checkWorlds = -1;
+        public double checkMs = Double.NaN;
+        /**
+         * choice-search-1109 pass 3 (set only when a choice scorer's relax pass screened this position): the relaxed-planning
+         * distance, the fewest generic relaxations (an extra untapped land of the seat's own; a card drawn from its unknown
+         * library) with which the planner finds a line (-1 = not run, Integer.MAX_VALUE = none within the bound), the share of
+         * the draw samples at that distance with a line, which relaxation, and the screens run.
+         */
+        public int relaxR = -1;
+        public double relaxP = Double.NaN;
+        public String relaxHow;
+        public int relaxScreens;
     }
 
     /**

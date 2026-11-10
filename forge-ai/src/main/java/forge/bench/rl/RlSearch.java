@@ -2092,13 +2092,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (sc.screenNodes > 0 || sc.pile) {
                 sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();
             }
+            if (sc.check != null) {
+                // choice-search-1109: the honest win check of an option's position (belief worlds over the search's
+                // own belief cube unless the check names one; HonestLabel refuses a dishonest spec)
+                final JsonObject chk = sc.check.deepCopy();
+                if (!chk.has("beliefCube") && cfg.beliefCube != null) chk.addProperty("beliefCube", cfg.beliefCube);
+                if (!chk.has("beliefCubeSha256") && cfg.beliefCubeSha256 != null) chk.addProperty("beliefCubeSha256", cfg.beliefCubeSha256);
+                if (!chk.has("beliefBasics")) chk.addProperty("beliefBasics", cfg.beliefBasics);
+                if (!chk.has("beliefSingleton")) chk.addProperty("beliefSingleton", cfg.beliefSingleton);
+                scorer.setChecker(new forge.ai.simulation.HonestLabel.Seat(forge.ai.simulation.HonestLabel.Spec.parse(chk)));
+            }
         }
         return scorer;
     }
 
     /** choice-scorer-1106: searched-to-top cards stay known for this search's seats, from before the first card moves. */
     public void bindChoiceScorer(final int seats) {
-        if (cfg.choiceScorer != null && liveKnow != null && scorer().config().searchedTop) {
+        // choice-search-1109: with lineOnly the live tracker is left as it is (the policy and the leaf see what they saw
+        // before); only the copies' forks keep the searched-to-top cards, for the line check of a top-of-library tutor
+        if (cfg.choiceScorer != null && liveKnow != null && scorer().config().searchedTop && !scorer().config().lineOnly) {
             liveKnow.setSearchedTopSeats(liveKnow.searchedTopSeats() | seats);
         }
     }
@@ -2115,16 +2127,47 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public short[] decideChoice(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
+        return decideChoice(g, me, m, frame, greedy, null);
+    }
+
+    /** choice-search-1109: as above, with the ask's menu objects (the asking ability of a discard, when the bridge has it). */
+    @Override
+    public short[] decideChoice(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
         final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
         try {
-            return decideChoice0(g, me, m, frame, greedy);
+            return decideChoice0(g, me, m, frame, greedy, objs);
         } finally {
             workEnd(ws);
         }
     }
 
+    /** choice-search-1109: the cost part's class among a costCards ask's menu objects ({pool, sa, cpl}), or null. */
+    static String costPartOf(final Object objs) {
+        if (objs instanceof Object[] a) {
+            for (Object o : a) {
+                if (o instanceof forge.game.cost.CostPart cp) {
+                    return cp.getClass().getSimpleName();
+                }
+            }
+        }
+        return null;
+    }
+
+    /** choice-search-1109: the asking ability among a bridge ask's menu objects ({validCards, sa, player} for discardFrom). */
+    static SpellAbility askSa(final Object objs) {
+        if (objs instanceof Object[] a) {
+            for (Object o : a) {
+                if (o instanceof SpellAbility sa) {
+                    return sa;
+                }
+            }
+        }
+        return null;
+    }
+
     private short[] decideChoice0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
-            final short[] greedy) {
+            final short[] greedy, final Object objs) {
         if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
             return keepAnswer(g, me, m, frame, greedy);
         }
@@ -2141,7 +2184,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long seed = LookaheadSearch.mix(LookaheadSearch.mix(gameSeed, 0xC401CEL), frame.decIdx);
         final String src = ChoiceScorer.srcOf(g);
-        final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed, null);
+        sc.setCostPart(costPartOf(objs)); // choice-search-1109 (COST_CARDS)
+        final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed,
+                sc.config().lineOnly ? askSa(objs) : null); // choice-search-1109: the asking ability (lineOnly only)
         final List<byte[]> ps = sc.payloads(s);
         double[] v = null;
         if (s.unsupported == null) {
@@ -2150,8 +2195,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             } else {
                 v = leafValues(new ArrayList<Object>(ps));
             }
+            if (v == null && sc.config().lineOnly) {
+                // choice-search-1109: a failed value pass leaves only the tie-break unset; the lines still decide
+                v = new double[ps.size()];
+                java.util.Arrays.fill(v, Double.NaN);
+            }
         }
         short[] alt = v == null ? null : sc.choose(s, v, greedy);
+        if (alt == null && v != null && sc.config().relax > 0) {
+            alt = sc.relax(g, me, m, greedy, liveKnow, seed, s); // choice-search-1109 pass 3 (off unless relax > 0)
+        }
         final boolean scored = v != null;
         if (sc.config().shadow) {
             alt = null;
