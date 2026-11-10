@@ -1935,6 +1935,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             labels.add(l);
         }
         row.add("plans", labels);
+        if (st.setup >= 0 && st.setupNote != null) {
+            row.addProperty("setup", st.setupNote); // solver-distill-cc-1109 (only with a setup candidate)
+        }
         row.addProperty("known_top", st.knownTop);
         if (st.horizonTurn > 0) {
             row.addProperty("horizon_turn", st.horizonTurn); // line-adoption-1107 (only when extended)
@@ -3053,6 +3056,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private boolean reachSeen;
     private long reachGateKey = Long.MIN_VALUE;
     public int reachGateChecks, reachGateOff;
+
+    /** SETUP: this decision's reach gate is open (no reach, or no gate: open). */
+    boolean reachGateOpen() {
+        return cfg.reach == null || !reachCfg().gate || reachOn;
+    }
 
     /** {@link ReachCfg#gate}: read the root's potential (once per change of the seat's zones) and set this decision's gate. */
     private void reachGate(final Game g, final Player me) {

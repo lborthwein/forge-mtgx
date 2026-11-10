@@ -2469,7 +2469,36 @@ public final class ForcedWinSolver {
         public final boolean libDependent;
         public final int hiddenTakes;
 
+        /**
+         * solver-distill-cc-1109 (SETUP; false for every offense line): the planner's play for this turn towards a kill
+         * that is {@link #winTurn} turns away, unverified ({@link #pUnopposed} = 0: never proven, never taken at once);
+         * {@link #gf} is its goldfish value.
+         */
+        public final boolean setup;
+        public final double gf;
+
+        Proposal(Line prefix, Goldfish g, Line whole) {
+            this.line = prefix;
+            this.pUnopposed = 0.0;
+            this.pBelief = 0.0;
+            this.worldsRun = 0;
+            this.steps = prefix.steps.size();
+            this.winTurn = whole.winTurn;
+            this.engine = false;
+            this.text = "setup gf=" + g.g + " " + whole;
+            this.knownTop = prefix.knownTop;
+            this.endReason = null;
+            this.endTurn = -1;
+            this.how = "setup:" + whole.how;
+            this.libDependent = false;
+            this.hiddenTakes = 0;
+            this.setup = true;
+            this.gf = g.g;
+        }
+
         Proposal(Eval e) {
+            this.setup = false;
+            this.gf = Double.NaN;
             this.line = e.line;
             this.pUnopposed = e.pUnopposed;
             this.pBelief = e.pBelief;
@@ -2527,6 +2556,74 @@ public final class ForcedWinSolver {
             evalSink = null;
         }
         return out;
+    }
+
+    /** SETUP (report only): calls, those with a goldfish line, and those that proposed steps for this turn. */
+    public int setupCalls, setupLines, setupProposals;
+
+    /**
+     * solver-distill-cc-1109 (SETUP): the planner's own play for this turn when its kill is more than a turn away: the
+     * steps of the goldfish's best line before its first pass (a land drop, a tutor with its pick, a pile with its
+     * cards), as a line the follower plays and answers. The look-ahead plays a tutor or a pile with the policy's picks, so
+     * to it casting one is worth what the policy would fetch; this is the same cast with the planner's picks. Not a
+     * proof and not verified: the search's play-outs weigh it against the default. null = no line, a line that wins this
+     * turn (the offense's own), nothing to play this turn, or not our main phase with an empty stack. Never throws.
+     */
+    public Proposal setup(final Game live, final GoldfishOpts o) {
+        return setup(live, knownTop(live), o);
+    }
+
+    /** As above, on the given known top (tests). */
+    public Proposal setup(final Game live, final List<Integer> knownTop, final GoldfishOpts o) {
+        try {
+            final PhaseHandler ph = live.getPhaseHandler();
+            if (lineActive() || !live.getStack().isEmpty()
+                    || !(ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)))) {
+                return null;
+            }
+            setupCalls++;
+            final Goldfish gf = goldfish(live, knownTop, o);
+            if (gf.failed || gf.bestLine == null || !(gf.g > 0)) {
+                return null;
+            }
+            setupLines++;
+            final Line whole = gf.bestLine;
+            if (whole.winTurn < 1) {
+                return null; // wins this turn: the offense proposes and verifies that
+            }
+            final List<Step> pre = new ArrayList<>();
+            for (Step st : whole.steps) {
+                if (st.pass) {
+                    break;
+                }
+                if (st.hostId >= GRANT_ID) {
+                    if (st.kind == AbilKind.LAND) {
+                        continue; // the relaxation's land drop: not ours to play
+                    }
+                    break; // a granted land's mana: what it pays for is not playable now
+                }
+                pre.add(st);
+            }
+            while (!pre.isEmpty() && pre.get(pre.size() - 1).kind == AbilKind.FLOAT) {
+                pre.remove(pre.size() - 1); // mana floated for a step that was cut
+            }
+            boolean acts = false;
+            for (Step st : pre) {
+                acts |= st.kind != AbilKind.MAIN && st.kind != AbilKind.FLOAT;
+            }
+            if (!acts) {
+                return null;
+            }
+            final Line prefix = new Line(pre, whole.pileNames, 0, whole.lifeLeft, whole.manaLeft, 0, List.of(), "setup");
+            prefix.knownTop = whole.knownTop;
+            setupProposals++;
+            receipt("FORCED_WIN setup" + tag() + " turn=" + ph.getTurn() + " gf=" + gf.g + " winTurn=" + whole.winTurn + " prefix="
+                    + pre + " of " + whole);
+            return new Proposal(prefix, gf, whole);
+        } catch (RuntimeException | StackOverflowError e) {
+            receipt("FORCED_WIN setup error " + e);
+            return null;
+        }
     }
 
     /** search-bones-1015: follow {@code line} (a {@link Proposal#line}) from the next priority on. */
@@ -4160,6 +4257,8 @@ public final class ForcedWinSolver {
         public long gfNodes;
         public int gfScreens;
         public boolean gfCut;
+        /** SETUP: the best line itself (opaque outside this package; {@link #screenSeq} only). */
+        Line bestLine;
     }
 
     /**
@@ -4396,6 +4495,8 @@ public final class ForcedWinSolver {
         public int samples, screens, capped, bestTurn = -1, granted;
         public long nodes, nanos;
         public String best;
+        /** SETUP: the best line itself (the earliest window's; null when sampled or none). */
+        Line bestLine;
     }
 
     /**
@@ -4477,6 +4578,7 @@ public final class ForcedWinSolver {
                         if (out.bestTurn < 0 || sc.bestTurn < out.bestTurn) {
                             out.bestTurn = sc.bestTurn;
                             out.best = sc.best;
+                            out.bestLine = o.samples > 0 ? null : sc.bestLine;
                         }
                         break; // the earliest window with a line
                     }
@@ -4765,6 +4867,7 @@ public final class ForcedWinSolver {
                     s.bestTurn = l.winTurn;
                     s.bestSteps = l.steps.size();
                     s.best = String.valueOf(l);
+                    s.bestLine = l;
                 }
             }
         } catch (RuntimeException | StackOverflowError e) {

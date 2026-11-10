@@ -138,8 +138,21 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * being cut at the leaf before its kill.
          */
         public boolean lineHorizon = false;
+        /**
+         * solver-distill-cc-1109 (SETUP; off by default): at a plan point with no offense line, the solver's play for this
+         * turn towards a kill more than a turn away ({@link ForcedWinSolver#setup}: the goldfish line's steps before its
+         * first pass, with its tutor picks and piles) is a plan candidate, and it is taken unless the search's choice beats
+         * it in the same worlds by more than {@code setupMargin} at the search's departZ (the planner's plan stands
+         * unless the play-outs speak against it). setupNodes / setupMaxNodes / setupMs: one screen's and the call's
+         * planner allowance; setupHorizon / setupActive: the goldfish's turns.
+         */
+        public boolean setup = false;
+        public int setupNodes = 4000, setupHorizon = 5, setupActive = 3;
+        public long setupMaxNodes = 12000, setupMs = 150;
+        public double setupMargin = 0.0;
 
-        static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
+        static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("setup", "setupNodes", "setupMaxNodes",
+                "setupMs", "setupHorizon", "setupActive", "setupMargin", "samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
                 "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX",
                 "lineHorizon", "exactActions"));
@@ -176,6 +189,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("planX")) s.planX = o.get("planX").getAsBoolean();
             if (o.has("lineHorizon")) s.lineHorizon = o.get("lineHorizon").getAsBoolean();
             if (o.has("exactActions")) s.exactActions = o.get("exactActions").getAsBoolean();
+            if (o.has("setup")) s.setup = o.get("setup").getAsBoolean();
+            if (o.has("setupNodes")) s.setupNodes = o.get("setupNodes").getAsInt();
+            if (o.has("setupMaxNodes")) s.setupMaxNodes = o.get("setupMaxNodes").getAsLong();
+            if (o.has("setupMs")) s.setupMs = o.get("setupMs").getAsLong();
+            if (o.has("setupHorizon")) s.setupHorizon = o.get("setupHorizon").getAsInt();
+            if (o.has("setupActive")) s.setupActive = o.get("setupActive").getAsInt();
+            if (o.has("setupMargin")) s.setupMargin = o.get("setupMargin").getAsDouble();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -894,6 +914,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     /** kill-line-1106 (plans.lineFloor; report only): lines adopted by the floor. */
     int lineFloorTakes;
+    /** SETUP (report only): plan points that asked, candidates, taken by the rule, vetoed by the search, chosen by it. */
+    int setupPoints, setupCands, setupTakes, setupVetoes, setupChosen;
+    /** SETUP: the last decision's verdict for its plan row (null = no setup candidate). */
+    String lastSetup;
     /** kill-line-1106 (plans.lineDuel; report only): points scored as default against the line. */
     int lineDuels;
     /** unified-search-1106 (report only): capped points adopted by the posterior, points with a line of no verified world. */
@@ -1050,6 +1074,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         String note = "";
         /** line-adoption-1107 (plans.lineHorizon): the absolute turn the play-outs run to, 0 = the search's own horizon. */
         int horizonTurn;
+        /** SETUP: the index in {@link #plans} of the solver's setup line, -1 = none; the decision's verdict on it. */
+        int setup = -1;
+        String setupNote;
     }
 
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
@@ -1137,6 +1164,24 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     horizonExtends++;
                 }
             }
+            if (spec.setup && n == 0 && duel == null && rs.reachGateOpen()) {
+                // SETUP: no offense line here: the planner's play for this turn towards its kill, as a candidate
+                final ForcedWinSolver.GoldfishOpts go = new ForcedWinSolver.GoldfishOpts();
+                go.horizon = spec.setupHorizon;
+                go.active = spec.setupActive;
+                go.nodes = spec.setupNodes;
+                go.maxNodes = spec.setupMaxNodes;
+                go.ms = spec.setupMs;
+                setupPoints++;
+                final ForcedWinSolver.Proposal sp = driver.probe(() -> solver.setup(g, go));
+                if (sp != null) {
+                    st.setup = st.plans.size();
+                    st.plans.add(new LinePlan(sp));
+                    st.labels.add("setup#0 gf=" + Math.round(sp.gf * 1000) / 1000.0 + " turn+" + sp.winTurn + " steps=" + sp.steps
+                            + (RlSearch.LOG_ACTS ? " text=" + (sp.text == null ? "" : sp.text.replaceAll("\\s+", " ")) : ""));
+                    setupCands++;
+                }
+            }
             if (duel != null) {
                 st.duel = true;
                 lineDuels++;
@@ -1216,6 +1261,54 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         if (r.proven) {
             provenPicks++;
         }
+        if (st.setup >= 0 && !r.proven && r.chosen != givenSize + st.setup) {
+            // SETUP: the planner's play stands unless the search's choice beats it in the same worlds at its own z
+            final int si = givenSize + st.setup;
+            int js = -1, jc = -1;
+            for (int j = 0; j < r.givenIndex.length; j++) {
+                if (r.givenIndex[j] == si) {
+                    js = j;
+                }
+                if (r.givenIndex[j] == Math.max(r.chosen, 0)) {
+                    jc = j;
+                }
+            }
+            int n = 0;
+            double sum = 0, sq = 0;
+            if (js >= 0 && jc >= 0 && js < r.values.length && jc < r.values.length) {
+                for (int w = 0; w < Math.min(r.values[js].length, r.values[jc].length); w++) {
+                    final double a = r.values[jc][w], b = r.values[js][w];
+                    if (Double.isNaN(a) || Double.isInfinite(a) || Double.isNaN(b) || Double.isInfinite(b)) {
+                        continue;
+                    }
+                    n++;
+                    sum += a - b;
+                    sq += (a - b) * (a - b);
+                }
+            }
+            boolean worse = false;
+            if (n >= 2) {
+                final double mean = sum / n;
+                final double se = Math.sqrt(Math.max(0.0, (sq - n * mean * mean) / (n - 1)) / n);
+                worse = mean > spec.setupMargin && mean > rs.departZ() * se;
+            }
+            lastSetup = "n=" + n + " d=" + (n == 0 ? "-" : String.valueOf(Math.round(sum / n * 1000) / 1000.0)) + (worse ? " veto" : " take");
+            st.setupNote = lastSetup;
+            if (!worse) {
+                driver.solver().adopt(((LinePlan) st.plans.get(st.setup)).line);
+                handoff = true;
+                setupTakes++;
+                lineTurns.add(g.getPhaseHandler().getTurn());
+                return RlSeat.PrioritySearch.HOOK;
+            }
+            setupVetoes++;
+        } else if (st.setup >= 0 && r.chosen == givenSize + st.setup) {
+            setupChosen++;
+            lastSetup = "chosen";
+            st.setupNote = lastSetup;
+        } else {
+            lastSetup = null;
+        }
         if (r.chosen < givenSize) {
             if (spec.unified && "capped".equals(r.outcome)) {
                 // unified-search-1106: no play-out verdict. The best verified line's posterior against the root's value,
@@ -1225,6 +1318,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 for (Object pl : st.plans) {
                     if (pl instanceof LinePlan) {
                         final ForcedWinSolver.Proposal pr = ((LinePlan) pl).proposal;
+                        if (pr.setup) {
+                            continue; // SETUP: not an offense line (it was weighed above)
+                        }
                         unknown |= pr.worldsRun == 0;
                         if (pr.worldsRun > 0 && (best == null || pr.pBelief > best.proposal.pBelief)) {
                             best = (LinePlan) pl;
@@ -1448,6 +1544,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         }
         if (lineFloorTakes != 0) {
             o.addProperty("lineFloorTakes", lineFloorTakes); // kill-line-1106
+        }
+        if (spec.setup) {
+            o.addProperty("setupPoints", setupPoints); // solver-distill-cc-1109 (only when on)
+            o.addProperty("setupCands", setupCands);
+            o.addProperty("setupTakes", setupTakes);
+            o.addProperty("setupVetoes", setupVetoes);
+            o.addProperty("setupChosen", setupChosen);
         }
         if (spec.lineHorizon) {
             o.addProperty("horizonExtends", horizonExtends); // line-adoption-1107 (only when on)
