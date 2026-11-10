@@ -103,6 +103,7 @@ public final class HonestGenerator {
         // integrate-1110: solver-distill-cc-1109's planLoops was recorded as false in every generator spec, so a tape
         // from a live-branch jar no longer compared equal on a replay (generator_spec_equal) and its label rows were void
         defaults.put("planLoops", false); // off = the recorded config unchanged
+        defaults.put("planLands", false); // planner-mana-1110: off = the recorded config unchanged
         for (java.util.Map.Entry<String, Object> e : defaults.entrySet()) {
             final com.google.gson.JsonElement v = o.get(e.getKey());
             if (v != null && v.isJsonPrimitive() && String.valueOf(e.getValue()).equals(v.getAsString())) {

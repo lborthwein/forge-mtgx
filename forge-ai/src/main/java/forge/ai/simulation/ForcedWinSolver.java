@@ -282,6 +282,16 @@ public final class ForcedWinSolver {
          * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
          */
         public boolean sourceColorsLive = false;
+        /**
+         * planner-mana-1110 (off by default; off changes nothing): the width model's land mana follows the state the plan
+         * has reached. (1) Each land in our hand is dropped once in a sandbox copy of the position at every read: the
+         * dropped land's own mana there, and every other source of ours whose mana that drop changes, replace the
+         * templates when the plan plays that land (a continuous effect that changes what lands tap for; sourceColorsLive
+         * reads only what is already on the battlefield). (2) A resolution that puts a land from our library onto our
+         * battlefield is an effect (LAND_FETCH: the land is a source with its own entry, tapped or not and at its own
+         * life cost, and the library holds one card fewer); before, such a move was dropped and the ability did nothing.
+         */
+        public boolean planLands = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -784,6 +794,7 @@ public final class ForcedWinSolver {
             c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
+            c.planLands = "true".equals(get.apply("planLands")); // planner-mana-1110
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1331,6 +1342,9 @@ public final class ForcedWinSolver {
         if (cfg.planScry) {
             this.reader.planScry = true;
             this.oppReader.planScry = true;
+        }
+        if (cfg.planLands) {
+            this.reader.planLands = true; // planner-mana-1110 (our own reader only: own template keys)
         }
     }
 
@@ -3866,6 +3880,7 @@ public final class ForcedWinSolver {
     private ForcedWinPlanner.Limits limits() {
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.expandCap = cfg.planExpandCap;
+        lim.planLands = cfg.planLands; // planner-mana-1110
         return lim;
     }
 
@@ -5104,6 +5119,9 @@ public final class ForcedWinSolver {
                 if (cfg.sourceColorsLive && hp != null) {
                     ForcedWinModel.Reader.readSourceColors(hp, pg); // ledger-sweep2-1107
                 }
+                if (cfg.planLands && hp != null) {
+                    reader.readLandDrops(hp, g, pg); // planner-mana-1110 (after the live colors: it compares with them)
+                }
                 return hp;
             }));
         }
@@ -5113,6 +5131,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.sourceOutput && pos != null) {
             ForcedWinModel.Reader.readSourceOutputs(pos, me); // kill-line-1106
+        }
+        if (cfg.planLands && pos != null) {
+            reader.readLandDrops(pos, live, me); // planner-mana-1110 (after the live colors and outputs: it compares with them)
         }
         return pos;
     }
@@ -6235,6 +6256,34 @@ public final class ForcedWinSolver {
         return active == null ? null : active.order(cards, destination, source);
     }
 
+    /**
+     * planner-mana-1110: the active line's answer to the entry payment of a land it names (true = pay, false = decline);
+     * null = no line, or not a land the line names (every line found without planLands).
+     */
+    public Boolean answerEntryPay(SpellAbility sa) {
+        if (active == null || active.done || sa == null || !sa.hasParam("ETB") || sa.getHostCard() == null) {
+            return null;
+        }
+        return entryAnswer(active.line, sa.getHostCard().getId());
+    }
+
+    static Boolean entryAnswer(Line line, int cardId) {
+        for (Step st : line.steps) {
+            if (st.entryPay.contains(cardId)) {
+                return Boolean.TRUE;
+            }
+            if (st.entryNoPay.contains(cardId)) {
+                return Boolean.FALSE;
+            }
+        }
+        return null;
+    }
+
+    /** planner-mana-1110: pay an entry payment the line decided to make (as Forge AI pays a cost it decided to pay). */
+    public static boolean payEntry(Player p, forge.game.cost.Cost cost, SpellAbility sa) {
+        return ForcedWinProbe.payEntry(p, cost, sa);
+    }
+
     public Boolean answerConfirm(SpellAbility sa, String message) {
         if (active == null || active.done || message == null || !message.toLowerCase().contains("shuffle")) {
             return null;
@@ -6318,6 +6367,11 @@ public final class ForcedWinSolver {
         }
         if (cfg.sourceOutput) {
             ForcedWinModel.Reader.readSourceOutputs(pos, p);
+        }
+        if (cfg.planLands) {
+            synchronized (reader) {
+                reader.readLandDrops(pos, g, p); // planner-mana-1110
+            }
         }
         final ForcedWinPlanner.Limits lim = limits();
         lim.nodes = cfg.nodes;
@@ -6887,6 +6941,22 @@ public final class ForcedWinSolver {
 
         List<SpellAbility> lineAction(SpellAbility sa) {
             return uncapped || f.uncapped ? List.of(sa) : capped(List.of(sa));
+        }
+
+        /**
+         * planner-mana-1110: a land the line names enters as the line planned it: its own entry payment is made or
+         * declined (Step#entryPay / entryNoPay; a line without them: Forge AI's answer, as before).
+         */
+        @Override
+        public boolean payCostToPreventEffect(forge.game.cost.Cost cost, SpellAbility sa, boolean alreadyPaid,
+                forge.util.collect.FCollectionView<Player> allPayers) {
+            if (sa != null && sa.hasParam("ETB") && sa.getHostCard() != null && f != null && f.line != null) {
+                final Boolean a = entryAnswer(f.line, sa.getHostCard().getId());
+                if (a != null) {
+                    return a && ForcedWinProbe.payEntry(getPlayer(), cost, sa);
+                }
+            }
+            return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
         }
 
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {

@@ -61,7 +61,12 @@ public final class ForcedWinModel {
         /** solver-gaps-1015: our whole hand / graveyard goes into our library (Timetwister, Echo of Eons); our hand is exiled (Memory Jar). */
         HAND_TO_LIBRARY, GRAVEYARD_TO_LIBRARY, EXILE_HAND,
         /** labeller-v2 (c): scry n / surveil n of our library (observed only by a planScry reader). */
-        SCRY, SURVEIL
+        SCRY, SURVEIL,
+        /**
+         * planner-mana-1110 (observed only by a planLands reader): n land cards go from our library onto our battlefield
+         * (names = the cards the engine offered the search in the sandbox, its filter as observed; null = any land).
+         */
+        LAND_FETCH
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
@@ -397,6 +402,21 @@ public final class ForcedWinModel {
         boolean loopChecked, loopHaste;
         /** planLoops: the loop starts by casting this card (an Aura) on a partner that could already tap. */
         boolean loopFromHand;
+        /**
+         * planner-mana-1110 (solverCfg planLands; set per position by {@link Reader#readLandDrops}, never on a template):
+         * this land of our hand was dropped in a sandbox copy of the position. There it entered tapped or not, at this
+         * life, and makes this plain mana; dropOthers = {card id, colors, amount} of each other source of ours whose
+         * plain mana that drop changed (a land that makes every land another type changes them all).
+         */
+        boolean dropRead, dropTapped;
+        int dropLife, dropColors, dropAmount;
+        int[] dropOthers = new int[0];
+        /**
+         * planner-mana-1110 (a planLands template only): the land drop with the land's own entry payment made: tapped or
+         * not, and the life it cost (entersTapped / landLife above are Forge AI's choice in the first sandbox).
+         */
+        boolean paidRead, paidTapped;
+        int paidLife;
 
         ACard instance(int newId) {
             final ACard a = new ACard();
@@ -405,6 +425,9 @@ public final class ForcedWinModel {
             a.land = land;
             a.entersTapped = entersTapped;
             a.landLife = landLife;
+            a.paidRead = paidRead;
+            a.paidTapped = paidTapped;
+            a.paidLife = paidLife;
             a.subtypes.addAll(subtypes);
             a.bluePips = bluePips;
             a.permanent = permanent;
@@ -643,6 +666,39 @@ public final class ForcedWinModel {
 
     /** The starting position of a search. */
     static final class Position {
+        /**
+         * planner-mana-1110 (solverCfg planLands): this position holds something the lands pass of the planner reads: a
+         * land of our hand whose sandbox drop differs from its template or changes another source, or an ability that
+         * fetches a land. False = the lands pass would search the same tree again.
+         */
+        boolean landPlans() {
+            for (ACard a : hand) {
+                if (a.dropRead && (a.dropColors != a.sourceColors || a.dropColors != 0 && a.dropAmount != a.sourceAmount
+                        || a.dropTapped != a.entersTapped || Math.min(0, a.dropLife) != Math.min(0, a.landLife)
+                        || a.dropOthers.length > 0)) {
+                    return true;
+                }
+                if (a.land && a.paidRead && (a.paidTapped != a.entersTapped || Math.min(0, a.paidLife) != Math.min(0, a.landLife))) {
+                    return true;
+                }
+            }
+            for (List<ACard> zone : List.of(hand, battlefield, library, graveyard, knownTop)) {
+                for (ACard a : zone) {
+                    for (Abil ab : a.fromHand) {
+                        if (ab.has(EffKind.LAND_FETCH)) {
+                            return true;
+                        }
+                    }
+                    for (Abil ab : a.onBattlefield) {
+                        if (ab.has(EffKind.LAND_FETCH)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
         /** blockers-1109: cannot block at the opponent's next declare-blockers step (not a creature, or prevented). */
         static final byte BLOCK_NO = 0;
         /** blockers-1109: can block there if it is untapped when our turn ends (the default for every creature). */
@@ -713,6 +769,40 @@ public final class ForcedWinModel {
     /**
      * Reads positions, probing each distinct card name once (cached for the reader's lifetime: one seat, one game).
      */
+    /**
+     * planner-mana-1110: {@code c}'s plain mana where it is now, {colors, amount}: the mana abilities with no cost but
+     * tapping (the same reading as {@link Reader#readSourceColors}); {0, 0} = no plain source.
+     */
+    static int[] plainOutput(final Card c, final Player me) {
+        int colors = 0, amount = 0;
+        for (SpellAbility original : c.getManaAbilities()) {
+            final SpellAbility m = original.copy(me);
+            if (m.getManaPart() == null) {
+                continue;
+            }
+            int col = 0;
+            for (int k = 0; k < 6; k++) {
+                if (m.canProduce(SHORT[k])) {
+                    col |= 1 << k;
+                }
+            }
+            final Abil cost = col == 0 ? null : readCost(m, AbilKind.FLOAT);
+            if (cost == null || cost.sacSelf || cost.generic != 0 || java.util.Arrays.stream(cost.pips).sum() != 0
+                    || cost.life != 0 || cost.discardHand || m.getSubAbility() != null) {
+                continue;
+            }
+            colors |= col;
+            int n;
+            try {
+                n = Math.max(1, m.amountOfManaGenerated(true));
+            } catch (RuntimeException e) {
+                n = 1;
+            }
+            amount = Math.max(amount, n);
+        }
+        return new int[] {colors, amount};
+    }
+
     static final class Reader {
         final Map<String, ACard> templates = new HashMap<>();
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
@@ -858,15 +948,19 @@ public final class ForcedWinModel {
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         synchronized ACard card(Game live, Player me, Card c) {
             // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
-            final String key = planScry ? "scry|" + c.getName() : c.getName();
+            // planner-mana-1110: a planLands reader learns a fetched land as a kind, under its own keys too
+            final String key = (planLands ? "lands|" : "") + (planScry ? "scry|" + c.getName() : c.getName());
             ACard t = templates.get(key);
             if (t == null) {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get();
+                final boolean prevLands = ForcedWinProbe.PLAN_LANDS.get();
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
+                ForcedWinProbe.PLAN_LANDS.set(planLands);
                 try {
                     t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
                 } finally {
                     ForcedWinProbe.PLAN_SCRY.set(prev);
+                    ForcedWinProbe.PLAN_LANDS.set(prevLands);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
@@ -885,6 +979,56 @@ public final class ForcedWinModel {
 
         /** labeller-v2 (c): observe scry / surveil as SCRY / SURVEIL effects (false = v1). */
         boolean planScry;
+
+        /** planner-mana-1110 (solverCfg planLands): observe a land fetched onto our battlefield as LAND_FETCH (false = before). */
+        boolean planLands;
+
+        /**
+         * planner-mana-1110 (solverCfg planLands): each land of our hand is dropped once in a sandbox copy of the position
+         * (one drop per distinct name; the same reading as the land-drop probe of a template, which is taken once per
+         * game). The planner uses what the engine says that land makes there, and what the drop changes in our other
+         * sources, when the plan plays it. A second land dropped later in the same plan keeps the view read here.
+         */
+        void readLandDrops(final Position p, final Game live, final Player me) {
+            final Map<String, ACard> byName = new HashMap<>();
+            for (ACard a : p.hand) {
+                if (!a.land) {
+                    continue;
+                }
+                final ACard seen = byName.get(a.name);
+                if (seen != null) {
+                    a.dropRead = seen.dropRead;
+                    a.dropTapped = seen.dropTapped;
+                    a.dropLife = seen.dropLife;
+                    a.dropColors = seen.dropColors;
+                    a.dropAmount = seen.dropAmount;
+                    a.dropOthers = seen.dropOthers;
+                    continue;
+                }
+                byName.put(a.name, a);
+                final ForcedWinProbe.DropView v = ForcedWinProbe.dropView(live, me, a.id, ForcedWinSolver.mix(seed, a.id * 31L + 1110), probeStats);
+                if (!v.played) {
+                    continue;
+                }
+                a.dropRead = true;
+                a.dropTapped = v.tapped;
+                a.dropLife = v.life;
+                a.dropColors = v.colors;
+                a.dropAmount = v.amount;
+                final List<Integer> changed = new ArrayList<>();
+                for (ACard b : p.battlefield) {
+                    final int[] now = v.others.get(b.id);
+                    // a source that is sick or a one-shot keeps what read() gave it (as readSourceColors)
+                    if (now == null || b.sourceSick || b.sourceSac || now[0] == b.sourceColors && (now[0] == 0 || now[1] == b.sourceAmount)) {
+                        continue;
+                    }
+                    changed.add(b.id);
+                    changed.add(now[0]);
+                    changed.add(now[1]);
+                }
+                a.dropOthers = changed.stream().mapToInt(Integer::intValue).toArray();
+            }
+        }
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
         interface LoopProbe {
@@ -994,6 +1138,22 @@ public final class ForcedWinModel {
             for (ACard a : p.battlefield) {
                 for (Abil ab : a.onBattlefield) {
                     chooses |= !ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                }
+            }
+            if (planLands) {
+                // planner-mana-1110: something of ours can fetch a land (only a planLands template has the effect)
+                for (ACard a : p.hand) {
+                    for (Abil ab : a.fromHand) {
+                        chooses |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
+                    }
+                    for (Abil ab : a.onBattlefield) {
+                        chooses |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
+                    }
+                }
+                for (ACard a : p.battlefield) {
+                    for (Abil ab : a.onBattlefield) {
+                        chooses |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
+                    }
                 }
             }
             if (libraryIfUseful && chooses) {

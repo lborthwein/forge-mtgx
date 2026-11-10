@@ -883,6 +883,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     }
 
     @Override
+    public Boolean payToPrevent(final forge.game.cost.Cost cost, final SpellAbility sa) {
+        return driver.payToPrevent(cost, sa); // planner-mana-1110
+    }
+
+    @Override
     public boolean confirmTrigger(final WrappedAbility w) {
         return worked(() -> driver.confirmTrigger(w)); // work-units-1107
     }
@@ -1492,6 +1497,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             @Override
             public Boolean confirm(final SpellAbility sa, final String message) {
                 return d.confirm(sa, message);
+            }
+
+            @Override
+            public Boolean payToPrevent(final forge.game.cost.Cost cost, final SpellAbility sa) {
+                return d.payToPrevent(cost, sa); // planner-mana-1110
             }
 
             @Override
