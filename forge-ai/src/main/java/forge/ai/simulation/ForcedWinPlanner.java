@@ -432,6 +432,12 @@ public final class ForcedWinPlanner {
          * before it. The solver asks for this once, after every line of the plain search failed in its game copies.
          */
         boolean landsOnly;
+        /**
+         * planner-mana-1110 (0 = no time bound): the second search starts only before this time on the budget clock and
+         * ends by it. The solver sets it to what is left of its own budget before the evaluation's reserve
+         * (ForcedWinSolver#landsDeadline), the time at which its engine search ends too.
+         */
+        long landsDeadline;
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -453,12 +459,14 @@ public final class ForcedWinPlanner {
         int maxExpand, expandStops;
         /** planner-mana-1110 (report only): the lines come from the lands pass (the plain search had none). */
         boolean landsPass;
+        /** planner-mana-1110 (report only): the lands pass did not run: no time was left before {@link Limits#landsDeadline}. */
+        boolean landsSkipped;
 
         String summary() {
             return "lines=" + lines.size() + " nodes=" + nodes + (exhausted ? "(budget)" : "") + (stoppedBy.isEmpty() ? "" : " stoppedBy=" + stoppedBy)
                     + (depthStops > 0 ? " depthStops=" + depthStops : "") + " sameTurn=" + sameTurn
                     + " nextTurn=" + nextTurn + " ms=" + nanos / 1_000_000 + (expandStops > 0 ? " expandStops=" + expandStops : "")
-                    + (landsPass ? " landsPass" : "");
+                    + (landsPass ? " landsPass" : "") + (landsSkipped ? " landsSkipped" : "");
         }
     }
 
@@ -654,7 +662,11 @@ public final class ForcedWinPlanner {
         final long t0 = forge.game.WorkClock.nanoTime();
         if (lim.planLands && lim.landsOnly) {
             // planner-mana-1110: the plain search's lines are known already (they failed in the game): the land plans only
-            final Result only = pos.landPlans() ? new ForcedWinPlanner(pos, lim, true).run() : new Result();
+            Result only = pos.landPlans() ? landsRun(pos, lim) : new Result();
+            if (only == null) {
+                only = new Result();
+                only.landsSkipped = true;
+            }
             only.landsPass = true;
             only.nanos = forge.game.WorkClock.nanoTime() - t0;
             return only;
@@ -663,17 +675,43 @@ public final class ForcedWinPlanner {
         if (lim.planLands && r.lines.isEmpty() && pos.landPlans()) {
             // planner-mana-1110: no line in the plain search: once more with the position's land plans
             final Result first = r;
-            r = new ForcedWinPlanner(pos, lim, true).run();
-            r.nodes += first.nodes;
-            r.visited += first.visited;
-            r.depthStops += first.depthStops;
-            r.expandStops += first.expandStops;
-            r.maxExpand = Math.max(r.maxExpand, first.maxExpand);
-            r.timedOut |= first.timedOut;
-            r.landsPass = true;
+            final Result second = landsRun(pos, lim);
+            if (second == null) {
+                first.landsSkipped = true; // no time left: the plain search's answer stands
+            } else {
+                r = second;
+                r.nodes += first.nodes;
+                r.visited += first.visited;
+                r.depthStops += first.depthStops;
+                r.expandStops += first.expandStops;
+                r.maxExpand = Math.max(r.maxExpand, first.maxExpand);
+                r.timedOut |= first.timedOut;
+                r.landsPass = true;
+            }
         }
         r.nanos = forge.game.WorkClock.nanoTime() - t0;
         return r;
+    }
+
+    /**
+     * planner-mana-1110: the second search (the land plans), inside {@link Limits#landsDeadline}: null when no time is
+     * left before it, and its own time cap is no longer than the time left.
+     */
+    private static Result landsRun(Position pos, Limits lim) {
+        if (lim.landsDeadline == 0L) {
+            return new ForcedWinPlanner(pos, lim, true).run();
+        }
+        final long left = (lim.landsDeadline - forge.game.WorkClock.nanoTime()) / 1_000_000L;
+        if (left <= 0) {
+            return null;
+        }
+        final long ms0 = lim.ms;
+        lim.ms = ms0 < 0 ? left : Math.min(ms0, left);
+        try {
+            return new ForcedWinPlanner(pos, lim, true).run();
+        } finally {
+            lim.ms = ms0;
+        }
     }
 
     private long deadline = Long.MAX_VALUE;

@@ -647,6 +647,112 @@ public class PlanLandsTest extends forge.ai.AITest {
         }
     }
 
+    // ------------------------------------------------------------------ the second search is inside the solver's budget
+
+    /** A second search starts only while time is left for it: past its deadline the plain search's answer stands. */
+    @Test
+    public void theSecondSearchDoesNotStartPastItsDeadline() {
+        final ForcedWinModel.Position pos = read(PAIR_035_T4, 1, true);
+        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        lim.horizon = 2;
+        lim.planLands = true;
+        final ForcedWinPlanner.Result open = ForcedWinPlanner.plan(pos, lim);
+        Assert.assertTrue(open.landsPass && !open.landsSkipped && !open.lines.isEmpty(), open.summary());
+        lim.landsDeadline = forge.game.WorkClock.nanoTime() - 1; // nothing left
+        final ForcedWinPlanner.Result shut = ForcedWinPlanner.plan(pos, lim);
+        Assert.assertTrue(shut.landsSkipped && !shut.landsPass && shut.lines.isEmpty(), shut.summary());
+        lim.planLands = false;
+        Assert.assertEquals(shut.nodes, ForcedWinPlanner.plan(pos, lim).nodes, "the plain search alone");
+    }
+
+    /**
+     * The solver gives a second search what is left of its own budget before the evaluation's reserve: budgetMs less
+     * evalReserveMs from the offense's start, and no later than the decision's hard deadline less that reserve. With
+     * nothing left it does not run and the solver proposes what it proposes without the key.
+     */
+    @Test
+    public void theSolverBoundsTheSecondSearchByItsBudget() {
+        final Game g0 = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", PAIR_035_T4);
+        final ForcedWinSolver open = new ForcedWinSolver(g0.getPlayers().get(1), ForcedWinSolver.Config.fromProps(ugold4(true)::get));
+        final long t0 = 1_000_000_000L;
+        Assert.assertEquals(open.landsDeadline(t0), t0 + (forge.ai.WallClock.budgetMs(6000) - 1500) * 1_000_000L,
+                "budgetMs 6000 less evalReserveMs 1500 from the offense's start");
+        open.setHardDeadline(t0 + 2_000L * 1_000_000L);
+        Assert.assertEquals(open.landsDeadline(t0), t0 + 500L * 1_000_000L, "the decision's hard deadline less the reserve");
+        open.setHardDeadline(0L);
+        Assert.assertTrue(plannedWinNextTurn(open.propose(g0)), "budget open: the line through the fetched land");
+        Assert.assertEquals(open.landsSkips, 0);
+
+        // the solver's budget equals the reserve: nothing is left for a second search
+        final Map<String, String> m = ugold4(true);
+        m.put("budgetMs", "1500");
+        final Game g1 = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", PAIR_035_T4);
+        final ForcedWinSolver shut = new ForcedWinSolver(g1.getPlayers().get(1), ForcedWinSolver.Config.fromProps(m::get));
+        Assert.assertFalse(plannedWinNextTurn(shut.propose(g1)), "no budget: as without the key");
+        Assert.assertTrue(shut.landsSkips > 0, "the second searches were skipped: " + shut.summary());
+
+        // the decision's hard deadline counts too (PlanSearch sets it with plans.unified): less than the reserve is left
+        final Game g2 = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", PAIR_037_T7);
+        final ForcedWinSolver hard = new ForcedWinSolver(g2.getPlayers().get(0), ForcedWinSolver.Config.fromProps(ugold4(true)::get));
+        hard.setHardDeadline(forge.game.WorkClock.nanoTime() + 1_000L * 1_000_000L);
+        hard.propose(g2);
+        hard.setHardDeadline(0L);
+        Assert.assertEquals(hard.landsRetries, 0, "no second search after the failed lines: " + hard.summary());
+        Assert.assertTrue(hard.landsSkips > 0, hard.summary());
+    }
+
+    private static boolean plannedWinNextTurn(final List<ForcedWinSolver.Proposal> ps) {
+        for (ForcedWinSolver.Proposal x : ps) {
+            if (x.pUnopposed >= 1.0 && x.winTurn == 1 && !x.engine) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The read's work-clock weights (reference nanoseconds per unit of each counted site), for the test below. */
+    private static final String READ_WEIGHTS = "mainLoopStep:5000,checkStateEffects:1589000,makeCopy:1,copyCard:184996,"
+            + "copyLeakWalk:200,canPlayAndPayFor:762901,evaluateBoardPosition:894742,getPossibleBlockers:346318,"
+            + "serviceRequest:67779073,serviceItem:17775284,plannerNode:34963,engineNode:50000,oppMinNode:100000";
+
+    /**
+     * Inside a decision. A search with plans.unified sets the solver's hard deadline to the decision's start plus the
+     * decision's budget (PlanSearch#propose), on the work clock when the decision is charged in work units. Here that
+     * clock is installed with a read's weights and the deadline is 8 s from the call, as a read's is. With the key on or
+     * off the solver's call ends at that deadline (the tail is the copy or search step in progress), on a position where
+     * the key finds unproven lines, on one where it finds none at the planner's node cap, and on the retry.
+     */
+    @Test
+    public void insideADecisionTheSolverEndsAtTheDecisionsDeadline() {
+        forge.game.WorkClock.setWeights(forge.game.WorkClock.parseWeights(READ_WEIGHTS));
+        try {
+            final Object[][] cases = {{"pair-021-T9", PAIR_021_T9, 0}, {"pair-026-T13", PAIR_026_T13, 1}, {"pair-037-T7", PAIR_037_T7, 0}};
+            for (Object[] c : cases) {
+                for (boolean on : new boolean[] {false, true}) {
+                    final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", (String) c[1]);
+                    final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get((Integer) c[2]), ForcedWinSolver.Config.fromProps(ugold4(on)::get));
+                    final forge.game.WorkClock.Clock clock = forge.game.WorkClock.newClock(1.0);
+                    final forge.game.WorkClock.Clock prev = forge.game.WorkClock.install(clock);
+                    try {
+                        s.readPosition(g, s.knownTop(g)); // a game's first read learns the templates; not this decision's
+                        final long t0 = forge.game.WorkClock.nanoTime();
+                        s.setHardDeadline(t0 + 8_000L * 1_000_000L);
+                        final List<ForcedWinSolver.Proposal> ps = s.propose(g);
+                        s.setHardDeadline(0L);
+                        final double ms = (forge.game.WorkClock.nanoTime() - t0) / 1e6;
+                        System.err.println("[plan-lands-test] in-decision " + c[0] + " planLands=" + on + " workMs=" + Math.round(ms)
+                                + " proposals=" + ps.size() + " plannerNodes=" + s.meter.plannerNodes + " " + s.summary());
+                        Assert.assertTrue(ms <= 8_000 + 250, c[0] + " planLands=" + on + ": " + ms + " ms of work clock");
+                    } finally {
+                        forge.game.WorkClock.install(prev);
+                    }
+                }
+            }
+        } finally {
+            forge.game.WorkClock.setWeights(null);
+        }
+    }
+
     /** Cost of the key at a read with every template already learned: one sandbox drop per distinct land name in hand. */
     @Test
     public void theCostOfARead() {

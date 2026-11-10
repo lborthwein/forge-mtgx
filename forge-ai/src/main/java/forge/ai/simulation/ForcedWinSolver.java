@@ -2271,6 +2271,9 @@ public final class ForcedWinSolver {
     private ForcedWinPlanner.Result plan(Position pos, ForcedWinPlanner.Limits lim) {
         final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
         meter.plannerNodes += r.visited;
+        if (r.landsSkipped) {
+            landsSkips++; // planner-mana-1110 (report only)
+        }
         if (r.timedOut) {
             meter.plannerTimeouts++;
         }
@@ -2349,6 +2352,7 @@ public final class ForcedWinSolver {
             markWindow(pos, live.getPhaseHandler()); // line-adoption-1107
         }
         final ForcedWinPlanner.Limits lim = limits();
+        lim.landsDeadline = landsDeadline(t0); // planner-mana-1110 (read only with planLands)
         lim.nodes = cfg.nodes;
         // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
         lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs);
@@ -2483,20 +2487,43 @@ public final class ForcedWinSolver {
      */
     public int landsRetries, landsRetryFound, landsRetryWins;
     public long landsRetryNodes;
+    /** planner-mana-1110 (report only): second searches that did not run because no budget was left for them. */
+    public int landsSkips;
+
+    /**
+     * planner-mana-1110: the time on the budget clock by which a second search (the land plans) must have ended: the
+     * solver's budget from {@code t0} less the evaluation's reserve, and no later than the decision's hard deadline less
+     * that reserve. The first search of each stage is the one the solver makes without the key; the second is extra work,
+     * and this keeps it inside the part of the solver's budget that the planner and the engine search already share
+     * (the engine search ends at the same times). 0 = no time bound (budget=counter reads no clock; its nodes bound it).
+     */
+    long landsDeadline(final long t0) {
+        if (cfg.counter) {
+            return 0L;
+        }
+        long d = t0 + (budgetMs() - cfg.evalReserveMs) * 1_000_000L;
+        if (hardDeadline != 0) {
+            d = Math.min(d, hardDeadline - cfg.evalReserveMs * 1_000_000L);
+        }
+        return d;
+    }
 
     /**
      * planner-mana-1110 (solverCfg planLands): the plain search found lines and none of them won its own play-out, so the
      * second search of {@link ForcedWinPlanner#plan} (the land plans) never ran at that stage. It runs here once per
      * decision, at the stage the failed lines came from (its horizon and payment orders; the stages before it had no
      * plain line, so their land plans are read already) and, if that was this turn only, by our next turn. Its cost is
-     * bounded: at most two searches of the planner's own node and time limits, started only while the decision's budget
-     * is open, and at most cfg.top lines evaluated against the same deadline as the plain lines. Null = no line that
-     * wins unopposed.
+     * bounded: at most two searches of the planner's own node and time limits, started and ended inside
+     * {@link #landsDeadline} (what is left of the solver's budget before the evaluation's reserve), and at most cfg.top
+     * lines evaluated against the same deadline as the plain lines. Null = no line that wins unopposed.
      */
     private Eval landsRetry(final Game live, final Position pos, final ForcedWinPlanner.Limits lim, final int index,
             final long evalFrom) {
-        if (!pos.landPlans() || forge.ai.AiWork.spent() || evalStepsSpent()
-                || forge.game.WorkClock.nanoTime() > deadlineAt(evalFrom + budgetMs() * 1_000_000L)) {
+        if (!pos.landPlans() || forge.ai.AiWork.spent() || evalStepsSpent()) {
+            return null;
+        }
+        if (lim.landsDeadline != 0L && forge.game.WorkClock.nanoTime() >= lim.landsDeadline) {
+            landsSkips++; // what is left of the solver's budget is the evaluation's reserve
             return null;
         }
         landsRetries++;
@@ -5583,6 +5610,7 @@ public final class ForcedWinSolver {
                 lim2.planDiscard = avoidLim.planDiscard;
                 lim2.horizon = avoidLim.horizon;
                 lim2.goneAtPass = new HashSet<>(lost);
+                lim2.landsDeadline = avoidLim.landsDeadline; // planner-mana-1110
                 final ForcedWinPlanner.Result r2 = ForcedWinPlanner.plan(avoidPos, lim2);
                 if (cfg.followPay) {
                     for (Line l2 : r2.lines) {
@@ -6633,6 +6661,7 @@ public final class ForcedWinSolver {
             }
         }
         final ForcedWinPlanner.Limits lim = limits();
+        lim.landsDeadline = landsDeadline(forge.game.WorkClock.nanoTime()); // planner-mana-1110
         lim.nodes = cfg.nodes;
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
@@ -7746,6 +7775,7 @@ public final class ForcedWinSolver {
                 + (plannerExhausted == 0 ? "" : " plannerExhausted=" + plannerExhausted)
                 + (planFailEngineTakes == 0 ? "" : " planFailEngineTakes=" + planFailEngineTakes)
                 + (landsRetries == 0 ? "" : " landsRetries=" + landsRetries + "/" + landsRetryFound + "/" + landsRetryWins)
+                + (landsSkips == 0 ? "" : " landsSkips=" + landsSkips)
                 + (verifyReplans == 0 ? "" : " verifyReplans=" + verifyReplans + "/" + verifyReplanLines)
                 + " copies=" + copies + " " + reader.probeStats.summary()
                 + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)
