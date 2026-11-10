@@ -3759,6 +3759,10 @@ public final class ForcedWinSolver {
         return lim;
     }
 
+    /** planLoops: the probes of the games in progress, by match (weak), then by seat, card and partner names. */
+    private static final java.util.Map<Object, java.util.Map<String, java.util.Set<String>>> LOOP_CACHE =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
     /** planLoops: the most partners one permanent is probed with, and one sandbox search's nodes and counted time. */
     static final int LOOP_PARTNERS = 12, LOOP_NODES = 300;
     static final long LOOP_NANOS = 3_000_000_000L;
@@ -3842,25 +3846,48 @@ public final class ForcedWinSolver {
             return;
         }
         t.loopFromHand = aura;
-        final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getId());
-        if (ForcedWinProbe.sandboxWin(live, me, c.getId(), -1, aura, loopLimits(cfg), seed, LOOP_NANOS)) {
-            t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe: wins alone";
-            return;
-        }
         t.loopHaste = c.hasKeyword(forge.game.keyword.Keyword.HASTE);
         final java.util.Set<String> seen = new java.util.HashSet<>();
         seen.add(c.getName());
-        int probed = 0;
+        final List<Card> partners = new ArrayList<>();
         for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard}) {
             for (Card p : me.getCardsIn(z)) {
-                if (!p.isCreature() || !seen.add(p.getName()) || probed >= LOOP_PARTNERS) {
-                    continue;
+                if (p.isCreature() && seen.add(p.getName()) && partners.size() < LOOP_PARTNERS) {
+                    partners.add(p);
                 }
-                probed++;
-                if (ForcedWinProbe.sandboxWin(live, me, c.getId(), p.getId(), aura, loopLimits(cfg), mix(seed, p.getId()), LOOP_NANOS)) {
+            }
+        }
+        // one probe per game, seat, card and partner list: the seat's other readers (the root solver's, the reach's, the
+        // choice scorer's) reuse it. The key holds the partner names in a fixed order, so it does not depend on which
+        // copy of the game asked.
+        final List<String> names = new ArrayList<>();
+        for (Card p : partners) {
+            names.add(p.getName());
+        }
+        java.util.Collections.sort(names);
+        final String key = me.getId() + "|" + c.getName() + "|" + aura + "|" + names;
+        final Object match = live.getMatch() != null ? live.getMatch() : LOOP_CACHE;
+        final java.util.Map<String, java.util.Set<String>> byKey = LOOP_CACHE.computeIfAbsent(match, x -> new java.util.HashMap<>());
+        final int probed = partners.size();
+        synchronized (byKey) {
+            final java.util.Set<String> hit = byKey.get(key);
+            if (hit != null) {
+                t.loopWith.addAll(hit);
+                return;
+            }
+            final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getName().hashCode());
+            if (ForcedWinProbe.sandboxWin(live, me, c.getId(), -1, aura, loopLimits(cfg), seed, LOOP_NANOS)) {
+                t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe: wins alone";
+                byKey.put(key, new java.util.TreeSet<>());
+                return;
+            }
+            partners.sort((x, y) -> x.getName().compareTo(y.getName()));
+            for (Card p : partners) {
+                if (ForcedWinProbe.sandboxWin(live, me, c.getId(), p.getId(), aura, loopLimits(cfg), mix(seed, p.getName().hashCode()), LOOP_NANOS)) {
                     t.loopWith.add(p.getName());
                 }
             }
+            byKey.put(key, new java.util.TreeSet<>(t.loopWith));
         }
         if (RECEIPTS) {
             receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste);
