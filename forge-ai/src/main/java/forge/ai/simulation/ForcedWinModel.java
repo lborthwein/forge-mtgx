@@ -387,6 +387,16 @@ public final class ForcedWinModel {
         /** It has a castable ability the width model cannot express (card targets, a cost outside the model). */
         boolean unmodeled;
         String note = "";
+        /**
+         * solver-distill-cc-1109 (planLoops; empty unless the solver's planLoops is on): the creature names with which
+         * this permanent's tap ability that targets a card makes an unbounded attack, as the engine found it in a sandbox
+         * holding only our lands, this permanent and that creature (no card knowledge: the pairs are observed). The
+         * probe runs once per reader template; loopHaste = it can tap the turn it enters.
+         */
+        final java.util.Set<String> loopWith = new java.util.TreeSet<>();
+        boolean loopChecked, loopHaste;
+        /** planLoops: the loop starts by casting this card (an Aura) on a partner that could already tap. */
+        boolean loopFromHand;
 
         ACard instance(int newId) {
             final ACard a = new ACard();
@@ -413,6 +423,10 @@ public final class ForcedWinModel {
             a.sourceSac = sourceSac;
             a.unmodeled = unmodeled;
             a.note = note;
+            a.loopWith.addAll(loopWith);
+            a.loopChecked = loopChecked;
+            a.loopHaste = loopHaste;
+            a.loopFromHand = loopFromHand;
             return a;
         }
 
@@ -858,11 +872,26 @@ public final class ForcedWinModel {
                     templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
                 }
             }
+            if (loopProbe != null && !t.loopChecked) {
+                t.loopChecked = true; // once per template, whatever it finds
+                try {
+                    loopProbe.fill(live, me, c, t);
+                } catch (RuntimeException | StackOverflowError e) {
+                    t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe failed: " + e;
+                }
+            }
             return t.instance(c.getId());
         }
 
         /** labeller-v2 (c): observe scry / surveil as SCRY / SURVEIL effects (false = v1). */
         boolean planScry;
+
+        /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
+        interface LoopProbe {
+            void fill(Game live, Player me, Card c, ACard template);
+        }
+
+        volatile LoopProbe loopProbe;
 
         /**
          * Read the seat's position; null when it is outside the model (more than one opponent). The library and

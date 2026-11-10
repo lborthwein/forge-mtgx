@@ -272,6 +272,12 @@ public final class ForcedWinSolver {
          */
         public boolean planExpandCap = false;
         /**
+         * solver-distill-cc-1109 (planLoops; false = off): the screens (reach, goldfish, the reach gate) count a loop the
+         * engine found in a sandbox (a permanent whose tap ability targets a card, with a partner creature: both in play =
+         * an unbounded attack) as a line. The width model has no copy or untap effects, so such decks had no reach at all.
+         */
+        public boolean planLoops = false;
+        /**
          * ledger-sweep2-1107 (off by default): battlefield mana sources' colors and amounts are read from the position at every
          * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
          */
@@ -776,6 +782,7 @@ public final class ForcedWinSolver {
             c.stackAbilityCopies = "true".equals(get.apply("stackAbilityCopies")); // house p16
             c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
+            c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
@@ -1314,6 +1321,9 @@ public final class ForcedWinSolver {
         this.cfg = cfg;
         this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
+        if (cfg.planLoops && this.reader.loopProbe == null) {
+            this.reader.loopProbe = (live, pm, c, t) -> fillLoops(cfg, live, pm, c, t); // solver-distill-cc-1109
+        }
         // labeller-v2 (c): a planScry solver learns scry / surveil (own template keys); never the shared v1 reader
         // work-units-1107: readerPerGame gives this solver its own reader preloaded as the shared one starts
         this.oppReader = cfg.sharedReader && !cfg.planScry ? (cfg.readerPerGame ? load() : sharedOppReader())
@@ -1326,6 +1336,11 @@ public final class ForcedWinSolver {
 
     public Config config() {
         return cfg;
+    }
+
+    /** Tests only: this solver's affordance reader. */
+    ForcedWinModel.Reader readerForTest() {
+        return reader;
     }
 
     /** bvw-step1-build-1024: the seat's game (the generator's recorded runtime). */
@@ -3744,6 +3759,91 @@ public final class ForcedWinSolver {
         return lim;
     }
 
+    /** planLoops: the most partners one permanent is probed with, and one sandbox search's nodes and counted time. */
+    static final int LOOP_PARTNERS = 16, LOOP_NODES = 300;
+    static final long LOOP_NANOS = 3_000_000_000L;
+
+    /** planLoops: an engine search's limits for the loop sandbox: this turn only, the solver's loop and move options. */
+    static ForcedWinEngine.Limits loopLimits(final Config cfg) {
+        final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
+        el.nodes = LOOP_NODES;
+        el.perSearchNodes = true;
+        el.passTurn = false;
+        el.staleStatics = cfg.staleStatics;
+        el.loopMacro = cfg.loopMacro;
+        el.loopMacro3 = cfg.loopMacro3;
+        el.triggerTargets = cfg.engineTriggerTargets;
+        el.triggerVariants = cfg.triggerVariants;
+        el.longLoops = cfg.engineLongLoops;
+        el.turnLimits = cfg.turnLimits;
+        if (cfg.engineMoves) {
+            el.oppTargets = true;
+            el.floatMana = true;
+            el.floatFirst = true;
+            el.libraryTop = true;
+        }
+        if (cfg.engineLoopReach) {
+            el.loopOutlets = true;
+            el.looseCycles = true;
+            el.outletNodes = cfg.engineOutletNodes;
+            el.loopHoist = cfg.engineLoopHoist;
+            el.loopBisect = cfg.engineLoopBisect;
+        }
+        el.stalePlayerStatics = cfg.stalePlayerStatics;
+        el.offBattlefieldLimits = cfg.offBattlefieldLimits;
+        el.historyLki = cfg.historyLki;
+        el.copyBackFace = cfg.copyBackFace;
+        el.stackAbilityCopies = cfg.stackAbilityCopies;
+        el.stackHistory = cfg.stackHistory;
+        el.cycles = cfg.cycles;
+        return el;
+    }
+
+    /**
+     * planLoops ({@link ForcedWinModel.Reader.LoopProbe}): for a permanent with a tap ability that targets a card, or an
+     * Aura, the creature names of ours (in play, in hand, in the library or the graveyard) with which the engine wins this
+     * turn from the bare sandbox ({@link ForcedWinProbe#sandboxWin}: the permanent in play, or the Aura in hand with
+     * mana); none when the card wins there alone.
+     */
+    static void fillLoops(final Config cfg, final Game live, final Player me, final Card c, final ACard t) {
+        if (!c.isPermanent() || c.isLand()) {
+            return;
+        }
+        boolean taps = false;
+        for (ForcedWinModel.Abil ab : t.onBattlefield) {
+            taps |= ab.tapSelf && ab.cardTargets;
+        }
+        // an Aura (it targets what it enchants) is probed cast from hand on the partner: what it grants is the partner's
+        final boolean aura = !taps && c.isAura();
+        if (!taps && !aura) {
+            return;
+        }
+        t.loopFromHand = aura;
+        final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getId());
+        if (ForcedWinProbe.sandboxWin(live, me, c.getId(), -1, aura, loopLimits(cfg), seed, LOOP_NANOS)) {
+            t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe: wins alone";
+            return;
+        }
+        t.loopHaste = c.hasKeyword(forge.game.keyword.Keyword.HASTE);
+        final java.util.Set<String> seen = new java.util.HashSet<>();
+        seen.add(c.getName());
+        int probed = 0;
+        for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard}) {
+            for (Card p : me.getCardsIn(z)) {
+                if (!p.isCreature() || !seen.add(p.getName()) || probed >= LOOP_PARTNERS) {
+                    continue;
+                }
+                probed++;
+                if (ForcedWinProbe.sandboxWin(live, me, c.getId(), p.getId(), aura, loopLimits(cfg), mix(seed, p.getId()), LOOP_NANOS)) {
+                    t.loopWith.add(p.getName());
+                }
+            }
+        }
+        if (RECEIPTS) {
+            receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste);
+        }
+    }
+
     /** wu-reads-1107: one planner search ({@link #plan}), within the hard deadline when windowCap is on (unchanged otherwise). */
     ForcedWinPlanner.Result planCapped(Position pos, ForcedWinPlanner.Limits lim) {
         if (!windowCap || hardDeadline == 0) {
@@ -4469,7 +4569,7 @@ public final class ForcedWinSolver {
         if (a == null) {
             return false;
         }
-        if (a.winsOnEntry || a.winIfLibraryAtMost >= 0 || a.emptyDrawWin) {
+        if (a.winsOnEntry || a.winIfLibraryAtMost >= 0 || a.emptyDrawWin || !a.loopWith.isEmpty()) {
             return true;
         }
         for (List<ForcedWinModel.Abil> abs : java.util.Arrays.asList(a.fromHand, a.onBattlefield)) {
@@ -4597,6 +4697,7 @@ public final class ForcedWinSolver {
             lim.payPolicies = 1;
             lim.horizon = Math.max(1, horizon);
             lim.quietTurns = Math.max(0, quiet);
+            lim.loops = cfg.planLoops;
             final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
             s.nodes = r.nodes;
             s.exhausted = r.exhausted;
@@ -4736,6 +4837,7 @@ public final class ForcedWinSolver {
             lim.ms = ms;
             lim.payPolicies = 1;
             lim.horizon = onePass && cfg.horizon >= 2 ? cfg.horizon : 1;
+            lim.loops = cfg.planLoops;
             ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
             s.nodes = r.nodes;
             s.exhausted = r.exhausted;

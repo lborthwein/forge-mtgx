@@ -334,6 +334,13 @@ public final class ForcedWinPlanner {
          * moves are a land drop and the pass, so a plan of several turns spends its nodes on the turns that decide it.
          */
         int quietTurns = 0;
+        /**
+         * solver-distill-cc-1109 (planLoops; false = off, nothing changes): a permanent in play whose model holds a loop
+         * partner ({@link ForcedWinModel.ACard#loopWith}) that is in play too wins from our main phase (untapped, and
+         * not entered this turn unless it has haste). Screens only: such a line names no targets, so the solver's
+         * root plan never follows it (the engine finds and plays the real line there).
+         */
+        boolean loops;
         int classes = 14;
 
         long ms = 1500;
@@ -411,6 +418,8 @@ public final class ForcedWinPlanner {
         int loyalty;
         /** blockers-1109: Position.BLOCK_* (a permanent that entered during the line blocks if untapped). */
         byte block = ForcedWinModel.Position.BLOCK_UNTAPPED;
+        /** planLoops: it entered during this turn of the line (cleared at the pass). */
+        boolean fresh;
 
         Perm copy() {
             final Perm p = new Perm();
@@ -419,6 +428,7 @@ public final class ForcedWinPlanner {
             p.activated = activated;
             p.loyalty = loyalty;
             p.block = block;
+            p.fresh = fresh;
             return p;
         }
     }
@@ -686,6 +696,24 @@ public final class ForcedWinPlanner {
             if (pending && a.id != pos.pendingId) {
                 continue;
             }
+            if (lim.loops && !pending && !quiet && a.loopFromHand && !a.loopWith.isEmpty() && s.sorcery) {
+                // planLoops: an Aura cast on a partner in play since before this turn (it must tap): pay it, then the loop
+                boolean partner = false;
+                for (Perm q : s.bf) {
+                    partner |= !q.fresh && a.loopWith.contains(cards.get(q.card).name);
+                }
+                for (Abil ab : a.fromHand) {
+                    if (partner && ab.kind == AbilKind.SPELL && tried.add(a.name + "|loop|" + ab.costKey)) {
+                        for (S n : apply(s, hi, -1, a, ab)) {
+                            if (!n.dead) {
+                                n.won = true;
+                                n.how = "loop";
+                                first.add(n);
+                            }
+                        }
+                    }
+                }
+            }
             for (Abil ab : a.fromHand) {
                 if (ab.unplayable || ab.cardTargets && ab.kind != AbilKind.LAND) {
                     continue;
@@ -708,6 +736,19 @@ public final class ForcedWinPlanner {
         for (int bi = 0; bi < s.bf.size() && !quiet; bi++) {
             final Perm p = s.bf.get(bi);
             final ACard a = cards.get(p.card);
+            if (lim.loops && !pending && !a.loopWith.isEmpty() && s.sorcery && !p.tapped && (!p.fresh || a.loopHaste)) {
+                for (Perm q : s.bf) {
+                    final ACard b = cards.get(q.card);
+                    if (q != p && a.loopWith.contains(b.name)) {
+                        final S n = s.copy();
+                        n.steps.add(Step.engine(AbilKind.ACTIVATE, a.id, a.name, "loop with " + b.name, "", false));
+                        n.won = true;
+                        n.how = "loop";
+                        first.add(n);
+                        break;
+                    }
+                }
+            }
             for (Abil ab : a.onBattlefield) {
                 if (ab.unplayable || ab.cardTargets) {
                     continue;
@@ -924,6 +965,7 @@ public final class ForcedWinPlanner {
             final Perm p = new Perm();
             p.card = host;
             p.loyalty = a.startLoyalty;
+            p.fresh = true;
             s.bf.add(p);
             s.devotion += a.bluePips;
             s.emptyDrawWin |= a.emptyDrawWin;
@@ -1010,6 +1052,7 @@ public final class ForcedWinPlanner {
         for (Perm p : s.bf) {
             p.tapped = false;
             p.activated = false;
+            p.fresh = false;
         }
         final List<Eff> draw = List.of(new Eff(EffKind.DRAW, 1, 0));
         resolve(s, draw, 0, 0, null, out);

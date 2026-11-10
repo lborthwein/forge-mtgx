@@ -1173,6 +1173,99 @@ public final class ForcedWinProbe {
         }
     }
 
+    /**
+     * solver-distill-cc-1109 (planLoops): does the engine win this turn from a sandbox that holds, for our seat, only its
+     * lands, the permanent {@code cardId} and (when {@code partnerId} >= 0) that creature, both in play and able to act?
+     * Our other nonland permanents and our hand are exiled first; the opponent's board stays. Own id scope, AI cache
+     * scope and random stream, as every probe. Never throws (false).
+     */
+    static boolean sandboxWin(Game live, Player liveMe, int cardId, int partnerId, ForcedWinEngine.Limits lim, long seed,
+            long budgetNanos) {
+        return sandboxWin(live, liveMe, cardId, partnerId, false, lim, seed, budgetNanos);
+    }
+
+    /**
+     * As above; {@code fromHand}: the card stays in our hand with plenty of floating mana of every colour (an Aura cast on
+     * the partner), instead of being put into play.
+     */
+    static boolean sandboxWin(Game live, Player liveMe, int cardId, int partnerId, boolean fromHand, ForcedWinEngine.Limits lim,
+            long seed, long budgetNanos) {
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(seed));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyFidelity(1);
+                copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+            }
+            if (!g.getStack().isEmpty()) {
+                return false;
+            }
+            g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+            final Card s = g.findById(cardId);
+            final Card t = partnerId < 0 ? null : g.findById(partnerId);
+            if (s == null || partnerId >= 0 && t == null) {
+                return false;
+            }
+            for (Card c : new ArrayList<>(me.getCardsIn(ZoneType.Battlefield))) {
+                if (!c.isLand() && c != s && c != t) {
+                    g.getAction().exile(c, null, null);
+                }
+            }
+            for (Card c : new ArrayList<>(me.getCardsIn(ZoneType.Hand))) {
+                if (c != s && c != t) {
+                    g.getAction().exile(c, null, null);
+                }
+            }
+            if (fromHand) {
+                if (!s.isInZone(ZoneType.Hand)) {
+                    g.getAction().moveToHand(s, null);
+                }
+            } else {
+                toBattlefield(g, me, s);
+            }
+            if (t != null) {
+                toBattlefield(g, me, t);
+            }
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                if (c.getId() == cardId || c.getId() == partnerId) {
+                    c.setSickness(false);
+                    c.setTapped(false);
+                }
+            }
+            resolveAll(g);
+            if (!g.getStack().isEmpty() || me.hasLost() || me.hasWon()) {
+                return false;
+            }
+            g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+            if (fromHand) {
+                final Card src = g.findById(cardId);
+                for (int c = 0; c < 6; c++) {
+                    for (int k = 0; k < 12; k++) {
+                        me.getManaPool().addMana(new Mana(ForcedWinModel.FORGE_COLOR[c], src, null, me));
+                    }
+                }
+            }
+            final long deadline = forge.game.WorkClock.nanoTime() + budgetNanos;
+            lim.wall = deadline + budgetNanos;
+            return ForcedWinEngine.search(g, me, lim, new ForcedWinEngine.Stats(), deadline, seed) != null;
+        } catch (RuntimeException | StackOverflowError e) {
+            return false;
+        } finally {
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
     private static void toBattlefield(Game g, Player m, Card c) {
         if (!c.isInPlay()) {
             g.getAction().moveToPlay(c, m, null, null);
