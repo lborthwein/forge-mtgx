@@ -1079,6 +1079,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return out;
     }
 
+    /** solver-distill-cc-1109: set by RlSearch with cfg.provenOnly; {@link #propose} then stops after the proven check. */
+    boolean provenOnly;
+
     /** What the plan stage decided before (or instead of) S-c's play-outs. */
     static final class Stage {
         /** The search hands the priority to the hook (a proven line was adopted). */
@@ -1158,6 +1161,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 provenTurns.add(g.getPhaseHandler().getTurn());
                 st.hook = true;
                 st.note = "proven-line " + proven.text;
+                st.ms = (System.nanoTime() - t0) / 1e6;
+                proposeMs.add(st.ms);
+                return st;
+            }
+            if (provenOnly) {
+                // solver-distill-cc-1109 (RlSearch cfg.provenOnly): only a proven line is taken; nothing else is proposed
                 st.ms = (System.nanoTime() - t0) / 1e6;
                 proposeMs.add(st.ms);
                 return st;

@@ -315,6 +315,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * games of one deal that differ only in a seat's forced answer are an outcome pair for that hand.
          */
         public JsonObject mullKeep;
+        /**
+         * solver-distill-cc-1109 (false = off, the default, and then absent from the JSON): every priority decision of the
+         * seat is the policy's own, except that a solver line proven at a plan point is taken at once (as always). No
+         * look-ahead, no sampled plans, no response search: the cheapest pilot that still finishes, for training-game
+         * generation. With the value sink, one plain row (kind {@code vplain}: the decision's frame) per decision with a
+         * choice. Needs plans with the solver; generic, no card or deck logic.
+         */
+        public boolean provenOnly = false;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -376,7 +384,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
-                "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink"));
+                "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
+                "provenOnly"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -393,6 +402,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("leafExtraSteps")) c.leafExtraSteps = o.get("leafExtraSteps").getAsInt();
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
             if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
+            if (o.has("provenOnly")) c.provenOnly = o.get("provenOnly").getAsBoolean();
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
             if (o.has("leaf")) c.leaf = o.get("leaf").getAsString();
             if (o.has("playout")) c.playout = o.get("playout").getAsString();
@@ -700,6 +710,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (mullKeep != null) {
                 o.add("mullKeep", mullKeep); // solver-distill-cc-1109: only when on
             }
+            if (provenOnly) {
+                o.addProperty("provenOnly", true); // solver-distill-cc-1109: only when on
+            }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
             }
@@ -900,6 +913,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (cfg.plans != null) {
                 final PlanSearch ps1 = new PlanSearch(PlanSearch.Spec.parse(cfg.plans), this, p, seat, d);
+                ps1.provenOnly = cfg.provenOnly;
                 planSearches.put(p.getId(), ps1);
                 b.planHook = ps1;
             }
@@ -1490,6 +1504,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return VOID;
         }
         final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
+        if (cfg.provenOnly) {
+            return provenOnlyDecide(g, me, m, frame, menuObjs, sb);
+        }
         // search-bones-1015 (d): S-b searches a respond point (their spell on top, a counter in our menu)
         final boolean respond = sb != null && !g.getStack().isEmpty() && sb.respondPoint(g, menuObjs);
         if (!cfg.stack && !g.getStack().isEmpty() && !respond) {
@@ -1938,6 +1955,50 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     public Tap tap;
+
+    /** solver-distill-cc-1109 (cfg.provenOnly): this game's decisions left to the policy, and its plain sink rows. */
+    private int provenOnlyPolicy, provenOnlyRows;
+
+    /**
+     * solver-distill-cc-1109 (cfg.provenOnly): the policy's own choice (-1), except a solver line proven at a plan point,
+     * which goes to the hook at once as in the full search. Nothing else is searched.
+     */
+    private int provenOnlyDecide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final List<SpellAbility> menuObjs, final PlanSearch sb) {
+        final long t0 = System.nanoTime();
+        final long bt0 = budgetStart(t0);
+        if (cfg.valueSink != null && m.C() >= 2) {
+            try {
+                final JsonObject h = new JsonObject();
+                h.addProperty("kind", "vplain");
+                provenance(h, g, frame, -1L);
+                h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+                valueRecs.add(labelRecord(h, RlWire.encodeDecide(frame)));
+                provenOnlyRows++;
+            } catch (RuntimeException e) {
+                System.err.println("[rlsearch] vplain row failed: " + e);
+            }
+        }
+        if (sb != null) {
+            final int f = sb.follow(g, me, m, menuObjs);
+            if (f >= 0) {
+                tap("follow", null, null, 0, f);
+                return f;
+            }
+            if (sb.planPoint(g, menuObjs)) {
+                final PlanSearch.Stage stage = sb.propose(g, me, m, menuObjs, t0, bt0);
+                if (stage.hook) {
+                    planRow(g, frame, stage, null, new ArrayList<Integer>(), -1, t0);
+                    planDecided(g, stage, null, t0);
+                    tap("proven_line", stage, null, 0, RlSeat.PrioritySearch.HOOK);
+                    return RlSeat.PrioritySearch.HOOK;
+                }
+            }
+        }
+        provenOnlyPolicy++;
+        tap("proven_only", null, null, 0, -1);
+        return -1;
+    }
 
     private void tap(final String why, final PlanSearch.Stage stage, final LookaheadSearch.GivenResult r, final int given,
             final int answer) {
@@ -3106,6 +3167,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("work_wall_hits", workWallHits);
         }
         o.addProperty("searched", searchedAsks);
+        if (cfg.provenOnly) {
+            o.addProperty("proven_only_policy", provenOnlyPolicy); // solver-distill-cc-1109: only when on
+            o.addProperty("proven_only_rows", provenOnlyRows);
+        }
         o.addProperty("departures", departures);
         o.addProperty("stack_skipped", searchStackSkipped);
         o.addProperty("score_calls", scoreCalls);
