@@ -42,6 +42,13 @@ public final class ChoiceScorer {
         public int settleSteps = 60;
         /** An answer must beat the policy's by more than this. */
         public double margin = 0.0;
+        /**
+         * solver-distill-cc-1109 (false = off, the default, and then absent from the JSON): declining an optional pick is
+         * an option only when it is the policy's own answer; the scorer never departs TO declining. The served values
+         * (R3F and the outcome-trained tower alike) rate the position after a declined search above the one after the
+         * search, and random-deviation games price a dropped pick at about -4 points. Generic: no card knowledge.
+         */
+        public boolean noDecline = false;
         /** Wall budget of one ask's option applications, ms; past it the unapplied options are dropped (counted). */
         public long budgetMs = 6000;
         /** Keep searched-to-top cards for this search's seats (the live tracker and its forks). */
@@ -96,7 +103,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig"));
+                "settleSteps", "margin", "noDecline", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -120,6 +127,7 @@ public final class ChoiceScorer {
             if (o.has("mullWorlds")) c.mullWorlds = o.get("mullWorlds").getAsInt();
             if (o.has("settleSteps")) c.settleSteps = o.get("settleSteps").getAsInt();
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
+            if (o.has("noDecline")) c.noDecline = o.get("noDecline").getAsBoolean();
             if (o.has("budgetMs")) c.budgetMs = o.get("budgetMs").getAsLong();
             if (o.has("searchedTop")) c.searchedTop = o.get("searchedTop").getAsBoolean();
             if (o.has("fidelity")) c.fidelity = o.get("fidelity").getAsInt();
@@ -163,6 +171,9 @@ public final class ChoiceScorer {
             o.addProperty("mullWorlds", mullWorlds);
             o.addProperty("settleSteps", settleSteps);
             o.addProperty("margin", margin);
+            if (noDecline) {
+                o.addProperty("noDecline", true);
+            }
             o.addProperty("budgetMs", budgetMs);
             o.addProperty("searchedTop", searchedTop);
             o.addProperty("fidelity", fidelity);
@@ -465,7 +476,7 @@ public final class ChoiceScorer {
         }
         s.menuOptions = byKey.size() + (m.minPick == 0 ? 1 : 0);
         final List<Integer> keep = cut(new ArrayList<>(byKey.values()), own, seed, s);
-        if (m.minPick == 0) {
+        if (m.minPick == 0 && (!cfg.noDecline || greedy != null && greedy.length == 0)) {
             final Option no = new Option();
             no.steps = new short[0];
             no.label = "decline";
