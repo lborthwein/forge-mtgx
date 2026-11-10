@@ -8,6 +8,7 @@ import org.testng.annotations.Test;
 import forge.ai.AiProfileUtil;
 import forge.ai.CubeComboPlayerController;
 import forge.game.Game;
+import forge.game.card.Card;
 import forge.game.player.Player;
 import forge.game.zone.ZoneType;
 
@@ -151,6 +152,97 @@ public class GoldfishTest extends forge.ai.AITest {
         Assert.assertTrue(potential("Island;Island", "", "Island;Thassa's Oracle;Island"), "the Oracle as the next draw");
         Assert.assertTrue(potential("Swamp", "Emry, Lurker of the Loch;Daze;Kaito Shizuki", "Bayou;Doomsday;" + DECK.replace("Bayou;", "")),
                 "a Doomsday list with Doomsday somewhere in the library");
+    }
+
+    static final String DD1010 = "Baleful Strix;Beseech the Mirror;Bolas's Citadel;Chart a Course;Chromatic Star;Collective Brutality;"
+            + "Counterspell;Darkslick Shores;Daze;Doomsday;Echo of Eons;Gush;Island;Island;Island;Jace, Wielder of Mysteries;"
+            + "Jace, the Mind Sculptor;Library of Alexandria;Lotus Petal;Memory Jar;Misty Rainforest;Mystical Tutor;Overgrown Tomb;"
+            + "Remand;Scalding Tarn;Stern Scolding;Swamp;Swamp;Timetwister;Troll of Khazad-dûm;Waterlogged Grove;Wishclaw Talisman;"
+            + "Xander's Lounge";
+
+    /**
+     * An opening hand the policy mulliganed in a read (four lands, a ritual, Mind Stone, the Oracle; nothing in play): is a
+     * kill within reach, and what does the check cost? (keepGate asks this before the first turn.)
+     */
+    @Test
+    public void openingHandPotential() {
+        final String hand = "Verdant Catacombs;Cabal Ritual;Urborg, Tomb of Yawgmoth;Raffine's Tower;Mind Stone;Thassa's Oracle;Swamp";
+        final String frame = ForcedWinSolverTest.frame(hand, "", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + DD1010);
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+        for (long cap : new long[] {12_000L, 40_000L, 120_000L}) {
+            final ForcedWinSolver.GoldfishOpts o = new ForcedWinSolver.GoldfishOpts();
+            o.ms = -1L;
+            o.window = false;
+            final long t0 = System.nanoTime();
+            final boolean pot = s.potential(g, new java.util.ArrayList<>(), o, 40, true, cap);
+            System.out.println("GOLDFISH openingHand potential cap=" + cap + " -> " + pot + " in " + (System.nanoTime() - t0) / 1_000_000 + " ms");
+        }
+        // Doomsday as the next draw, by hand: where is the line and what does it cost?
+        Card dd = null;
+        for (Card c : me.getCardsIn(ZoneType.Library)) {
+            if (c.getName().equals("Doomsday")) {
+                dd = c;
+            }
+        }
+        me.getZone(ZoneType.Library).remove(dd);
+        me.getZone(ZoneType.Library).add(dd, 0);
+        for (int nodes : new int[] {1500, 6000, 20000}) {
+            final ForcedWinSolver.GoldfishOpts o = opts(5, 3, true, 0, nodes);
+            o.window = false;
+            final ForcedWinSolver.Goldfish r = s.goldfish(g, List.of(dd.getId()), o);
+            System.out.println("GOLDFISH openingHand DD-next nodes/screen=" + nodes + " g=" + r.g + " turn=" + r.bestTurn + " screens=" + r.screens
+                    + " nodes=" + r.nodes + " capped=" + r.capped + " | " + r.best);
+        }
+    }
+
+    /**
+     * The same hand before the game starts (the mulligan decision): the game's stage is Mulligan, and the planner must
+     * still see the kill within reach (its sandboxes play from our first main phase).
+     */
+    @Test
+    public void openingHandPotentialBeforeTheGame() {
+        final String hand = "Verdant Catacombs;Cabal Ritual;Urborg, Tomb of Yawgmoth;Raffine's Tower;Mind Stone;Thassa's Oracle;Swamp";
+        final String frame = ForcedWinSolverTest.frame(hand, "", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + DD1010);
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        g.setAge(forge.game.GameStage.Mulligan);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+        final ForcedWinSolver.GoldfishOpts o = new ForcedWinSolver.GoldfishOpts();
+        o.ms = -1L;
+        o.window = false;
+        final boolean pot = s.potential(g, new java.util.ArrayList<>(), o, 40, true, 12_000L);
+        System.out.println("GOLDFISH openingHand before the game: potential=" + pot + " age=" + g.getAge());
+        Assert.assertTrue(pot, "a kill within reach from the opening hand, asked at the mulligan");
+        Assert.assertEquals(g.getAge(), forge.game.GameStage.Mulligan, "the live game is untouched");
+        // keepGate's own question: no land relaxation (only the lands in the hand): this hand's four lands and ritual do it
+        final ForcedWinSolver.GoldfishOpts strict = new ForcedWinSolver.GoldfishOpts();
+        strict.ms = -1L;
+        strict.window = false;
+        strict.lands = false;
+        Assert.assertTrue(s.potential(g, new java.util.ArrayList<>(), strict, 40, true, 12_000L), "four lands in hand reach it");
+        // one land, no fast mana: with no land assumed the planner has nothing, and the policy's mulligan stands
+        final String thin = "Swamp;Doomsday;Thassa's Oracle;Gush;Counterspell;Remand;Baleful Strix";
+        final String rest = DD1010.replace("Doomsday;", "").replace("Gush;", "").replace("Counterspell;", "").replace("Remand;", "")
+                .replace("Baleful Strix;", "") + ";Verdant Catacombs;Cabal Ritual;Urborg, Tomb of Yawgmoth;Raffine's Tower;Mind Stone";
+        final Game g3 = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default",
+                ForcedWinSolverTest.frame(thin, "", 20, "", "", 20, "human").replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + rest));
+        g3.setAge(forge.game.GameStage.Mulligan);
+        final ForcedWinSolver s3 = ((CubeComboPlayerController) g3.getPlayers().get(0).getController()).cubeCombo().forcedWin();
+        final boolean thinStrict = s3.potential(g3, new java.util.ArrayList<>(), strict, 40, true, 12_000L);
+        final boolean thinRelaxed = s3.potential(g3, new java.util.ArrayList<>(), o, 40, true, 12_000L);
+        System.out.println("GOLDFISH openingHand before the game: one-lander strict=" + thinStrict + " relaxed=" + thinRelaxed);
+        Assert.assertFalse(thinStrict, "one land and no fast mana: not kept by the gate");
+        // a hand of lands and creatures of a deck with no kill: nothing
+        final String fair = ForcedWinSolverTest.frame("Forest;Forest;Grizzly Bears;Balduvian Bears;Forest;Forest;Grizzly Bears", "", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Forest;Forest;Grizzly Bears;Balduvian Bears;Forest;Forest;Forest;Grizzly Bears");
+        final Game g2 = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", fair);
+        g2.setAge(forge.game.GameStage.Mulligan);
+        final ForcedWinSolver s2 = ((CubeComboPlayerController) g2.getPlayers().get(0).getController()).cubeCombo().forcedWin();
+        Assert.assertFalse(s2.potential(g2, new java.util.ArrayList<>(), o, 40, true, 12_000L), "no kill in the deck: the policy's mulligan stands");
     }
 
     /**

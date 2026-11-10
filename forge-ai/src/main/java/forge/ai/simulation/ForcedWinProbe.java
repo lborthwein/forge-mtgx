@@ -296,6 +296,7 @@ public final class ForcedWinProbe {
                 o.error = "stack";
                 return o;
             }
+            inPlay(g);
             g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
             final ProbeAi probeAi = new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace);
             probeAi.planScry = PLAN_SCRY.get();
@@ -1174,6 +1175,16 @@ public final class ForcedWinProbe {
     }
 
     /**
+     * solver-distill-cc-1109 (keepGate): a sandbox of a game that has not started (the mulligan decision) plays as a started
+     * one: the copy's stage becomes Play (the live game is never touched). In a started game this does nothing.
+     */
+    static void inPlay(final Game copy) {
+        if (copy.getAge() != forge.game.GameStage.Play && !copy.isGameOver()) {
+            copy.setAge(forge.game.GameStage.Play);
+        }
+    }
+
+    /**
      * solver-distill-cc-1109 (planLoops): does the engine win this turn from a sandbox that holds, for our seat, only its
      * lands, the permanent {@code cardId} and (when {@code partnerId} >= 0) that creature, both in play and able to act?
      * Our other nonland permanents and our hand are exiled first; the opponent's board stays. Own id scope, AI cache
@@ -1209,6 +1220,7 @@ public final class ForcedWinProbe {
             if (!g.getStack().isEmpty()) {
                 return false;
             }
+            inPlay(g);
             g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
             final Card s = g.findById(cardId);
             final Card t = partnerId < 0 ? null : g.findById(partnerId);

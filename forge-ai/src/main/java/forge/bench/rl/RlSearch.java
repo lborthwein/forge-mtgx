@@ -287,7 +287,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /**
          * solver-distill-cc-1109 (off by default and then absent from the JSON): an opening hand the policy would mulligan is
          * kept when the planner sees a kill within reach from it ({@link forge.ai.simulation.ForcedWinSolver#potential}: a
-         * line within five turns with its land drops, as it stands or with one library card next). A seat whose cards
+         * line within five turns from the hand's own lands, as it stands or with one library card next). A seat whose cards
          * cannot end the game in the planner's model is never asked: its mulligans are the policy's, as before. alwaysKeep
          * read on R4 (11-07) helped Doomsday holdings and harmed fair play; this is that key gated by the planner. Needs
          * {@code reach}.
@@ -2021,6 +2021,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
                 final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
                 o.window = false; // before the first turn: plan as from our first main phase
+                o.lands = false;  // only the lands in the hand: a hand that needs land draws is the policy's to judge
                 pot = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader)
                         .potential(g, new ArrayList<>(), o, rc.maxNames, rc.sig, 12_000L);
             } catch (RuntimeException e) {
