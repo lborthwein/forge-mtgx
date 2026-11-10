@@ -3261,9 +3261,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int leafGfs = 0;
         public double leafGfsW = 0.5;
         public boolean leafGfFree = true;
+        /**
+         * The teacher's planner allowance at a leaf: nodes of one screen and of the whole call (0 = the labels' own:
+         * 1,500 and 6,000). The labels' allowance does not find a three-turn Doomsday line from a real hand (GoldfishTest
+         * tutorHandPotential: none at 1,500 or 6,000 a screen, found at 12,000-20,000).
+         */
+        public int leafGfNodes = 0;
+        public long leafGfMaxNodes = 0;
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
                 "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart",
-                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree", "gateEnder"));
+                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree", "gateEnder", "leafGfNodes", "leafGfMaxNodes"));
 
         public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
             final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
@@ -3305,6 +3312,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("leafGfs")) c.leafGfs = o.get("leafGfs").getAsInt();
             if (o.has("leafGfsW")) c.leafGfsW = o.get("leafGfsW").getAsDouble();
             if (o.has("leafGfFree")) c.leafGfFree = o.get("leafGfFree").getAsBoolean();
+            if (o.has("leafGfNodes")) c.leafGfNodes = o.get("leafGfNodes").getAsInt();
+            if (o.has("leafGfMaxNodes")) c.leafGfMaxNodes = o.get("leafGfMaxNodes").getAsLong();
             return c;
         }
     }
@@ -3534,7 +3543,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final double before = pot;
             teachLeaves.incrementAndGet();
             if (rc.leafGf) {
-                final forge.ai.simulation.ForcedWinSolver.Goldfish gf = goldfishFull(k, g, me);
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gf;
+                if (rc.leafGfNodes > 0) {
+                    final Object rd = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                    final forge.ai.simulation.ForcedWinSolver.GoldfishOpts go = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                    go.nodes = rc.leafGfNodes;
+                    go.maxNodes = rc.leafGfMaxNodes > 0 ? rc.leafGfMaxNodes : 4L * rc.leafGfNodes;
+                    go.ms = 60_000L; // node caps only
+                    gf = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, rd).goldfish(g, knownTopOf(k, me), go);
+                } else {
+                    gf = goldfishFull(k, g, me);
+                }
                 if (!gf.failed && !Double.isNaN(gf.g) && gf.g > 0) {
                     teachGfHits.incrementAndGet();
                     pot = Math.max(pot, gf.g);
