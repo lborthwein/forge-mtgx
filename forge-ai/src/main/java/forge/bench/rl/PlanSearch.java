@@ -1125,7 +1125,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     break;
                 }
                 st.plans.add(new LinePlan(pr));
-                st.labels.add("line#" + n + " P=" + Math.round(pr.pBelief * 100) + "% steps=" + pr.steps);
+                st.labels.add("line#" + n + " P=" + Math.round(pr.pBelief * 100) + "% steps=" + pr.steps
+                        + (RlSearch.LOG_ACTS ? " how=" + pr.how + " winTurn=" + pr.winTurn + " engine=" + pr.engine + " text="
+                                + (pr.text == null ? "" : pr.text.replaceAll("\\s+", " ")) : ""));
                 n++;
                 lineCands++;
             }

@@ -1187,6 +1187,71 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     // ------------------------------------------------------------------------------------------------ the decision
 
     /** S1: one action's identity across identical copies (card name, zone, land flag, ability text); pass = "pass". */
+    /** Diagnostics (-Dsdcc.logActs=true; off = nothing below is called): names in the decision log. */
+    static final boolean LOG_ACTS = Boolean.getBoolean("sdcc.logActs");
+
+    static String actLabel(final SpellAbility sa) {
+        if (sa == null) {
+            return "pass";
+        }
+        final forge.game.card.Card h = sa.getHostCard();
+        final String name = h == null ? "?" : h.getName();
+        if (sa.isLandAbility()) {
+            return "land " + name;
+        }
+        if (sa.isSpell()) {
+            return "cast " + name;
+        }
+        String d = sa.getDescription() == null ? "" : sa.getDescription().replaceAll("\\s+", " ").trim();
+        if (d.length() > 48) {
+            d = d.substring(0, 48);
+        }
+        return "act " + name + (d.isEmpty() ? "" : ": " + d);
+    }
+
+    private static JsonArray names(final Iterable<forge.game.card.Card> cs, final boolean lands) {
+        final JsonArray a = new JsonArray();
+        for (forge.game.card.Card c : cs) {
+            if (c.isLand() == lands) {
+                a.add(c.getName() + (c.isTapped() ? "(T)" : ""));
+            }
+        }
+        return a;
+    }
+
+    static JsonObject stateNote(final Game g, final Player me) {
+        final JsonObject o = new JsonObject();
+        try {
+            Player opp = null;
+            for (Player p : g.getPlayers()) {
+                if (p != me) {
+                    opp = p;
+                }
+            }
+            o.addProperty("life", me.getLife());
+            o.addProperty("lib", me.getCardsIn(forge.game.zone.ZoneType.Library).size());
+            o.add("hand", names(me.getCardsIn(forge.game.zone.ZoneType.Hand), false));
+            o.add("hand_lands", names(me.getCardsIn(forge.game.zone.ZoneType.Hand), true));
+            o.add("bf", names(me.getCardsIn(forge.game.zone.ZoneType.Battlefield), false));
+            o.add("lands", names(me.getCardsIn(forge.game.zone.ZoneType.Battlefield), true));
+            o.add("gy", names(me.getCardsIn(forge.game.zone.ZoneType.Graveyard), false));
+            if (opp != null) {
+                o.addProperty("opp_life", opp.getLife());
+                o.addProperty("opp_hand", opp.getCardsIn(forge.game.zone.ZoneType.Hand).size());
+                o.add("opp_bf", names(opp.getCardsIn(forge.game.zone.ZoneType.Battlefield), false));
+                o.addProperty("opp_lands", names(opp.getCardsIn(forge.game.zone.ZoneType.Battlefield), true).size());
+            }
+            final JsonArray stk = new JsonArray();
+            for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+                stk.add(String.valueOf(si.getSourceCard()));
+            }
+            o.add("stack", stk);
+        } catch (RuntimeException e) {
+            o.addProperty("error", String.valueOf(e));
+        }
+        return o;
+    }
+
     static String actionKey(final SpellAbility sa) {
         if (sa == null) {
             return "pass";
@@ -1685,6 +1750,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.add("prior", pr);
             row.add("entry", ix);
             row.add("ev", ev);
+            if (LOG_ACTS) {
+                // diagnostics only (-Dsdcc.logActs=true): the searched candidates by name, and the seat's own view
+                final JsonArray acts = new JsonArray();
+                for (int j = 0; j < r.givenIndex.length; j++) {
+                    if (r.givenIndex[j] >= order.size()) {
+                        acts.add("plan#" + (r.givenIndex[j] - order.size()));
+                    } else {
+                        acts.add(actLabel(given.get(r.givenIndex[j])));
+                    }
+                }
+                row.add("acts", acts);
+                row.add("st", stateNote(g, me));
+            }
             // per-world values (diagnostics: paired differences, sign consistency across worlds)
             final JsonArray vw = new JsonArray();
             final double scale = "value".equals(cfg.leaf) ? 1e4 : 10;
