@@ -644,8 +644,13 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private JsonObject relaxLabel(final Player p, final int seat, final int ord, final String phase, final int stack,
             final HonestLabel.Result r) {
         final Game g = game;
-        if (!RELAX_ALL && (stack != 0 || !"MAIN1".equals(phase) || g.getPhaseHandler().getPlayerTurn() != p)) {
-            return null;
+        if (!RELAX_ALL) {
+            // the seat's own turn, by seat index (the hook's Player may be an equal object, not the same reference)
+            final Player active = g.getPhaseHandler().getPlayerTurn();
+            if (stack != 0 || !"MAIN1".equals(phase) || active == null
+                    || g.getRegisteredPlayers().indexOf(active) != seat) {
+                return null;
+            }
         }
         final JsonObject x = new JsonObject();
         x.addProperty("relax_max", RELAX);
