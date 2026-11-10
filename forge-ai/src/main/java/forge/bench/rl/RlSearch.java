@@ -306,7 +306,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * permanents, only lands, six lands of seven) asks for it too. Generic: land counts, no card or deck logic; never
          * turns a keep into a mulligan. Keys: shadow (false; true = the verdict is logged and nothing changes),
          * stopUnfired (false; true = a game in which the rule has not fired for this seat ends as a draw at the seat's
-         * first priority decision, so a paired read of the rule against its shadow plays out only the games it touches).
+         * first priority decision, so a paired read of the rule against its shadow plays out only the games it touches),
+         * ender (false; true = the rule applies only to a seat one of whose cards can end the game in the planner's
+         * model, {@link forge.ai.simulation.ForcedWinSolver#hasEnder}; needs {@code reach}; every other seat's mulligans
+         * are the policy's). With {@code reach} on, the planner's verdict is logged in every row either way.
          */
         public JsonObject mullKeep;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
@@ -447,7 +450,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("mullKeep") && !o.get("mullKeep").isJsonNull()) {
                 c.mullKeep = o.getAsJsonObject("mullKeep");
                 for (String k : c.mullKeep.keySet()) {
-                    if (!k.equals("shadow") && !k.equals("stopUnfired")) {
+                    if (!k.equals("shadow") && !k.equals("stopUnfired") && !k.equals("ender")) {
                         throw new IllegalArgumentException("mullKeep: unknown key " + k);
                     }
                 }
@@ -2259,6 +2262,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     public int mullKeepAsks, mullKeepFires;
     /** mullKeep.stopUnfired: this game was ended at the seat's first priority decision (the rule had not fired). */
     public boolean mullKeepStopped;
+    /** mullKeep: the planner's deck-level verdict for this seat (null = not asked yet or no reach). */
+    private Boolean mullKeepEnder;
 
     private boolean mullKeepFlag(final String key) {
         return cfg.mullKeep != null && cfg.mullKeep.has(key) && cfg.mullKeep.get(key).getAsBoolean();
@@ -2282,7 +2287,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         } catch (RuntimeException e) {
             err = String.valueOf(e);
         }
-        final boolean fire = would && keep >= 0 && err == null && !stock;
+        // the deck-level verdict of the planner (once per game; null without reach): only read by the ender key
+        if (mullKeepEnder == null && cfg.reach != null) {
+            try {
+                reachCfg();
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                mullKeepEnder = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader).hasEnder(g);
+            } catch (RuntimeException e) {
+                mullKeepEnder = Boolean.FALSE;
+                err = err == null ? "ender: " + e : err;
+            }
+        }
+        final boolean gated = mullKeepFlag("ender") && !Boolean.TRUE.equals(mullKeepEnder);
+        final boolean fire = would && keep >= 0 && err == null && !stock && !gated;
         final boolean shadow = mullKeepFlag("shadow");
         if (would) {
             mullKeepAsks++;
@@ -2300,6 +2317,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("stock_mulligan", stock);
             row.addProperty("fired", fire);
             row.addProperty("kept", fire && !shadow);
+            if (mullKeepEnder != null) {
+                row.addProperty("has_ender", mullKeepEnder);
+            }
             if (err != null) {
                 row.addProperty("error", err);
             }
