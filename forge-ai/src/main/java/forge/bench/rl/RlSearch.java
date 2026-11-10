@@ -1501,6 +1501,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // integrate-1110: this decision's plan for its play-outs' card picks, after the budget's start: its planner
             // nodes are this decision's work and count against its budget like the search's own
             nestedPlan = planNested(g, me, knownTopOf(liveKnow, me));
+            final forge.game.phase.PhaseHandler nph = g.getPhaseHandler();
+            if (g.getStack().isEmpty() && nph.isPlayerTurn(me)
+                    && (nph.is(forge.game.phase.PhaseType.MAIN1) || nph.is(forge.game.phase.PhaseType.MAIN2))) {
+                // a decision where a plan can be made (the planner's own condition): its plan, or none, is the one the
+                // live pick of a card cast at this decision follows. A decision with the stack in use changes nothing:
+                // the cast card is waiting there.
+                keepForLive(nestedPlan, g);
+            }
         }
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
@@ -2397,6 +2405,32 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (m.family == RlSchema.F_MULLIGAN && cfg.keepGate && cfg.reach != null) {
             return keepGateAnswer(g, me, m, frame, greedy);
         }
+        if (cfg.nestedChoice != null) {
+            // integrate-1110: the live pick of a tutor this turn's plan cast is the plan's (the play-outs valued the cast
+            // with that pick); every other ask goes on to the scorer as before
+            final int hit = planPick(nestedLive, nestedLiveSeen, g, m, nestedLiveTurn);
+            if (hit >= 0) {
+                final boolean changed = greedy == null || greedy.length != 1 || greedy[0] != hit;
+                nestedLivePicks.incrementAndGet();
+                if (cfg.decisionLog != null || rowsWanted) {
+                    final JsonObject row = new JsonObject();
+                    row.addProperty("game_uid", Long.toUnsignedString(uid));
+                    row.addProperty("dec_idx", frame.decIdx);
+                    row.addProperty("turn", g.getPhaseHandler().getTurn());
+                    row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+                    row.addProperty("kind", "choice");
+                    row.addProperty("family", RlSchema.familyName(m.family));
+                    row.addProperty("src", ChoiceScorer.srcOf(g));
+                    row.addProperty("nested_live", true);
+                    row.addProperty("picked", m.cands.get(hit).host.getName());
+                    row.addProperty("gf", Math.round(nestedLive.gf * 1000) / 1000.0);
+                    row.addProperty("scored", false);
+                    row.addProperty("departed", changed);
+                    addRow(row);
+                }
+                return changed ? new short[] {(short) hit} : null;
+            }
+        }
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
         if (sc.pileActive(g)) {
@@ -3093,6 +3127,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ne.addProperty("answered", nestedAnswered.get());
             ne.addProperty("changed", nestedChanged.get());
             ne.addProperty("floors", nestedFloors.get());
+            ne.addProperty("live_picks", nestedLivePicks.get());
             o.add("nested", ne);
         }
         if (teachLeaves.get() > 0) {
@@ -3764,35 +3799,32 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return nestedPlan;
     }
 
-    public void setNestedPlan(final NestedPlan np) {
+    public void setNestedPlan(final NestedPlan np, final Game g) {
         nestedPlan = np;
+        keepForLive(np, g);
     }
 
     /**
-     * nestedChoice, play-out thread: the searching seat's CARDS ask in play-out {@code g}. When the resolving card is a
-     * step of this root decision's plan, the plan's next pick for it (the steps to answer with), and the play-out's leaf
-     * floor is set; else null (the policy's answer stands, no floor). A lookup: no planner work here.
+     * The plan's next pick for the card now resolving in {@code g}, as a candidate index of a CARDS single-pick menu, or
+     * -1 (no plan, another turn when {@code turn} >= 0, another family, the resolving card is not a step of the plan, its
+     * picks are used up, or the pick is not on the menu). {@code seen} counts the picks given per card.
      */
-    public short[] nestedAnswer(final Object copyCtx, final Game g, final Player me, final RlCandidates.Menu m,
-            final short[] greedy) {
-        final NestedPlan np = nestedPlan;
-        if (np == null || !(copyCtx instanceof CopyCtx) || m.family != RlSchema.F_CARDS || !ChoiceWindow.singlePick(m)) {
-            return null;
-        }
-        nestedAsks.incrementAndGet();
+    static int planPick(final NestedPlan np, final java.util.Map<Integer, Integer> seen, final Game g,
+            final RlCandidates.Menu m, final int turn) {
         try {
-            if (g.getStack().isEmpty() || !g.getStack().isResolving()) {
-                return null;
+            if (np == null || m.family != RlSchema.F_CARDS || !ChoiceWindow.singlePick(m)
+                    || turn >= 0 && g.getPhaseHandler().getTurn() != turn
+                    || g.getStack().isEmpty() || !g.getStack().isResolving()) {
+                return -1;
             }
             final forge.game.card.Card host = g.getStack().peekAbility().getHostCard();
             final List<Integer> picks = host == null ? null : np.picks.get(host.getId());
             if (picks == null) {
-                return null;
+                return -1;
             }
-            final CopyCtx cc = (CopyCtx) copyCtx;
-            final int at = cc.nestedSeen.merge(host.getId(), 1, Integer::sum) - 1;
+            final int at = seen.getOrDefault(host.getId(), 0);
             if (at >= picks.size()) {
-                return null;
+                return -1;
             }
             final int want = picks.get(at);
             final forge.game.card.Card wc = g.findById(want);
@@ -3808,18 +3840,63 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     hit = i;
                 }
             }
-            if (hit < 0) {
-                return null;
+            if (hit >= 0) {
+                seen.put(host.getId(), at + 1);
             }
-            nestedAnswered.incrementAndGet();
-            if (greedy == null || greedy.length != 1 || greedy[0] != hit) {
-                nestedChanged.incrementAndGet();
-            }
-            cc.nestedPot = Math.max(cc.nestedPot, np.pot);
-            return new short[] {(short) hit};
+            return hit;
         } catch (RuntimeException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * nestedChoice, play-out thread: the searching seat's CARDS ask in play-out {@code g}. When the resolving card is a
+     * step of this root decision's plan, the plan's next pick for it (the steps to answer with), and the play-out's leaf
+     * floor is set; else null (the policy's answer stands, no floor). A lookup: no planner work here.
+     */
+    public short[] nestedAnswer(final Object copyCtx, final Game g, final Player me, final RlCandidates.Menu m,
+            final short[] greedy) {
+        final NestedPlan np = nestedPlan;
+        if (np == null || !(copyCtx instanceof CopyCtx) || m.family != RlSchema.F_CARDS || !ChoiceWindow.singlePick(m)) {
             return null;
         }
+        nestedAsks.incrementAndGet();
+        final CopyCtx cc = (CopyCtx) copyCtx;
+        final int hit = planPick(np, cc.nestedSeen, g, m, -1);
+        if (hit < 0) {
+            return null;
+        }
+        nestedAnswered.incrementAndGet();
+        if (greedy == null || greedy.length != 1 || greedy[0] != hit) {
+            nestedChanged.incrementAndGet();
+        }
+        cc.nestedPot = Math.max(cc.nestedPot, np.pot);
+        return new short[] {(short) hit};
+    }
+
+    /**
+     * nestedChoice: the plan of the seat's last root decision at which a plan can be made (its own main phase, an empty
+     * stack), kept past that decision for the live seat's own pick. The search casts a tutor because its play-outs valued
+     * the cast with the plan's pick; when that tutor resolves in the live game (the same turn), its menu is answered with
+     * that pick too ({@link #decideChoice0}), ahead of the choice scorer, whose allowance per option is too small to see
+     * the line. The next such decision replaces it with its own plan, or with none; decisions taken with the stack in use
+     * (the cast card waiting there) leave it.
+     */
+    private NestedPlan nestedLive;
+    private int nestedLiveTurn = -1;
+    private final java.util.Map<Integer, Integer> nestedLiveSeen = new java.util.HashMap<>();
+    /** nestedChoice (report only): live picks answered from the plan. */
+    public final java.util.concurrent.atomic.AtomicLong nestedLivePicks = new java.util.concurrent.atomic.AtomicLong();
+
+    private void keepForLive(final NestedPlan np, final Game g) {
+        nestedLive = np; // null: no plan at this decision, so no live pick follows an older one
+        nestedLiveTurn = g.getPhaseHandler().getTurn();
+        nestedLiveSeen.clear();
+    }
+
+    /** Tests: the live seat's pick for the card now resolving in the live game (candidate index, -1 = not the plan's). */
+    public int nestedLivePick(final Game g, final RlCandidates.Menu m) {
+        return planPick(nestedLive, nestedLiveSeen, g, m, nestedLiveTurn);
     }
 
     /** Tests: a play-out copy's context as {@link #onCopy} makes it, and its nested floor. */

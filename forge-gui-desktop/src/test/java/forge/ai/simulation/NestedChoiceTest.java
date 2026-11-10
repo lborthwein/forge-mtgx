@@ -161,7 +161,7 @@ public class NestedChoiceTest extends AITest {
         final RlSearch.NestedPlan np = on.planNested(live, me, new ArrayList<>());
         final double planMs = (System.nanoTime() - t0) / 1e6;
         Assert.assertNotNull(np, "the root plan: the tutor with its pick");
-        on.setNestedPlan(np); // what decide0 does for the play-outs of this root decision
+        on.setNestedPlan(np, live); // what decide0 does for the play-outs of this root decision
         Assert.assertEquals(np.picks.size(), 1, np.text);
         final int tutorId = find(me, ZoneType.Hand, "Mystical Tutor").getId();
         Assert.assertEquals(np.picks.get(tutorId), List.of(find(me, ZoneType.Library, "Doomsday").getId()), np.text);
@@ -185,13 +185,113 @@ public class NestedChoiceTest extends AITest {
         Assert.assertEquals(tutorOn, 0.85 * np.pot + (1 - 0.85 * np.pot) * V_TUTOR, 1e-12, "the reach blend with the floor as its potential");
     }
 
+    /**
+     * The search casts the tutor because its play-outs valued the cast with the plan's pick. When the tutor then resolves in
+     * the LIVE game, its menu is answered with that pick too; another turn's ask, or a card the plan did not cast, is not.
+     */
+    @Test
+    public void theLivePickOfATutorThePlanCastIsThePlans() {
+        liveFollow("Mystical Tutor", HAND, REST);
+    }
+
+    /**
+     * Report only: the same hand with a tutor for ANY card in place of Mystical Tutor. The plan must search the pick among
+     * the whole library; how many planner nodes does it need? (No assertion: the numbers go to RESULT.md.)
+     */
+    @Test
+    public void allowanceForAnAnyCardTutor() {
+        for (String nested : new String[] {"{}", "{\"nodes\":20000,\"maxNodes\":80000}", "{\"nodes\":40000,\"maxNodes\":160000}"}) {
+            final RlSearch on = search(nested);
+            final Game live = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(
+                    HAND.replace("Mystical Tutor", "Vampiric Tutor"), BF, 20, "", "Island", 20, "human")
+                    .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + REST));
+            final long t0 = System.nanoTime();
+            final RlSearch.NestedPlan np = on.planNested(live, live.getPlayers().get(0), new ArrayList<>());
+            System.out.println("NESTED any-card tutor " + nested + ": " + (np == null ? "no plan" : "gf " + np.gf + " turn+" + np.winTurn + " | "
+                    + np.text.substring(0, Math.min(200, np.text.length()))) + "; nodes " + on.nestedNodes.get() + " wall ms "
+                    + (System.nanoTime() - t0) / 1_000_000);
+        }
+    }
+
+    private static void liveFollow(final String tutor, final String hand, final String lib) {
+        final RlSearch on = search("{}");
+        final Game live = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(hand, BF, 20, "", "Island", 20,
+                "human").replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + lib));
+        final Player me = live.getPlayers().get(0);
+        final RlSearch.NestedPlan np = on.planNested(live, me, new ArrayList<>());
+        Assert.assertNotNull(np);
+        on.setNestedPlan(np, live);
+        final String[] picked = {null};
+        final int[] hits = {-9, -9};
+        final short[][] scorerAlt = {null};
+        final double[] scorerDd = {Double.NaN}, scorerMax = {0.0};
+        me.dangerouslySetController(new PlayerControllerAi(live, me, me.getController().getLobbyPlayer()) {
+            @Override
+            public Card chooseSingleCardForZoneChange(final ZoneType destination, final List<ZoneType> origin,
+                    final SpellAbility sa, final CardCollection fetchList, final forge.game.player.DelayedReveal delayedReveal,
+                    final String selectPrompt, final boolean isOptional, final Player decider) {
+                final JsonObject body = new JsonObject();
+                body.addProperty("min", isOptional ? 0 : 1);
+                body.addProperty("max", 1);
+                final RlCandidates.Menu m = RlCandidates.build(live, me, "chooseSingleCardForZoneChange", "zoneChange", body, fetchList);
+                // the choice scorer alone on this real ask, with the pilot arm's block (gfNodes 1500 a screen): what
+                // answers it without the key. The policy's pick is the first card that is not Doomsday; flat leaf values.
+                short own = -1;
+                for (int i = 0; i < fetchList.size() && own < 0; i++) {
+                    if (!fetchList.get(i).getName().equals("Doomsday")) {
+                        own = (short) i;
+                    }
+                }
+                final forge.bench.rl.ChoiceScorer sc = ReachDiscardsTest.scorer(false);
+                final forge.bench.rl.RlKnowledge know = new forge.bench.rl.RlKnowledge(live);
+                know.v2 = true;
+                know.attach();
+                final long t0 = System.nanoTime();
+                final forge.bench.rl.ChoiceScorer.Scored s = sc.enumerate(live, me, m, new short[] {own}, know, 4242L, null);
+                final double[] v = new double[sc.payloads(s).size()];
+                java.util.Arrays.fill(v, 0.5);
+                scorerAlt[0] = s.unsupported == null ? sc.choose(s, v, new short[] {own}) : null;
+                for (forge.bench.rl.ChoiceScorer.Option o : s.options) {
+                    if (o.label.equals("Doomsday")) {
+                        scorerDd[0] = o.screen == null || Double.isNaN(o.screen.reach) ? 0.0 : o.screen.reach;
+                    }
+                    scorerMax[0] = Math.max(scorerMax[0], o.screen == null || Double.isNaN(o.screen.reach) ? 0.0 : o.screen.reach);
+                }
+                System.out.println("NESTED live ask of " + tutor + ": the choice scorer alone (gfNodes 1500): options " + s.options.size()
+                        + " unsupported " + s.unsupported + " Doomsday's reach part " + scorerDd[0] + " best reach part " + scorerMax[0]
+                        + " answer " + (scorerAlt[0] == null ? "the policy's (" + fetchList.get(own).getName() + ")"
+                                : fetchList.get(scorerAlt[0][0]).getName()) + " in " + (System.nanoTime() - t0) / 1_000_000 + " ms");
+                hits[0] = on.nestedLivePick(live, m);
+                hits[1] = on.nestedLivePick(live, m); // the plan has one pick for this card: a second ask is not its
+                picked[0] = hits[0] < 0 ? null : fetchList.get(hits[0]).getName();
+                return fetchList.get(Math.max(0, hits[0]));
+            }
+        });
+        Assert.assertEquals(np.picks.get(find(me, ZoneType.Hand, tutor).getId()),
+                List.of(find(me, ZoneType.Library, "Doomsday").getId()), "the plan casts " + tutor + " for Doomsday: " + np.text);
+        final SpellAbility sa = find(me, ZoneType.Hand, tutor).getFirstSpellAbility();
+        sa.setActivatingPlayer(me);
+        Assert.assertTrue(((PlayerControllerAi) me.getController()).playChosenSpellAbility(sa), "cast the tutor");
+        MyRandom.setRandom(new Random(42));
+        live.getStack().resolveStack();
+        Assert.assertEquals(picked[0], "Doomsday", "the live pick is the plan's");
+        Assert.assertEquals(hits[1], -1, "one pick per step");
+        Assert.assertEquals(live.getPlayers().get(0).getCardsIn(ZoneType.Library).get(0).getName(), "Doomsday", "on top of the live library");
+        // key off: no plan is kept, the real ask is the choice scorer's as today
+        final RlSearch off = search(null);
+        final Game live2 = root(REST);
+        off.setNestedPlan(off.planNested(live2, live2.getPlayers().get(0), new ArrayList<>()), live2);
+        Assert.assertNull(off.nestedPlan());
+        Assert.assertEquals(off.nestedLivePick(live2, null), -1);
+    }
+
     @Test
     public void thePlanIsComputedOncePerRootDecisionAndEveryWorldReadsIt() {
         final RlSearch on = search("{}");
         final Game live = root(REST);
         final RlSearch.NestedPlan np = on.planNested(live, live.getPlayers().get(0), new ArrayList<>());
         Assert.assertNotNull(np);
-        on.setNestedPlan(np);
+        on.setNestedPlan(np, live);
         final long nodes = on.nestedNodes.get(), plans = on.nestedPlans.get();
         Assert.assertEquals(plans, 1);
         Assert.assertTrue(nodes > 0);
@@ -215,7 +315,7 @@ public class NestedChoiceTest extends AITest {
         final Game live = root(NOKILL);
         final RlSearch.NestedPlan np = on.planNested(live, live.getPlayers().get(0), new ArrayList<>());
         Assert.assertNull(np, "no kill in the library: no plan");
-        on.setNestedPlan(np);
+        on.setNestedPlan(np, live);
         final Playout a = playout(on, live);
         Assert.assertNull(a.nested);
         Assert.assertEquals(a.picked, a.policyPick);
