@@ -988,7 +988,9 @@ public final class ForcedWinPlanner {
             effs.addAll(ab.effects);
         }
         // an instant or sorcery goes to our graveyard after it resolves (not while it resolves: Doomsday's own pile)
-        final boolean toGraveyard = handIdx >= 0 && ab.kind == AbilKind.SPELL && !a.permanent;
+        // sdcc-draws-1110: unless it was observed going to our library instead (a SELF_TO_LIBRARY effect, probeSettle only)
+        final boolean toGraveyard = handIdx >= 0 && ab.kind == AbilKind.SPELL && !a.permanent
+                && !ab.has(EffKind.SELF_TO_LIBRARY);
         if (sacked != null) {
             // the ability's observed (or folded-in) effects already hold what the sacrifice itself causes
             s.bf.remove(sacked);
@@ -1341,6 +1343,11 @@ public final class ForcedWinPlanner {
                 out.add(s);
                 return;
             }
+            case SELF_TO_LIBRARY: {
+                selfToLibrary(s, step, e.n);
+                resolve(s, effs, ei + 1, 0, ab, out);
+                return;
+            }
             case SHUFFLE: {
                 // POST-FREEZE 2: our library is shuffled; every entry becomes an unseen card (known cards go back to
                 // the library's contents; a lazy pile position is no longer ours to choose)
@@ -1360,6 +1367,49 @@ public final class ForcedWinPlanner {
             }
             default:
                 resolve(s, effs, ei + 1, 0, ab, out);
+        }
+    }
+
+    /**
+     * sdcc-draws-1110 (a SELF_TO_LIBRARY effect; only a probeSettle reader's templates hold one): the card of the step
+     * being resolved goes to our library from wherever the model holds it (the battlefield for an activation, the
+     * graveyard for a cycled or sacrificed card; a resolving spell is in no zone of the model). On top it is a known
+     * entry, so the next draw is this card; at the bottom it is a known entry under the rest; anywhere else it is one
+     * more unseen entry whose card the library is known to hold.
+     */
+    private void selfToLibrary(S s, Step step, int place) {
+        final Integer host = step == null ? null : indexOfId.get(step.hostId);
+        if (host == null) {
+            return;
+        }
+        Perm perm = null;
+        for (Perm p : s.bf) {
+            if (p.card == host) {
+                perm = p;
+                break;
+            }
+        }
+        if (perm != null) {
+            final ACard a = cards.get(host);
+            s.bf.remove(perm);
+            s.devotion -= a.bluePips;
+            if (a.emptyDrawWin) {
+                boolean still = false;
+                for (Perm p : s.bf) {
+                    still |= cards.get(p.card).emptyDrawWin;
+                }
+                s.emptyDrawWin = still;
+            }
+        } else {
+            s.gyPool.remove(host);
+        }
+        if (place == ForcedWinModel.LIB_TOP) {
+            s.lib.add(0, host);
+        } else if (place == ForcedWinModel.LIB_BOTTOM) {
+            s.lib.add(host);
+        } else {
+            s.libPool.add(host);
+            s.lib.add(UNKNOWN);
         }
     }
 

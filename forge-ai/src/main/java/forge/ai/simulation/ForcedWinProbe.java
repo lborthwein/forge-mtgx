@@ -77,10 +77,33 @@ public final class ForcedWinProbe {
         int unmapped;
         /** solver-gaps-1015: our hand (without the probed card) and graveyard sizes when it was played. */
         int handBefore, gyBefore;
+        /** sdcc-draws-1110: the run was a {@link #PROBE_SETTLE} one; our library's size when it was played and after it. */
+        boolean settle;
+        int libBefore, libAfter;
     }
 
     /** labeller-v2 (c): set by a planScry reader around its learning (false = v1). */
     static final ThreadLocal<Boolean> PLAN_SCRY = ThreadLocal.withInitial(() -> false);
+
+    /**
+     * sdcc-draws-1110 (solverCfg {@code probeSettle}; set by a probeSettle reader around its learning, false = as before).
+     * The width model counted the cards an ability moves between our library and hand from what the ability's own
+     * resolution moved in the sandbox, with two holes. (1) A mana ability was never played there: its mana came from
+     * engine metadata, and what paying its cost causes (the "when this is put into a graveyard, draw a card" trigger of
+     * an artifact sacrificed for mana) was to come from a separate sacrifice probe. That probe fails in this engine (it
+     * calls GameAction.sacrifice with no parameter map, which the engine now reads: a NullPointerException every time),
+     * so the draw was never learned. (2) The probed card's own moves were skipped, so "draw a card, then put this on top
+     * of your library" was a plain draw: the card stayed on the battlefield and the library read one card short.
+     *
+     * <p>On: every mana ability that is no plain source (it has a mana or life cost or a second part, or it sacrifices a
+     * permanent with such a trigger) is activated in a sandbox like any other ability: the engine pays its cost, the
+     * stack and the triggers that causes resolve, and the cards the engine then moved between our library, hand and
+     * graveyard are the ability's effects after its mana ({@link #settledMana}). The separate sacrifice probe is not run
+     * (each ability's own run holds what its cost causes). A probed card that goes to our library is a
+     * {@link EffKind#SELF_TO_LIBRARY} effect, in order with the draws, with the place the engine put it. Receipts name
+     * each ability whose effects still imply another library size than the engine left ({@code probe-net}).</p>
+     */
+    static final ThreadLocal<Boolean> PROBE_SETTLE = ThreadLocal.withInitial(() -> false);
 
     /**
      * ledger-sweep-1107, ledger row 45 ({@code -Dforge.probeEmptyDraw=true}, off by default). A probe runs in a copy of
@@ -232,10 +255,20 @@ public final class ForcedWinProbe {
     static final class ZoneRec {
         final List<String> trace;
         final int me;
+        /**
+         * sdcc-draws-1110 (a {@link #PROBE_SETTLE} run only; null otherwise): our seat in the sandbox. A card that enters
+         * our library is then preceded by a "LIBPOS id index size" line: where the engine put it.
+         */
+        final Player seat;
 
         ZoneRec(List<String> trace, int me) {
+            this(trace, me, null);
+        }
+
+        ZoneRec(List<String> trace, int me, Player seat) {
             this.trace = trace;
             this.me = me;
+            this.seat = seat;
         }
 
         @Subscribe
@@ -258,6 +291,16 @@ public final class ForcedWinProbe {
             } catch (RuntimeException ex) {
                 land = false;
             }
+            if (seat != null && t.equals("Library@me")) {
+                // sdcc-draws-1110: the event comes after the card is in the zone, so its index is where the engine put it
+                final CardCollectionView lib = seat.getCardsIn(ZoneType.Library);
+                for (int i = 0; i < lib.size(); i++) {
+                    if (lib.get(i).getId() == e.card().getId()) {
+                        trace.add("LIBPOS " + e.card().getId() + " " + i + " " + lib.size());
+                        break;
+                    }
+                }
+            }
             trace.add("MOVE " + e.card().getId() + " " + f + " " + t + (land ? " L" : ""));
         }
     }
@@ -275,6 +318,7 @@ public final class ForcedWinProbe {
 
     static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st) {
         final Obs o = new Obs();
+        o.settle = PROBE_SETTLE.get(); // sdcc-draws-1110 (false = as before)
         final long t0 = System.nanoTime();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -328,10 +372,11 @@ public final class ForcedWinProbe {
             final int life0 = me.getLife(), opp0 = opp == null ? 0 : opp.getLife();
             o.lifeBefore = life0;
             o.stormBefore = g.getStack().getSpellsCastThisTurn().size();
-            g.subscribeToEvents(new ZoneRec(o.trace, me.getId()));
+            g.subscribeToEvents(new ZoneRec(o.trace, me.getId(), o.settle ? me : null));
             final int[] poolBefore = pool(me);
             o.handBefore = me.getCardsIn(ZoneType.Hand).size() - (card.isInZone(ZoneType.Hand) ? 1 : 0);
             o.gyBefore = me.getCardsIn(ZoneType.Graveyard).size();
+            o.libBefore = me.getCardsIn(ZoneType.Library).size();
             o.played = act.apply(g, me, card);
             if (!o.played) {
                 o.error = o.error == null ? "not played" : o.error;
@@ -339,6 +384,7 @@ public final class ForcedWinProbe {
             }
             final int[] poolCast = pool(me);
             resolveAll(g);
+            o.libAfter = me.getCardsIn(ZoneType.Library).size();
             final int[] poolAfter = pool(me);
             for (int c = 0; c < 6; c++) {
                 o.produced[c] = Math.max(0, poolAfter[c] - Math.min(poolCast[c], poolBefore[c]));
@@ -523,7 +569,15 @@ public final class ForcedWinProbe {
         int run = 0;
         java.util.Set<String> tutorNames = null, topNames = null;
         final int mark = out.size();
+        int posId = -1, posIndex = -1, posSize = -1; // sdcc-draws-1110: the last LIBPOS line (a settle run only)
         for (String line : o.trace) {
+            if (line.startsWith("LIBPOS ")) {
+                final String[] q = line.split(" ");
+                posId = Integer.parseInt(q[1]);
+                posIndex = Integer.parseInt(q[2]);
+                posSize = Integer.parseInt(q[3]);
+                continue;
+            }
             if (line.equals("SHUFFLE")) {
                 // our library was shuffled: what is on top afterwards is unknown
                 if (last != null) {
@@ -577,7 +631,28 @@ public final class ForcedWinProbe {
             final String[] p = line.split(" ");
             final int id = Integer.parseInt(p[1]);
             if (id == hostId) {
-                continue;
+                if (!o.settle) {
+                    continue;
+                }
+                if (p[3].equals("Library@me")) {
+                    // sdcc-draws-1110: the probed card itself goes to our library (its moves were skipped: the library
+                    // then read one card short). An effect in order with the draws; the place is where the engine put it
+                    // (a library that held nothing else reads as the top).
+                    if (last != null) {
+                        out.add(new Eff(last, run, 0));
+                        last = null;
+                        run = 0;
+                    }
+                    final int place = posId != id || posIndex < 0 ? ForcedWinModel.LIB_SOMEWHERE
+                            : posIndex == 0 ? ForcedWinModel.LIB_TOP
+                            : posIndex == posSize - 1 ? ForcedWinModel.LIB_BOTTOM : ForcedWinModel.LIB_SOMEWHERE;
+                    out.add(new Eff(EffKind.SELF_TO_LIBRARY, place, 0));
+                    continue;
+                }
+                if (!p[2].equals("Library@me")) {
+                    continue;
+                }
+                // it leaves our library again (this very ability put it there): a draw or a mill like any other card's
             }
             final String from = p[2], to = p[3];
             EffKind k = null;
@@ -913,6 +988,12 @@ public final class ForcedWinProbe {
                     t.sourceSac |= cost.sacSelf;
                 } else {
                     cost.effects.add(new Eff(EffKind.MANA, amount, colors));
+                    if (PROBE_SETTLE.get()) {
+                        // sdcc-draws-1110: what activating it moves besides the mana, as the engine settles it (its own
+                        // seed stream: the other probes of this card run on the same seeds with the key on and off)
+                        cost.effects.addAll(settledMana(live, me, id, cost,
+                                ForcedWinSolver.mix(seed, id * 53L + 17 + t.onBattlefield.size()), st, card.getName()));
+                    }
                     t.onBattlefield.add(cost);
                 }
             }
@@ -974,7 +1055,9 @@ public final class ForcedWinProbe {
                 }
             }
             // sacrifice: what happens when it goes to our graveyard from the battlefield (Chromatic Star draws)
-            if (hasDiesTrigger(card)) {
+            // sdcc-draws-1110: not with probeSettle, where each ability's own sandbox run holds what its sacrifice causes
+            // (folding this in as well would count the draw of a probed "sacrifice this:" ability twice)
+            if (hasDiesTrigger(card) && !PROBE_SETTLE.get()) {
                 final Obs o = run(live, me, id, (g, m, c) -> toBattlefield(g, m, c), (g, m, c) -> {
                     final Card bc = g.findById(c.getId());
                     if (bc == null || !bc.isInPlay()) {
@@ -1055,6 +1138,129 @@ public final class ForcedWinProbe {
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ sdcc-draws-1110 (probeSettle)
+
+    /**
+     * sdcc-draws-1110 ({@link #PROBE_SETTLE}): what activating a mana ability moves besides its mana. The ability is
+     * played in a sandbox with the permanent in play and untapped; the engine pays its cost (a sacrifice of the permanent
+     * included), and the stack and every trigger that causes resolve. The cards the engine then moved between our
+     * library, hand and graveyard are returned in the order they moved: draws, mills, put-backs, the permanent itself
+     * going to our library. The mana stays the engine metadata's (the sandbox's floating mana pays the ability's own mana
+     * cost, so the pool does not show what it made). Empty when the sandbox could not play it: the ability is then its
+     * mana, as before.
+     */
+    static List<Eff> settledMana(Game live, Player me, int id, Abil cost, long seed, Stats st, String name) {
+        final String desc = cost.desc, costKey = cost.costKey;
+        final Setup inPlay = (g, m, c) -> {
+            toBattlefield(g, m, c);
+            final Card bc = g.findById(c.getId());
+            if (bc != null) {
+                bc.setTapped(false);
+            }
+        };
+        final Act activate = (g, m, c) -> {
+            // the setup may have moved the card (a zone change makes a new object): find it again
+            final Card bc = g.findById(c.getId());
+            final SpellAbility sa = bc == null ? null : locate(bc, m, desc, costKey, true);
+            return sa != null && play(g, m, sa);
+        };
+        final Obs o = emptyDrawRetry(live, me, id, inPlay, activate, seed, st, run(live, me, id, inPlay, activate, seed, st),
+                name);
+        final List<Eff> out = new ArrayList<>();
+        if (o.error != null || !o.played) {
+            ForcedWinSolver.receipt("FORCED_WIN probe-fail card=" + name + " ability=" + cost.kind + " why="
+                    + (o.error == null ? "" : o.error.length() > 80 ? o.error.substring(0, 80) : o.error));
+            return out;
+        }
+        effectsFromTrace(o, id, cost, null);
+        for (Eff e : o.effects) {
+            if (e.kind == EffKind.DRAW || e.kind == EffKind.MILL || e.kind == EffKind.PUTBACK
+                    || e.kind == EffKind.SELF_TO_LIBRARY) {
+                out.add(e);
+            }
+        }
+        netReceipt(name, cost.kind + "", out, o);
+        return out;
+    }
+
+    /**
+     * sdcc-draws-1110: our library's size after {@code effs}, as the width search counts them, from the sizes a sandbox
+     * run started with (a draw or mill takes what is there; a pile leaves its cards; a tutor to hand takes one).
+     */
+    static int modelLibrary(List<Eff> effs, int library, int hand, int graveyard) {
+        int lib = library, h = hand, gy = graveyard;
+        for (Eff e : effs) {
+            switch (e.kind) {
+                case DRAW: {
+                    final int d = Math.min(e.n, lib);
+                    lib -= d;
+                    h += d;
+                    break;
+                }
+                case MILL: {
+                    final int d = Math.min(e.n, lib);
+                    lib -= d;
+                    gy += d;
+                    break;
+                }
+                case PUTBACK: {
+                    final int d = Math.min(e.n, h);
+                    lib += d;
+                    h -= d;
+                    break;
+                }
+                case DISCARD: {
+                    final int d = Math.min(e.n, h);
+                    h -= d;
+                    gy += d;
+                    break;
+                }
+                case TUTOR:
+                    if (lib > 0) {
+                        lib--;
+                        h++;
+                    }
+                    break;
+                case PILE:
+                    lib = Math.min(e.n, lib + gy);
+                    gy = 0;
+                    break;
+                case HAND_TO_LIBRARY:
+                    lib += h;
+                    h = 0;
+                    break;
+                case GRAVEYARD_TO_LIBRARY:
+                    lib += gy;
+                    gy = 0;
+                    break;
+                case EXILE_HAND:
+                    h = 0;
+                    break;
+                case SELF_TO_LIBRARY:
+                    lib++;
+                    break;
+                default:
+                    break;
+            }
+        }
+        return lib;
+    }
+
+    /**
+     * sdcc-draws-1110 ({@link #PROBE_SETTLE}, receipts only): names an ability whose learned effects imply another library
+     * size than the engine left in the sandbox: a count of cards the width model still gets wrong.
+     */
+    static void netReceipt(String name, String ability, List<Eff> effs, Obs o) {
+        if (!o.settle || !ForcedWinSolver.RECEIPTS || o.error != null || !o.played || o.won || o.lost) {
+            return;
+        }
+        final int model = modelLibrary(effs, o.libBefore, o.handBefore, o.gyBefore);
+        if (model != o.libAfter) {
+            ForcedWinSolver.receipt("FORCED_WIN probe-net card=" + name + " ability=" + ability + " library=" + o.libBefore
+                    + " model=" + model + " engine=" + o.libAfter + " effects=" + effs);
         }
     }
 
@@ -1395,6 +1601,8 @@ public final class ForcedWinProbe {
         effectsFromTrace(o, hostId, ab, sa);
         ab.effects.addAll(o.effects);
         ab.counter = sa.getApi() == forge.game.ability.ApiType.Counter;
+        netReceipt(sa.getHostCard() == null ? "?" : sa.getHostCard().getName(), ab.kind + (variant == null ? "" : "@" + variant),
+                ab.effects, o); // sdcc-draws-1110 (a probeSettle run with receipts only)
         return ab;
     }
 

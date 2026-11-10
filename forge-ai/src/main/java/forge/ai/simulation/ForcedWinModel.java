@@ -61,11 +61,20 @@ public final class ForcedWinModel {
         /** solver-gaps-1015: our whole hand / graveyard goes into our library (Timetwister, Echo of Eons); our hand is exiled (Memory Jar). */
         HAND_TO_LIBRARY, GRAVEYARD_TO_LIBRARY, EXILE_HAND,
         /** labeller-v2 (c): scry n / surveil n of our library (observed only by a planScry reader). */
-        SCRY, SURVEIL
+        SCRY, SURVEIL,
+        /**
+         * sdcc-draws-1110 (observed only by a probeSettle reader): the ability's own card goes to our library ("draw a
+         * card, then put this on top of your library"); n is where: {@link #LIB_TOP}, {@link #LIB_BOTTOM} or
+         * {@link #LIB_SOMEWHERE}.
+         */
+        SELF_TO_LIBRARY
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
     static final int ALL = 99;
+
+    /** sdcc-draws-1110: where a SELF_TO_LIBRARY card went, as the engine placed it in the sandbox. */
+    static final int LIB_TOP = 0, LIB_BOTTOM = 1, LIB_SOMEWHERE = 2;
 
     /**
      * solver-distill-cc-1109 (REACH sig): a card model's identity for the planner: every observed field of the card, its
@@ -221,6 +230,9 @@ public final class ForcedWinModel {
 
         @Override
         public String toString() {
+            if (kind == EffKind.SELF_TO_LIBRARY) {
+                return kind + (n == LIB_TOP ? ":top" : n == LIB_BOTTOM ? ":bottom" : ":somewhere");
+            }
             return kind + "" + (perLife != 0 ? perLife + "*life" : n == ALL ? "all" : String.valueOf(n))
                     + (kind == EffKind.MANA ? ":" + colorString(colors) : "") + (names == null ? "" : names.size() + "names");
         }
@@ -858,15 +870,18 @@ public final class ForcedWinModel {
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         synchronized ACard card(Game live, Player me, Card c) {
             // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
-            final String key = planScry ? "scry|" + c.getName() : c.getName();
+            // sdcc-draws-1110: so does a probeSettle reader (its templates hold what the settled sandbox moved)
+            final String key = (planScry ? "scry|" : "") + (probeSettle ? "settle|" : "") + c.getName();
             ACard t = templates.get(key);
             if (t == null) {
-                final boolean prev = ForcedWinProbe.PLAN_SCRY.get();
+                final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
+                ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
                 try {
                     t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
                 } finally {
                     ForcedWinProbe.PLAN_SCRY.set(prev);
+                    ForcedWinProbe.PROBE_SETTLE.set(prevSettle);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
@@ -885,6 +900,13 @@ public final class ForcedWinModel {
 
         /** labeller-v2 (c): observe scry / surveil as SCRY / SURVEIL effects (false = v1). */
         boolean planScry;
+
+        /**
+         * sdcc-draws-1110 (solverCfg probeSettle; false = off, the default, and then nothing changes): templates are learned
+         * with {@link ForcedWinProbe#PROBE_SETTLE} on (a mana ability with a cost or a trigger is played in the sandbox
+         * too, and a card that puts itself into our library is an effect), under their own keys.
+         */
+        boolean probeSettle;
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
         interface LoopProbe {

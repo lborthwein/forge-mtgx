@@ -74,6 +74,16 @@ public final class ForcedWinSolver {
          * casts a pile spell now and wins on our next turn needs more than 18.
          */
         public int planDepth = 18;
+        /**
+         * sdcc-draws-1110 (false = off, the default, and then nothing changes): the seat's own card models are learned
+         * from settled sandbox runs ({@link ForcedWinProbe#PROBE_SETTLE}). A mana ability that is no plain source is
+         * activated in the sandbox like any other ability, and what the engine then moved between our library, hand and
+         * graveyard is part of it (an artifact sacrificed for mana whose "put into a graveyard" trigger draws a card: the
+         * planner counted no draw and ran the library out one card early). A card that puts itself into our library
+         * ("draw a card, then put this on top of your library") is an effect too: the planner returns it there, so the
+         * library is not one card short and the next draw is that card.
+         */
+        public boolean probeSettle = false;
         public int horizon = 2;
         public long budgetMs = 8000;
         public boolean adversary = true;
@@ -742,6 +752,7 @@ public final class ForcedWinSolver {
             c.threshold = dblOr(get.apply("threshold"), c.threshold);
             c.nodes = intOr(get.apply("nodes"), c.nodes);
             c.planDepth = intOr(get.apply("planDepth"), c.planDepth);
+            c.probeSettle = "true".equals(get.apply("probeSettle")); // sdcc-draws-1110
             c.horizon = intOr(get.apply("horizon"), c.horizon);
             c.budgetMs = intOr(get.apply("budgetMs"), (int) c.budgetMs);
             c.adversary = !"false".equals(get.apply("adversary"));
@@ -859,7 +870,8 @@ public final class ForcedWinSolver {
                 + (engineAltLines > 0 ? " engineAltLines=" + engineAltLines : "")
                 + (oppBelief > 0 ? " oppBelief=" + oppBelief + " C=" + oppBeliefCands : "") // opp-belief-1104
                 + (oppHoldPoints ? " oppHoldPoints" : "")
-                + (oppResponse ? " oppResponse ms=" + oppResponseMs + " N=" + oppResponseNodes + " D=" + oppResponseDepth : "");
+                + (oppResponse ? " oppResponse ms=" + oppResponseMs + " N=" + oppResponseNodes + " D=" + oppResponseDepth : "")
+                + (probeSettle ? " probeSettle" : ""); // sdcc-draws-1110
         }
     }
 
@@ -1338,6 +1350,10 @@ public final class ForcedWinSolver {
         if (cfg.planScry) {
             this.reader.planScry = true;
             this.oppReader.planScry = true;
+        }
+        if (cfg.probeSettle) {
+            // sdcc-draws-1110: our own cards' models (own template keys); the defense's opponent reader is as before
+            this.reader.probeSettle = true;
         }
     }
 
