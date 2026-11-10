@@ -92,6 +92,12 @@ public final class ChoiceApply {
         final Runnable leaf;
         boolean missed = false;
         int tail = 0;
+        /**
+         * integrate-1110: false = this seat answers its own discards as before choice-search-1109 (Forge AI, not forced
+         * from the picks, not counted as a tail ask). Set false only for the solver-distill-cc-1109 arms' CARDS asks,
+         * whose copies must stay what that lane read ({@code ChoiceScorer.ownDiscards}).
+         */
+        boolean ownDiscards = true;
         Forced(final Game g, final Player p, final forge.LobbyPlayer lp, final List<Integer> picks, final Runnable leaf) {
             super(g, p, lp);
             this.picks = picks;
@@ -188,6 +194,9 @@ public final class ChoiceApply {
         @Override
         public CardCollection chooseCardsToDiscardFrom(final Player p, final SpellAbility sa, final CardCollection validCards,
                 final int min, final int max, final CardCollectionView visibleToChooser) {
+            if (!ownDiscards) {
+                return super.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser); // integrate-1110
+            }
             if (p == getPlayer() && next < picks.size()) {
                 final CardCollection out = forcedCards(validCards, min, max);
                 if (out != null) {
@@ -202,6 +211,9 @@ public final class ChoiceApply {
         /** choice-search-1109: the cleanup discard to hand size, forced like the others. */
         @Override
         public CardCollectionView chooseCardsToDiscardToMaximumHandSize(final int numDiscard) {
+            if (!ownDiscards) {
+                return super.chooseCardsToDiscardToMaximumHandSize(numDiscard); // integrate-1110
+            }
             if (next < picks.size()) {
                 final CardCollection out = forcedCards(getPlayer().getCardsIn(ZoneType.Hand), numDiscard, numDiscard);
                 if (out != null) {
@@ -373,6 +385,16 @@ public final class ChoiceApply {
     public static Result applyPicks(final Game live, final Player liveMe, final List<Integer> picks,
             final List<Integer> order, final long seed, final int settleSteps, final int fidelity, final Frames frames,
             final int chain) {
+        return applyPicks(live, liveMe, picks, order, seed, settleSteps, fidelity, frames, chain, true);
+    }
+
+    /**
+     * As above; integrate-1110: {@code ownDiscards} false = the copy's seat answers its own discards as before
+     * choice-search-1109 ({@link Forced#ownDiscards}); true is the call above.
+     */
+    public static Result applyPicks(final Game live, final Player liveMe, final List<Integer> picks,
+            final List<Integer> order, final long seed, final int settleSteps, final int fidelity, final Frames frames,
+            final int chain, final boolean ownDiscards) {
         final Result r = new Result();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -408,6 +430,7 @@ public final class ChoiceApply {
                 }
             };
             final Forced sc = new Forced(g, me, me.getController().getLobbyPlayer(), picks, leaf);
+            sc.ownDiscards = ownDiscards;
             sc.order = order;
             sc.looked = cs -> frames.onOrder(ctx, g, me, cs);
             me.dangerouslySetController(sc);

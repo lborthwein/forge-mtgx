@@ -771,12 +771,22 @@ public final class ChoiceScorer {
         this.costPart = part;
     }
 
+    /**
+     * integrate-1110 (set per ask in {@link #enumerate}): whether the copy's seat answers its own discards from the forced
+     * picks and counts one past the list as a tail ask, as choice-search-1109 (#233) made every copy do, also with lineOnly
+     * off. On a solver-distill-cc-1109 arm (reachAlpha or seqs set; lineOnly is refused with them) that would change which
+     * CARDS menus are refused ("multiAnswer") or fail ("pickMissed") whenever the replayed ability also makes the seat
+     * discard, so those arms' CARDS asks keep the seat that lane read with: Forge AI answers its discards, uncounted.
+     * Every other configuration and family keeps #233's seat.
+     */
+    private boolean ownDiscards = true;
+
     /** choice-search-1109: one answer applied on a copy: the resolution from the asking sub-ability, or the cleanup step. */
     private ChoiceApply.Result apply(final Game g, final Player me, final List<Integer> picks, final long seed,
             final ChoiceApply.Frames fr) {
         return costMode ? ChoiceApply.applyCost(g, me, castSa, costPart, picks, seed, cfg.settleSteps, cfg.fidelity, fr)
                 : cleanupMode ? ChoiceApply.applyCleanup(g, me, picks, seed, cfg.settleSteps, cfg.fidelity, fr)
-                : ChoiceApply.applyPicks(g, me, picks, null, seed, cfg.settleSteps, cfg.fidelity, fr, askChain);
+                : ChoiceApply.applyPicks(g, me, picks, null, seed, cfg.settleSteps, cfg.fidelity, fr, askChain, ownDiscards);
     }
 
     /** choice-search-1109: the card ids of a menu answer's steps (null when a step has no card). */
@@ -914,6 +924,7 @@ public final class ChoiceScorer {
             screenReader = null; // one reader per ask: its probes are of this position's copies
         } // choice-search-1109 pass 3: with relax, one reader per game (the solver's readerPerGame; affordances by card)
         relaxBest = Integer.MAX_VALUE;
+        ownDiscards = cfg.lineOnly || !(cfg.reachAlpha > 0 || cfg.seqs > 0) || m.family != RlSchema.F_CARDS; // integrate-1110
         // choice-search-1109: an ask from a sub-ability is replayed from that sub-ability (0 = the root, as before)
         cleanupMode = false;
         costMode = cfg.lineOnly && m.family == RlSchema.F_COST_CARDS;
@@ -1127,7 +1138,7 @@ public final class ChoiceScorer {
         }
         // the honest-copy checks on the first full sequence: no Forge AI tail, no read of the opponent's hidden cards
         final List<Integer> probe = ids(m, seqs.get(0));
-        final ChoiceApply.Result a = ChoiceApply.applyPicks(g, me, probe, probe, seed, cfg.settleSteps, cfg.fidelity, fr);
+        final ChoiceApply.Result a = ChoiceApply.applyPicks(g, me, probe, probe, seed, cfg.settleSteps, cfg.fidelity, fr, 0, ownDiscards);
         if (a.fail == null && a.tailAsks > 0) {
             s.unsupported = "seqTail";
             return;
@@ -1135,7 +1146,7 @@ public final class ChoiceScorer {
         final boolean was = guardSwap;
         guardSwap = true;
         try {
-            final ChoiceApply.Result b = ChoiceApply.applyPicks(g, me, probe, probe, seed, cfg.settleSteps, cfg.fidelity, fr);
+            final ChoiceApply.Result b = ChoiceApply.applyPicks(g, me, probe, probe, seed, cfg.settleSteps, cfg.fidelity, fr, 0, ownDiscards);
             if (a.fail == null && b.fail == null && !Arrays.equals(a.payload, b.payload)) {
                 s.unsupported = "oppHidden";
                 return;
@@ -1169,7 +1180,7 @@ public final class ChoiceScorer {
                 o.fail = "budget";
                 s.overBudget = true;
             } else {
-                note(ChoiceApply.applyPicks(g, me, o.pileIds, o.pileIds, seed, cfg.settleSteps, cfg.fidelity, fr), o, s, 0);
+                note(ChoiceApply.applyPicks(g, me, o.pileIds, o.pileIds, seed, cfg.settleSteps, cfg.fidelity, fr, 0, ownDiscards), o, s, 0);
             }
             s.options.add(o);
         }
@@ -1242,7 +1253,7 @@ public final class ChoiceScorer {
                 o.steps = new short[0];
             } else {
                 o.steps = new short[] {first.shortValue()};
-                note(ChoiceApply.applyPicks(g, me, p, p, seed, cfg.settleSteps, cfg.fidelity, fr), o, s, 0);
+                note(ChoiceApply.applyPicks(g, me, p, p, seed, cfg.settleSteps, cfg.fidelity, fr, 0, ownDiscards), o, s, 0);
             }
             s.options.add(o);
         }
