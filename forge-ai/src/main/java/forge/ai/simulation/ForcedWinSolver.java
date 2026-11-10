@@ -276,6 +276,19 @@ public final class ForcedWinSolver {
          * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
          */
         public boolean sourceColorsLive = false;
+        /**
+         * planner-mana-1110 (off by default; off changes nothing): the width model's land mana follows the state the plan
+         * has reached. (1) Each land in our hand is dropped once in a sandbox copy of the position at every read: the
+         * dropped land's own mana there, and every other source of ours whose mana that drop changes, replace the
+         * templates when the plan plays that land (a continuous effect that changes what lands tap for; sourceColorsLive
+         * reads only what is already on the battlefield). (2) A resolution that puts a land from our library onto our
+         * battlefield is an effect (LAND_FETCH: the land is a source with its own entry, tapped or not and at its own
+         * life cost, and the library holds one card fewer); before, such a move was dropped and the ability did nothing.
+         * Scope: the offense (the proposals and the line it follows). The planner-only screens ({@link #screen},
+         * {@link #pileChoices}) and the threat checks keep the old reading: a search calls a screen many times a decision,
+         * and a screen that finds no line would pay one more search and one sandbox drop per land name in hand each time.
+         */
+        public boolean planLands = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -777,6 +790,7 @@ public final class ForcedWinSolver {
             c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
+            c.planLands = "true".equals(get.apply("planLands")); // planner-mana-1110
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1322,7 +1336,13 @@ public final class ForcedWinSolver {
             this.reader.planScry = true;
             this.oppReader.planScry = true;
         }
+        // planner-mana-1110: the land plans are read from the reader's twin (its own templates); never without the key
+        this.landReader = cfg.planLands ? this.reader.landsTwin() : null;
     }
+
+    /** planner-mana-1110 (planLands): the reader of the positions the land plans are read from; null without the key. */
+    final ForcedWinModel.Reader landReader;
+
 
     public Config config() {
         return cfg;
@@ -2224,6 +2244,9 @@ public final class ForcedWinSolver {
     private ForcedWinPlanner.Result plan(Position pos, ForcedWinPlanner.Limits lim) {
         final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
         meter.plannerNodes += r.visited;
+        if (r.landsSkipped) {
+            landsSkips++; // planner-mana-1110 (report only)
+        }
         if (r.timedOut) {
             meter.plannerTimeouts++;
         }
@@ -2302,6 +2325,7 @@ public final class ForcedWinSolver {
             markWindow(pos, live.getPhaseHandler()); // line-adoption-1107
         }
         final ForcedWinPlanner.Limits lim = limits();
+        lim.landsDeadline = landsDeadline(t0); // planner-mana-1110 (read only with planLands)
         lim.nodes = cfg.nodes;
         // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
         lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs);
@@ -2380,7 +2404,12 @@ public final class ForcedWinSolver {
             receipt("FW_POSITION " + pos.describe());
         }
         final long t1 = forge.game.WorkClock.nanoTime();
-        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch || hardDeadline != 0 ? t0 : forge.game.WorkClock.nanoTime());
+        final long evalFrom = cfg.paySearch || hardDeadline != 0 ? t0 : forge.game.WorkClock.nanoTime();
+        Eval best0 = evaluateTop(live, res.lines, index, evalFrom);
+        if (best0 == null && cfg.planLands && !res.landsPass) {
+            best0 = landsRetry(live, pos, lim, index, evalFrom); // planner-mana-1110 (never without the key)
+        }
+        final Eval best = best0;
         engineNanos += forge.game.WorkClock.nanoTime() - t1;
         if (cfg.engineAfterPlanFail && evalSink != null && (best == null || best.pUnopposed < 1.0 || best.pBelief < 1.0
                 || best.worldsRun < cfg.worlds)) {
@@ -2422,6 +2451,97 @@ public final class ForcedWinSolver {
                 + " copies=" + copies + (payOnly ? " paySearch" : ""));
         lastOutcome = "take";
         return best.line;
+    }
+
+    /**
+     * planner-mana-1110 (report only): decisions whose plain lines all failed in their play-outs and were searched once
+     * more with the land plans; those searches that found a line; those whose line won its unopposed play-out; the
+     * planner nodes those searches took.
+     */
+    public int landsRetries, landsRetryFound, landsRetryWins;
+    public long landsRetryNodes;
+    /** planner-mana-1110 (report only): second searches that did not run because no budget was left for them. */
+    public int landsSkips;
+
+    /**
+     * planner-mana-1110: the time on the budget clock by which a second search (the land plans) must have ended: the
+     * solver's budget from {@code t0} less the evaluation's reserve, and no later than the decision's hard deadline less
+     * that reserve. The first search of each stage is the one the solver makes without the key; the second is extra work,
+     * and this keeps it inside the part of the solver's budget that the planner and the engine search already share
+     * (the engine search ends at the same times). 0 = no time bound (budget=counter reads no clock; its nodes bound it).
+     */
+    long landsDeadline(final long t0) {
+        if (cfg.counter) {
+            return 0L;
+        }
+        long d = t0 + (budgetMs() - cfg.evalReserveMs) * 1_000_000L;
+        if (hardDeadline != 0) {
+            d = Math.min(d, hardDeadline - cfg.evalReserveMs * 1_000_000L);
+        }
+        return d;
+    }
+
+    /**
+     * planner-mana-1110 (solverCfg planLands): the plain search found lines and none of them won its own play-out, so the
+     * second search of {@link ForcedWinPlanner#plan} (the land plans) never ran at that stage. It runs here once per
+     * decision, at the stage the failed lines came from (its horizon and payment orders; the stages before it had no
+     * plain line, so their land plans are read already) and, if that was this turn only, by our next turn. Its cost is
+     * bounded: at most two searches of the planner's own node and time limits, started and ended inside
+     * {@link #landsDeadline} (what is left of the solver's budget before the evaluation's reserve), and at most cfg.top
+     * lines evaluated against the same deadline as the plain lines. Null = no line that wins unopposed.
+     */
+    private Eval landsRetry(final Game live, final Position pos, final ForcedWinPlanner.Limits lim, final int index,
+            final long evalFrom) {
+        if (!pos.landPlans() || forge.ai.AiWork.spent() || evalStepsSpent()) {
+            return null;
+        }
+        if (lim.landsDeadline != 0L && forge.game.WorkClock.nanoTime() >= lim.landsDeadline) {
+            landsSkips++; // what is left of the solver's budget is the evaluation's reserve
+            return null;
+        }
+        landsRetries++;
+        final long tp = forge.game.WorkClock.nanoTime();
+        final int horizon0 = lim.horizon;
+        ForcedWinPlanner.Result res = null;
+        lim.landsOnly = true;
+        try {
+            res = planCapped(pos, lim);
+            if (res.lines.isEmpty() && horizon0 < cfg.horizon && cfg.horizon >= 2) {
+                final int first = res.nodes;
+                lim.horizon = cfg.horizon;
+                res = planCapped(pos, lim);
+                res.nodes += first;
+            }
+        } finally {
+            lim.landsOnly = false;
+            if (res == null || res.lines.isEmpty()) {
+                lim.horizon = horizon0; // nothing found: the limits are those of the lines evaluated
+            }
+        }
+        plannerNanos += forge.game.WorkClock.nanoTime() - tp;
+        lastPlannerNodes += res.nodes;
+        landsRetryNodes += res.nodes;
+        if (res.exhausted) {
+            plannerExhausted++;
+        }
+        receipt("FORCED_WIN lands-retry" + tag() + " turn=" + pos.turn + " " + res.summary()
+                + (res.lines.isEmpty() ? "" : " best=" + res.lines.get(0)));
+        if (res.lines.isEmpty()) {
+            return null;
+        }
+        landsRetryFound++;
+        if (cfg.followPay) {
+            for (Line l : res.lines) {
+                for (Step st : l.steps) {
+                    st.forceLife = st.phyrexianLife; // kill-line-1106, as for the plain lines
+                }
+            }
+        }
+        final Eval best = evaluateTop(live, res.lines, index, evalFrom);
+        if (best != null) {
+            landsRetryWins++;
+        }
+        return best;
     }
 
     // ------------------------------------------------------------------ search-bones-1015: lines as proposals
@@ -3741,6 +3861,7 @@ public final class ForcedWinSolver {
     private ForcedWinPlanner.Limits limits() {
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.expandCap = cfg.planExpandCap;
+        lim.planLands = cfg.planLands; // planner-mana-1110
         return lim;
     }
 
@@ -3953,11 +4074,11 @@ public final class ForcedWinSolver {
     public List<List<Integer>> pileChoices(final Game g, final int hostId, final int nodes, final long ms, final int top) {
         final List<List<Integer>> out = new ArrayList<>();
         try {
-            final Position pos = readPosition(g, new ArrayList<>());
+            final Position pos = readPosition(g, new ArrayList<>(), false); // planner-mana-1110: a screen
             if (pos == null) {
                 return out;
             }
-            final ForcedWinPlanner.Limits lim = limits();
+            final ForcedWinPlanner.Limits lim = screenLimits(); // planner-mana-1110: a screen
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
@@ -4027,12 +4148,12 @@ public final class ForcedWinSolver {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
-            final Position pos = readPosition(g, knownTop);
+            final Position pos = readPosition(g, knownTop, false); // planner-mana-1110: a screen
             if (pos == null) {
                 s.failed = true;
                 return s;
             }
-            final ForcedWinPlanner.Limits lim = limits();
+            final ForcedWinPlanner.Limits lim = screenLimits(); // planner-mana-1110: a screen
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
@@ -4076,6 +4197,19 @@ public final class ForcedWinSolver {
     }
 
     Position readPosition(Game live, List<Integer> knownOrder) {
+        return readPosition(live, knownOrder, cfg.planLands);
+    }
+
+    /** planner-mana-1110: {@link #limits} for a planner-only screen: the land plans are the offense's, never a screen's. */
+    private ForcedWinPlanner.Limits screenLimits() {
+        final ForcedWinPlanner.Limits lim = limits();
+        lim.planLands = false;
+        return lim;
+    }
+
+    /** As above; {@code lands}: read the position's land plans (planLands, in the caller's scope). */
+    Position readPosition(Game live, List<Integer> knownOrder, final boolean lands) {
+        final ForcedWinModel.Reader reader = lands ? landReader : this.reader; // planner-mana-1110
         if (cfg.honestProbes) {
             return forge.bench.PlayerControllerBridge.isolated(live, () -> forge.util.IdScope.detached(() -> {
                 final Game g = honestProbeRoot(live, knownOrder);
@@ -4083,6 +4217,9 @@ public final class ForcedWinSolver {
                 final Position hp = reader.read(g, pg, knownOrder, true);
                 if (cfg.sourceColorsLive && hp != null) {
                     ForcedWinModel.Reader.readSourceColors(hp, pg); // ledger-sweep2-1107
+                }
+                if (lands && hp != null) {
+                    reader.readLandDrops(hp, g, pg); // planner-mana-1110 (after the live colors: it compares with them)
                 }
                 return hp;
             }));
@@ -4093,6 +4230,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.sourceOutput && pos != null) {
             ForcedWinModel.Reader.readSourceOutputs(pos, me); // kill-line-1106
+        }
+        if (lands && pos != null) {
+            reader.readLandDrops(pos, live, me); // planner-mana-1110 (after the live colors and outputs: it compares with them)
         }
         return pos;
     }
@@ -4284,6 +4424,7 @@ public final class ForcedWinSolver {
                 lim2.planDiscard = avoidLim.planDiscard;
                 lim2.horizon = avoidLim.horizon;
                 lim2.goneAtPass = new HashSet<>(lost);
+                lim2.landsDeadline = avoidLim.landsDeadline; // planner-mana-1110
                 final ForcedWinPlanner.Result r2 = ForcedWinPlanner.plan(avoidPos, lim2);
                 if (cfg.followPay) {
                     for (Line l2 : r2.lines) {
@@ -5215,6 +5356,34 @@ public final class ForcedWinSolver {
         return active == null ? null : active.order(cards, destination, source);
     }
 
+    /**
+     * planner-mana-1110: the active line's answer to the entry payment of a land it names (true = pay, false = decline);
+     * null = no line, or not a land the line names (every line found without planLands).
+     */
+    public Boolean answerEntryPay(SpellAbility sa) {
+        if (active == null || active.done || sa == null || !sa.hasParam("ETB") || sa.getHostCard() == null) {
+            return null;
+        }
+        return entryAnswer(active.line, sa.getHostCard().getId());
+    }
+
+    static Boolean entryAnswer(Line line, int cardId) {
+        for (Step st : line.steps) {
+            if (st.entryPay.contains(cardId)) {
+                return Boolean.TRUE;
+            }
+            if (st.entryNoPay.contains(cardId)) {
+                return Boolean.FALSE;
+            }
+        }
+        return null;
+    }
+
+    /** planner-mana-1110: pay an entry payment the line decided to make (as Forge AI pays a cost it decided to pay). */
+    public static boolean payEntry(Player p, forge.game.cost.Cost cost, SpellAbility sa) {
+        return ForcedWinProbe.payEntry(p, cost, sa);
+    }
+
     public Boolean answerConfirm(SpellAbility sa, String message) {
         if (active == null || active.done || message == null || !message.toLowerCase().contains("shuffle")) {
             return null;
@@ -5287,6 +5456,7 @@ public final class ForcedWinSolver {
             known.add(c.getId());
         }
         final Position pos;
+        final ForcedWinModel.Reader reader = cfg.planLands ? landReader : this.reader; // planner-mana-1110
         synchronized (reader) {
             pos = reader.read(g, p, known, true);
         }
@@ -5299,7 +5469,13 @@ public final class ForcedWinSolver {
         if (cfg.sourceOutput) {
             ForcedWinModel.Reader.readSourceOutputs(pos, p);
         }
+        if (cfg.planLands) {
+            synchronized (reader) {
+                reader.readLandDrops(pos, g, p); // planner-mana-1110
+            }
+        }
         final ForcedWinPlanner.Limits lim = limits();
+        lim.landsDeadline = landsDeadline(forge.game.WorkClock.nanoTime()); // planner-mana-1110
         lim.nodes = cfg.nodes;
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
@@ -5869,6 +6045,22 @@ public final class ForcedWinSolver {
             return uncapped || f.uncapped ? List.of(sa) : capped(List.of(sa));
         }
 
+        /**
+         * planner-mana-1110: a land the line names enters as the line planned it: its own entry payment is made or
+         * declined (Step#entryPay / entryNoPay; a line without them: Forge AI's answer, as before).
+         */
+        @Override
+        public boolean payCostToPreventEffect(forge.game.cost.Cost cost, SpellAbility sa, boolean alreadyPaid,
+                forge.util.collect.FCollectionView<Player> allPayers) {
+            if (sa != null && sa.hasParam("ETB") && sa.getHostCard() != null && f != null && f.line != null) {
+                final Boolean a = entryAnswer(f.line, sa.getHostCard().getId());
+                if (a != null) {
+                    return a && ForcedWinProbe.payEntry(getPlayer(), cost, sa);
+                }
+            }
+            return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
+        }
+
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
             this.f = f;
@@ -6396,6 +6588,8 @@ public final class ForcedWinSolver {
                 + replans + " plannerMs=" + plannerNanos / 1_000_000 + " engineMs=" + engineNanos / 1_000_000
                 + (plannerExhausted == 0 ? "" : " plannerExhausted=" + plannerExhausted)
                 + (planFailEngineTakes == 0 ? "" : " planFailEngineTakes=" + planFailEngineTakes)
+                + (landsRetries == 0 ? "" : " landsRetries=" + landsRetries + "/" + landsRetryFound + "/" + landsRetryWins)
+                + (landsSkips == 0 ? "" : " landsSkips=" + landsSkips)
                 + (verifyReplans == 0 ? "" : " verifyReplans=" + verifyReplans + "/" + verifyReplanLines)
                 + " copies=" + copies + " " + reader.probeStats.summary()
                 + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)

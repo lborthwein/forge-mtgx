@@ -190,6 +190,14 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return null;
         }
 
+        /**
+         * planner-mana-1110 (null by default, and then nothing changes): a followed solver line's answer to the entry
+         * payment of a land the line names (true = pay it, false = decline); null = not the line's.
+         */
+        default Boolean payToPrevent(Cost cost, SpellAbility sa) {
+            return null;
+        }
+
         default boolean confirmTrigger(WrappedAbility w) {
             return false;
         }
@@ -3983,6 +3991,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     // ---- 22 PAY_TO_PREVENT
     private boolean bridgedPayToPrevent(final Cost cost, final SpellAbility sa, final boolean alreadyPaid,
             final FCollectionView<Player> allPayers) {
+        if (planHook != null && cost != null && sa != null) {
+            final Boolean h = planHook.payToPrevent(cost, sa); // planner-mana-1110 (null unless a line names this land)
+            if (h != null) {
+                return h && forge.ai.simulation.ForcedWinSolver.payEntry(getPlayer(), cost, sa);
+            }
+        }
         if (!localAnswers() || cost == null || sa == null) {
             return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
         }

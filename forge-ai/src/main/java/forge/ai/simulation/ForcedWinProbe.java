@@ -81,6 +81,25 @@ public final class ForcedWinProbe {
 
     /** labeller-v2 (c): set by a planScry reader around its learning (false = v1). */
     static final ThreadLocal<Boolean> PLAN_SCRY = ThreadLocal.withInitial(() -> false);
+    /**
+     * planner-mana-1110: set by a planLands reader around its learning (false = as before): a land that goes from our
+     * library onto our battlefield while the probed thing resolves is an effect (EffKind.LAND_FETCH).
+     */
+    static final ThreadLocal<Boolean> PLAN_LANDS = ThreadLocal.withInitial(() -> false);
+    /**
+     * planner-mana-1110: set around one sandbox run (null = Forge AI's answer, as before): the probed card's own entry
+     * payment ("unless you pay" on its entering) is made (TRUE) or declined (FALSE). A land that may enter untapped for a
+     * price has two entries; which one Forge AI takes depends on its hand, so the planLands probes fix the answer.
+     */
+    static final ThreadLocal<Boolean> ENTRY_PAY = new ThreadLocal<>();
+
+    /** planner-mana-1110: pay {@code cost} of an entry replacement as Forge AI pays a cost it has decided to pay. */
+    static boolean payEntry(final Player p, final forge.game.cost.Cost cost, final SpellAbility sa) {
+        if (!forge.ai.ComputerUtilCost.canPayCost(cost, sa, p, true)) {
+            return false;
+        }
+        return new forge.game.cost.CostPayment(cost, sa).payComputerCosts(forge.ai.AiCostDecision.forPayment(p, sa, true));
+    }
 
     /**
      * ledger-sweep-1107, ledger row 45 ({@code -Dforge.probeEmptyDraw=true}, off by default). A probe runs in a copy of
@@ -140,6 +159,19 @@ public final class ForcedWinProbe {
         final List<String> trace;
         /** labeller-v2 (c): record scry / surveil asks and keep the looked-at cards on top (false = Forge AI's answer). */
         boolean planScry;
+        /** planner-mana-1110 ({@link #ENTRY_PAY}; null = Forge AI's answer): the probed card's own entry payment. */
+        Boolean entryPay;
+        int entryCard = -1;
+
+        @Override
+        public boolean payCostToPreventEffect(forge.game.cost.Cost cost, SpellAbility sa, boolean alreadyPaid,
+                forge.util.collect.FCollectionView<Player> allPayers) {
+            if (entryPay != null && sa != null && sa.hasParam("ETB") && sa.getHostCard() != null
+                    && sa.getHostCard().getId() == entryCard) {
+                return entryPay && payEntry(player, cost, sa);
+            }
+            return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
+        }
 
         @Override
         public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
@@ -274,6 +306,11 @@ public final class ForcedWinProbe {
     // ------------------------------------------------------------------ one sandbox run
 
     static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st) {
+        return run(live, liveMe, cardId, setup, act, seed, st, null);
+    }
+
+    /** planner-mana-1110: as {@link #run}, then {@code reading} reads the sandbox once everything has resolved (null = none). */
+    static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st, Setup reading) {
         final Obs o = new Obs();
         final long t0 = System.nanoTime();
         final Random prev = MyRandom.getThreadRandom();
@@ -299,6 +336,8 @@ public final class ForcedWinProbe {
             g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
             final ProbeAi probeAi = new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace);
             probeAi.planScry = PLAN_SCRY.get();
+            probeAi.entryPay = ENTRY_PAY.get(); // planner-mana-1110 (null = as before)
+            probeAi.entryCard = cardId;
             me.dangerouslySetController(probeAi);
             for (Player p : g.getPlayers()) {
                 if (p != me) {
@@ -357,6 +396,9 @@ public final class ForcedWinProbe {
                 dev += ForcedWinModel.bluePips(c);
             }
             o.devotionAfter = dev;
+            if (reading != null) {
+                reading.apply(g, me, after);
+            }
         } catch (RuntimeException | StackOverflowError e) {
             o.error = String.valueOf(e);
         } finally {
@@ -491,6 +533,71 @@ public final class ForcedWinProbe {
         return ComputerUtil.handlePlayingSpellAbility(me, sa, null);
     }
 
+    // ------------------------------------------------------------------ planner-mana-1110: a land drop's view
+
+    /** What dropping one land does to our plain mana sources, read in a sandbox copy of the position. */
+    static final class DropView {
+        boolean played;
+        /** The dropped land: entered tapped, the life its entry cost, its plain mana there. */
+        boolean tapped;
+        int life, colors, amount;
+        /** Our other battlefield permanents after the drop: card id -> {colors, amount} of its plain mana. */
+        final Map<Integer, int[]> others = new java.util.HashMap<>();
+    }
+
+    /**
+     * planner-mana-1110 (solverCfg planLands): play {@code cardId} (a land of ours, from any zone) as our land drop in a
+     * sandbox copy and read every plain mana source of ours there, the engine's own answer to "what does it tap for
+     * now": no card knowledge, the same reading as {@link ForcedWinModel.Reader#readSourceColors}.
+     */
+    static DropView dropView(Game live, Player liveMe, int cardId, long seed, Stats st) {
+        final Boolean prev = ENTRY_PAY.get();
+        ENTRY_PAY.set(Boolean.TRUE); // the land's own entry payment is made: the plan may also choose the unpaid entry
+        try {
+            return dropView0(live, liveMe, cardId, seed, st);
+        } finally {
+            ENTRY_PAY.set(prev);
+        }
+    }
+
+    private static DropView dropView0(Game live, Player liveMe, int cardId, long seed, Stats st) {
+        final DropView v = new DropView();
+        final Obs o = run(live, liveMe, cardId, (g, m, c) -> {
+            if (!c.isInZone(ZoneType.Hand)) {
+                g.getAction().moveToHand(c, null);
+            }
+            m.setLandsPlayedThisTurn(0);
+        }, (g, m, c) -> {
+            final Card hc = g.findById(c.getId());
+            if (hc == null) {
+                return false;
+            }
+            for (SpellAbility sa : hc.getAllPossibleAbilities(m, true)) {
+                if (sa.isLandAbility()) {
+                    return play(g, m, sa);
+                }
+            }
+            return false;
+        }, seed, st, (g, m, c) -> {
+            for (Card x : m.getCardsIn(ZoneType.Battlefield)) {
+                if (x.isFaceDown()) {
+                    continue;
+                }
+                final int[] out = ForcedWinModel.plainOutput(x, m);
+                if (x.getId() == cardId) {
+                    v.colors = out[0];
+                    v.amount = out[1];
+                } else {
+                    v.others.put(x.getId(), out);
+                }
+            }
+        });
+        v.played = o.played && o.error == null && o.entered;
+        v.tapped = o.hostTapped;
+        v.life = o.lifeDelta;
+        return v;
+    }
+
     // ------------------------------------------------------------------ reading a trace into effects
 
     static void effectsFromTrace(Obs o, int hostId, Abil ab, SpellAbility sa) {
@@ -520,7 +627,8 @@ public final class ForcedWinProbe {
         String pendingAsk = null;
         EffKind last = null;
         int run = 0;
-        java.util.Set<String> tutorNames = null, topNames = null;
+        java.util.Set<String> tutorNames = null, topNames = null, fetchNames = null;
+        final boolean planLands = PLAN_LANDS.get(); // planner-mana-1110 (false = every line below as before)
         final int mark = out.size();
         for (String line : o.trace) {
             if (line.equals("SHUFFLE")) {
@@ -557,6 +665,8 @@ public final class ForcedWinProbe {
                         tutorNames = offered;
                     } else if (line.startsWith("ASK pick Library [Library]")) {
                         topNames = offered;
+                    } else if (planLands && line.startsWith("ASK pick Battlefield [Library")) {
+                        fetchNames = offered; // planner-mana-1110: what the search for a land was offered
                     }
                 }
                 // a pick INTO our library FROM our library or graveyard (not Brainstorm's put-back from hand)
@@ -594,6 +704,8 @@ public final class ForcedWinProbe {
                 k = EffKind.EXILE_HAND;
             } else if (from.equals("Library@opp") && to.equals("Graveyard@opp")) {
                 k = EffKind.MILL_OPP;
+            } else if (planLands && from.equals("Library@me") && to.equals("Battlefield@me") && p.length > 4 && "L".equals(p[4])) {
+                k = EffKind.LAND_FETCH; // planner-mana-1110: a land from our library onto our battlefield
             } else if ((from.equals("Library@me") || from.equals("Graveyard@me")) && to.equals("Exile@me")) {
                 exiled++;
                 continue;
@@ -651,6 +763,8 @@ public final class ForcedWinProbe {
                 out.set(i, new Eff(EffKind.DISCARD, ForcedWinModel.ALL, 0));
             } else if (e.kind == EffKind.TUTOR && tutorNames != null) {
                 out.set(i, new Eff(EffKind.TUTOR, e.n, 0, 0, tutorNames));
+            } else if (e.kind == EffKind.LAND_FETCH && fetchNames != null) {
+                out.set(i, new Eff(EffKind.LAND_FETCH, e.n, 0, 0, fetchNames)); // planner-mana-1110
             }
         }
         // POST-FREEZE 6: a pick into our library still counts after a shuffle. "Search, shuffle, then put that card on
@@ -677,6 +791,8 @@ public final class ForcedWinProbe {
         }
         final boolean won = o.won && !o.libraryEmptied;
         if (life != 0 && !won) {
+            // planner-mana-1110: with a land fetched this is the sandbox land's own entry (one paid to enter untapped); a
+            // plan that fetches a land charges that land's entry instead (ForcedWinPlanner, LAND_FETCH)
             out.add(new Eff(EffKind.LIFE, life, 0));
         }
         if (won) {
@@ -876,6 +992,38 @@ public final class ForcedWinProbe {
             if (o.played && o.error == null) {
                 t.entersTapped = o.hostTapped;
                 t.landLife = o.lifeDelta;
+            }
+            if (PLAN_LANDS.get()) {
+                // planner-mana-1110: the same drop with the land's own entry payment made (a land that enters untapped
+                // for a price): the entry a plan may choose, whatever Forge AI chose above
+                final Boolean prev = ENTRY_PAY.get();
+                ENTRY_PAY.set(Boolean.TRUE);
+                try {
+                    final Obs o2 = run(live, me, id, (g, m, c) -> {
+                        if (!c.isInZone(ZoneType.Hand)) {
+                            g.getAction().moveToHand(c, null);
+                        }
+                        m.setLandsPlayedThisTurn(0);
+                    }, (g, m, c) -> {
+                        final Card hc = g.findById(c.getId());
+                        if (hc == null) {
+                            return false;
+                        }
+                        for (SpellAbility sa : hc.getAllPossibleAbilities(m, true)) {
+                            if (sa.isLandAbility()) {
+                                return play(g, m, sa);
+                            }
+                        }
+                        return false;
+                    }, ForcedWinSolver.mix(seed, id * 31L + 978), st);
+                    if (o2.played && o2.error == null) {
+                        t.paidRead = true;
+                        t.paidTapped = o2.hostTapped;
+                        t.paidLife = o2.lifeDelta;
+                    }
+                } finally {
+                    ENTRY_PAY.set(prev);
+                }
             }
         }
         // ---- on the battlefield: mana sources (engine metadata), activated abilities (probed), sacrifice, wins

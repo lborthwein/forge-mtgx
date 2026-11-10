@@ -109,6 +109,11 @@ public final class ForcedWinPlanner {
         boolean forceLife;
         /** kill-line-1106 (planDiscard; null = none): this step's forced discard tokens ({@link ForcedWinChoices}). */
         List<String> cac;
+        /**
+         * planner-mana-1110 (solverCfg planLands; empty otherwise): lands of ours that enter in this step with their own
+         * entry payment made (the follower pays it) or declined (the follower does not).
+         */
+        final List<Integer> entryPay = new ArrayList<>(), entryNoPay = new ArrayList<>();
         /** ENGINE steps: the recorded targets, "link:ref" (ref = "C" + card id or "P" + player id). */
         final List<String> targetRefs = new ArrayList<>();
         /** ENGINE steps: the forced target of the first targeting trigger of ours this step causes (null = Forge AI's). */
@@ -180,6 +185,8 @@ public final class ForcedWinPlanner {
             s.pile.addAll(pile);
             s.picks.addAll(picks);
             s.putBack.addAll(putBack);
+            s.entryPay.addAll(entryPay);
+            s.entryNoPay.addAll(entryNoPay);
             s.phyrexianLife = phyrexianLife;
             s.forceLife = forceLife;
             s.cac = cac == null ? null : new ArrayList<>(cac);
@@ -305,7 +312,8 @@ public final class ForcedWinPlanner {
                     + (putBack.isEmpty() ? "" : " putBack" + putBack) + (phyrexianLife ? " phyLife" : "")
                     + (anyColors.isEmpty() ? "" : " as" + anyColors)
                     + (cacPlayed != null ? " cac" + cacPlayed : cac != null ? " cac" + cac : "")
-                    + (payFloats == null ? "" : " pay" + payFloats) + (xValue >= 0 ? " X=" + xValue : "");
+                    + (payFloats == null ? "" : " pay" + payFloats) + (xValue >= 0 ? " X=" + xValue : "")
+                    + (entryPay.isEmpty() ? "" : " paid" + entryPay) + (entryNoPay.isEmpty() ? "" : " unpaid" + entryNoPay);
         }
     }
 
@@ -400,6 +408,24 @@ public final class ForcedWinPlanner {
          * row 66: 15^5 copies under one Memory Jar activation after Doomsday, then the JVM's heap ran out).
          */
         boolean expandCap;
+        /**
+         * planner-mana-1110 (solverCfg planLands; false = off, the default, and nothing changes): when the search finds no
+         * line, it runs once more reading the land plans of the position: a dropped land is what its sandbox drop said
+         * (ACard#dropRead), and a land fetched from our library is an effect (LAND_FETCH). The first search is the one a
+         * planner without the key makes, so a position that has a line without the key keeps exactly that result.
+         */
+        boolean planLands;
+        /**
+         * planner-mana-1110 (read only with planLands): the search reads the land plans at once, without the plain search
+         * before it. The solver asks for this once, after every line of the plain search failed in its game copies.
+         */
+        boolean landsOnly;
+        /**
+         * planner-mana-1110 (0 = no time bound): the second search starts only before this time on the budget clock and
+         * ends by it. The solver sets it to what is left of its own budget before the evaluation's reserve
+         * (ForcedWinSolver#landsDeadline), the time at which its engine search ends too.
+         */
+        long landsDeadline;
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -419,11 +445,16 @@ public final class ForcedWinPlanner {
         boolean timedOut;
         /** ledger-sweep2-1107 (report only): the most resolve steps one expansion took; expansions cut by planExpandCap. */
         int maxExpand, expandStops;
+        /** planner-mana-1110 (report only): the lines come from the lands pass (the plain search had none). */
+        boolean landsPass;
+        /** planner-mana-1110 (report only): the lands pass did not run: no time was left before {@link Limits#landsDeadline}. */
+        boolean landsSkipped;
 
         String summary() {
             return "lines=" + lines.size() + " nodes=" + nodes + (exhausted ? "(budget)" : "") + (stoppedBy.isEmpty() ? "" : " stoppedBy=" + stoppedBy)
                     + (depthStops > 0 ? " depthStops=" + depthStops : "") + " sameTurn=" + sameTurn
-                    + " nextTurn=" + nextTurn + " ms=" + nanos / 1_000_000 + (expandStops > 0 ? " expandStops=" + expandStops : "");
+                    + " nextTurn=" + nextTurn + " ms=" + nanos / 1_000_000 + (expandStops > 0 ? " expandStops=" + expandStops : "")
+                    + (landsPass ? " landsPass" : "") + (landsSkipped ? " landsSkipped" : "");
         }
     }
 
@@ -450,6 +481,11 @@ public final class ForcedWinPlanner {
         int loyalty;
         /** blockers-1109: Position.BLOCK_* (a permanent that entered during the line blocks if untapped). */
         byte block = ForcedWinModel.Position.BLOCK_UNTAPPED;
+        /**
+         * planner-mana-1110 (solverCfg planLands; -1 = the card's own, as before): this permanent's plain mana in the state
+         * the plan has reached (a land the plan dropped, or a source a dropped land changed).
+         */
+        int colors = -1, amount = -1;
 
         Perm copy() {
             final Perm p = new Perm();
@@ -458,8 +494,19 @@ public final class ForcedWinPlanner {
             p.activated = activated;
             p.loyalty = loyalty;
             p.block = block;
+            p.colors = colors;
+            p.amount = amount;
             return p;
         }
+    }
+
+    /** planner-mana-1110: a permanent's plain mana colours and amount in this state (its own unless a land drop set them). */
+    private int colorsOf(Perm p) {
+        return p.colors >= 0 ? p.colors : cards.get(p.card).sourceColors;
+    }
+
+    private int amountOf(Perm p) {
+        return p.colors >= 0 ? p.amount : cards.get(p.card).sourceAmount;
     }
 
     final class S {
@@ -543,7 +590,8 @@ public final class ForcedWinPlanner {
             final List<String> perms = new ArrayList<>();
             for (Perm p : bf) {
                 perms.add(cards.get(p.card).name + (p.tapped ? 't' : 'u') + (p.activated ? 'a' : '-') + p.loyalty
-                        + (p.block == ForcedWinModel.Position.BLOCK_UNTAPPED ? "" : "b" + p.block));
+                        + (p.block == ForcedWinModel.Position.BLOCK_UNTAPPED ? "" : "b" + p.block)
+                        + (p.colors < 0 ? "" : "m" + p.colors + "x" + p.amount)); // planner-mana-1110
             }
             java.util.Collections.sort(perms);
             sb.append(perms);
@@ -565,7 +613,15 @@ public final class ForcedWinPlanner {
         return out;
     }
 
+    /** planner-mana-1110: this search reads the position's land plans (the second pass of a planLands plan). */
+    private final boolean lands;
+
     ForcedWinPlanner(Position pos, Limits lim) {
+        this(pos, lim, false);
+    }
+
+    ForcedWinPlanner(Position pos, Limits lim, boolean lands) {
+        this.lands = lands;
         this.pos = pos;
         this.lim = lim;
         final ACard unknown = new ACard();
@@ -589,9 +645,58 @@ public final class ForcedWinPlanner {
 
     static Result plan(Position pos, Limits lim) {
         final long t0 = forge.game.WorkClock.nanoTime();
-        final Result r = new ForcedWinPlanner(pos, lim).run();
+        if (lim.planLands && lim.landsOnly) {
+            // planner-mana-1110: the plain search's lines are known already (they failed in the game): the land plans only
+            Result only = pos.landPlans() ? landsRun(pos, lim) : new Result();
+            if (only == null) {
+                only = new Result();
+                only.landsSkipped = true;
+            }
+            only.landsPass = true;
+            only.nanos = forge.game.WorkClock.nanoTime() - t0;
+            return only;
+        }
+        Result r = new ForcedWinPlanner(pos, lim).run();
+        if (lim.planLands && r.lines.isEmpty() && pos.landPlans()) {
+            // planner-mana-1110: no line in the plain search: once more with the position's land plans
+            final Result first = r;
+            final Result second = landsRun(pos, lim);
+            if (second == null) {
+                first.landsSkipped = true; // no time left: the plain search's answer stands
+            } else {
+                r = second;
+                r.nodes += first.nodes;
+                r.visited += first.visited;
+                r.depthStops += first.depthStops;
+                r.expandStops += first.expandStops;
+                r.maxExpand = Math.max(r.maxExpand, first.maxExpand);
+                r.timedOut |= first.timedOut;
+                r.landsPass = true;
+            }
+        }
         r.nanos = forge.game.WorkClock.nanoTime() - t0;
         return r;
+    }
+
+    /**
+     * planner-mana-1110: the second search (the land plans), inside {@link Limits#landsDeadline}: null when no time is
+     * left before it, and its own time cap is no longer than the time left.
+     */
+    private static Result landsRun(Position pos, Limits lim) {
+        if (lim.landsDeadline == 0L) {
+            return new ForcedWinPlanner(pos, lim, true).run();
+        }
+        final long left = (lim.landsDeadline - forge.game.WorkClock.nanoTime()) / 1_000_000L;
+        if (left <= 0) {
+            return null;
+        }
+        final long ms0 = lim.ms;
+        lim.ms = ms0 < 0 ? left : Math.min(ms0, left);
+        try {
+            return new ForcedWinPlanner(pos, lim, true).run();
+        } finally {
+            lim.ms = ms0;
+        }
     }
 
     private long deadline = Long.MAX_VALUE;
@@ -626,7 +731,8 @@ public final class ForcedWinPlanner {
         }
         s.devotion = pos.devotionBlue;
         s.emptyDrawWin = pos.emptyDrawWinLive;
-        for (ACard a : pos.library) {
+        // planner-mana-1110: the lands pass of a position whose library was not loaded searches the land library
+        for (ACard a : lands && pos.library.isEmpty() && pos.landLibrary != null ? pos.landLibrary : pos.library) {
             s.libPool.add(idx(a));
         }
         for (ACard a : pos.graveyard) {
@@ -801,7 +907,23 @@ public final class ForcedWinPlanner {
         if (ab.kind == AbilKind.SPELL && a.permanent) {
             return true;
         }
-        return !ab.effects.isEmpty();
+        return !noEffects(ab);
+    }
+
+    /** planner-mana-1110: nothing to resolve; in the plain search a fetched land is nothing (as before the key). */
+    private boolean noEffects(Abil ab) {
+        if (ab.effects.isEmpty()) {
+            return true;
+        }
+        if (lands) {
+            return false;
+        }
+        for (Eff e : ab.effects) {
+            if (e.kind != EffKind.LAND_FETCH) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private boolean allowedBf(S s, Perm p, Abil ab) {
@@ -814,7 +936,7 @@ public final class ForcedWinPlanner {
         if (ab.loyalty && (p.activated || p.loyalty + ab.loyaltyDelta < 0)) {
             return false;
         }
-        return !ab.effects.isEmpty();
+        return !noEffects(ab);
     }
 
     private List<S> apply(S s0, int handIdx, int bfIdx, ACard a, Abil ab) {
@@ -836,10 +958,10 @@ public final class ForcedWinPlanner {
             }
             for (Perm p : back) {
                 final ACard land = cards.get(p.card);
-                if (!p.tapped && land.sourceColors != 0) {
-                    final int colour = bestFloatColour(land.sourceColors);
+                if (!p.tapped && colorsOf(p) != 0) {
+                    final int colour = bestFloatColour(colorsOf(p));
                     p.tapped = true;
-                    s.pool[colour] += Math.max(1, land.sourceAmount);
+                    s.pool[colour] += Math.max(1, amountOf(p));
                     s.steps.add(new Step(AbilKind.FLOAT, land, null, colour));
                 }
             }
@@ -907,8 +1029,8 @@ public final class ForcedWinPlanner {
         final List<String> left = new ArrayList<>();
         for (Perm p : s.bf) {
             final ACard c = cards.get(p.card);
-            if (!p.tapped && c.sourceColors != 0) {
-                left.add(c.name + "/" + c.sourceColors);
+            if (!p.tapped && colorsOf(p) != 0) {
+                left.add(c.name + "/" + colorsOf(p));
             }
         }
         java.util.Collections.sort(left);
@@ -923,6 +1045,31 @@ public final class ForcedWinPlanner {
         }
         if (ab.kind == AbilKind.LAND) {
             s.landDrop = false;
+            if (lands) {
+                // planner-mana-1110: each entry the land has (its payment made, or declined); a land dropped in a
+                // sandbox copy of the position has its mana there, and so have the sources of ours that drop changed
+                final List<int[]> entries = entries(a, true);
+                for (int k = 0; k < entries.size(); k++) {
+                    final S n = k == entries.size() - 1 ? s : s.copy();
+                    final Perm p = enter(n, host, entries.get(k));
+                    if (a.dropRead) {
+                        p.colors = a.dropColors;
+                        p.amount = a.dropAmount;
+                        for (int i = 0; i + 2 < a.dropOthers.length; i += 3) {
+                            for (Perm q : n.bf) {
+                                if (q != p && cards.get(q.card).id == a.dropOthers[i]) {
+                                    q.colors = a.dropOthers[i + 1];
+                                    q.amount = a.dropOthers[i + 2];
+                                }
+                            }
+                        }
+                    }
+                    if (n.life > 0) {
+                        out.add(n);
+                    }
+                }
+                return;
+            }
             final Perm p = new Perm();
             p.card = host;
             p.tapped = a.entersTapped;
@@ -1248,7 +1395,85 @@ public final class ForcedWinPlanner {
                 }
                 return;
             }
+            case LAND_FETCH: {
+                // planner-mana-1110: a land of our library onto our battlefield: each distinct land the search may take
+                // (the names the engine offered it in the sandbox) is a branch; the land enters as its own land drop
+                // does (tapped or not, at its own life) and the library holds one card fewer. A lazy pile position can
+                // be the land: the pile then holds it, in its last open position.
+                if (!lands || done >= e.n) {
+                    resolve(s, effs, ei + 1, 0, ab, out);
+                    return;
+                }
+                final List<Integer> known = new ArrayList<>(), pile = new ArrayList<>();
+                for (int c : s.libPool) {
+                    if (fetchable(e, c)) {
+                        known.add(c);
+                    }
+                }
+                for (int e2 : s.lib) {
+                    if (e2 >= 0 && fetchable(e, e2)) {
+                        known.add(e2);
+                    }
+                }
+                int lastLazy = -1;
+                for (int i = 0; i < s.lib.size(); i++) {
+                    final int e2 = s.lib.get(i);
+                    if (e2 <= LAZY && e2 != UNKNOWN && s.pile != null && s.pile[LAZY - e2] < 0) {
+                        lastLazy = i;
+                    }
+                }
+                if (lastLazy >= 0) {
+                    for (int c : s.remaining) {
+                        if (fetchable(e, c)) {
+                            pile.add(c);
+                        }
+                    }
+                }
+                if (known.isEmpty() && pile.isEmpty()) {
+                    resolve(s, effs, ei + 1, 0, ab, out); // nothing to find
+                    return;
+                }
+                for (int c : landClasses(known)) {
+                    final S n = s.copy();
+                    final int at = n.lib.indexOf(c);
+                    if (at >= 0) {
+                        n.lib.remove(at);
+                    } else {
+                        n.libPool.remove(Integer.valueOf(c));
+                        final int u = n.lib.lastIndexOf(UNKNOWN);
+                        if (u < 0) {
+                            continue;
+                        }
+                        n.lib.remove(u);
+                    }
+                    enterFetched(n, c, effs, ei, done, ab, out);
+                }
+                for (int c : landClasses(pile)) {
+                    final S n = s.copy();
+                    assign(n, n.lib.get(lastLazy), c);
+                    n.lib.remove(lastLazy);
+                    // the search shuffles what is left: the other open positions get their cards now (the leftovers, as
+                    // a mill gives them), so the pile is whole when the shuffle makes its order unknown
+                    for (int i = 0; i < n.lib.size(); i++) {
+                        final int e2 = n.lib.get(i);
+                        if (e2 <= LAZY && e2 != UNKNOWN && n.pile[LAZY - e2] < 0) {
+                            final int f = leftover(n.remaining);
+                            if (f >= 0) {
+                                assign(n, e2, f);
+                                n.lib.set(i, f);
+                            }
+                        }
+                    }
+                    enterFetched(n, c, effs, ei, done, ab, out);
+                }
+                return;
+            }
             case LIFE: {
+                if (lands && ab != null && ab.has(EffKind.LAND_FETCH)) {
+                    // planner-mana-1110: the life of the sandbox's fetched land; this plan's land paid its own entry
+                    resolve(s, effs, ei + 1, 0, ab, out);
+                    return;
+                }
                 s.life += e.lifeChange(s.life);
                 if (s.life <= 0) {
                     return;
@@ -1502,6 +1727,78 @@ public final class ForcedWinPlanner {
         s.remaining.remove(Integer.valueOf(card));
     }
 
+    /** planner-mana-1110: a land the observed search may take (its offered names; null = any land). */
+    private boolean fetchable(Eff e, int card) {
+        final ACard a = cards.get(card);
+        return a.land && (e.names == null || e.names.contains(a.name));
+    }
+
+    /** planner-mana-1110: one land per distinct name, those that make mana first, at most the class limit. */
+    private List<Integer> landClasses(List<Integer> from) {
+        final List<Integer> out = new ArrayList<>();
+        final Set<String> names = new HashSet<>();
+        for (int c : from) {
+            if (names.add(cards.get(c).name)) {
+                out.add(c);
+            }
+        }
+        out.sort(Comparator.comparingInt((Integer c) -> cards.get(c).sourceColors == 0 ? 1 : 0)
+                .thenComparingInt(c -> cards.get(c).entersTapped ? 1 : 0)
+                .thenComparingInt(c -> -Integer.bitCount(cards.get(c).sourceColors)).thenComparingInt(c -> cards.get(c).id));
+        return out.size() > lim.classes ? new ArrayList<>(out.subList(0, lim.classes)) : out;
+    }
+
+    /**
+     * planner-mana-1110: the entries of a land in the lands pass, each {tapped (1/0), life, the follower's answer to the
+     * land's own entry payment (1 pay, 0 decline, -1 none to answer)}. The sandbox drop with the payment made (this
+     * position's for a hand land, else the template's); when that cost life and left it untapped, declining is the other
+     * entry: tapped, at no life.
+     */
+    private List<int[]> entries(ACard a, boolean drop) {
+        final List<int[]> out = new ArrayList<>();
+        final boolean read = drop && a.dropRead || a.paidRead;
+        if (!read) {
+            out.add(new int[] {a.entersTapped ? 1 : 0, Math.min(0, a.landLife), -1});
+            return out;
+        }
+        final boolean tapped = drop && a.dropRead ? a.dropTapped : a.paidTapped;
+        final int life = Math.min(0, drop && a.dropRead ? a.dropLife : a.paidLife);
+        if (life < 0 && !tapped) {
+            out.add(new int[] {0, life, 1});
+            out.add(new int[] {1, 0, 0});
+        } else {
+            out.add(new int[] {tapped ? 1 : 0, life, -1});
+        }
+        return out;
+    }
+
+    /** planner-mana-1110: {@code card} (a land) enters by {@code entry}; the current step records the entry's answer. */
+    private Perm enter(S n, int card, int[] entry) {
+        final Perm p = new Perm();
+        p.card = card;
+        p.tapped = entry[0] != 0;
+        n.bf.add(p);
+        n.life += entry[1];
+        if (entry[2] >= 0) {
+            final Step st = n.steps.get(n.steps.size() - 1);
+            (entry[2] == 1 ? st.entryPay : st.entryNoPay).add(cards.get(card).id);
+        }
+        return p;
+    }
+
+    /** planner-mana-1110: the fetched land enters by each of its entries; the step names it. */
+    private void enterFetched(S n0, int card, List<Eff> effs, int ei, int done, Abil ab, List<S> out) {
+        n0.steps.get(n0.steps.size() - 1).picks.add(cards.get(card).id);
+        final List<int[]> entries = entries(cards.get(card), false);
+        for (int k = 0; k < entries.size(); k++) {
+            final S n = k == entries.size() - 1 ? n0 : n0.copy();
+            enter(n, card, entries.get(k));
+            if (n.life > 0) {
+                resolve(n, effs, ei, done + 1, ab, out);
+            }
+        }
+    }
+
     /** One card per distinct name, ordered by observed affordance (wins, draws, mana, lands, protection), plus one other. */
     private List<Integer> classes(List<Integer> from) {
         final List<Integer> useful = new ArrayList<>();
@@ -1705,7 +2002,7 @@ public final class ForcedWinPlanner {
         if (p == null) {
             return false;
         }
-        final int col = Integer.numberOfTrailingZeros(cards.get(p.card).sourceColors & mask);
+        final int col = Integer.numberOfTrailingZeros(colorsOf(p) & mask);
         tapSource(s, p, col);
         s.pool[col]--;
         return true;
@@ -1735,9 +2032,8 @@ public final class ForcedWinPlanner {
         if (p == null) {
             return false;
         }
-        final ACard a = cards.get(p.card);
-        final int col = (a.sourceColors & (1 << ForcedWinModel.C)) != 0 ? ForcedWinModel.C
-                : Integer.numberOfTrailingZeros(a.sourceColors);
+        final int col = (colorsOf(p) & (1 << ForcedWinModel.C)) != 0 ? ForcedWinModel.C
+                : Integer.numberOfTrailingZeros(colorsOf(p));
         tapSource(s, p, col);
         s.pool[col]--;
         return true;
@@ -1751,15 +2047,16 @@ public final class ForcedWinPlanner {
      * greedy order); 1: one-shot sources first; 2: most flexible first; 3..7: keep colour W/U/B/R/G (tap other sources
      * first); 8: as 0 with Phyrexian pips paid in life.
      */
-    private int sourceScore(ACard a) {
-        final int flex = Integer.bitCount(a.sourceColors), sac = a.sourceSac ? 1 : 0;
+    private int sourceScore(Perm p) {
+        final ACard a = cards.get(p.card);
+        final int flex = Integer.bitCount(colorsOf(p)), sac = a.sourceSac ? 1 : 0;
         switch (payPolicy) {
             case 1:
                 return (1 - sac) * 100 + flex * 10;
             case 2:
                 return -flex * 10 + sac * 100;
             case 3: case 4: case 5: case 6: case 7:
-                return ((a.sourceColors & (1 << (payPolicy - 3))) != 0 ? 1000 : 0) + flex * 10 + sac * 100;
+                return ((colorsOf(p) & (1 << (payPolicy - 3))) != 0 ? 1000 : 0) + flex * 10 + sac * 100;
             default:
                 return flex * 10 + sac * 100;
         }
@@ -1773,10 +2070,10 @@ public final class ForcedWinPlanner {
                 continue;
             }
             final ACard a = cards.get(p.card);
-            if ((a.sourceColors & mask) == 0 || a.sourceSick) {
+            if ((colorsOf(p) & mask) == 0 || a.sourceSick) {
                 continue;
             }
-            final int score = sourceScore(a);
+            final int score = sourceScore(p);
             if (score < bestScore) {
                 bestScore = score;
                 best = p;
@@ -1791,7 +2088,7 @@ public final class ForcedWinPlanner {
         // step (Forge AI's own payment chose other sources, or would not use a sacrifice source like Black Lotus)
         s.steps.add(new Step(AbilKind.FLOAT, a, null, col));
         p.tapped = true;
-        s.pool[col] += Math.max(1, a.sourceAmount);
+        s.pool[col] += Math.max(1, amountOf(p));
         if (a.sourceSac) {
             s.bf.remove(p);
             s.gyPool.add(p.card);
@@ -1838,7 +2135,7 @@ public final class ForcedWinPlanner {
             mana += s.pool[i];
         }
         for (Perm p : s.bf) {
-            if (!p.tapped && cards.get(p.card).sourceColors != 0) {
+            if (!p.tapped && colorsOf(p) != 0) {
                 mana++;
             }
         }
