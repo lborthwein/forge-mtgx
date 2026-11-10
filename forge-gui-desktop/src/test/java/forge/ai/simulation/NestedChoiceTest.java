@@ -88,6 +88,8 @@ public class NestedChoiceTest extends AITest {
         Object ctx;
         String policyPick, picked;
         short[] nested;
+        /** The asks of the resolution, and those {@link RlSearch#nestedAnswer} answered. */
+        int asks, answered;
         long answerNanos;
         double[] leaf;
     }
@@ -134,6 +136,10 @@ public class NestedChoiceTest extends AITest {
                 final long t0 = System.nanoTime();
                 po.nested = search.nestedAnswer(po.ctx, g, me, m, new short[] {own});
                 po.answerNanos = System.nanoTime() - t0;
+                po.asks++;
+                if (po.nested != null) {
+                    po.answered++;
+                }
                 final Card c = fetchList.get(po.nested == null ? own : po.nested[0]);
                 po.picked = c.getName();
                 return c;
@@ -487,6 +493,26 @@ public class NestedChoiceTest extends AITest {
         System.out.println("NESTED4C no separation: table nodes " + nodes + " (work clock " + Math.round(nodes * NODE_NS / 1e6)
                 + " ms), once per root position; a library with no card that ends the game: " + fair.nestedDrawNodes.get() + " nodes");
         Assert.assertEquals(fair.nestedDrawNodes.get(), 0);
+    }
+
+    /**
+     * Doomsday's own five picks (library and graveyard, five cards) are not a tutor's menu: with a table at the root (the
+     * seat also holds a card that searches) and an empty graveyard, none of them is answered from it and no floor is set.
+     */
+    @Test
+    public void doomsdaysPicksAreNotReadFromTheNextDrawTable() {
+        final RlSearch on = search("{\"nodes\":1,\"maxNodes\":1,\"askNodes\":" + ASK_NODES + "}"); // the plan shut: the table alone
+        final Game live = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(
+                HAND.replace("Mystical Tutor", "Doomsday").replace("Wishclaw Talisman", "Thassa's Oracle"), BF + ";Swamp", 20, "", "Island", 20,
+                "human").replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + REST));
+        final Player me = live.getPlayers().get(0);
+        final ForcedWinSolver.NextDraws nd = on.openNestedDraws(live, me);
+        System.out.println("NESTED4C Doomsday in hand, the root's table: " + table(nd));
+        final Playout a = playout(on, live, "Doomsday");
+        Assert.assertEquals(a.asks, 5, "Doomsday asks for five cards, one at a time");
+        Assert.assertEquals(a.answered, 0, "none is answered from the table");
+        Assert.assertEquals(RlSearch.nestedPotOf(a.ctx), 0.0, 1e-12, "and no floor is set");
+        Assert.assertEquals(on.nestedDrawAnswered.get(), 0);
     }
 
     /** A library search that does not give the seat the card (Entomb: to the graveyard) is not read from a table of draw values. */

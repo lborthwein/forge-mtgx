@@ -4171,9 +4171,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /**
-     * The resolving effect searches a library and gives the seat the card: the first ChangeZone from a library among the
-     * resolving ability and its sub-abilities puts it into a hand or onto a library (a tutor to hand or to the top). A
-     * search that exiles, mills or puts the card onto the battlefield is not read from a table of DRAW values.
+     * The resolving effect searches a library for ONE card and gives the seat the card: the first ChangeZone from a
+     * library among the resolving ability and its sub-abilities searches the library alone, for one card, and puts it
+     * into a hand or onto a library (a tutor to hand or to the top). A search that exiles, mills or puts the card onto
+     * the battlefield is not read from a table of DRAW values, and neither is a search for several cards or of several
+     * zones (Doomsday's five picks from library and graveyard are a pile, not five best draws).
      */
     static boolean takesCard(final Game g) {
         if (g.getStack().isEmpty() || !g.getStack().isResolving()) {
@@ -4182,6 +4184,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         SpellAbility sa = g.getStack().peekAbility();
         for (int n = 0; sa != null && n < 12; sa = sa.getSubAbility(), n++) {
             if (sa.getApi() == forge.game.ability.ApiType.ChangeZone && String.valueOf(sa.getParam("Origin")).contains("Library")) {
+                final String num = sa.getParam("ChangeNum");
+                if (!"Library".equals(sa.getParam("Origin")) || num != null && !"1".equals(num.trim())) {
+                    return false;
+                }
                 final String d = sa.getParam("Destination");
                 return "Hand".equals(d) || "Library".equals(d);
             }
