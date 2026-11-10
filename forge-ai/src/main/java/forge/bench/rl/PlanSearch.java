@@ -158,7 +158,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          */
         public int setupMinWorlds = 0, setupBreadth = 0;
         public double setupMaxLoss = 0.0;
-        /** SETUP v4 (0 = v1: any failed play-out vetoes): the share of the setup's worlds that must fail to veto it (at least two). */
+        /**
+         * SETUP v4 (0 = v1: any failed play-out vetoes): the share of the setup's worlds that must fail to veto it (at
+         * least two). Negative = v5: the share of its valued worlds in which the play-out BROKE the plan; play-outs the
+         * budget cut short are not failures.
+         */
         public double setupFailShare = 0.0;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("setup", "setupNodes", "setupMaxNodes",
@@ -1312,8 +1316,15 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 }
                 // v1 / v2 (setupFailShare 0): one failed play-out and the search never plays it. v4: a failure is a
                 // world like the others (an unfinished play-out reads as one too); the veto needs a share of them.
-                failedWorld = spec.setupFailShare > 0 ? fails >= Math.max(2, (int) Math.ceil(spec.setupFailShare * known))
-                        : fails > 0;
+                if (spec.setupFailShare < 0) {
+                    // v5: only a plan the play-out BROKE is a failure (planBroken); a play-out the budget cut short has
+                    // no value and is no evidence either way (it read as a failure in v1-v4)
+                    final int broken = r.planBroken != null && js < r.planBroken.length ? r.planBroken[js] : 0;
+                    failedWorld = broken >= Math.max(2, (int) Math.ceil(-spec.setupFailShare * Math.max(1, known - fails + broken)));
+                } else {
+                    failedWorld = spec.setupFailShare > 0 ? fails >= Math.max(2, (int) Math.ceil(spec.setupFailShare * known))
+                            : fails > 0;
+                }
             }
             if (js >= 0 && jc >= 0 && js < r.values.length && jc < r.values.length) {
                 for (int w = 0; w < Math.min(r.values[js].length, r.values[jc].length); w++) {
