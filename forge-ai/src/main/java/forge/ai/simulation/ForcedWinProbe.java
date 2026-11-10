@@ -1184,6 +1184,58 @@ public final class ForcedWinProbe {
         }
     }
 
+    /** mullValue: what a caller does with a sandbox (the copy and our seat in it). */
+    public interface SandboxUse<T> {
+        T use(Game copy, Player me);
+    }
+
+    /**
+     * solver-distill-cc-1109 (mullValue): a private copy of the game for one hypothetical opening hand. {@code use} gets the
+     * copy before anything is changed (to attach its own trackers), calls {@link #redraw} / {@link #toFirstMain} itself
+     * and reads what it needs. Own id scope, AI cache scope and random stream ({@code seed} makes the redrawn hand a
+     * function of the game); the live game is never touched. Null when the sandbox failed.
+     */
+    public static <T> T handSandbox(final Game live, final Player liveMe, final long seed, final SandboxUse<T> use) {
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(seed));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyFidelity(1);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+            }
+            return use.use(g, me);
+        } catch (RuntimeException | StackOverflowError e) {
+            return null;
+        } finally {
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /** mullValue: in a sandbox, our hand goes back into our library, the library is shuffled and we draw {@code n}. */
+    public static void redraw(final Game copy, final Player me, final int n) {
+        for (Card c : new ArrayList<>(me.getCardsIn(ZoneType.Hand))) {
+            copy.getAction().moveToLibrary(c, null);
+        }
+        me.shuffle(null);
+        me.drawCards(n);
+    }
+
+    /** mullValue: a sandbox of a game that has not started stands at our first main phase (the stage becomes Play). */
+    public static void toFirstMain(final Game copy, final Player me) {
+        inPlay(copy);
+        copy.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+    }
+
     /**
      * solver-distill-cc-1109 (planLoops): does the engine win this turn from a sandbox that holds, for our seat, only its
      * lands, the permanent {@code cardId} and (when {@code partnerId} >= 0) that creature, both in play and able to act?

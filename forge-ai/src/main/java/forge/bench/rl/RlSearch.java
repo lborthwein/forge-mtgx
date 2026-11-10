@@ -293,6 +293,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * {@code reach}.
          */
         public boolean keepGate = false;
+        /**
+         * solver-distill-cc-1109 (mullValue; null = off): a mulligan the policy asks for is turned into a keep when the
+         * leaf value of this hand at our first main phase is at least the mean value of {@code samples} hands of one card
+         * fewer drawn from our own shuffled library, less {@code margin}. Never turns a keep into a mulligan. No card
+         * knowledge: the same value the search reads at its leaves. Keys: samples (6), margin (0).
+         */
+        public JsonObject mullValue;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -350,7 +357,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate",
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
@@ -420,6 +427,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (o.has("alwaysKeep")) c.alwaysKeep = o.get("alwaysKeep").getAsBoolean();
             if (o.has("keepGate")) c.keepGate = o.get("keepGate").getAsBoolean();
+            if (o.has("mullValue") && !o.get("mullValue").isJsonNull()) {
+                c.mullValue = o.getAsJsonObject("mullValue");
+                for (String k : c.mullValue.keySet()) {
+                    if (!k.equals("samples") && !k.equals("margin")) {
+                        throw new IllegalArgumentException("mullValue: unknown key " + k);
+                    }
+                }
+            }
             if (o.has("chooseACard") && !o.get("chooseACard").isJsonNull()) {
                 c.cac = o.getAsJsonObject("chooseACard");
                 // review #143 S3: every refusal at parse time (never at the first priority of a game)
@@ -650,6 +665,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (keepGate) {
                 o.addProperty("keepGate", true); // solver-distill-cc-1109: only when on
+            }
+            if (mullValue != null) {
+                o.add("mullValue", mullValue); // solver-distill-cc-1109: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -2057,6 +2075,105 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return would && pot && keep >= 0 ? new short[] {keep} : null;
     }
 
+    /** mullValue (report only): mulligans the policy asked for, those the value turned into a keep, failed asks. */
+    public int mullValueAsks, mullValueKeeps, mullValueFails;
+
+    /**
+     * mullValue: the policy's answer stands (null) unless it would mulligan and this hand's value at our first main phase
+     * is at least the mean value of sampled hands of one card fewer; then keep. Logged either way.
+     */
+    private short[] mullValueAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        final boolean would = greedy == null || greedy.length != 1 || greedy[0] != keep;
+        final int n = me.getCardsIn(forge.game.zone.ZoneType.Hand).size();
+        final int samples = cfg.mullValue.has("samples") ? cfg.mullValue.get("samples").getAsInt() : 6;
+        final double margin = cfg.mullValue.has("margin") ? cfg.mullValue.get("margin").getAsDouble() : 0.0;
+        double vKeep = Double.NaN, vMull = Double.NaN;
+        double[] vs = null;
+        String err = null;
+        final long t0 = System.nanoTime();
+        if (would && keep >= 0 && n >= 2) {
+            mullValueAsks++;
+            try {
+                final long seed0 = splitmix(uid ^ 0x4D554C4C56414CL ^ (0x9E3779B97F4A7C15L * n));
+                final List<Object> ps = new ArrayList<>();
+                for (int k = 0; k <= samples && err == null; k++) {
+                    final int draw = k == 0 ? -1 : n - 1;
+                    final Object pl = forge.ai.simulation.ForcedWinProbe.handSandbox(g, me, splitmix(seed0 + k), (c, cm) -> {
+                        final Object ctx = onCopy(c, cm);
+                        if (draw >= 0) {
+                            forge.ai.simulation.ForcedWinProbe.redraw(c, cm, draw);
+                        }
+                        forge.ai.simulation.ForcedWinProbe.toFirstMain(c, cm);
+                        return captureLeaf(ctx, c, cm);
+                    });
+                    if (pl == null) {
+                        err = "sandbox " + k;
+                    } else {
+                        ps.add(pl);
+                    }
+                }
+                if (err == null) {
+                    vs = leafValues(ps);
+                    if (vs == null || vs.length != samples + 1) {
+                        err = "values";
+                    } else {
+                        vKeep = vs[0];
+                        double sum = 0;
+                        for (int k = 1; k <= samples; k++) {
+                            sum += vs[k];
+                        }
+                        vMull = sum / samples;
+                    }
+                }
+            } catch (RuntimeException e) {
+                err = String.valueOf(e);
+            }
+            if (err != null) {
+                mullValueFails++;
+            }
+        }
+        final boolean keepIt = would && keep >= 0 && err == null && !Double.isNaN(vKeep) && vKeep + margin >= vMull;
+        if (keepIt) {
+            mullValueKeeps++;
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "mullValue");
+            row.addProperty("would_mulligan", would);
+            row.addProperty("kept", keepIt);
+            if (!Double.isNaN(vKeep)) {
+                row.addProperty("v_keep", Math.round(vKeep * 1e4) / 1e4);
+                row.addProperty("v_mull", Math.round(vMull * 1e4) / 1e4);
+                final JsonArray va = new JsonArray();
+                for (int k = 1; k < vs.length; k++) {
+                    va.add(Math.round(vs[k] * 1e4) / 1e4);
+                }
+                row.add("v_samples", va);
+            }
+            if (err != null) {
+                row.addProperty("error", err);
+            }
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
+            addRow(row);
+        }
+        return keepIt ? new short[] {keep} : null;
+    }
+
     /** mull-off: the keep answer, with the policy's own answer and the hand logged. */
     private short[] keepAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
@@ -2105,7 +2222,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public boolean choiceAsk(final int family) {
-        if ((cfg.alwaysKeep || cfg.keepGate && cfg.reach != null) && family == RlSchema.F_MULLIGAN) {
+        if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.keepGate && cfg.reach != null) && family == RlSchema.F_MULLIGAN) {
             return true;
         }
         return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
@@ -2129,6 +2246,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return keepAnswer(g, me, m, frame, greedy);
         }
         if (m.family == RlSchema.F_MULLIGAN) {
+            if (cfg.mullValue != null) {
+                return mullValueAnswer(g, me, m, frame, greedy);
+            }
             return cfg.keepGate && cfg.reach != null ? keepGateAnswer(g, me, m, frame, greedy) : null;
         }
         final long t0 = System.nanoTime();
@@ -2794,6 +2914,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             po.addProperty("default_cap_ends", ps[2]);
             po.addProperty("max_sent_finished", ps[3]);
             o.add("playout_seats", po);
+        }
+        if (cfg.mullValue != null) {
+            // solver-distill-cc-1109: only with mullValue, so every other summary is unchanged
+            final JsonObject mv = new JsonObject();
+            mv.addProperty("asks", mullValueAsks);
+            mv.addProperty("keeps", mullValueKeeps);
+            mv.addProperty("fails", mullValueFails);
+            o.add("mull_value", mv);
         }
         if (teachLeaves.get() > 0) {
             // solver-distill-cc-1109: only with the teacher at the leaves, so every other summary is unchanged

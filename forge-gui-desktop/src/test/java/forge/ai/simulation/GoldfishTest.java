@@ -263,4 +263,46 @@ public class GoldfishTest extends forge.ai.AITest {
         Assert.assertTrue(cut.cut);
         Assert.assertEquals(cut.screens, 1);
     }
+
+    /**
+     * mullValue's sandbox: before the game starts, another hand of one card fewer from our own shuffled library, standing
+     * at our first main phase; the hand is a function of the seed and the live game is untouched.
+     */
+    @Test
+    public void handSandboxRedraws() {
+        final String hand = "Verdant Catacombs;Cabal Ritual;Urborg, Tomb of Yawgmoth;Raffine's Tower;Mind Stone;Thassa's Oracle;Swamp";
+        final String frame = ForcedWinSolverTest.frame(hand, "", 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + DD1010);
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        g.setAge(forge.game.GameStage.Mulligan);
+        final Player me = g.getPlayers().get(0);
+        final int lib = me.getCardsIn(forge.game.zone.ZoneType.Library).size();
+        final ForcedWinProbe.SandboxUse<String> read = (c, cm) -> {
+            ForcedWinProbe.redraw(c, cm, 6);
+            ForcedWinProbe.toFirstMain(c, cm);
+            final java.util.List<String> names = new java.util.ArrayList<>();
+            for (forge.game.card.Card x : cm.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                names.add(x.getName());
+            }
+            java.util.Collections.sort(names);
+            return names.size() + "|" + cm.getCardsIn(forge.game.zone.ZoneType.Library).size() + "|" + c.getAge() + "|"
+                    + c.getPhaseHandler().getPhase() + "|" + (c.getPhaseHandler().getPlayerTurn() == cm) + "|" + names;
+        };
+        final String a = ForcedWinProbe.handSandbox(g, me, 11L, read);
+        final String a2 = ForcedWinProbe.handSandbox(g, me, 11L, read);
+        final String b = ForcedWinProbe.handSandbox(g, me, 12L, read);
+        final String kept = ForcedWinProbe.handSandbox(g, me, 13L, (c, cm) -> {
+            ForcedWinProbe.toFirstMain(c, cm);
+            return cm.getCardsIn(forge.game.zone.ZoneType.Hand).size() + "|" + cm.getCardsIn(forge.game.zone.ZoneType.Library).size();
+        });
+        System.out.println("MULLVALUE sandbox a=" + a + " b=" + b + " kept=" + kept);
+        Assert.assertNotNull(a);
+        Assert.assertTrue(a.startsWith("6|" + (lib + 1) + "|Play|MAIN1|true|"), a);
+        Assert.assertEquals(a2, a, "the redrawn hand is a function of the seed");
+        Assert.assertNotEquals(b, a, "another seed, another hand");
+        Assert.assertEquals(kept, "7|" + lib, "the hand as dealt");
+        Assert.assertEquals(me.getCardsIn(forge.game.zone.ZoneType.Hand).size(), 7, "the live hand is untouched");
+        Assert.assertEquals(me.getCardsIn(forge.game.zone.ZoneType.Library).size(), lib);
+        Assert.assertEquals(g.getAge(), forge.game.GameStage.Mulligan, "the live game is untouched");
+    }
 }
