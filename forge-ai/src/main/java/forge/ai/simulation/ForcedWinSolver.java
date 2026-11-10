@@ -2478,16 +2478,20 @@ public final class ForcedWinSolver {
 
     /**
      * planner-mana-1110 (report only): decisions whose plain lines all failed in their play-outs and were searched once
-     * more with the land plans; those searches that found a line; those whose line won its unopposed play-out.
+     * more with the land plans; those searches that found a line; those whose line won its unopposed play-out; the
+     * planner nodes those searches took.
      */
     public int landsRetries, landsRetryFound, landsRetryWins;
+    public long landsRetryNodes;
 
     /**
      * planner-mana-1110 (solverCfg planLands): the plain search found lines and none of them won its own play-out, so the
-     * second search of {@link ForcedWinPlanner#plan} (the land plans) never ran. It runs here once per decision: this
-     * turn, then by our next turn, with the payment orders the failed lines were found with. Its cost is bounded: at most
-     * two searches of the planner's own node and time limits, started only while the decision's budget is open, and at
-     * most cfg.top lines evaluated against the same deadline as the plain lines. Null = no line that wins unopposed.
+     * second search of {@link ForcedWinPlanner#plan} (the land plans) never ran at that stage. It runs here once per
+     * decision, at the stage the failed lines came from (its horizon and payment orders; the stages before it had no
+     * plain line, so their land plans are read already) and, if that was this turn only, by our next turn. Its cost is
+     * bounded: at most two searches of the planner's own node and time limits, started only while the decision's budget
+     * is open, and at most cfg.top lines evaluated against the same deadline as the plain lines. Null = no line that
+     * wins unopposed.
      */
     private Eval landsRetry(final Game live, final Position pos, final ForcedWinPlanner.Limits lim, final int index,
             final long evalFrom) {
@@ -2501,9 +2505,8 @@ public final class ForcedWinSolver {
         ForcedWinPlanner.Result res = null;
         lim.landsOnly = true;
         try {
-            lim.horizon = 1;
             res = planCapped(pos, lim);
-            if (res.lines.isEmpty() && cfg.horizon >= 2) {
+            if (res.lines.isEmpty() && horizon0 < cfg.horizon && cfg.horizon >= 2) {
                 final int first = res.nodes;
                 lim.horizon = cfg.horizon;
                 res = planCapped(pos, lim);
@@ -2517,6 +2520,7 @@ public final class ForcedWinSolver {
         }
         plannerNanos += forge.game.WorkClock.nanoTime() - tp;
         lastPlannerNodes += res.nodes;
+        landsRetryNodes += res.nodes;
         if (res.exhausted) {
             plannerExhausted++;
         }

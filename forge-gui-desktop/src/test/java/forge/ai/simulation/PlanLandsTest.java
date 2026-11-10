@@ -386,6 +386,51 @@ public class PlanLandsTest extends forge.ai.AITest {
             p1exile=
             """;
 
+    // the two other legs of the same pairs that differ from the fixtures above: pair-021 L2 (the same own position, another
+    // opponent hand) and pair-037 L2 (another land in hand). pair-035 L1, turn 4, is the pair-035 fixture card for card.
+
+    static final String PAIR_021_L2_T9 = """
+            [state]
+            turn=9
+            activeplayer=p0
+            activephase=MAIN1
+            p0life=20
+            p0landsplayed=0
+            p0hand=Jace, the Mind Sculptor;Memory Jar;Doomsday;Echo of Eons;Timetwister;Waterlogged Grove;Island
+            p0library=Beseech the Mirror;Misty Rainforest;Swamp;Darkslick Shores;Bolas's Citadel;Gush;Thassa's Oracle;Library of Alexandria;Swamp;Jace, Wielder of Mysteries;Island;Scalding Tarn;Xander's Lounge;Collective Brutality;Baleful Strix;Wishclaw Talisman;Lotus Petal;Verdant Catacombs;Chart a Course;Swamp;Troll of Khazad-dûm;Island;Cabal Ritual;Mind Stone;Stern Scolding;Overgrown Tomb;Chromatic Star;Counterspell
+            p0graveyard=Daze;Mystical Tutor;Remand
+            p0battlefield=Raffine's Tower;Urborg, Tomb of Yawgmoth
+            p0exile=
+            p1life=19
+            p1landsplayed=0
+            p1hand=Gitaxian Probe;Consider;Swamp;Kaito Shizuki
+            p1library=Urborg, Tomb of Yawgmoth;Swamp;Gush;Vampiric Tutor;Spellseeker;Doomsday;Echo of Eons;Jace, the Mind Sculptor;Mox Emerald;Mishra's Bauble;Brainstorm;Cabal Ritual;Bazaar of Baghdad;Botanical Sanctum;Daze;Island;Jace, Vryn's Prodigy;Swamp;Chromatic Star;Remand;Island;Brain Freeze;Library of Alexandria;Island;Chart a Course;Emry, Lurker of the Loch;Lotus Petal;Thassa's Oracle;Raffine's Tower
+            p1graveyard=Marsh Flats;Dark Ritual;Liliana of the Veil;Troll of Khazad-dûm
+            p1battlefield=Bayou|Tapped;Tolarian Academy|Tapped;Underground Sea|Tapped
+            p1exile=
+            """;
+
+    static final String PAIR_037_L2_T7 = """
+            [state]
+            turn=7
+            activeplayer=p0
+            activephase=MAIN1
+            p0life=17
+            p0landsplayed=0
+            p0hand=Verdant Catacombs;Xander's Lounge;Swamp;Doomsday;Island;Jace, the Mind Sculptor
+            p0library=Swamp;Collective Brutality;Mind Stone;Cabal Ritual;Gush;Beseech the Mirror;Echo of Eons;Remand;Counterspell;Island;Baleful Strix;Mystical Tutor;Wishclaw Talisman;Lotus Petal;Misty Rainforest;Memory Jar;Urborg, Tomb of Yawgmoth;Darkslick Shores;Thassa's Oracle;Daze;Jace, Wielder of Mysteries;Raffine's Tower;Swamp;Bolas's Citadel;Stern Scolding;Library of Alexandria;Chart a Course
+            p0graveyard=Timetwister;Scalding Tarn;Troll of Khazad-dûm
+            p0battlefield=Waterlogged Grove;Chromatic Star;Island;Overgrown Tomb
+            p0exile=
+            p1life=19
+            p1landsplayed=0
+            p1hand=Saheeli, Sublime Artificer;Duress;Reanimate;Phyrexian Metamorph;Crabomination;Snuff Out
+            p1library=Inquisition of Kozilek;Fallen Shinobi;Murderous Cut;Karn, Scion of Urza;Baleful Strix;Liliana of the Veil;Valki, God of Lies;Ancestral Recall;Swamp;Faerie Mastermind;Swamp;Brazen Borrower;Tamiyo, Inquisitive Student;Spell Pierce;Island;Island;Stock Up;Raucous Theater;Underground Sea;Swamp;Swamp;Watery Grave;Demonic Tutor;Island;Island;Island;Thieving Skydiver;Enduring Curiosity;Ancient Tomb
+            p1graveyard=Prismatic Vista;Hymn to Tourach
+            p1battlefield=Swamp|Tapped;Swamp|Tapped;Island
+            p1exile=
+            """;
+
     /** The key never takes a line away: where the planner has one with it off, it has one with it on. */
     @Test
     public void theOtherReviewedPositionsKeepTheirLines() {
@@ -429,7 +474,8 @@ public class PlanLandsTest extends forge.ai.AITest {
         final List<ForcedWinSolver.Proposal> p = s.propose(g);
         System.err.println("[plan-lands-test] propose " + tag + " planLands=" + on + " ms=" + (System.nanoTime() - t0) / 1_000_000
                 + " proposals=" + p.size() + " probes=" + s.reader.probeStats.summary() + " plannerNodes=" + s.meter.plannerNodes
-                + " landsRetries=" + s.landsRetries + "/" + s.landsRetryFound + "/" + s.landsRetryWins + " copies=" + s.copies);
+                + " landsRetries=" + s.landsRetries + "/" + s.landsRetryFound + "/" + s.landsRetryWins + " retryNodes="
+                + s.landsRetryNodes + " copies=" + s.copies);
         for (ForcedWinSolver.Proposal x : p) {
             System.err.println("[plan-lands-test]   " + tag + " unopposed=" + x.pUnopposed + " belief=" + x.pBelief + " worlds="
                     + x.worldsRun + " " + x.text);
@@ -504,7 +550,8 @@ public class PlanLandsTest extends forge.ai.AITest {
     public void theRealPositionsThroughTheSolver() {
         final Object[][] cases = {{"pair-021-T9", PAIR_021_T9, 0}, {"pair-021-L1-T16", PAIR_021_L1_T16, 1},
                 {"pair-035-T4", PAIR_035_T4, 1}, {"pair-025-T16", PAIR_025_T16, 1}, {"pair-026-T13", PAIR_026_T13, 1},
-                {"pair-037-T7", PAIR_037_T7, 0}, {"pair-037-T9", PAIR_037_T9, 0}};
+                {"pair-037-T7", PAIR_037_T7, 0}, {"pair-037-T9", PAIR_037_T9, 0}, {"pair-021-L2-T9", PAIR_021_L2_T9, 0},
+                {"pair-037-L2-T7", PAIR_037_L2_T7, 0}};
         for (Object[] c : cases) {
             for (boolean on : new boolean[] {false, true}) {
                 propose((String) c[0], (String) c[1], (Integer) c[2], on);
