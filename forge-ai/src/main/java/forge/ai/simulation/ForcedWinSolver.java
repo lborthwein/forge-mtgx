@@ -4007,6 +4007,16 @@ public final class ForcedWinSolver {
         public String checkGate;
         public int checkWorlds = -1;
         public double checkMs = Double.NaN;
+        /**
+         * choice-search-1109 pass 3 (set only when a choice scorer's relax pass screened this position): the relaxed-planning
+         * distance, the fewest generic relaxations (an extra untapped land of the seat's own; a card drawn from its unknown
+         * library) with which the planner finds a line (-1 = not run, Integer.MAX_VALUE = none within the bound), the share of
+         * the draw samples at that distance with a line, which relaxation, and the screens run.
+         */
+        public int relaxR = -1;
+        public double relaxP = Double.NaN;
+        public String relaxHow;
+        public int relaxScreens;
     }
 
     /**

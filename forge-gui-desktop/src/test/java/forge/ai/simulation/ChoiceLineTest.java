@@ -296,4 +296,26 @@ public class ChoiceLineTest extends AITest {
         Assert.assertEquals(names(me, ZoneType.Hand), "Daze;Troll of Khazad-dûm");
         Assert.assertEquals(g.getStack().size(), 1);
     }
+
+    /** pass 3: the relaxed-planning distance (an extra land of the seat's own; a card drawn from its unknown library). */
+    private static ForcedWinSolver.Screen relaxOf(final String hand) {
+        final String lib = "Swamp;Thassa's Oracle;Grizzly Bears;Grizzly Bears;Grizzly Bears;Grizzly Bears;Grizzly Bears;Grizzly Bears";
+        final Game g = game(hand, "Swamp;Swamp;Island;Island;Island", lib);
+        final Player me = g.getPlayers().get(0);
+        final forge.bench.rl.ChoiceScorer.Config cfg = forge.bench.rl.ChoiceScorer.Config.parse(com.google.gson.JsonParser
+                .parseString("{\"screenNodes\":4000,\"screenMs\":60000,\"lineOnly\":true,\"relax\":3}").getAsJsonObject());
+        cfg.solverCfg = ForcedWinSolver.Config.fromProps(k -> "planExpandCap".equals(k) ? "true" : null);
+        final ForcedWinSolver.Screen plain = ForcedWinSolver.withReader(me, cfg.solverCfg, ForcedWinSolver.newSharedReader())
+                .screen(g, Collections.<Integer>emptyList(), 4000, 60_000L);
+        Assert.assertEquals(plain.lines, 0, "no plain line: " + plain.best);
+        return forge.bench.rl.ChoiceScorer.relaxDistanceForTest(cfg, g, me, c -> false, 5L);
+    }
+
+    @Test
+    public void relaxedDistanceIsOneLandForDoomsdayAndNoneForTroll() {
+        final ForcedWinSolver.Screen dd = relaxOf("Doomsday;Ancestral Recall");
+        Assert.assertEquals(dd.relaxR, 1, "Doomsday one B short: " + dd.relaxHow + " p " + dd.relaxP + " screens " + dd.relaxScreens);
+        final ForcedWinSolver.Screen tr = relaxOf("Troll of Khazad-dûm");
+        Assert.assertEquals(tr.relaxR, Integer.MAX_VALUE, "Troll: " + tr.relaxHow + " screens " + tr.relaxScreens);
+    }
 }
