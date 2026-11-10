@@ -205,8 +205,14 @@ public class ReachDiscardsTest extends AITest {
 
     /** Bazaar of Baghdad's discard, posed in the live resolution; {@code on} = the key. */
     private static Ask bazaar(final boolean on, final String lib, final double[] value) {
-        final Game g = game("Doomsday;Grizzly Bears;Balduvian Bears", "Bazaar of Baghdad;Underground Sea;Watery Grave",
-                "Island;Island;" + lib, "MAIN1");
+        return bazaar(on, "Doomsday;Grizzly Bears;Balduvian Bears", "Bazaar of Baghdad;Underground Sea;Watery Grave",
+                "Island;Island;" + lib, new String[] {"Doomsday", "Island", "Island"}, value, "Balduvian Bears;Grizzly Bears");
+    }
+
+    /** As above on any position: {@code policy} = the three cards the policy discards, {@code kept} = the live hand after. */
+    private static Ask bazaar(final boolean on, final String hand, final String battlefield, final String lib,
+            final String[] policy, final double[] value, final String kept) {
+        final Game g = game(hand, battlefield, lib, "MAIN1");
         final Player me = g.getPlayers().get(0);
         final ChoiceScorer sc = scorer(on);
         final RlKnowledge know = know(g);
@@ -219,7 +225,7 @@ public class ReachDiscardsTest extends AITest {
                 final RlCandidates.Menu m = RlCandidates.build(g, me, "chooseCardsToDiscardFrom", "discardFrom", body(min, max),
                         new Object[] {validCards, sa, p});
                 // the policy's answer, as in the audit: Doomsday and the two cards just drawn
-                final short[] greedy = steps(validCards, "Doomsday", "Island", "Island");
+                final short[] greedy = steps(validCards, policy);
                 sc.setAskPlayer(p);
                 out[0] = ask(sc, g, me, m, greedy, know, sa, validCards, value);
                 final CardCollection live = new CardCollection();
@@ -244,7 +250,7 @@ public class ReachDiscardsTest extends AITest {
         g.getStack().resolveStack();
         Assert.assertNotNull(out[0], "the discard was asked");
         // the copies never moved the live game: it took the policy's answer
-        Assert.assertEquals(ChoiceLineTest.names(me, ZoneType.Hand), "Balduvian Bears;Grizzly Bears");
+        Assert.assertEquals(ChoiceLineTest.names(me, ZoneType.Hand), kept);
         return out[0];
     }
 
@@ -374,8 +380,14 @@ public class ReachDiscardsTest extends AITest {
     // ------------------------------------------------------------------ 3. the cleanup's discard to hand size (a CARDS ask)
 
     private static Ask cleanup(final boolean on) {
-        final Game g = game("Doomsday;Grizzly Bears;Balduvian Bears;Forest;Forest;Forest;Forest;Forest;Forest",
-                "Underground Sea;Watery Grave", KILL, "MAIN2");
+        return cleanup(on, "Doomsday;Grizzly Bears;Balduvian Bears;Forest;Forest;Forest;Forest;Forest;Forest",
+                "Underground Sea;Watery Grave", KILL, new String[] {"Doomsday", "Forest"});
+    }
+
+    /** As above on any position: {@code policy} = the cards the policy discards (as many as the cleanup asks for). */
+    private static Ask cleanup(final boolean on, final String hand0, final String battlefield, final String lib,
+            final String[] policy) {
+        final Game g = game(hand0, battlefield, lib, "MAIN2");
         final Player me = g.getPlayers().get(0);
         final ChoiceScorer sc = scorer(on);
         final RlKnowledge know = know(g);
@@ -388,17 +400,20 @@ public class ReachDiscardsTest extends AITest {
 
             @Override
             public CardCollectionView chooseCardsToDiscardToMaximumHandSize(final int numDiscard) {
-                Assert.assertEquals(numDiscard, 2);
+                Assert.assertEquals(numDiscard, policy.length);
                 final CardCollectionView hand = me.getCardsIn(ZoneType.Hand);
                 // the bridge poses the cleanup discard as a cardsChoice ask over the hand (family CARDS)
                 final RlCandidates.Menu m = RlCandidates.build(g, me, "chooseCardsToDiscardToMaximumHandSize", "cardsChoice",
                         body(numDiscard, numDiscard), hand);
-                final short[] greedy = steps(hand, "Doomsday", "Forest"); // the policy's answer, as in the audit
+                final short[] greedy = steps(hand, policy); // the policy's answer, as in the audit
                 sc.setAskPlayer(null);
                 out[0] = ask(sc, g, me, m, greedy, know, null, hand, null);
                 final CardCollection live = new CardCollection();
-                live.add(find(me, ZoneType.Hand, "Doomsday"));
-                live.add(find(me, ZoneType.Hand, "Forest"));
+                final List<Card> cs = new ArrayList<>();
+                hand.forEach(cs::add);
+                for (short x : greedy) {
+                    live.add(cs.get(x));
+                }
                 return live;
             }
         });
@@ -427,6 +442,61 @@ public class ReachDiscardsTest extends AITest {
         final Ask off = cleanup(false);
         Assert.assertEquals(off.s.unsupported, "multiPick");
         Assert.assertNull(off.alt);
+    }
+
+    // ------------------------------------------------------------------ the two audit positions on real 40-card lists
+
+    /** The rest of the R4 Doomsday list (GoldfishTest.DD1010 and its opening hand) below this test's hand and lands. */
+    private static final String DD1010_REST = "Beseech the Mirror;Bolas's Citadel;Chart a Course;Chromatic Star;"
+            + "Collective Brutality;Counterspell;Daze;Echo of Eons;Gush;Island;Jace, Wielder of Mysteries;Library of Alexandria;"
+            + "Lotus Petal;Memory Jar;Misty Rainforest;Mystical Tutor;Scalding Tarn;Stern Scolding;Troll of Khazad-dûm;"
+            + "Waterlogged Grove;Xander's Lounge;Verdant Catacombs;Cabal Ritual;Urborg, Tomb of Yawgmoth;Mind Stone;"
+            + "Thassa's Oracle;Swamp";
+
+    /**
+     * dd-audit-1109, pair 33: the cleanup threw Doomsday with two Swamps from ten cards. The same ask on the list's real
+     * cards: 22 options (the policy's set and its one-card swaps) inside the arm's node allowance.
+     */
+    @Test
+    public void theAuditsCleanupOnARealList() {
+        final Ask a = cleanup(true, "Doomsday;Swamp;Swamp;Raffine's Tower;Timetwister;Baleful Strix;Wishclaw Talisman;Island;"
+                + "Jace, the Mind Sculptor;Remand", "Darkslick Shores;Overgrown Tomb;Island", DD1010_REST,
+                new String[] {"Doomsday", "Swamp", "Swamp"});
+        Assert.assertNull(a.s.unsupported, a.dump());
+        Assert.assertTrue(a.s.options.size() >= 8, a.dump());
+        for (ChoiceScorer.Option o : a.s.options) {
+            Assert.assertNull(o.fail, o.label + "\n" + a.dump());
+            if (o.label.contains("Doomsday")) {
+                Assert.assertEquals(reachOf(o), 0.0, 1e-9, "no line without Doomsday: " + o.label + "\n" + a.dump());
+            }
+        }
+        Assert.assertNotNull(a.alt, "the answer moves: " + a.dump());
+        Assert.assertFalse(a.altNames.contains("Doomsday"), "Doomsday is kept: " + a.altNames);
+        Assert.assertTrue(a.ms < 8000, "inside the ask's budget: " + a.ms);
+    }
+
+    /** The rest of the R4 oracle list (GoldfishTest.DECK) below this test's hand, lands and the two cards Bazaar draws. */
+    private static final String ORACLE_REST = "Bayou;Botanical Sanctum;Brain Freeze;Brainstorm;Cabal Ritual;Consider;"
+            + "Dark Ritual;Echo of Eons;Gush;Island;Island;Jace, the Mind Sculptor;Jace, Vryn's Prodigy;Library of Alexandria;"
+            + "Liliana of the Veil;Lotus Petal;Marsh Flats;Mishra's Bauble;Mox Emerald;Raffine's Tower;Spellseeker;Swamp;"
+            + "Thassa's Oracle;Tolarian Academy";
+
+    /**
+     * dd-audit-1109: Bazaar of Baghdad with Doomsday, Troll, Remand and a fourth card in hand; the pilot discarded
+     * Doomsday, Chromatic Star and an Island and kept Troll. The same ask on the oracle list's real cards.
+     */
+    @Test
+    public void theAuditsBazaarOnARealList() {
+        final Ask a = bazaar(true, "Doomsday;Troll of Khazad-dûm;Remand;Daze",
+                "Bazaar of Baghdad;Underground Sea;Swamp;Urborg, Tomb of Yawgmoth", "Island;Chromatic Star;" + ORACLE_REST,
+                new String[] {"Doomsday", "Chromatic Star", "Island"}, null, "Daze;Remand;Troll of Khazad-dûm");
+        Assert.assertNull(a.s.unsupported, a.dump());
+        for (ChoiceScorer.Option o : a.s.options) {
+            Assert.assertNull(o.fail, o.label + "\n" + a.dump());
+        }
+        Assert.assertNotNull(a.alt, "the answer moves: " + a.dump());
+        Assert.assertFalse(a.altNames.contains("Doomsday"), "Doomsday is kept: " + a.altNames);
+        Assert.assertTrue(a.ms < 8000, "inside the ask's budget: " + a.ms);
     }
 
     // ------------------------------------------------------------------ the key
