@@ -150,9 +150,18 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         public int setupNodes = 4000, setupHorizon = 5, setupActive = 3;
         public long setupMaxNodes = 12000, setupMs = 150;
         public double setupMargin = 0.0;
+        /**
+         * SETUP v2 (defaults = v1: 0, off, 0): the setup is taken only when at least setupMinWorlds worlds valued both it
+         * and the search's choice (fewer: the search's choice stands, "thin"); a mean loss above setupMaxLoss vetoes it
+         * whatever the spread (0 = off); setupBreadth > 0 searches that many menu candidates at a setup point instead of
+         * the search's breadth, so the worlds go to the default, its best alternatives and the setup.
+         */
+        public int setupMinWorlds = 0, setupBreadth = 0;
+        public double setupMaxLoss = 0.0;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("setup", "setupNodes", "setupMaxNodes",
-                "setupMs", "setupHorizon", "setupActive", "setupMargin", "samples", "temperature",
+                "setupMs", "setupHorizon", "setupActive", "setupMargin", "setupMinWorlds", "setupMaxLoss", "setupBreadth",
+                "samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
                 "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX",
                 "lineHorizon", "exactActions"));
@@ -196,6 +205,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("setupHorizon")) s.setupHorizon = o.get("setupHorizon").getAsInt();
             if (o.has("setupActive")) s.setupActive = o.get("setupActive").getAsInt();
             if (o.has("setupMargin")) s.setupMargin = o.get("setupMargin").getAsDouble();
+            if (o.has("setupMinWorlds")) s.setupMinWorlds = o.get("setupMinWorlds").getAsInt();
+            if (o.has("setupMaxLoss")) s.setupMaxLoss = o.get("setupMaxLoss").getAsDouble();
+            if (o.has("setupBreadth")) s.setupBreadth = o.get("setupBreadth").getAsInt();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
             }
@@ -915,7 +927,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** kill-line-1106 (plans.lineFloor; report only): lines adopted by the floor. */
     int lineFloorTakes;
     /** SETUP (report only): plan points that asked, candidates, taken by the rule, vetoed by the search, chosen by it. */
-    int setupPoints, setupCands, setupTakes, setupVetoes, setupChosen;
+    int setupPoints, setupCands, setupTakes, setupVetoes, setupChosen, setupThin;
     /** SETUP: the last decision's verdict for its plan row (null = no setup candidate). */
     String lastSetup;
     /** kill-line-1106 (plans.lineDuel; report only): points scored as default against the line. */
@@ -1079,6 +1091,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         String setupNote;
     }
 
+    /** SETUP v2: the menu candidates to search at this stage ({@code breadth}, or plans.setupBreadth with a setup candidate). */
+    int breadthAt(final Stage st, final int breadth) {
+        return st != null && st.setup >= 0 && spec.setupBreadth > 0 ? Math.min(breadth, spec.setupBreadth) : breadth;
+    }
+
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
     Stage propose(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs, final long t0) {
         return propose(g, p, m, objs, t0, t0);
@@ -1180,6 +1197,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     st.labels.add("setup#0 gf=" + Math.round(sp.gf * 1000) / 1000.0 + " turn+" + sp.winTurn + " steps=" + sp.steps
                             + (RlSearch.LOG_ACTS ? " text=" + (sp.text == null ? "" : sp.text.replaceAll("\\s+", " ")) : ""));
                     setupCands++;
+                    if (spec.setupBreadth > 0) {
+                        st.ms = (System.nanoTime() - t0) / 1e6;
+                        return st; // v2: the decision's time goes to the default, its alternatives and the setup; no sampled plans
+                    }
                 }
             }
             if (duel != null) {
@@ -1293,22 +1314,29 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 }
             }
             boolean worse = failedWorld;
-            if (!worse && n >= 2) {
+            final boolean thin = !worse && n < spec.setupMinWorlds; // v2: no verdict from too few worlds: the search's choice stands
+            if (!worse && !thin && n >= 2) {
                 final double mean = sum / n;
                 final double se = Math.sqrt(Math.max(0.0, (sq - n * mean * mean) / (n - 1)) / n);
-                worse = mean > spec.setupMargin && mean > rs.departZ() * se;
+                worse = mean > spec.setupMargin && (mean > rs.departZ() * se || spec.setupMaxLoss > 0 && mean > spec.setupMaxLoss);
+            } else if (!worse && !thin && n == 1 && spec.setupMaxLoss > 0) {
+                worse = sum > spec.setupMaxLoss;
             }
             lastSetup = "n=" + n + " d=" + (n == 0 ? "-" : String.valueOf(Math.round(sum / n * 1000) / 1000.0))
-                    + (failedWorld ? " failed" : "") + (worse ? " veto" : " take");
+                    + (failedWorld ? " failed" : "") + (thin ? " thin" : worse ? " veto" : " take");
             st.setupNote = lastSetup;
-            if (!worse) {
+            if (thin) {
+                setupThin++;
+            } else if (!worse) {
                 driver.solver().adopt(((LinePlan) st.plans.get(st.setup)).line);
                 handoff = true;
                 setupTakes++;
                 lineTurns.add(g.getPhaseHandler().getTurn());
                 return RlSeat.PrioritySearch.HOOK;
             }
-            setupVetoes++;
+            if (!thin) {
+                setupVetoes++;
+            }
         } else if (st.setup >= 0 && r.chosen == givenSize + st.setup) {
             setupChosen++;
             lastSetup = "chosen";
@@ -1558,6 +1586,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             o.addProperty("setupTakes", setupTakes);
             o.addProperty("setupVetoes", setupVetoes);
             o.addProperty("setupChosen", setupChosen);
+            o.addProperty("setupThin", setupThin);
             o.addProperty("setupLines", driver.solver().setupLines);
             o.addProperty("setupWinNow", driver.solver().setupWinNow);
         }
