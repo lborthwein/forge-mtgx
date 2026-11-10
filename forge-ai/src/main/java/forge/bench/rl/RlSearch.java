@@ -3226,6 +3226,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * open. A deck with no combo then pays (almost) nothing for the reach.
          */
         public boolean gate;
+        /**
+         * With {@link #gate}: the gate is the list's, not the position's. It opens at the seat's first decision when any
+         * of its cards can end the game in the planner's model ({@link forge.ai.simulation.ForcedWinSolver#hasEnder}),
+         * with no planner search. The position gate was found closed on half of the decisions at which a Doomsday seat
+         * held a tutor (its check runs at the turn's first decision, before the land drop, on a node allowance).
+         */
+        public boolean gateEnder;
         /** The opponent's reach at a leaf is its no-new-card line only (one screen, not one per name). */
         public boolean oppDirect;
         /** A line k turns from the leaf counts gamma^k (1 = off): a line now outranks the same line a turn later. */
@@ -3256,7 +3263,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean leafGfFree = true;
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
                 "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart",
-                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree"));
+                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree", "gateEnder"));
 
         public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
             final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
@@ -3293,6 +3300,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("gamma")) c.gamma = o.get("gamma").getAsDouble();
             if (o.has("depart")) c.depart = o.get("depart").getAsDouble();
             if (o.has("sinkSamples")) c.sinkSamples = o.get("sinkSamples").getAsInt();
+            if (o.has("gateEnder")) c.gateEnder = o.get("gateEnder").getAsBoolean();
             if (o.has("leafGf")) c.leafGf = o.get("leafGf").getAsBoolean();
             if (o.has("leafGfs")) c.leafGfs = o.get("leafGfs").getAsInt();
             if (o.has("leafGfsW")) c.leafGfsW = o.get("leafGfsW").getAsDouble();
@@ -3367,7 +3375,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             reachOn = true;
             return;
         }
-        if (!reachSeen) {
+        if (rc.gateEnder) {
+            if (!reachSeen && reachGateKey == Long.MIN_VALUE) {
+                reachGateKey = 0L; // asked once per game
+                reachGateChecks++;
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                reachSeen = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader).hasEnder(g);
+            }
+        } else if (!reachSeen) {
             // one check per turn and library size (a draw or a search re-reads it)
             final long key = g.getPhaseHandler().getTurn() * 1_000L + me.getCardsIn(forge.game.zone.ZoneType.Library).size();
             if (key != reachGateKey) {

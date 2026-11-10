@@ -4619,6 +4619,27 @@ public final class ForcedWinSolver {
      * (wins on entry or on a small library, an empty-library draw win, a WIN / DRAIN / MILL_OPP effect) has no line.
      * Names that can end the game or that search or pile the library are planned first. Never throws (false).
      */
+    /**
+     * solver-distill-cc-1109 (the reach gate, deck level): can any card of this seat (hand, battlefield, graveyard,
+     * library) end the game in the planner's model? {@link #potential}'s first question alone, with no planner search:
+     * a property of the list, true from the first decision of a deck that holds a kill. Never throws (false).
+     */
+    public boolean hasEnder(final Game g) {
+        try {
+            final java.util.Set<String> seen = new java.util.HashSet<>();
+            for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Library}) {
+                for (Card c : me.getCardsIn(z)) {
+                    if (seen.add(c.getName()) && endsGames(reader.card(g, me, c))) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } catch (RuntimeException | StackOverflowError e) {
+            return false;
+        }
+    }
+
     public boolean potential(final Game g, final List<Integer> knownTop, final GoldfishOpts o, final int maxNames,
             final boolean sig, final long maxNodes) {
         try {
