@@ -2795,6 +2795,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             po.addProperty("max_sent_finished", ps[3]);
             o.add("playout_seats", po);
         }
+        if (teachLeaves.get() > 0) {
+            // solver-distill-cc-1109: only with the teacher at the leaves, so every other summary is unchanged
+            final JsonObject te = new JsonObject();
+            te.addProperty("leaves", teachLeaves.get());
+            te.addProperty("gf_hits", teachGfHits.get());
+            te.addProperty("gfs_hits", teachGfsHits.get());
+            te.addProperty("raised", teachRaised.get());
+            te.addProperty("ms", teachNanos.get() / 1_000_000L);
+            o.add("teacher", te);
+        }
         if (voided != null) {
             o.addProperty("voided", voided);
         }
@@ -3049,9 +3059,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * partners' draws are worth; the unsampled goldfish scores it 0.
          */
         public int sinkSamples = 0;
+        /**
+         * The teacher at the leaves (off by default): a leaf's potential is also the seat's goldfish there (leafGf: the
+         * planner's gamma^turn over five turns with the land-drop relaxation, unknown draws blank) and leafGfsW x its
+         * sampled goldfish (leafGfs orders of the seat's unknown library; every leaf of a game sees the same orders).
+         * These are the value tower's teacher labels, computed exactly. leafGfFree (the default) runs them off the work
+         * clock: a ceiling read of what a perfectly distilled value would give at no cost; false charges the pilot.
+         */
+        public boolean leafGf;
+        public int leafGfs = 0;
+        public double leafGfsW = 0.5;
+        public boolean leafGfFree = true;
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
                 "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart",
-                "sinkSamples"));
+                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree"));
 
         public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
             final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
@@ -3088,6 +3109,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("gamma")) c.gamma = o.get("gamma").getAsDouble();
             if (o.has("depart")) c.depart = o.get("depart").getAsDouble();
             if (o.has("sinkSamples")) c.sinkSamples = o.get("sinkSamples").getAsInt();
+            if (o.has("leafGf")) c.leafGf = o.get("leafGf").getAsBoolean();
+            if (o.has("leafGfs")) c.leafGfs = o.get("leafGfs").getAsInt();
+            if (o.has("leafGfsW")) c.leafGfsW = o.get("leafGfsW").getAsDouble();
+            if (o.has("leafGfFree")) c.leafGfFree = o.get("leafGfFree").getAsBoolean();
             return c;
         }
     }
@@ -3258,6 +3283,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
             out[0] = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
             addCost(out, r);
+            if (rc.leafGf || rc.leafGfs > 0) {
+                leafTeacher(rc, k, g, me, out);
+            }
         }
         if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
             final forge.ai.simulation.ForcedWinSolver.Reach ro = reachOpp(k, g, me.getOpponents().get(0), rc);
@@ -3290,6 +3318,55 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         return out;
+    }
+
+    /** {@link ReachCfg#leafGf}, {@link ReachCfg#leafGfs}: the teacher's potential at this leaf joins its reach. */
+    public final java.util.concurrent.atomic.AtomicLong teachLeaves = new java.util.concurrent.atomic.AtomicLong(),
+            teachGfHits = new java.util.concurrent.atomic.AtomicLong(), teachGfsHits = new java.util.concurrent.atomic.AtomicLong(),
+            teachRaised = new java.util.concurrent.atomic.AtomicLong(), teachNanos = new java.util.concurrent.atomic.AtomicLong();
+    /** The sampled orders' salt: one for the whole game, so every leaf (and every candidate) sees the same draws. */
+    static final long LEAF_GFS_SALT = 0x51DCC1109L;
+
+    private void leafTeacher(final ReachCfg rc, final RlKnowledge k, final Game g, final Player me, final double[] out) {
+        final long t0 = System.nanoTime();
+        final forge.game.WorkClock.Clock clock = rc.leafGfFree ? forge.game.WorkClock.install(null) : null;
+        try {
+            double pot = Double.isNaN(out[0]) ? 0.0 : out[0];
+            final double before = pot;
+            teachLeaves.incrementAndGet();
+            if (rc.leafGf) {
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gf = goldfishFull(k, g, me);
+                if (!gf.failed && !Double.isNaN(gf.g) && gf.g > 0) {
+                    teachGfHits.incrementAndGet();
+                    pot = Math.max(pot, gf.g);
+                }
+            }
+            if (rc.leafGfs > 0) {
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                o.samples = rc.leafGfs;
+                o.maxNodes = 4L * o.nodes * rc.leafGfs;
+                o.ms = 10_000L; // node caps only
+                o.seed = splitmix(uid ^ LEAF_GFS_SALT);
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gs = forge.ai.simulation.ForcedWinSolver
+                        .withReader(me, reachSolverCfg, reader).goldfish(g, knownTopOf(k, me), o);
+                if (!gs.failed && !Double.isNaN(gs.g) && gs.g > 0) {
+                    teachGfsHits.incrementAndGet();
+                    pot = Math.max(pot, Math.min(1.0, rc.leafGfsW * gs.g / Math.max(1e-9, rc.alpha)));
+                }
+            }
+            if (pot > before) {
+                teachRaised.incrementAndGet();
+                out[0] = pot;
+            }
+        } catch (RuntimeException e) {
+            // the leaf keeps its reach
+        } finally {
+            if (rc.leafGfFree) {
+                forge.game.WorkClock.install(clock);
+            }
+            teachNanos.addAndGet(System.nanoTime() - t0);
+        }
     }
 
     private static void addCost(final double[] out, final forge.ai.simulation.ForcedWinSolver.Reach r) {
