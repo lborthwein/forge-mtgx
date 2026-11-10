@@ -4782,6 +4782,164 @@ public final class ForcedWinSolver {
         }
     }
 
+    /** integrate-1110 ({@link #nextDraws}): the seat's goldfish with no new card, and with each card of its unknown library as its next draw. */
+    public static final class NextDraws {
+        /** The goldfish value with no new card (0 = no line). */
+        public double blank;
+        /** By card name: the goldfish value with that card as the next draw (0 = planned, no line). A name not here was not planned. */
+        public final java.util.Map<String, Double> byName = new java.util.TreeMap<>();
+        /** The names in the order they were planned: cards that can end the game, then cards that choose from the library, then the rest. */
+        public final List<String> order = new ArrayList<>();
+        public long nodes;
+        public int screens, groups;
+        /** The allowance ran out before every name was planned; the call failed (the table is empty). */
+        public boolean cut, failed;
+    }
+
+    /**
+     * integrate-1110 (search spec nestedChoice.askNodes): what is each card of this seat's unknown library worth as its
+     * NEXT DRAW? {@link #potential}'s screens, kept instead of stopped at the first line: one goldfish with no new card,
+     * then one per name (names of one planner model share a screen with {@code sig}; names that pile the library first,
+     * then those that can end the game, then those that search the library, then the rest by copies; a land is the
+     * relaxation's already), each over the same windows, the earliest window with a line giving the value (gamma^turn,
+     * times lambda with a granted land), until {@code maxNodes} planner nodes. Not planned at all (0 nodes): a seat with
+     * no card that can end the game, or one that holds no card that searches its library (in hand: a spell that does; on
+     * the battlefield: an ability that does), since then no search will ask. Reads the position only: no copy is played.
+     * Honest and optimistic as the goldfish is, and a line that passes the turn must survive the opponent's visible
+     * clock, as every planner line. Never throws ({@link NextDraws#failed}).
+     */
+    public NextDraws nextDraws(final Game g, final List<Integer> knownTop, final GoldfishOpts o, final int maxNames,
+            final boolean sig, final long maxNodes) {
+        final NextDraws out = new NextDraws();
+        try {
+            if (!hasEnder(g) || !holdsSearch(g)) {
+                return out;
+            }
+            final GoldfishOpts b = new GoldfishOpts();
+            b.horizon = o.horizon;
+            b.active = o.active;
+            b.lands = o.lands;
+            b.lambda = o.lambda;
+            b.samples = 0;
+            b.nodes = o.nodes;
+            b.ms = o.ms;
+            b.gamma = o.gamma;
+            b.window = o.window;
+            b.maxNodes = Math.max(1, maxNodes / 4);
+            final Goldfish blank = goldfish(g, knownTop, b);
+            out.nodes = blank.nodes;
+            out.screens = blank.screens;
+            if (blank.failed) {
+                out.failed = true;
+                return out;
+            }
+            out.blank = Double.isNaN(blank.g) ? 0.0 : blank.g;
+            final int h = Math.max(1, o.horizon);
+            final int w = Math.max(1, Math.min(h, o.active));
+            final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+            int k = knownTop == null ? 0 : knownTop.size();
+            if (k > lib.size()) {
+                k = 0;
+            }
+            for (int i = 0; i < k; i++) {
+                if (lib.get(i).getId() != knownTop.get(i)) {
+                    k = 0;
+                    break;
+                }
+            }
+            final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
+            final List<Card> rest = new ArrayList<>(lib.subList(k, lib.size()));
+            rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+            final List<Card> grant = new ArrayList<>();
+            final java.util.LinkedHashMap<String, List<Card>> byName = new java.util.LinkedHashMap<>();
+            final java.util.Set<String> lands = new java.util.HashSet<>();
+            for (Card c : rest) {
+                byName.computeIfAbsent(c.getName(), x -> new ArrayList<>()).add(c);
+                if (o.lands && h > 1 && c.isLand() && lands.add(c.getName())) {
+                    grant.add(c);
+                }
+            }
+            List<List<Card>> groups = new ArrayList<>(byName.values());
+            if (sig) {
+                groups = sigGroups(g, groups, lib.subList(0, k));
+            }
+            final java.util.Map<List<Card>, Integer> rank = new java.util.IdentityHashMap<>();
+            for (List<Card> grp : groups) {
+                final ACard a = reader.card(g, me, grp.get(0));
+                rank.put(grp, has(a, EffKind.PILE) ? 0 : endsGames(a) ? 1 : chooses(a) ? 2 : 3);
+            }
+            groups.sort((a, c) -> rank.get(a) != rank.get(c).intValue() ? Integer.compare(rank.get(a), rank.get(c))
+                    : Integer.compare(c.size(), a.size()));
+            names:
+            for (int i = 0; i < groups.size() && i < maxNames; i++) {
+                final Card next = groups.get(i).get(0);
+                if (next.isLand() && o.lands) {
+                    continue; // the relaxation already plays a land a turn
+                }
+                double best = 0.0;
+                for (int j = 0; j + w <= h || j == 0; j++) {
+                    if (maxNodes > 0 && out.nodes >= maxNodes) {
+                        out.cut = true;
+                        break names;
+                    }
+                    final Screen sc = screenSeq(g, top, List.of(next), grant, h - 1, o.nodes, o.ms, o.window, Math.min(h, j + w), j,
+                            o.gamma, o.lambda);
+                    out.nodes += sc.nodes;
+                    out.screens++;
+                    if (sc.failed) {
+                        break;
+                    }
+                    if (sc.lines > 0) {
+                        best = sc.score;
+                        break; // the earliest window with a line
+                    }
+                }
+                out.groups++;
+                for (Card c : groups.get(i)) {
+                    if (out.byName.merge(c.getName(), best, Math::max) == best && !out.order.contains(c.getName())) {
+                        out.order.add(c.getName());
+                    }
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            out.failed = true;
+            out.byName.clear();
+            out.order.clear();
+        }
+        return out;
+    }
+
+    /** integrate-1110: a playable ability of this card from hand has the effect. */
+    private static boolean has(final ACard a, final EffKind kind) {
+        if (a == null) {
+            return false;
+        }
+        for (ForcedWinModel.Abil ab : a.fromHand) {
+            if (!ab.unplayable && ab.has(kind)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** integrate-1110: the seat holds a card that searches its library (a spell in hand, or an ability on the battlefield). */
+    private boolean holdsSearch(final Game g) {
+        for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield}) {
+            for (Card c : me.getCardsIn(z)) {
+                final ACard a = reader.card(g, me, c);
+                if (a == null) {
+                    continue;
+                }
+                for (ForcedWinModel.Abil ab : z == ZoneType.Hand ? a.fromHand : a.onBattlefield) {
+                    if (!ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     /** The planner can end the game with this card: it wins on entry or on a small library, or an ability wins, drains or mills. */
     static boolean endsGames(final ACard a) {
         if (a == null) {

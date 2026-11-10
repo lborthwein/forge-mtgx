@@ -312,6 +312,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * goldfish does). No line, or the pick not on the menu: the policy's answer, no floor. The opponent's asks are
          * untouched. Keys: nodes (one screen's planner nodes, 12000), maxNodes (the call's, 36000), ms (work-clock cap of
          * the call, 4000), floorW (1.0).
+         * <p>The floor pays for the opponent's direct line: at the leaf it is floorW x value x (1 - R_opp), R_opp the
+         * opponent's reach read there (the spec's own with reach.oppBeta; else its no-new-card line, read for floored
+         * leaves only). A play-out that ended the game has no leaf, so no floor.
+         * <p>askNodes (0 = off, the default): a search of the seat's own library that the plan does not answer (a tutor
+         * for any card, where the plan finds nothing). Once per root position (reach gate open, the seat holds a card
+         * that searches its library) the planner's goldfish is run from the root with each card of the seat's unknown
+         * library as its NEXT DRAW
+         * ({@link forge.ai.simulation.ForcedWinSolver#nextDraws}: askNodes planner nodes for the whole table, askScreen a
+         * screen, 1500; cards that can end the game or choose from the library first). In every play-out of the decision a
+         * single-pick CARDS ask of the searching seat whose options are cards of its library, from a resolving effect that
+         * puts the card into its hand or on its library, reads that table: the option of the highest value is taken when
+         * alpha x (its value - the policy's pick's) is above askMargin (0.02), and the play-out carries floorW x that value;
+         * else the policy's pick stands (and carries its own value when that stands out from the no-new-card goldfish by
+         * the same rule). A lookup in the play-out: no planner work there, the same answer in every world and candidate.
          */
         public JsonObject nestedChoice;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
@@ -1474,6 +1488,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         nestedPlan = null; // integrate-1110: one root decision's only
+        nestedDraws = null;
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
             tap("cpu_cap", null, null, 0, VOID);
@@ -1501,6 +1516,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // integrate-1110: this decision's plan for its play-outs' card picks, after the budget's start: its planner
             // nodes are this decision's work and count against its budget like the search's own
             nestedPlan = planNested(g, me, knownTopOf(liveKnow, me));
+            nestedDraws = drawsNested(g, me, knownTopOf(liveKnow, me)); // 4c: the next-draw table (askNodes; null = off)
+            if (nestedDraws != null || g.getPhaseHandler().getTurn() != nestedDrawsLiveTurn) {
+                // the live ask of a search cast at this decision reads the same table; a later decision of the turn with
+                // no table (the search is on the stack: no card that searches is held any more) leaves it
+                nestedDrawsLive = nestedDraws;
+                nestedDrawsLiveTurn = g.getPhaseHandler().getTurn();
+            }
             final forge.game.phase.PhaseHandler nph = g.getPhaseHandler();
             if (g.getStack().isEmpty() && nph.isPlayerTurn(me)
                     && (nph.is(forge.game.phase.PhaseType.MAIN1) || nph.is(forge.game.phase.PhaseType.MAIN2))) {
@@ -2430,6 +2452,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 return changed ? new short[] {(short) hit} : null;
             }
+            // 4c: a search of the library the plan does not answer reads the table its play-outs read
+            final int dp = nestedLiveDraw(g, me, m, greedy);
+            if (dp != DRAW_NONE) {
+                nestedDrawLive.incrementAndGet();
+                if (cfg.decisionLog != null || rowsWanted) {
+                    final JsonObject row = new JsonObject();
+                    row.addProperty("game_uid", Long.toUnsignedString(uid));
+                    row.addProperty("dec_idx", frame.decIdx);
+                    row.addProperty("turn", g.getPhaseHandler().getTurn());
+                    row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+                    row.addProperty("kind", "choice");
+                    row.addProperty("family", RlSchema.familyName(m.family));
+                    row.addProperty("src", ChoiceScorer.srcOf(g));
+                    row.addProperty("nested_draw", true);
+                    row.addProperty("picked", dp >= 0 ? m.cands.get(dp).host.getName() : "policy");
+                    row.addProperty("scored", false);
+                    row.addProperty("departed", dp >= 0);
+                    addRow(row);
+                }
+                return dp >= 0 ? new short[] {(short) dp} : null;
+            }
         }
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
@@ -2520,6 +2563,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
         nestedPlan = null; // integrate-1110: a block search's play-outs have no plan of this kind
+        nestedDraws = null;
         blockAsks++;
         lastProposeMs = -1;
         if (m.family != RlSchema.F_BLOCK || greedy == null || greedy.length != m.S() || m.S() == 0
@@ -3127,7 +3171,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ne.addProperty("answered", nestedAnswered.get());
             ne.addProperty("changed", nestedChanged.get());
             ne.addProperty("floors", nestedFloors.get());
+            ne.addProperty("floors_void", nestedFloorsVoid.get());
             ne.addProperty("live_picks", nestedLivePicks.get());
+            if (nestedCfg != null && nestedCfg.askNodes > 0) {
+                // 4c: next-draw tables planned, root decisions that reused the last one (same position), those with a
+                // line for some card, their planner nodes and time; play-out asks answered (or floored) from a table
+                ne.addProperty("draw_tables", nestedDrawTables.get());
+                ne.addProperty("draw_reuses", nestedDrawReuses.get());
+                ne.addProperty("draw_lines", nestedDrawLines.get());
+                ne.addProperty("draw_nodes", nestedDrawNodes.get());
+                ne.addProperty("draw_ms", nestedDrawNanos.get() / 1_000_000L);
+                ne.addProperty("draw_answered", nestedDrawAnswered.get());
+                ne.addProperty("draw_live", nestedDrawLive.get());
+            }
             o.add("nested", ne);
         }
         if (teachLeaves.get() > 0) {
@@ -3649,18 +3705,37 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 leafTeacher(rc, k, g, me, out);
             }
         }
-        if (copyCtx instanceof CopyCtx && ((CopyCtx) copyCtx).nestedPot > 0) {
-            // integrate-1110 (nestedChoice): the plan whose pick this play-out took is this leaf's potential at least
-            final double f = ((CopyCtx) copyCtx).nestedPot;
-            if (Double.isNaN(out[0]) || f > out[0]) {
-                out[0] = f;
-                nestedFloors.incrementAndGet();
-            }
-        }
         if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
             final forge.ai.simulation.ForcedWinSolver.Reach ro = reachOpp(k, g, me.getOpponents().get(0), rc);
             out[1] = ro.failed ? Double.NaN : ro.p;
             addCost(out, ro);
+        }
+        if (copyCtx instanceof CopyCtx && ((CopyCtx) copyCtx).nestedPot > 0) {
+            // integrate-1110 (nestedChoice): the line whose pick this play-out took is this leaf's potential at least,
+            // less the opponent's direct line read HERE (after the play): a line that needs more turns is lost to a
+            // kill on the opponent's next turn, so that part is not discounted by oppBeta. With oppBeta the opponent's
+            // reach is the leaf's own (above); without it, it is read for floored leaves only.
+            double ro = out[1];
+            if (!(rc.oppBeta > 0) && me.getOpponents().size() == 1) {
+                final forge.ai.simulation.ForcedWinSolver.ReachOpts oo = rc.opts();
+                oo.maxNames = 0;
+                final Player opp = me.getOpponents().get(0);
+                final Object reader = reachReaders.computeIfAbsent(opp.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.Reach r2 = forge.ai.simulation.ForcedWinSolver
+                        .withReader(opp, reachSolverCfg, reader).reach(g, knownTopOf(k, opp), oo);
+                ro = r2.failed ? Double.NaN : r2.p;
+                addCost(out, r2);
+            }
+            // and nothing when the opponent's visible clock kills us here before our line's next turn (the planner's own
+            // rule for a line that passes the turn, read at the leaf: after the play's life loss, on the leaf's board)
+            final double f = clockKills(g, me) ? 0.0
+                    : ((CopyCtx) copyCtx).nestedPot * (1.0 - (Double.isNaN(ro) ? 0.0 : Math.max(0.0, Math.min(1.0, ro))));
+            if (f > 0 && (Double.isNaN(out[0]) || f > out[0])) {
+                out[0] = f;
+                nestedFloors.incrementAndGet();
+            } else if (!(f > 0)) {
+                nestedFloorsVoid.incrementAndGet();
+            }
         }
         if (cfg.valueSink != null && (out[0] > 0 || out[1] > 0 || leafSeen.getAndIncrement() % LEAF_KEEP == 0)) {
             // a sink row: every leaf with a reach above 0 (either seat) and one in LEAF_KEEP of the others, with the
@@ -3700,6 +3775,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public long ms = 4_000;
         /** The share of the line's goldfish value a play-out that took its pick carries to its leaf as potential. */
         public double floorW = 1.0;
+        /**
+         * 4c (askNodes 0 = off): the next-draw table's planner nodes for a root position, one screen's nodes, and the
+         * margin by which alpha x a value must stand out for a play-out's pick or floor.
+         */
+        public long askNodes = 0;
+        public int askScreen = 1_500;
+        public double askMargin = 0.02;
 
         public static NestedCfg parse(final JsonObject o) {
             final NestedCfg c = new NestedCfg();
@@ -3709,11 +3791,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     case "maxNodes": c.maxNodes = o.get(k).getAsLong(); break;
                     case "ms": c.ms = o.get(k).getAsLong(); break;
                     case "floorW": c.floorW = o.get(k).getAsDouble(); break;
+                    case "askNodes": c.askNodes = o.get(k).getAsLong(); break;
+                    case "askScreen": c.askScreen = o.get(k).getAsInt(); break;
+                    case "askMargin": c.askMargin = o.get(k).getAsDouble(); break;
                     default: throw new IllegalArgumentException("nestedChoice: unknown key " + k);
                 }
             }
             if (c.nodes < 1 || c.maxNodes < c.nodes || !(c.floorW >= 0 && c.floorW <= 1)) {
                 throw new IllegalArgumentException("nestedChoice: nodes >= 1, maxNodes >= nodes, floorW in [0, 1]");
+            }
+            if (c.askNodes < 0 || c.askScreen < 1 || !(c.askMargin >= 0)) {
+                throw new IllegalArgumentException("nestedChoice: askNodes >= 0, askScreen >= 1, askMargin >= 0");
             }
             return c;
         }
@@ -3851,18 +3939,37 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /**
      * nestedChoice, play-out thread: the searching seat's CARDS ask in play-out {@code g}. When the resolving card is a
-     * step of this root decision's plan, the plan's next pick for it (the steps to answer with), and the play-out's leaf
-     * floor is set; else null (the policy's answer stands, no floor). A lookup: no planner work here.
+     * step of this root decision's plan, the plan's next pick for it. Else, with askNodes, a search of the seat's own
+     * library reads the root's next-draw table ({@link #drawPick}). The steps to answer with, and the play-out's leaf
+     * floor is set; or null (the policy's answer stands). Lookups only: no planner work here.
      */
     public short[] nestedAnswer(final Object copyCtx, final Game g, final Player me, final RlCandidates.Menu m,
             final short[] greedy) {
         final NestedPlan np = nestedPlan;
-        if (np == null || !(copyCtx instanceof CopyCtx) || m.family != RlSchema.F_CARDS || !ChoiceWindow.singlePick(m)) {
+        final forge.ai.simulation.ForcedWinSolver.NextDraws nd = nestedDraws;
+        if (np == null && nd == null || !(copyCtx instanceof CopyCtx) || m.family != RlSchema.F_CARDS
+                || !ChoiceWindow.singlePick(m)) {
             return null;
         }
         nestedAsks.incrementAndGet();
         final CopyCtx cc = (CopyCtx) copyCtx;
-        final int hit = planPick(np, cc.nestedSeen, g, m, -1);
+        int hit = planPick(np, cc.nestedSeen, g, m, -1);
+        double pot = np == null ? 0.0 : np.pot;
+        if (hit < 0 && nd != null) {
+            final double[] v = new double[1];
+            final int d = drawPick(nd, nestedCfg, reachCfg().alpha, g, me, m, greedy, v);
+            if (d == DRAW_NONE) {
+                return null;
+            }
+            nestedDrawAnswered.incrementAndGet();
+            if (d == DRAW_OWN) {
+                // the policy's own pick stands, and its value is this play-out's floor
+                cc.nestedPot = Math.max(cc.nestedPot, v[0]);
+                return null;
+            }
+            hit = d;
+            pot = v[0];
+        }
         if (hit < 0) {
             return null;
         }
@@ -3870,8 +3977,247 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (greedy == null || greedy.length != 1 || greedy[0] != hit) {
             nestedChanged.incrementAndGet();
         }
-        cc.nestedPot = Math.max(cc.nestedPot, np.pot);
+        cc.nestedPot = Math.max(cc.nestedPot, pot);
         return new short[] {(short) hit};
+    }
+
+    // ---- 4c: a search of the seat's own library that the plan does not answer (the root's next-draw table)
+
+    /** The root position's next-draw table for the decision in progress (null = off, or nothing to read). */
+    private volatile forge.ai.simulation.ForcedWinSolver.NextDraws nestedDraws;
+    /** The last table and the root position it was planned at: the next decision at the same position reads it again. */
+    private String nestedDrawsKey;
+    private forge.ai.simulation.ForcedWinSolver.NextDraws nestedDrawsKept;
+    /**
+     * 4c (report only): tables planned, decisions that reused the last one, tables with a line for some card, their
+     * planner nodes and time; play-out asks answered or floored from a table.
+     */
+    public final java.util.concurrent.atomic.AtomicLong nestedDrawTables = new java.util.concurrent.atomic.AtomicLong(),
+            nestedDrawReuses = new java.util.concurrent.atomic.AtomicLong(), nestedDrawLines = new java.util.concurrent.atomic.AtomicLong(),
+            nestedDrawNodes = new java.util.concurrent.atomic.AtomicLong(), nestedDrawNanos = new java.util.concurrent.atomic.AtomicLong(),
+            nestedDrawAnswered = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * nestedChoice.askNodes, decision thread, on this decision's work clock: the root's next-draw table, or null (off,
+     * the gate closed, no card that ends the game, no line for any card, or the call failed). Planned once per root
+     * position: a decision at the position of the last one (same turn, phase, stack, both battlefields and lives, the
+     * seat's hand, graveyard, library size and known top) reads the last table. Never throws.
+     */
+    public forge.ai.simulation.ForcedWinSolver.NextDraws drawsNested(final Game g, final Player me, final List<Integer> knownTop) {
+        if (cfg.nestedChoice == null || cfg.reach == null || !reachGateOpen()) {
+            return null;
+        }
+        try {
+            if (nestedCfg == null) {
+                nestedCfg = NestedCfg.parse(cfg.nestedChoice);
+            }
+            if (!(nestedCfg.askNodes > 0)) {
+                return null;
+            }
+            final String key = rootKey(g, me, knownTop);
+            if (key.equals(nestedDrawsKey)) {
+                nestedDrawReuses.incrementAndGet();
+                return nestedDrawsKept;
+            }
+            final long t0 = System.nanoTime();
+            final ReachCfg rc = reachCfg();
+            final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+            final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+            o.nodes = nestedCfg.askScreen;
+            o.ms = nestedCfg.ms;
+            final forge.ai.simulation.ForcedWinSolver.NextDraws d = forge.ai.simulation.ForcedWinSolver
+                    .withReader(me, reachSolverCfg, reader).nextDraws(g, knownTop, o, rc.maxNames, rc.sig, nestedCfg.askNodes);
+            nestedDrawTables.incrementAndGet();
+            nestedDrawNodes.addAndGet(d.nodes);
+            nestedDrawNanos.addAndGet(System.nanoTime() - t0);
+            boolean line = false;
+            for (double x : d.byName.values()) {
+                line |= x > 0;
+            }
+            if (line) {
+                nestedDrawLines.incrementAndGet();
+            }
+            nestedDrawsKey = key;
+            nestedDrawsKept = d.failed || !line ? null : d;
+            return nestedDrawsKept;
+        } catch (RuntimeException | StackOverflowError e) {
+            return null;
+        }
+    }
+
+    /** The root position as the next-draw table reads it (see {@link #drawsNested}). */
+    static String rootKey(final Game g, final Player me, final List<Integer> knownTop) {
+        final StringBuilder sb = new StringBuilder();
+        sb.append(g.getPhaseHandler().getTurn()).append(' ').append(g.getPhaseHandler().getPhase())
+                .append(g.getPhaseHandler().isPlayerTurn(me) ? " mine" : " theirs").append('|');
+        for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+            sb.append(si.getSourceCard() == null ? "?" : si.getSourceCard().getName()).append(',');
+        }
+        for (Player p : g.getRegisteredPlayers()) {
+            final List<String> bf = new ArrayList<>();
+            for (forge.game.card.Card c : p.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+                bf.add(c.getName() + (c.isTapped() ? "/T" : "") + (c.isSick() ? "/s" : ""));
+            }
+            Collections.sort(bf);
+            sb.append('|').append(p == me ? "me " : "opp ").append(p.getLife()).append(' ').append(bf).append(' ')
+                    .append(p.getCardsIn(forge.game.zone.ZoneType.Hand).size()).append(' ')
+                    .append(p.getCardsIn(forge.game.zone.ZoneType.Library).size()).append(' ').append(p.getLandsPlayedThisTurn());
+        }
+        for (forge.game.zone.ZoneType z : new forge.game.zone.ZoneType[] {forge.game.zone.ZoneType.Hand, forge.game.zone.ZoneType.Graveyard,
+            forge.game.zone.ZoneType.Exile}) {
+            final List<String> names = new ArrayList<>();
+            for (forge.game.card.Card c : me.getCardsIn(z)) {
+                names.add(c.getName());
+            }
+            Collections.sort(names);
+            sb.append('|').append(names);
+        }
+        return sb.append('|').append(knownTop).toString();
+    }
+
+    /** nestedChoice (report only): floored leaves whose floor the opponent's clock or direct line took away. */
+    public final java.util.concurrent.atomic.AtomicLong nestedFloorsVoid = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * The opponent's visible clock kills the seat on its next attack: its creatures' combat damage, largest first, less
+     * one attacker for each untapped creature of ours, is at least our life. The planner's rule for a line that passes
+     * the turn ({@code ForcedWinPlanner.passTurn}), read on this position. No card knowledge; never throws (false).
+     */
+    static boolean clockKills(final Game g, final Player me) {
+        try {
+            if (me.getOpponents().size() != 1) {
+                return false;
+            }
+            final List<Integer> powers = new ArrayList<>();
+            for (forge.game.card.Card c : me.getOpponents().get(0).getCreaturesInPlay()) {
+                final int dmg = Math.max(0, c.getNetCombatDamage());
+                if (dmg > 0) {
+                    powers.add(dmg);
+                }
+            }
+            powers.sort(Collections.reverseOrder());
+            int blockers = 0;
+            for (forge.game.card.Card c : me.getCreaturesInPlay()) {
+                if (!c.isTapped()) {
+                    blockers++;
+                }
+            }
+            int damage = 0;
+            for (int i = blockers; i < powers.size(); i++) {
+                damage += powers.get(i);
+            }
+            return damage > 0 && damage >= me.getLife();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    static final int DRAW_NONE = -1, DRAW_OWN = -2;
+
+    /**
+     * A play-out's library search against the root's next-draw table: the candidate index to answer with (its floor in
+     * {@code v[0]}), {@link #DRAW_OWN} (the policy's pick stands and carries {@code v[0]}), or {@link #DRAW_NONE} (not a
+     * search of the seat's own library into its hand or onto its library, or no option stands out). An option's value is
+     * its name's in the table; a name the table did not plan (a land, or past the allowance) is worth the no-new-card
+     * goldfish. Among equal values the name planned first wins (a card that can end the game before one that chooses
+     * from the library, before the rest), then the name. A function of the table and the menu: no play-out state.
+     */
+    static int drawPick(final forge.ai.simulation.ForcedWinSolver.NextDraws nd, final NestedCfg nc, final double alpha,
+            final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final double[] v) {
+        try {
+            if (nd == null || nc == null || !takesCard(g)) {
+                return DRAW_NONE;
+            }
+            int best = -1;
+            int ob = 0;
+            double vb = 0.0;
+            String nb = null;
+            for (int i = 0; i < m.C(); i++) {
+                if (m.cands.get(i).kind <= 0 || m.cands.get(i).host == null) {
+                    continue;
+                }
+                final forge.game.card.Card c = m.cands.get(i).host;
+                if (c.getOwner() != me || !c.isInZone(forge.game.zone.ZoneType.Library)) {
+                    return DRAW_NONE; // not a menu of the seat's own library
+                }
+                final double x = nd.byName.getOrDefault(c.getName(), nd.blank);
+                final int at = nd.order.indexOf(c.getName());
+                final int ord = at < 0 ? Integer.MAX_VALUE : at;
+                if (best < 0 || x > vb || x == vb && (ord < ob || ord == ob && c.getName().compareTo(nb) < 0)) {
+                    best = i;
+                    vb = x;
+                    ob = ord;
+                    nb = c.getName();
+                }
+            }
+            if (best < 0) {
+                return DRAW_NONE;
+            }
+            final boolean ownCard = greedy != null && greedy.length == 1 && greedy[0] >= 0 && greedy[0] < m.C()
+                    && m.cands.get(greedy[0]).host != null;
+            final double vo = ownCard ? nd.byName.getOrDefault(m.cands.get(greedy[0]).host.getName(), nd.blank) : nd.blank;
+            if (alpha * (vb - vo) > nc.askMargin) {
+                v[0] = Math.max(0.0, Math.min(1.0, nc.floorW * vb));
+                return best;
+            }
+            if (ownCard && alpha * (vo - nd.blank) > nc.askMargin) {
+                v[0] = Math.max(0.0, Math.min(1.0, nc.floorW * vo));
+                return DRAW_OWN;
+            }
+            return DRAW_NONE;
+        } catch (RuntimeException e) {
+            return DRAW_NONE;
+        }
+    }
+
+    /**
+     * The resolving effect searches a library and gives the seat the card: the first ChangeZone from a library among the
+     * resolving ability and its sub-abilities puts it into a hand or onto a library (a tutor to hand or to the top). A
+     * search that exiles, mills or puts the card onto the battlefield is not read from a table of DRAW values.
+     */
+    static boolean takesCard(final Game g) {
+        if (g.getStack().isEmpty() || !g.getStack().isResolving()) {
+            return false;
+        }
+        SpellAbility sa = g.getStack().peekAbility();
+        for (int n = 0; sa != null && n < 12; sa = sa.getSubAbility(), n++) {
+            if (sa.getApi() == forge.game.ability.ApiType.ChangeZone && String.valueOf(sa.getParam("Origin")).contains("Library")) {
+                final String d = sa.getParam("Destination");
+                return "Hand".equals(d) || "Library".equals(d);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The table of the seat's last searched root decision and its turn: a search of the library cast at that decision and
+     * resolving in the live game that turn is answered from it too ({@link #decideChoice0}), as the play-outs that
+     * valued the cast answered it. Another turn's ask is the choice scorer's as before.
+     */
+    private forge.ai.simulation.ForcedWinSolver.NextDraws nestedDrawsLive;
+    private int nestedDrawsLiveTurn = -1;
+    /** 4c (report only): live asks answered from the table. */
+    public final java.util.concurrent.atomic.AtomicLong nestedDrawLive = new java.util.concurrent.atomic.AtomicLong();
+
+    /** The live seat's answer from the table: a candidate index, {@link #DRAW_OWN} (the policy's pick is the table's), or {@link #DRAW_NONE}. */
+    public int nestedLiveDraw(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy) {
+        if (nestedDrawsLive == null || g.getPhaseHandler().getTurn() != nestedDrawsLiveTurn || m.family != RlSchema.F_CARDS
+                || !ChoiceWindow.singlePick(m)) {
+            return DRAW_NONE;
+        }
+        return drawPick(nestedDrawsLive, nestedCfg, reachCfg().alpha, g, me, m, greedy, new double[1]);
+    }
+
+    /** Tests: the table of the root decision in progress, and planning one as decide0 does. */
+    public forge.ai.simulation.ForcedWinSolver.NextDraws nestedDraws() {
+        return nestedDraws;
+    }
+
+    public forge.ai.simulation.ForcedWinSolver.NextDraws openNestedDraws(final Game g, final Player me) {
+        nestedDraws = drawsNested(g, me, new ArrayList<>());
+        nestedDrawsLive = nestedDraws;
+        nestedDrawsLiveTurn = g.getPhaseHandler().getTurn();
+        return nestedDraws;
     }
 
     /**
