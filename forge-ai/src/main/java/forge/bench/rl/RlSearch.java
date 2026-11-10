@@ -1999,7 +1999,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     // ---- solver-distill-cc-1109: exploration (cfg.explore), training-game generation only
     private java.util.Set<Integer> exploreFams;
-    private final Map<String, int[]> exploreEligible = new TreeMap<>(), exploreDeviated = new TreeMap<>();
+    private final Map<String, int[]> exploreEligible = new TreeMap<>(), exploreDeviated = new TreeMap<>(), exploreEligibleBy = new TreeMap<>();
     private final JsonArray exploreRows = new JsonArray();
 
     private boolean exploreFamily(final int family) {
@@ -2127,6 +2127,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return null;
         }
         exploreCount(exploreEligible, m.family, frame.seat);
+        if (m.mode == RlSchema.M_SINGLE && c <= 3 && frame.seat >= 0 && frame.seat < 2) {
+            // small menus (keep / mulligan, play / draw, yes / no): the eligible asks by the policy's own answer
+            exploreEligibleBy.computeIfAbsent(RlSchema.familyName(m.family) + ":" + candLabel(m, greedy[0]), k -> new int[2])[frame.seat]++;
+        }
         final java.util.SplittableRandom rnd = exploreRng(frame, 0L);
         final double eps = cfg.explore.has("eps") ? cfg.explore.get("eps").getAsDouble() : 0.0;
         if (rnd.nextDouble() >= eps) {
@@ -3479,7 +3483,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 a2.add(e.getValue()[1]);
                 dv.add(e.getKey(), a2);
             }
+            final JsonObject eb = new JsonObject();
+            for (Map.Entry<String, int[]> e : exploreEligibleBy.entrySet()) {
+                final JsonArray a2 = new JsonArray();
+                a2.add(e.getValue()[0]);
+                a2.add(e.getValue()[1]);
+                eb.add(e.getKey(), a2);
+            }
             ex.add("eligible", el);
+            ex.add("eligible_by", eb);
             ex.add("deviated", dv);
             ex.add("rows", exploreRows);
             o.add("explore", ex);
