@@ -290,8 +290,18 @@ public final class ForcedWinSolver {
          * reads only what is already on the battlefield). (2) A resolution that puts a land from our library onto our
          * battlefield is an effect (LAND_FETCH: the land is a source with its own entry, tapped or not and at its own
          * life cost, and the library holds one card fewer); before, such a move was dropped and the ability did nothing.
+         * Scope: the offense (the proposals and the line it follows). The planner-only screens keep the old reading unless
+         * planLandsScreens is on too.
          */
         public boolean planLands = false;
+        /**
+         * planner-mana-1110 (off by default; read only with planLands): the planner-only screens read the land plans too:
+         * {@link #screen}, the reach screens ({@link #screenAt}), the goldfish and what is built on it ({@link #goldfish},
+         * {@link #setup}, {@link #potential}, the next-draw table) and {@link #pileChoices}. Off, a screen is exactly the
+         * screen without planLands: a search's leaves call them many times a decision, and a screen that finds no line
+         * would pay one more search and one sandbox drop per land name in hand at each call.
+         */
+        public boolean planLandsScreens = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -795,6 +805,7 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.planLands = "true".equals(get.apply("planLands")); // planner-mana-1110
+            c.planLandsScreens = "true".equals(get.apply("planLandsScreens")); // planner-mana-1110
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -1343,9 +1354,16 @@ public final class ForcedWinSolver {
             this.reader.planScry = true;
             this.oppReader.planScry = true;
         }
-        if (cfg.planLands) {
-            this.reader.planLands = true; // planner-mana-1110 (our own reader only: own template keys)
-        }
+        // planner-mana-1110: the land plans are read from the reader's twin (its own templates); never without the key
+        this.landReader = cfg.planLands ? this.reader.landsTwin() : null;
+    }
+
+    /** planner-mana-1110 (planLands): the reader of the positions the land plans are read from; null without the key. */
+    final ForcedWinModel.Reader landReader;
+
+    /** planner-mana-1110 ({@link Config#planLandsScreens}): the reader of a planner-only screen's cards. */
+    private ForcedWinModel.Reader screenReader() {
+        return screenLands() ? landReader : reader;
     }
 
     public Config config() {
@@ -2409,7 +2427,12 @@ public final class ForcedWinSolver {
             receipt("FW_POSITION " + pos.describe());
         }
         final long t1 = forge.game.WorkClock.nanoTime();
-        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch || hardDeadline != 0 ? t0 : forge.game.WorkClock.nanoTime());
+        final long evalFrom = cfg.paySearch || hardDeadline != 0 ? t0 : forge.game.WorkClock.nanoTime();
+        Eval best0 = evaluateTop(live, res.lines, index, evalFrom);
+        if (best0 == null && cfg.planLands && !res.landsPass) {
+            best0 = landsRetry(live, pos, lim, index, evalFrom); // planner-mana-1110 (never without the key)
+        }
+        final Eval best = best0;
         engineNanos += forge.game.WorkClock.nanoTime() - t1;
         if (cfg.engineAfterPlanFail && evalSink != null && (best == null || best.pUnopposed < 1.0 || best.pBelief < 1.0
                 || best.worldsRun < cfg.worlds)) {
@@ -2451,6 +2474,70 @@ public final class ForcedWinSolver {
                 + " copies=" + copies + (payOnly ? " paySearch" : ""));
         lastOutcome = "take";
         return best.line;
+    }
+
+    /**
+     * planner-mana-1110 (report only): decisions whose plain lines all failed in their play-outs and were searched once
+     * more with the land plans; those searches that found a line; those whose line won its unopposed play-out.
+     */
+    public int landsRetries, landsRetryFound, landsRetryWins;
+
+    /**
+     * planner-mana-1110 (solverCfg planLands): the plain search found lines and none of them won its own play-out, so the
+     * second search of {@link ForcedWinPlanner#plan} (the land plans) never ran. It runs here once per decision: this
+     * turn, then by our next turn, with the payment orders the failed lines were found with. Its cost is bounded: at most
+     * two searches of the planner's own node and time limits, started only while the decision's budget is open, and at
+     * most cfg.top lines evaluated against the same deadline as the plain lines. Null = no line that wins unopposed.
+     */
+    private Eval landsRetry(final Game live, final Position pos, final ForcedWinPlanner.Limits lim, final int index,
+            final long evalFrom) {
+        if (!pos.landPlans() || forge.ai.AiWork.spent() || evalStepsSpent()
+                || forge.game.WorkClock.nanoTime() > deadlineAt(evalFrom + budgetMs() * 1_000_000L)) {
+            return null;
+        }
+        landsRetries++;
+        final long tp = forge.game.WorkClock.nanoTime();
+        final int horizon0 = lim.horizon;
+        ForcedWinPlanner.Result res = null;
+        lim.landsOnly = true;
+        try {
+            lim.horizon = 1;
+            res = planCapped(pos, lim);
+            if (res.lines.isEmpty() && cfg.horizon >= 2) {
+                final int first = res.nodes;
+                lim.horizon = cfg.horizon;
+                res = planCapped(pos, lim);
+                res.nodes += first;
+            }
+        } finally {
+            lim.landsOnly = false;
+            if (res == null || res.lines.isEmpty()) {
+                lim.horizon = horizon0; // nothing found: the limits are those of the lines evaluated
+            }
+        }
+        plannerNanos += forge.game.WorkClock.nanoTime() - tp;
+        lastPlannerNodes += res.nodes;
+        if (res.exhausted) {
+            plannerExhausted++;
+        }
+        receipt("FORCED_WIN lands-retry" + tag() + " turn=" + pos.turn + " " + res.summary()
+                + (res.lines.isEmpty() ? "" : " best=" + res.lines.get(0)));
+        if (res.lines.isEmpty()) {
+            return null;
+        }
+        landsRetryFound++;
+        if (cfg.followPay) {
+            for (Line l : res.lines) {
+                for (Step st : l.steps) {
+                    st.forceLife = st.phyrexianLife; // kill-line-1106, as for the plain lines
+                }
+            }
+        }
+        final Eval best = evaluateTop(live, res.lines, index, evalFrom);
+        if (best != null) {
+            landsRetryWins++;
+        }
+        return best;
     }
 
     // ------------------------------------------------------------------ search-bones-1015: lines as proposals
@@ -4228,11 +4315,11 @@ public final class ForcedWinSolver {
     public List<List<Integer>> pileChoices(final Game g, final int hostId, final int nodes, final long ms, final int top) {
         final List<List<Integer>> out = new ArrayList<>();
         try {
-            final Position pos = readPosition(g, new ArrayList<>());
+            final Position pos = readPosition(g, new ArrayList<>(), screenLands());
             if (pos == null) {
                 return out;
             }
-            final ForcedWinPlanner.Limits lim = limits();
+            final ForcedWinPlanner.Limits lim = screenLimits(); // planner-mana-1110: a screen (planLandsScreens)
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
@@ -4317,12 +4404,12 @@ public final class ForcedWinSolver {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
-            final Position pos = readPosition(g, knownTop);
+            final Position pos = readPosition(g, knownTop, screenLands());
             if (pos == null) {
                 s.failed = true;
                 return s;
             }
-            final ForcedWinPlanner.Limits lim = limits();
+            final ForcedWinPlanner.Limits lim = screenLimits(); // planner-mana-1110: a screen (planLandsScreens)
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
@@ -4672,7 +4759,7 @@ public final class ForcedWinSolver {
             final java.util.Set<String> seen = new java.util.HashSet<>();
             for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Library}) {
                 for (Card c : me.getCardsIn(z)) {
-                    if (seen.add(c.getName()) && endsGames(reader.card(g, me, c))) {
+                    if (seen.add(c.getName()) && endsGames(screenReader().card(g, me, c))) {
                         return true;
                     }
                 }
@@ -4702,7 +4789,7 @@ public final class ForcedWinSolver {
             final java.util.Set<String> seen = new java.util.HashSet<>();
             for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Library}) {
                 for (Card c : me.getCardsIn(z)) {
-                    if (seen.add(c.getName()) && endsGames(reader.card(g, me, c))) {
+                    if (seen.add(c.getName()) && endsGames(screenReader().card(g, me, c))) {
                         ender = true;
                         break;
                     }
@@ -4766,7 +4853,7 @@ public final class ForcedWinSolver {
             // names that can end the game or choose from the library first, then the most copies
             final java.util.Map<List<Card>, Integer> rank = new java.util.IdentityHashMap<>();
             for (List<Card> grp : groups) {
-                final ACard a = reader.card(g, me, grp.get(0));
+                final ACard a = screenReader().card(g, me, grp.get(0));
                 rank.put(grp, endsGames(a) ? 0 : chooses(a) ? 1 : 2);
             }
             groups.sort((a, c) -> rank.get(a) != rank.get(c).intValue() ? Integer.compare(rank.get(a), rank.get(c))
@@ -4880,7 +4967,7 @@ public final class ForcedWinSolver {
             }
             final java.util.Map<List<Card>, Integer> rank = new java.util.IdentityHashMap<>();
             for (List<Card> grp : groups) {
-                final ACard a = reader.card(g, me, grp.get(0));
+                final ACard a = screenReader().card(g, me, grp.get(0));
                 rank.put(grp, has(a, EffKind.PILE) ? 0 : endsGames(a) ? 1 : chooses(a) ? 2 : 3);
             }
             groups.sort((a, c) -> rank.get(a) != rank.get(c).intValue() ? Integer.compare(rank.get(a), rank.get(c))
@@ -4941,7 +5028,7 @@ public final class ForcedWinSolver {
     private boolean holdsSearch(final Game g) {
         for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield}) {
             for (Card c : me.getCardsIn(z)) {
-                final ACard a = reader.card(g, me, c);
+                final ACard a = screenReader().card(g, me, c);
                 if (a == null) {
                     continue;
                 }
@@ -5001,7 +5088,7 @@ public final class ForcedWinSolver {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
-            final Position pos = readPosition(g, knownTop);
+            final Position pos = readPosition(g, knownTop, screenLands());
             if (pos == null) {
                 s.failed = true;
                 return s;
@@ -5017,7 +5104,7 @@ public final class ForcedWinSolver {
             if (!nexts.isEmpty()) {
                 final List<Integer> order = pos.knownOrder == null ? new ArrayList<>() : new ArrayList<>(pos.knownOrder);
                 for (Card next : nexts) {
-                    pos.knownTop.add(reader.card(g, me, next));
+                    pos.knownTop.add(screenReader().card(g, me, next));
                     order.add(next.getId());
                 }
                 pos.knownOrder = order;
@@ -5035,13 +5122,13 @@ public final class ForcedWinSolver {
                 final List<Card> rest = new ArrayList<>(lib.subList(Math.min(lib.size(), base), lib.size()));
                 rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
                 for (Card c : rest) {
-                    pos.library.add(reader.card(g, me, c));
+                    pos.library.add(screenReader().card(g, me, c));
                 }
                 if (pos.graveyard.isEmpty()) {
                     final List<Card> gy = new ArrayList<>(me.getCardsIn(ZoneType.Graveyard));
                     gy.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
                     for (Card c : gy) {
-                        pos.graveyard.add(reader.card(g, me, c));
+                        pos.graveyard.add(screenReader().card(g, me, c));
                     }
                 }
             }
@@ -5052,7 +5139,7 @@ public final class ForcedWinSolver {
             boolean untapped = false;
             final java.util.Set<String> types = new java.util.LinkedHashSet<>();
             for (Card c : grant) {
-                final ACard a = reader.card(g, me, c);
+                final ACard a = screenReader().card(g, me, c);
                 if (!a.land) {
                     continue;
                 }
@@ -5081,8 +5168,11 @@ public final class ForcedWinSolver {
                         break;
                     }
                 }
+                if (pos.landLibrary != null) {
+                    pos.landLibrary.removeIf(x -> x.id == c.getId()); // planner-mana-1110: it is the known top now
+                }
             }
-            final ForcedWinPlanner.Limits lim = limits();
+            final ForcedWinPlanner.Limits lim = screenLimits(); // planner-mana-1110: a screen (planLandsScreens)
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
@@ -5140,10 +5230,10 @@ public final class ForcedWinSolver {
         }
         final List<ACard> models = new ArrayList<>();
         for (List<Card> grp : byName) {
-            models.add(reader.card(g, me, grp.get(0)));
+            models.add(screenReader().card(g, me, grp.get(0)));
         }
         for (Card c : ours) {
-            addFilterNames(reader.card(g, me, c), keep);
+            addFilterNames(screenReader().card(g, me, c), keep);
         }
         for (ACard a : models) {
             addFilterNames(a, keep);
@@ -5179,7 +5269,7 @@ public final class ForcedWinSolver {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
-            final Position pos = readPosition(g, knownTop);
+            final Position pos = readPosition(g, knownTop, screenLands());
             if (pos == null) {
                 s.failed = true;
                 return s;
@@ -5192,7 +5282,7 @@ public final class ForcedWinSolver {
                     s.failed = true; // the known top was not read as given
                     return s;
                 }
-                final ACard nc = reader.card(g, me, next);
+                final ACard nc = screenReader().card(g, me, next);
                 pos.knownTop.add(nc);
                 boolean chooses = false;
                 for (ForcedWinModel.Abil ab : nc.fromHand) {
@@ -5204,13 +5294,13 @@ public final class ForcedWinSolver {
                     final List<Card> rest = new ArrayList<>(lib.subList(Math.min(lib.size(), pos.knownTop.size() - 1), lib.size()));
                     rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
                     for (Card c : rest) {
-                        pos.library.add(reader.card(g, me, c));
+                        pos.library.add(screenReader().card(g, me, c));
                     }
                     if (pos.graveyard.isEmpty()) {
                         final List<Card> gy = new ArrayList<>(me.getCardsIn(ZoneType.Graveyard));
                         gy.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
                         for (Card c : gy) {
-                            pos.graveyard.add(reader.card(g, me, c));
+                            pos.graveyard.add(screenReader().card(g, me, c));
                         }
                     }
                 }
@@ -5223,8 +5313,11 @@ public final class ForcedWinSolver {
                         break;
                     }
                 }
+                if (pos.landLibrary != null) {
+                    pos.landLibrary.removeIf(x -> x.id == next.getId()); // planner-mana-1110: it is the known top now
+                }
             }
-            final ForcedWinPlanner.Limits lim = limits();
+            final ForcedWinPlanner.Limits lim = screenLimits(); // planner-mana-1110: a screen (planLandsScreens)
             lim.nodes = nodes;
             lim.ms = ms;
             lim.payPolicies = 1;
@@ -5269,6 +5362,24 @@ public final class ForcedWinSolver {
     }
 
     Position readPosition(Game live, List<Integer> knownOrder) {
+        return readPosition(live, knownOrder, cfg.planLands);
+    }
+
+    /** planner-mana-1110 ({@link Config#planLandsScreens}): a planner-only screen reads the land plans only with that key. */
+    private boolean screenLands() {
+        return cfg.planLands && cfg.planLandsScreens;
+    }
+
+    /** planner-mana-1110: {@link #limits} for a planner-only screen. */
+    private ForcedWinPlanner.Limits screenLimits() {
+        final ForcedWinPlanner.Limits lim = limits();
+        lim.planLands = screenLands();
+        return lim;
+    }
+
+    /** As above; {@code lands}: read the position's land plans (planLands, in the caller's scope). */
+    Position readPosition(Game live, List<Integer> knownOrder, final boolean lands) {
+        final ForcedWinModel.Reader reader = lands ? landReader : this.reader; // planner-mana-1110
         if (cfg.honestProbes) {
             return forge.bench.PlayerControllerBridge.isolated(live, () -> forge.util.IdScope.detached(() -> {
                 final Game g = honestProbeRoot(live, knownOrder);
@@ -5277,7 +5388,7 @@ public final class ForcedWinSolver {
                 if (cfg.sourceColorsLive && hp != null) {
                     ForcedWinModel.Reader.readSourceColors(hp, pg); // ledger-sweep2-1107
                 }
-                if (cfg.planLands && hp != null) {
+                if (lands && hp != null) {
                     reader.readLandDrops(hp, g, pg); // planner-mana-1110 (after the live colors: it compares with them)
                 }
                 return hp;
@@ -5290,7 +5401,7 @@ public final class ForcedWinSolver {
         if (cfg.sourceOutput && pos != null) {
             ForcedWinModel.Reader.readSourceOutputs(pos, me); // kill-line-1106
         }
-        if (cfg.planLands && pos != null) {
+        if (lands && pos != null) {
             reader.readLandDrops(pos, live, me); // planner-mana-1110 (after the live colors and outputs: it compares with them)
         }
         return pos;
@@ -6514,6 +6625,7 @@ public final class ForcedWinSolver {
             known.add(c.getId());
         }
         final Position pos;
+        final ForcedWinModel.Reader reader = cfg.planLands ? landReader : this.reader; // planner-mana-1110
         synchronized (reader) {
             pos = reader.read(g, p, known, true);
         }
@@ -7644,6 +7756,7 @@ public final class ForcedWinSolver {
                 + replans + " plannerMs=" + plannerNanos / 1_000_000 + " engineMs=" + engineNanos / 1_000_000
                 + (plannerExhausted == 0 ? "" : " plannerExhausted=" + plannerExhausted)
                 + (planFailEngineTakes == 0 ? "" : " planFailEngineTakes=" + planFailEngineTakes)
+                + (landsRetries == 0 ? "" : " landsRetries=" + landsRetries + "/" + landsRetryFound + "/" + landsRetryWins)
                 + (verifyReplans == 0 ? "" : " verifyReplans=" + verifyReplans + "/" + verifyReplanLines)
                 + " copies=" + copies + " " + reader.probeStats.summary()
                 + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)

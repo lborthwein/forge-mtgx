@@ -427,6 +427,11 @@ public final class ForcedWinPlanner {
          * planner without the key makes, so a position that has a line without the key keeps exactly that result.
          */
         boolean planLands;
+        /**
+         * planner-mana-1110 (read only with planLands): the search reads the land plans at once, without the plain search
+         * before it. The solver asks for this once, after every line of the plain search failed in its game copies.
+         */
+        boolean landsOnly;
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -647,6 +652,13 @@ public final class ForcedWinPlanner {
 
     static Result plan(Position pos, Limits lim) {
         final long t0 = forge.game.WorkClock.nanoTime();
+        if (lim.planLands && lim.landsOnly) {
+            // planner-mana-1110: the plain search's lines are known already (they failed in the game): the land plans only
+            final Result only = pos.landPlans() ? new ForcedWinPlanner(pos, lim, true).run() : new Result();
+            only.landsPass = true;
+            only.nanos = forge.game.WorkClock.nanoTime() - t0;
+            return only;
+        }
         Result r = new ForcedWinPlanner(pos, lim).run();
         if (lim.planLands && r.lines.isEmpty() && pos.landPlans()) {
             // planner-mana-1110: no line in the plain search: once more with the position's land plans
@@ -696,7 +708,8 @@ public final class ForcedWinPlanner {
         }
         s.devotion = pos.devotionBlue;
         s.emptyDrawWin = pos.emptyDrawWinLive;
-        for (ACard a : pos.library) {
+        // planner-mana-1110: the lands pass of a position whose library was not loaded searches the land library
+        for (ACard a : lands && pos.library.isEmpty() && pos.landLibrary != null ? pos.landLibrary : pos.library) {
             s.libPool.add(idx(a));
         }
         for (ACard a : pos.graveyard) {

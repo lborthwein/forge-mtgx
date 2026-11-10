@@ -91,6 +91,12 @@ public class PlanLandsTest extends forge.ai.AITest {
         Assert.assertFalse(HonestGenerator.solverCfgJson(ForcedWinSolver.Config.fromProps(k -> null)).has("planLands"));
         Assert.assertTrue(HonestGenerator.solverCfgJson(ForcedWinSolver.Config.fromProps(Map.of("planLands", "true")::get))
                 .has("planLands"));
+        // the screens' key is a second one, off by default too, and a recorded config names it only when it is on
+        Assert.assertFalse(ForcedWinSolver.Config.fromProps(Map.of("planLands", "true")::get).planLandsScreens);
+        Assert.assertFalse(HonestGenerator.solverCfgJson(ForcedWinSolver.Config.fromProps(Map.of("planLands", "true")::get))
+                .has("planLandsScreens"));
+        Assert.assertTrue(HonestGenerator.solverCfgJson(ForcedWinSolver.Config.fromProps(
+                Map.of("planLands", "true", "planLandsScreens", "true")::get)).has("planLandsScreens"));
     }
 
     // ------------------------------------------------------------------ defect 1: a land drop under a continuous effect
@@ -412,13 +418,18 @@ public class PlanLandsTest extends forge.ai.AITest {
         return m;
     }
 
+    /** The solver of the last {@link #propose} call (its report counters). */
+    private static ForcedWinSolver last;
+
     private static List<ForcedWinSolver.Proposal> propose(final String tag, final String frame, final int seat, final boolean on) {
         final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
         final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get(seat), ForcedWinSolver.Config.fromProps(ugold4(on)::get));
+        last = s;
         final long t0 = System.nanoTime();
         final List<ForcedWinSolver.Proposal> p = s.propose(g);
         System.err.println("[plan-lands-test] propose " + tag + " planLands=" + on + " ms=" + (System.nanoTime() - t0) / 1_000_000
-                + " proposals=" + p.size() + " probes=" + s.reader.probeStats.summary() + " plannerNodes=" + s.meter.plannerNodes);
+                + " proposals=" + p.size() + " probes=" + s.reader.probeStats.summary() + " plannerNodes=" + s.meter.plannerNodes
+                + " landsRetries=" + s.landsRetries + "/" + s.landsRetryFound + "/" + s.landsRetryWins + " copies=" + s.copies);
         for (ForcedWinSolver.Proposal x : p) {
             System.err.println("[plan-lands-test]   " + tag + " unopposed=" + x.pUnopposed + " belief=" + x.pBelief + " worlds="
                     + x.worldsRun + " " + x.text);
@@ -466,6 +477,28 @@ public class PlanLandsTest extends forge.ai.AITest {
         }
     }
 
+    /**
+     * pair-037 L0, turn 7: the plain search has lines by our next turn and every one of them fails in its game copy, so
+     * the second search (the land plans) never ran and the solver proposed nothing. With the key the solver reads the
+     * land plans once after that failure: the line through the fetched land wins its play-out.
+     */
+    @Test
+    public void whenNoPlainLineWinsItsPlayOutTheLandPlansAreReadOnce() {
+        final List<ForcedWinSolver.Proposal> off = propose("pair-037-T7 retry", PAIR_037_T7, 0, false);
+        Assert.assertEquals(last.landsRetries, 0, "off: no second search");
+        for (ForcedWinSolver.Proposal x : off) {
+            Assert.assertTrue(x.pUnopposed < 1.0 || x.engine, "off: no planner line wins: " + x.text);
+        }
+        final List<ForcedWinSolver.Proposal> on = propose("pair-037-T7 retry", PAIR_037_T7, 0, true);
+        Assert.assertEquals(last.landsRetries, 1, "on: one second search");
+        Assert.assertEquals(last.landsRetryWins, 1);
+        boolean won = false;
+        for (ForcedWinSolver.Proposal x : on) {
+            won |= x.pUnopposed >= 1.0 && !x.engine && x.winTurn == 1 && x.text.contains("ACTIVATE:Verdant Catacombs pick[");
+        }
+        Assert.assertTrue(won, "on: the line through the fetched land wins unopposed");
+    }
+
     /** The real positions through the whole solver (planner, then its own play-outs): report only. */
     @Test
     public void theRealPositionsThroughTheSolver() {
@@ -475,6 +508,94 @@ public class PlanLandsTest extends forge.ai.AITest {
         for (Object[] c : cases) {
             for (boolean on : new boolean[] {false, true}) {
                 propose((String) c[0], (String) c[1], (Integer) c[2], on);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ the planner-only screens (planLandsScreens)
+
+    private static final Object[][] REAL = {{"pair-021-T9", PAIR_021_T9, 0}, {"pair-021-L1-T16", PAIR_021_L1_T16, 1},
+            {"pair-035-T4", PAIR_035_T4, 1}, {"pair-025-T16", PAIR_025_T16, 1}, {"pair-026-T13", PAIR_026_T13, 1},
+            {"pair-037-T7", PAIR_037_T7, 0}, {"pair-037-T9", PAIR_037_T9, 0}};
+
+    /**
+     * The three screens a search calls (the plain screen, the reach over the next draw, the goldfish with the ugold4
+     * spec's sizes; their time caps opened so the node caps decide), as text without the times. mode 0 = no key,
+     * 1 = planLands, 2 = planLands and planLandsScreens.
+     */
+    private static String[] screens(final String tag, final String frame, final int seat, final int mode) {
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        final Map<String, String> m = ugold4(mode >= 1);
+        if (mode >= 2) {
+            m.put("planLandsScreens", "true");
+        }
+        final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get(seat), ForcedWinSolver.Config.fromProps(m::get));
+        final List<Integer> top = s.knownTop(g);
+        s.readPosition(g, top); // the templates are learned before the clock starts
+        final String[] out = new String[3];
+        final long t0 = System.nanoTime();
+        final ForcedWinSolver.Screen sc = s.screen(g, top, 2000, 5000);
+        out[0] = "screen lines=" + sc.lines + " nodes=" + sc.nodes + " turn=" + sc.bestTurn + " best=" + sc.best;
+        final long t1 = System.nanoTime();
+        final ForcedWinSolver.ReachOpts ro = new ForcedWinSolver.ReachOpts();
+        ro.nodes = 2000;
+        ro.ms = 5000;
+        ro.maxNames = 40;
+        ro.nameNodes = 1000;
+        ro.nameOnePass = true;
+        ro.skipCapped = true;
+        ro.sig = true;
+        ro.gamma = 0.9;
+        final ForcedWinSolver.Reach r = s.reach(g, top, ro);
+        out[1] = "reach p=" + r.p + " pd=" + r.pd + " direct=" + r.direct + " screens=" + r.screens + " nodes=" + r.nodes
+                + " capped=" + r.s0Capped + "/" + r.nameCapped + " skipped=" + r.skipped;
+        final long t2 = System.nanoTime();
+        final ForcedWinSolver.GoldfishOpts go = new ForcedWinSolver.GoldfishOpts();
+        go.ms = 5000;
+        final ForcedWinSolver.Goldfish gf = s.goldfish(g, top, go);
+        out[2] = "goldfish g=" + gf.g + " direct=" + gf.direct + " turn=" + gf.bestTurn + " screens=" + gf.screens + " nodes="
+                + gf.nodes + " best=" + gf.best;
+        final long t3 = System.nanoTime();
+        System.err.println("[plan-lands-test] screens " + tag + " mode=" + mode + " screenMs=" + (t1 - t0) / 1_000_000.0 + " reachMs="
+                + (t2 - t1) / 1_000_000.0 + " goldfishMs=" + (t3 - t2) / 1_000_000.0);
+        for (String o : out) {
+            System.err.println("[plan-lands-test]   " + tag + " mode=" + mode + " " + (o.length() > 420 ? o.substring(0, 420) : o));
+        }
+        return out;
+    }
+
+    private static int turnOf(final String screen) {
+        final int i = screen.indexOf(" turn=") + 6;
+        return Integer.parseInt(screen.substring(i, screen.indexOf(' ', i)));
+    }
+
+    /** planLands alone does not reach a screen: on every real position the three screens are what they are without it. */
+    @Test
+    public void theScreensAreUnchangedWithoutTheirOwnKey() {
+        for (Object[] c : REAL) {
+            final String[] off = screens((String) c[0], (String) c[1], (Integer) c[2], 0);
+            final String[] on = screens((String) c[0], (String) c[1], (Integer) c[2], 1);
+            Assert.assertEquals(on, off, (String) c[0]);
+        }
+    }
+
+    /**
+     * With planLandsScreens the screens read the land plans: where a screen had a line it keeps it (the first search is
+     * the old one), and the position whose only line needs the fetched land's mana now has one in the plain screen.
+     */
+    @Test
+    public void theScreensWithTheirKeyReadTheLandPlans() {
+        for (Object[] c : REAL) {
+            final String[] off = screens((String) c[0], (String) c[1], (Integer) c[2], 0);
+            final String[] on = screens((String) c[0], (String) c[1], (Integer) c[2], 2);
+            if (!off[0].contains("lines=0")) {
+                // a screen with a line keeps one, never a later one (a same-turn line through a land plan may come first)
+                Assert.assertFalse(on[0].contains("lines=0"), c[0] + " " + on[0]);
+                Assert.assertTrue(turnOf(on[0]) <= turnOf(off[0]), c[0] + " " + on[0] + " / " + off[0]);
+            }
+            if ("pair-035-T4".equals(c[0])) {
+                Assert.assertTrue(off[0].contains("lines=0"), off[0]);
+                Assert.assertFalse(on[0].contains("lines=0"), on[0]);
             }
         }
     }

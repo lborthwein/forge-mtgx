@@ -667,6 +667,12 @@ public final class ForcedWinModel {
     /** The starting position of a search. */
     static final class Position {
         /**
+         * planner-mana-1110 (solverCfg planLands; null = not read or not needed): the cards a land fetch of ours can find
+         * when {@link #library} was not loaded (Reader#readLandLibrary). Read by the lands pass only.
+         */
+        List<ACard> landLibrary;
+
+        /**
          * planner-mana-1110 (solverCfg planLands): this position holds something the lands pass of the planner reads: a
          * land of our hand whose sandbox drop differs from its template or changes another source, or an ability that
          * fetches a land. False = the lands pass would search the same tree again.
@@ -805,8 +811,37 @@ public final class ForcedWinModel {
 
     static final class Reader {
         final Map<String, ACard> templates = new HashMap<>();
-        final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
+        final ForcedWinProbe.Stats probeStats;
         long seed = 20261012L;
+
+        Reader() {
+            this(new ForcedWinProbe.Stats());
+        }
+
+        private Reader(final ForcedWinProbe.Stats stats) {
+            this.probeStats = stats;
+        }
+
+        /** planner-mana-1110: see {@link #landsTwin()}. */
+        private Reader landsTwin;
+
+        /**
+         * planner-mana-1110 (solverCfg planLands): this reader's twin for the positions the land plans are read from. It
+         * learns its own templates (a fetched land as LAND_FETCH, a land's paid entry), so a position read from this
+         * reader, a planner-only screen without planLandsScreens among them, is built from exactly the templates a
+         * solver without the key learns. One twin per reader (a shared reader's twin is shared with it); the probe
+         * counters are common.
+         */
+        synchronized Reader landsTwin() {
+            if (landsTwin == null) {
+                landsTwin = new Reader(probeStats);
+                landsTwin.planLands = true;
+            }
+            landsTwin.seed = seed;
+            landsTwin.planScry = planScry;
+            landsTwin.loopProbe = loopProbe;
+            return landsTwin;
+        }
 
         /**
          * blockers-1109 (ledger row 81): can {@code c} (ours, on the battlefield) block at the opponent's next
@@ -990,6 +1025,7 @@ public final class ForcedWinModel {
          * sources, when the plan plays it. A second land dropped later in the same plan keeps the view read here.
          */
         void readLandDrops(final Position p, final Game live, final Player me) {
+            readLandLibrary(p, live, me);
             final Map<String, ACard> byName = new HashMap<>();
             for (ACard a : p.hand) {
                 if (!a.land) {
@@ -1028,6 +1064,43 @@ public final class ForcedWinModel {
                 }
                 a.dropOthers = changed.stream().mapToInt(Integer::intValue).toArray();
             }
+        }
+
+        /**
+         * planner-mana-1110 (solverCfg planLands): when something of ours can fetch a land and the position did not load
+         * our library (nothing of ours searches or piles it), the cards a fetch can find are read into
+         * {@link Position#landLibrary}: the library below the known top, by id. Only the second search reads it, so the
+         * first one sees the position exactly as it is read without the key.
+         */
+        void readLandLibrary(final Position p, final Game live, final Player me) {
+            if (!p.library.isEmpty()) {
+                return; // loaded already: the fetch searches that
+            }
+            boolean fetches = false;
+            for (ACard a : p.hand) {
+                for (Abil ab : a.fromHand) {
+                    fetches |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
+                }
+                for (Abil ab : a.onBattlefield) {
+                    fetches |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
+                }
+            }
+            for (ACard a : p.battlefield) {
+                for (Abil ab : a.onBattlefield) {
+                    fetches |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
+                }
+            }
+            if (!fetches) {
+                return;
+            }
+            final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+            final List<Card> rest = new ArrayList<>(lib.subList(Math.min(lib.size(), p.knownTop.size()), lib.size()));
+            rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+            final List<ACard> out = new ArrayList<>();
+            for (Card c : rest) {
+                out.add(card(live, me, c));
+            }
+            p.landLibrary = out;
         }
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
@@ -1138,22 +1211,6 @@ public final class ForcedWinModel {
             for (ACard a : p.battlefield) {
                 for (Abil ab : a.onBattlefield) {
                     chooses |= !ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
-                }
-            }
-            if (planLands) {
-                // planner-mana-1110: something of ours can fetch a land (only a planLands template has the effect)
-                for (ACard a : p.hand) {
-                    for (Abil ab : a.fromHand) {
-                        chooses |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
-                    }
-                    for (Abil ab : a.onBattlefield) {
-                        chooses |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
-                    }
-                }
-                for (ACard a : p.battlefield) {
-                    for (Abil ab : a.onBattlefield) {
-                        chooses |= !ab.unplayable && ab.has(EffKind.LAND_FETCH);
-                    }
                 }
             }
             if (libraryIfUseful && chooses) {
