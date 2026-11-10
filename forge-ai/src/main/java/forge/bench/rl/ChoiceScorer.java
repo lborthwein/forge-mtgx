@@ -123,13 +123,27 @@ public final class ChoiceScorer {
         public int relaxTop = 6;
         public long relaxMs = 3000;
         public int relaxDraws = 2;
+        /**
+         * integrate-1110 (false = off, the default, and then nothing changes; needs reachAlpha): the reach / goldfish blend
+         * also answers the seat's OWN discards: the DISCARD_FROM family (a resolving effect's discard), COST_CARDS (a
+         * cast's card cost) and the cleanup's discard to hand size (a CARDS ask). The two families are added to
+         * {@link #families}. The options, the copies and their replay are choice-search-1109's (#233): every single card,
+         * or for a multi-pick the policy's set and its one-card swaps; an ask from a sub-ability replayed from it; a cost
+         * paid on a copy; the cleanup step replayed. Each option's leaf is screened and valued as a CARDS option is. The
+         * answer moves only when the reach part separates the options: an option replaces the policy's when its reach is
+         * above the policy's and its blended value beats the policy's by more than {@link #margin}. With equal reach the
+         * policy's discard stands (the value alone never moves a discard). Other CARDS asks are untouched.
+         */
+        public boolean reachDiscards = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
                 "settleSteps", "margin", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs",
                 // solver-distill-cc-1109
                 "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig",
                 // choice-search-1109
-                "lineOnly", "check", "checkTop", "subsetCap", "relax", "relaxTop", "relaxMs", "relaxDraws"));
+                "lineOnly", "check", "checkTop", "subsetCap", "relax", "relaxTop", "relaxMs", "relaxDraws",
+                // integrate-1110
+                "reachDiscards"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -207,6 +221,15 @@ public final class ChoiceScorer {
                 // rules for the same ask, and neither lane defined the mix
                 throw new IllegalArgumentException("choiceScorer: lineOnly / check together with reachAlpha or seqs is not defined");
             }
+            if (o.has("reachDiscards")) c.reachDiscards = o.get("reachDiscards").getAsBoolean();
+            if (c.reachDiscards) {
+                // integrate-1110: the blend's own keys must be on; the two families are asked without naming them
+                if (!(c.reachAlpha > 0) || c.screenNodes <= 0) {
+                    throw new IllegalArgumentException("choiceScorer: reachDiscards needs reachAlpha and the planner screen (screenNodes > 0)");
+                }
+                c.families.add(RlSchema.F_DISCARD_FROM);
+                c.families.add(RlSchema.F_COST_CARDS);
+            }
             return c;
         }
 
@@ -254,6 +277,9 @@ public final class ChoiceScorer {
                     o.addProperty("gfLambda", gfLambda);
                     o.addProperty("gfLands", gfLands);
                     o.addProperty("gfAskNodes", gfAskNodes);
+                }
+                if (reachDiscards) {
+                    o.addProperty("reachDiscards", true); // integrate-1110: only when on
                 }
             }
             if (seqs > 0) {
@@ -320,6 +346,8 @@ public final class ChoiceScorer {
         public int relaxed;
         public long relaxNanos;
         public boolean relaxDeparted;
+        /** integrate-1110: this ask is one of {@link Config#reachDiscards}'s (a discard of the seat's own, answered by the blend). */
+        public boolean reachDiscards;
     }
 
     /** Frames at most for one opening-hand ask. */
@@ -383,7 +411,7 @@ public final class ChoiceScorer {
 
             @Override
             public forge.ai.simulation.ForcedWinSolver.Screen screen(final Object ctx, final Game g, final Player me) {
-                if (cfg.screenNodes <= 0 || cfg.solverCfg == null) {
+                if (cfg.screenNodes <= 0 || cfg.solverCfg == null || guardProbe) {
                     return null;
                 }
                 final RlKnowledge k = ((RlFeaturizer) ctx).knowledge();
@@ -781,6 +809,32 @@ public final class ChoiceScorer {
      */
     private boolean ownDiscards = true;
 
+    /**
+     * integrate-1110 (set per ask in {@link #enumerate}): this ask is answered with choice-search-1109's apply-on-copy
+     * mechanics (the asking sub-ability's replay, a cost paid on a copy, the cleanup step, multi-pick swaps): every ask
+     * with lineOnly, and {@link Config#reachDiscards}'s own asks. With reachDiscards off this is lineOnly itself.
+     */
+    private boolean mech = false;
+    /** integrate-1110: true while the hidden guard probes a reachDiscards ask (its copies need no planner screen). */
+    private boolean guardProbe = false;
+    /** integrate-1110 (DISCARD_FROM): the player who discards, among the ask's menu objects; null when unknown. */
+    private Player askPlayer;
+
+    public void setAskPlayer(final Player p) {
+        this.askPlayer = p;
+    }
+
+    /** integrate-1110: {@link Config#reachDiscards} is on and this menu is one of its asks (no card knowledge: family and method). */
+    public boolean discardAsk(final RlCandidates.Menu m) {
+        return cfg.reachDiscards && (m.family == RlSchema.F_DISCARD_FROM || m.family == RlSchema.F_COST_CARDS
+                || m.family == RlSchema.F_CARDS && "chooseCardsToDiscardToMaximumHandSize".equals(m.method));
+    }
+
+    /** integrate-1110: the caller passes the asking ability for these asks (lineOnly: every ask, as before). */
+    public boolean mechAsk(final RlCandidates.Menu m) {
+        return cfg.lineOnly || discardAsk(m);
+    }
+
     /** choice-search-1109: one answer applied on a copy: the resolution from the asking sub-ability, or the cleanup step. */
     private ChoiceApply.Result apply(final Game g, final Player me, final List<Integer> picks, final long seed,
             final ChoiceApply.Frames fr) {
@@ -924,10 +978,18 @@ public final class ChoiceScorer {
             screenReader = null; // one reader per ask: its probes are of this position's copies
         } // choice-search-1109 pass 3: with relax, one reader per game (the solver's readerPerGame; affordances by card)
         relaxBest = Integer.MAX_VALUE;
-        ownDiscards = cfg.lineOnly || !(cfg.reachAlpha > 0 || cfg.seqs > 0) || m.family != RlSchema.F_CARDS; // integrate-1110
+        // integrate-1110: with reachDiscards off, mech is lineOnly and ownDiscards is what it was
+        s.reachDiscards = discardAsk(m);
+        mech = cfg.lineOnly || s.reachDiscards;
+        ownDiscards = mech || !(cfg.reachAlpha > 0 || cfg.seqs > 0) || m.family != RlSchema.F_CARDS;
+        if (s.reachDiscards && m.family == RlSchema.F_DISCARD_FROM && askPlayer != null && askPlayer != me) {
+            s.unsupported = "otherPlayer"; // the seat picks another player's discard: not its own cards to keep
+            s.totalNanos = System.nanoTime() - t0;
+            return s;
+        }
         // choice-search-1109: an ask from a sub-ability is replayed from that sub-ability (0 = the root, as before)
         cleanupMode = false;
-        costMode = cfg.lineOnly && m.family == RlSchema.F_COST_CARDS;
+        costMode = mech && m.family == RlSchema.F_COST_CARDS;
         castSa = costMode ? askSa : null;
         askChain = askSa == null || costMode ? 0 : ChoiceApply.chainOf(g, askSa);
         if (askChain < 0) {
@@ -938,7 +1000,7 @@ public final class ChoiceScorer {
         final int seat = g.getRegisteredPlayers().indexOf(me);
         final ChoiceApply.Frames fr = frames(know, cfg.searchedTop ? 1 << seat : 0, s);
         final long deadline = cfg.budgetMs > 0 ? (forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0) + cfg.budgetMs * 1_000_000L : Long.MAX_VALUE;
-        if (m.family == RlSchema.F_CARDS || (m.family == RlSchema.F_DISCARD_FROM || m.family == RlSchema.F_COST_CARDS) && cfg.lineOnly) {
+        if (m.family == RlSchema.F_CARDS || (m.family == RlSchema.F_DISCARD_FROM || m.family == RlSchema.F_COST_CARDS) && mech) {
             cards(g, me, m, greedy, seed, fr, s, deadline);
         } else if (m.family == RlSchema.F_MULLIGAN) {
             mulligan(g, me, m, greedy, seed, fr, s, deadline);
@@ -959,23 +1021,28 @@ public final class ChoiceScorer {
 
     private void cards(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final long seed,
             final ChoiceApply.Frames fr, final Scored s, final long deadline) {
-        final boolean subset = cfg.lineOnly && !ChoiceWindow.singlePick(m) && m.mode == RlSchema.M_SUBSET;
+        final boolean subset = mech && !ChoiceWindow.singlePick(m) && m.mode == RlSchema.M_SUBSET;
         if (!ChoiceWindow.singlePick(m) && !subset) {
             s.unsupported = "multiPick";
             return;
         }
         // choice-search-1109: the cleanup's discard to hand size is replayed on a copy of the step, not of a resolution
-        cleanupMode = cfg.lineOnly && "chooseCardsToDiscardToMaximumHandSize".equals(m.method) && ChoiceApply.cleanupAsk(g, me);
+        cleanupMode = mech && "chooseCardsToDiscardToMaximumHandSize".equals(m.method) && ChoiceApply.cleanupAsk(g, me);
         s.unsupported = costMode ? ChoiceApply.castUnsupported(g, me, castSa) : cleanupMode ? null : ChoiceApply.unsupported(g, null);
         if (s.unsupported != null) {
             return;
         }
         if (cfg.guard) {
             noCheck = true; // choice-search-1109: the guard's probe copies never spend a check
+            guardProbe = s.reachDiscards; // integrate-1110: nor a reach / goldfish screen on a reachDiscards ask
             try {
                 s.unsupported = hiddenGuard(g, me, m, seed, fr, deadline, subset ? ids(m, greedy) : null);
             } finally {
                 noCheck = false;
+                guardProbe = false;
+            }
+            if (s.reachDiscards && s.unsupported != null) {
+                return; // integrate-1110: a discard is never answered as a pile or a sequence
             }
             if ("multiAnswer".equals(s.unsupported) && cfg.pile && cfg.solverCfg != null) {
                 piles(g, me, m, seed, fr, s);
@@ -1496,6 +1563,9 @@ public final class ChoiceScorer {
         if (best != null && best.pileIds != null && !best.seq) {
             return best.screen != null && best.screen.lines > 0 ? best.steps : null;
         }
+        if (cfg.reachAlpha > 0 && s.reachDiscards) {
+            return chooseDiscard(s, own); // integrate-1110
+        }
         if (cfg.reachAlpha > 0) {
             return best == null || own == null || Double.isNaN(own.value) || best == own
                     || best.value <= own.value + cfg.margin ? null : best.steps;
@@ -1505,6 +1575,38 @@ public final class ChoiceScorer {
                 && best.value <= own.value + cfg.margin) {
             return null;
         }
+        return best.steps;
+    }
+
+    /** integrate-1110: an option's reach part (reach or goldfish, the larger), 0 when its leaf was not screened. */
+    static double reachOf(final Option o) {
+        return o == null || o.screen == null || Double.isNaN(o.screen.reach) ? 0.0 : o.screen.reach;
+    }
+
+    /**
+     * integrate-1110 ({@link Config#reachDiscards}): the policy's discard stands (null) unless another option's reach part
+     * is above its own; among those, the one with the best blended value is played when it beats the policy's by more
+     * than margin. {@link Scored#chosen} is the option played.
+     */
+    short[] chooseDiscard(final Scored s, final Option own) {
+        s.chosen = own;
+        if (own == null || Double.isNaN(own.value)) {
+            return null;
+        }
+        final double r0 = reachOf(own);
+        Option best = null;
+        for (Option o : s.options) {
+            if (o == own || Double.isNaN(o.value) || !(reachOf(o) > r0)) {
+                continue;
+            }
+            if (best == null || o.value > best.value) {
+                best = o;
+            }
+        }
+        if (best == null || best.value <= own.value + cfg.margin) {
+            return null;
+        }
+        s.chosen = best;
         return best.steps;
     }
 
@@ -1638,7 +1740,7 @@ public final class ChoiceScorer {
                     x.addProperty("check_ms", Math.round(o.screen.checkMs * 100) / 100.0);
                 }
             }
-            if (cfg.lineOnly && o == s.chosen) x.addProperty("chosen", true);
+            if ((cfg.lineOnly || s.reachDiscards) && o == s.chosen) x.addProperty("chosen", true);
             a.add(x);
         }
         r.add("options", a);
@@ -1647,6 +1749,9 @@ public final class ChoiceScorer {
             r.addProperty("checks", s.checks);
             r.addProperty("proven", s.proven);
             r.addProperty("check_ms", Math.round(s.checkNanos / 1e4) / 100.0);
+        }
+        if (s.reachDiscards) {
+            r.addProperty("reach_discards", true); // integrate-1110
         }
         if (cfg.relax > 0) {
             r.addProperty("relaxed", s.relaxed);

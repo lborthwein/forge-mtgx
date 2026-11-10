@@ -2166,6 +2166,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return null;
     }
 
+    /** integrate-1110: the discarding player among a discardFrom ask's menu objects ({validCards, sa, player}), or null. */
+    static Player askPlayer(final Object objs) {
+        if (objs instanceof Object[] a) {
+            for (Object o : a) {
+                if (o instanceof Player p) {
+                    return p;
+                }
+            }
+        }
+        return null;
+    }
+
     private short[] decideChoice0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
         if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
@@ -2188,8 +2200,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final long seed = LookaheadSearch.mix(LookaheadSearch.mix(gameSeed, 0xC401CEL), frame.decIdx);
         final String src = ChoiceScorer.srcOf(g);
         sc.setCostPart(costPartOf(objs)); // choice-search-1109 (COST_CARDS)
-        final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed,
-                sc.config().lineOnly ? askSa(objs) : null); // choice-search-1109: the asking ability (lineOnly only)
+        sc.setAskPlayer(askPlayer(objs)); // integrate-1110 (reachDiscards: whose discard)
+        // choice-search-1109: the asking ability (lineOnly only); integrate-1110: also for a reachDiscards ask (off:
+        // mechAsk is lineOnly itself)
+        final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed, sc.mechAsk(m) ? askSa(objs) : null);
         final List<byte[]> ps = sc.payloads(s);
         double[] v = null;
         if (s.unsupported == null) {
