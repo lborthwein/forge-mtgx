@@ -4790,12 +4790,12 @@ public final class ForcedWinSolver {
         public final java.util.Map<String, Double> byName = new java.util.TreeMap<>();
         /** The names in the order they were planned: cards that can end the game, then cards that choose from the library, then the rest. */
         public final List<String> order = new ArrayList<>();
-        /** The ids of the cards the seat holds that search its library (a spell in hand, an ability on the battlefield). */
-        public final List<Integer> searchers = new ArrayList<>();
         public long nodes;
         public int screens, groups;
         /** The allowance ran out before every name was planned; the call failed (the table is empty). */
         public boolean cut, failed;
+        /** Not planned: the seat has no card that can end the game. */
+        public boolean noEnder;
     }
 
     /**
@@ -4805,8 +4805,8 @@ public final class ForcedWinSolver {
      * then those that can end the game, then those that search the library, then the rest by copies; a land is the
      * relaxation's already), each over the same windows, the earliest window with a line giving the value (gamma^turn,
      * times lambda with a granted land), until {@code maxNodes} planner nodes. Not planned at all (0 nodes): a seat with
-     * no card that can end the game, or one that holds no card that searches its library (in hand: a spell that does; on
-     * the battlefield: an ability that does), since then no search will ask. Reads the position only: no copy is played.
+     * no card that can end the game. (The caller asks only when the seat holds a card that searches its library.)
+     * Reads the position only: no copy is played.
      * Honest and optimistic as the goldfish is, and a line that passes the turn must survive the opponent's visible
      * clock, as every planner line. Never throws ({@link NextDraws#failed}).
      */
@@ -4815,10 +4815,7 @@ public final class ForcedWinSolver {
         final NextDraws out = new NextDraws();
         try {
             if (!hasEnder(g)) {
-                return out;
-            }
-            out.searchers.addAll(heldSearches(g));
-            if (out.searchers.isEmpty()) {
+                out.noEnder = true;
                 return out;
             }
             final GoldfishOpts b = new GoldfishOpts();
@@ -4926,26 +4923,6 @@ public final class ForcedWinSolver {
             }
         }
         return false;
-    }
-
-    /** integrate-1110: the cards the seat holds that search its library (a spell in hand, or an ability on the battlefield), by id. */
-    private List<Integer> heldSearches(final Game g) {
-        final List<Integer> out = new ArrayList<>();
-        for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield}) {
-            for (Card c : me.getCardsIn(z)) {
-                final ACard a = reader.card(g, me, c);
-                if (a == null) {
-                    continue;
-                }
-                for (ForcedWinModel.Abil ab : z == ZoneType.Hand ? a.fromHand : a.onBattlefield) {
-                    if (!ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP))) {
-                        out.add(c.getId());
-                        break;
-                    }
-                }
-            }
-        }
-        return out;
     }
 
     /** The planner can end the game with this card: it wins on entry or on a small library, or an ability wins, drains or mills. */

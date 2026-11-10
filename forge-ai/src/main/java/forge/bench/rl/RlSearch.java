@@ -317,12 +317,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * leaves only). A play-out that ended the game has no leaf, so no floor.
          * <p>askNodes (0 = off, the default): a search of the seat's own library that the plan does not answer (a tutor
          * for any card, where the plan finds nothing). Once per root position (reach gate open, the seat holds a card
-         * that searches its library) the planner's goldfish is run from the root with each card of the seat's unknown
-         * library as its NEXT DRAW
+         * that searches its library for one card that is not a land) the planner's goldfish is run from the root with
+         * each card of the seat's unknown library as its NEXT DRAW
          * ({@link forge.ai.simulation.ForcedWinSolver#nextDraws}: askNodes planner nodes for the whole table, askScreen a
          * screen, 1500; cards that can end the game or choose from the library first). In every play-out of the decision a
          * single-pick CARDS ask of the searching seat whose options are cards of its library, from a resolving effect that
-         * puts the card into its hand or on its library, reads that table: the option of the highest value is taken when
+         * puts the card into its hand or on its library (or exiles it and then gives it), reads that table: the option of the highest value is taken when
          * alpha x (its value - the policy's pick's) is above askMargin (0.02), and the play-out carries floorW x that value;
          * else the policy's pick stands (and carries its own value when that stands out from the no-new-card goldfish by
          * the same rule). A lookup in the play-out: no planner work there, the same answer in every world and candidate.
@@ -1495,6 +1495,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         nestedPlan = null; // integrate-1110: one root decision's only
         nestedDraws = null;
+        nestedCandNote = null;
+        nestedStartNotes = null;
+        nestedMark = cfg.nestedChoice == null ? null : new long[] {nestedAsks.get(), nestedAnswered.get(), nestedFloors.get(),
+            nestedFloorsVoid.get()};
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
             tap("cpu_cap", null, null, 0, VOID);
@@ -1653,10 +1657,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // integrate-1110 (nestedChoice.candidate): is the start of this decision's line among the candidates the
             // search is about to value? Counted always; with the key, a missing one is given after them
             final int b0 = stage != null ? (stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth)) : cfg.breadth;
-            candStep = candidateStep(menuObjs, order, ch -> {
+            final Starts starts = lineStarts(me, menuObjs);
+            nestedStartNotes = new ArrayList<>();
+            for (int ch : starts.byChoice.keySet()) {
+                nestedStartNotes.add(actLabel(menuObjs.get(ch - 1)) + (starts.castFirst.contains(ch) ? " (search after)" : "")
+                        + (ch == starts.planChoice ? " (plan)" : ""));
+            }
+            candStep = candidateStep(order, ch -> {
                 final Integer e = entryOf.get(actionKey(menuObjs.get(ch - 1)));
                 return e == null ? -1 : e;
-            }, b0, nestedPlan == null ? -1 : nestedPlan.firstHost, lineSearchers(me, menuObjs), stage == null ? null : stage.plans);
+            }, b0, starts, stage == null ? null : stage.plans);
             if (candStep.append >= 0 && nestedCfg != null && nestedCfg.candidate && !(stage != null && stage.duel)
                     && appendEntry(order, candStep.append, b0)) {
                 given.clear();
@@ -1707,21 +1717,34 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         } else {
             r = ls.decideGiven(g, me, given, cfg.breadth + extraCand);
         }
-        if (candStep != null && !candStep.entries.isEmpty() && r.givenIndex.length > 0) {
-            // counted on what the search really valued (its guards may drop a given candidate)
-            boolean searched = candStep.proposal;
-            for (int gi : r.givenIndex) {
-                searched |= gi >= 0 && gi < order.size() && candStep.entries.contains(order.get(gi));
-            }
-            if (extraCand == 1) {
-                nestedCandMissing.incrementAndGet();
-                if (searched) {
-                    nestedCandAdded.incrementAndGet();
+        nestedCandNote = null;
+        if (candStep != null && r.givenIndex.length > 0) {
+            if (candStep.entries.isEmpty()) {
+                if (nestedPlan != null || nestedDraws != null) {
+                    nestedCandNoStart.incrementAndGet(); // a line, and nothing that starts it is legal now
+                    nestedCandNote = "no_start";
+                } else {
+                    nestedCandNote = "none";
                 }
-            } else if (searched) {
-                nestedCandPresent.incrementAndGet();
             } else {
-                nestedCandMissing.incrementAndGet();
+                // counted on what the search really valued (its guards may drop a given candidate)
+                boolean searched = candStep.proposal;
+                for (int gi : r.givenIndex) {
+                    searched |= gi >= 0 && gi < order.size() && candStep.entries.contains(order.get(gi));
+                }
+                if (extraCand == 1) {
+                    nestedCandMissing.incrementAndGet();
+                    if (searched) {
+                        nestedCandAdded.incrementAndGet();
+                    }
+                    nestedCandNote = searched ? "added" : "added_dropped";
+                } else if (searched) {
+                    nestedCandPresent.incrementAndGet();
+                    nestedCandNote = "present";
+                } else {
+                    nestedCandMissing.incrementAndGet();
+                    nestedCandNote = "missing";
+                }
             }
         }
         tookForce(r);
@@ -1892,6 +1915,52 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.add("prior", pr);
             row.add("entry", ix);
             row.add("ev", ev);
+            if (cfg.nestedChoice != null) {
+                // integrate-1110 (only with the key, so every other arm's rows are unchanged): what this decision's
+                // plan and table held, what starts the line on the menu, whether that was valued, the searched
+                // candidates by name, and this decision's play-out asks and floors
+                final JsonObject nr = new JsonObject();
+                final NestedPlan np1 = nestedPlan;
+                if (np1 != null) {
+                    nr.addProperty("plan", np1.text == null ? "" : np1.text.substring(0, Math.min(160, np1.text.length())));
+                    nr.addProperty("plan_gf", Math.round(np1.gf * 1000) / 1000.0);
+                }
+                final forge.ai.simulation.ForcedWinSolver.NextDraws nd1 = nestedDraws;
+                if (nd1 != null) {
+                    final JsonObject tl = new JsonObject();
+                    tl.addProperty("blank", Math.round(nd1.blank * 1000) / 1000.0);
+                    int shown = 0;
+                    for (String n : nd1.order) {
+                        final Double x = nd1.byName.get(n);
+                        if (x != null && x > nd1.blank && shown++ < 6) {
+                            tl.addProperty(n, Math.round(x * 1000) / 1000.0);
+                        }
+                    }
+                    nr.add("table", tl);
+                }
+                if (nestedStartNotes != null && !nestedStartNotes.isEmpty()) {
+                    final JsonArray sn = new JsonArray();
+                    for (String x : nestedStartNotes) {
+                        sn.add(x);
+                    }
+                    nr.add("starts", sn);
+                }
+                if (nestedCandNote != null) {
+                    nr.addProperty("cand", nestedCandNote);
+                }
+                final JsonArray acts = new JsonArray();
+                for (int j = 0; j < r.givenIndex.length; j++) {
+                    acts.add(r.givenIndex[j] >= order.size() ? "plan#" + (r.givenIndex[j] - order.size()) : actLabel(given.get(r.givenIndex[j])));
+                }
+                nr.add("acts", acts);
+                if (nestedMark != null) {
+                    nr.addProperty("asks", nestedAsks.get() - nestedMark[0]);
+                    nr.addProperty("answered", nestedAnswered.get() - nestedMark[1]);
+                    nr.addProperty("floors", nestedFloors.get() - nestedMark[2]);
+                    nr.addProperty("floors_void", nestedFloorsVoid.get() - nestedMark[3]);
+                }
+                row.add("nested", nr);
+            }
             if (LOG_ACTS) {
                 // diagnostics only (-Dsdcc.logActs=true): the searched candidates by name, and the seat's own view
                 final JsonArray acts = new JsonArray();
@@ -3220,12 +3289,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ne.addProperty("cand_present", nestedCandPresent.get());
             ne.addProperty("cand_missing", nestedCandMissing.get());
             ne.addProperty("cand_added", nestedCandAdded.get());
+            // searched decisions with a plan or a table line whose start is not on the menu (not legal now)
+            ne.addProperty("cand_no_start", nestedCandNoStart.get());
             if (nestedCfg != null && nestedCfg.askNodes > 0) {
-                // 4c: next-draw tables planned, root decisions that reused the last one (same position), those with a
-                // line for some card, their planner nodes and time; play-out asks answered (or floored) from a table
+                // 4c: root decisions that asked for a next-draw table = gate closed + no searching card held + the last
+                // table read again (same position) + no card that ends the game + tables planned (the goldfish ran);
+                // planned tables with a line for some card, their planner nodes and time; play-out asks answered (or
+                // floored) from a table; real asks answered from one
+                ne.addProperty("draw_requested", nestedDrawRequested.get());
+                ne.addProperty("draw_gate_closed", nestedDrawGate.get());
+                ne.addProperty("draw_no_search", nestedDrawNoSearch.get());
+                ne.addProperty("draw_no_ender", nestedDrawNoEnder.get());
                 ne.addProperty("draw_tables", nestedDrawTables.get());
                 ne.addProperty("draw_reuses", nestedDrawReuses.get());
                 ne.addProperty("draw_lines", nestedDrawLines.get());
+                ne.addProperty("draw_picks", nestedDrawPicks.get());
                 ne.addProperty("draw_nodes", nestedDrawNodes.get());
                 ne.addProperty("draw_ms", nestedDrawNanos.get() / 1_000_000L);
                 ne.addProperty("draw_answered", nestedDrawAnswered.get());
@@ -3862,6 +3940,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public final java.util.Map<Integer, List<Integer>> picks = new java.util.LinkedHashMap<>();
         /** The card of the line's first step when that is a cast or an activation (-1: the line starts with a land). */
         public int firstHost = -1;
+        /** 1 = that step is a cast, 2 = an activation. */
+        public int firstRole;
         public double gf, pot;
         public int winTurn;
         public long nodes;
@@ -3910,7 +3990,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             final NestedPlan np = new NestedPlan();
             int host = -1;
-            np.firstHost = firstAction(p.line);
+            np.firstHost = firstAction(p.line)[0];
+            np.firstRole = firstAction(p.line)[1];
             for (int[] t : forge.ai.simulation.ForcedWinPlanner.touched(p.line)) {
                 if (t[1] == 1 || t[1] == 2) {
                     host = t[0]; // a cast or an activation: the picks that follow are its own
@@ -4045,6 +4126,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * 4c (report only): tables planned, decisions that reused the last one, tables with a line for some card, their
      * planner nodes and time; play-out asks answered or floored from a table.
      */
+    public final java.util.concurrent.atomic.AtomicLong nestedDrawRequested = new java.util.concurrent.atomic.AtomicLong(),
+            nestedDrawGate = new java.util.concurrent.atomic.AtomicLong(), nestedDrawNoSearch = new java.util.concurrent.atomic.AtomicLong(),
+            nestedDrawNoEnder = new java.util.concurrent.atomic.AtomicLong(), nestedDrawPicks = new java.util.concurrent.atomic.AtomicLong();
     public final java.util.concurrent.atomic.AtomicLong nestedDrawTables = new java.util.concurrent.atomic.AtomicLong(),
             nestedDrawReuses = new java.util.concurrent.atomic.AtomicLong(), nestedDrawLines = new java.util.concurrent.atomic.AtomicLong(),
             nestedDrawNodes = new java.util.concurrent.atomic.AtomicLong(), nestedDrawNanos = new java.util.concurrent.atomic.AtomicLong(),
@@ -4052,12 +4136,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /**
      * nestedChoice.askNodes, decision thread, on this decision's work clock: the root's next-draw table, or null (off,
-     * the gate closed, no card that ends the game, no line for any card, or the call failed). Planned once per root
+     * the gate closed, no searching card held, no card that ends the game, no card whose value stands out from the
+     * no-new-card goldfish, or the call failed). Planned once per root
      * position: a decision at the position of the last one (same turn, phase, stack, both battlefields and lives, the
      * seat's hand, graveyard, library size and known top) reads the last table. Never throws.
      */
     public forge.ai.simulation.ForcedWinSolver.NextDraws drawsNested(final Game g, final Player me, final List<Integer> knownTop) {
-        if (cfg.nestedChoice == null || cfg.reach == null || !reachGateOpen()) {
+        if (cfg.nestedChoice == null || cfg.reach == null) {
             return null;
         }
         try {
@@ -4066,6 +4151,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (!(nestedCfg.askNodes > 0)) {
                 return null;
+            }
+            nestedDrawRequested.incrementAndGet();
+            if (!reachGateOpen()) {
+                nestedDrawGate.incrementAndGet();
+                return null;
+            }
+            if (heldSearches(me).isEmpty()) {
+                nestedDrawNoSearch.incrementAndGet();
+                return null; // no search of the seat's will ask: no table (0 nodes)
             }
             final String key = rootKey(g, me, knownTop);
             if (key.equals(nestedDrawsKey)) {
@@ -4080,18 +4174,26 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.ms = nestedCfg.ms;
             final forge.ai.simulation.ForcedWinSolver.NextDraws d = forge.ai.simulation.ForcedWinSolver
                     .withReader(me, reachSolverCfg, reader).nextDraws(g, knownTop, o, rc.maxNames, rc.sig, nestedCfg.askNodes);
-            nestedDrawTables.incrementAndGet();
+            if (d.noEnder) {
+                nestedDrawNoEnder.incrementAndGet();
+            } else {
+                nestedDrawTables.incrementAndGet(); // planned: the goldfish ran
+            }
             nestedDrawNodes.addAndGet(d.nodes);
             nestedDrawNanos.addAndGet(System.nanoTime() - t0);
-            boolean line = false;
+            boolean line = false, pick = false;
             for (double x : d.byName.values()) {
                 line |= x > 0;
+                pick |= rc.alpha * (x - d.blank) > nestedCfg.askMargin;
             }
             if (line) {
                 nestedDrawLines.incrementAndGet();
             }
+            if (pick) {
+                nestedDrawPicks.incrementAndGet(); // some card stands out from the no-new-card goldfish: a pick to make
+            }
             nestedDrawsKey = key;
-            nestedDrawsKept = d.failed || !line ? null : d;
+            nestedDrawsKept = d.failed || !pick ? null : d; // a table on which no card stands out answers nothing
             return nestedDrawsKept;
         } catch (RuntimeException | StackOverflowError e) {
             return null;
@@ -4169,7 +4271,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** nestedChoice (report only): see the summary's cand_present, cand_missing, cand_added. */
     public final java.util.concurrent.atomic.AtomicLong nestedCandPresent = new java.util.concurrent.atomic.AtomicLong(),
-            nestedCandMissing = new java.util.concurrent.atomic.AtomicLong(), nestedCandAdded = new java.util.concurrent.atomic.AtomicLong();
+            nestedCandMissing = new java.util.concurrent.atomic.AtomicLong(), nestedCandAdded = new java.util.concurrent.atomic.AtomicLong(),
+            nestedCandNoStart = new java.util.concurrent.atomic.AtomicLong();
+    /** This decision's candidate finding for its row: none | no_start | present | missing | added | added_dropped. */
+    private String nestedCandNote;
+    private List<String> nestedStartNotes;
+    private long[] nestedMark;
 
     /** One decision's line starts on its menu: their entries, whether a plan proposal starts with one, and the one to give (-1 = none). */
     public static final class CandStep {
@@ -4178,17 +4285,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int append = -1;
     }
 
-    /** The card of a planner line's first step when that is a cast or an activation; -1 when it starts with a land or has none. */
-    static int firstAction(final Object line) {
+    /** {card, role} of a planner line's first step when that is a cast (1) or an activation (2); {-1, 0} when it starts with a land or has none. */
+    static int[] firstAction(final Object line) {
         for (int[] t : forge.ai.simulation.ForcedWinPlanner.touched(line)) {
             if (t[1] == 1 || t[1] == 2) {
-                return t[0];
+                return new int[] {t[0], t[1]};
             }
             if (t[1] == 3) {
-                return -1;
+                break;
             }
         }
-        return -1;
+        return new int[] {-1, 0};
     }
 
     /** An ability that searches a library: a ChangeZone from a library among it and its sub-abilities. */
@@ -4204,56 +4311,59 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /**
      * The menu's choice (1-based index of {@code menuObjs}) for this card's step, or 0 when it is not on the menu (not
-     * legal now): its library search when it has one there; else, unless {@code searchOnly}, its spell, else its first
-     * ability.
+     * legal now). {@code mode} 0: its library search only; 1 (a plan's cast): its library search, else its spell, else its
+     * first ability; 2 (a plan's activation): its library search, else its first ability that is not a spell; 3: its spell
+     * only.
      */
-    static int menuChoice(final List<SpellAbility> menuObjs, final int cardId, final boolean searchOnly) {
-        int spell = 0, any = 0;
+    static int menuChoice(final List<SpellAbility> menuObjs, final int cardId, final int mode) {
+        int spell = 0, ability = 0, any = 0;
         for (int i = 0; i < menuObjs.size(); i++) {
             final SpellAbility sa = menuObjs.get(i);
             if (sa == null || sa.getHostCard() == null || sa.getHostCard().getId() != cardId) {
                 continue;
             }
-            if (searches(sa)) {
+            if (mode != 3 && searches(sa)) {
                 return i + 1;
             }
             if (spell == 0 && sa.isSpell()) {
                 spell = i + 1;
             }
+            if (ability == 0 && !sa.isSpell()) {
+                ability = i + 1;
+            }
             if (any == 0) {
                 any = i + 1;
             }
         }
-        return searchOnly ? 0 : spell > 0 ? spell : any;
+        return mode == 0 ? 0 : mode == 3 ? spell : mode == 2 ? ability : spell > 0 ? spell : any;
     }
 
     /**
-     * The starts of this decision's line on its menu, against the candidates the search is about to value: the first
-     * {@code breadth} of {@code order} (the policy's own choice, then its entries by prior) and the plan proposals. The
-     * starts: the plan's first step ({@code planHost}; -1 = none) and each held card's search ({@code searchers}; null =
-     * none; see {@link #lineSearchers}). {@link CandStep#append}: the start to give as one more candidate when none is
-     * among them (the plan's, else the search the policy ranks highest). A function of its arguments.
+     * The starts of this decision's line ({@link #lineStarts}) against the candidates the search is about to value: the
+     * first {@code breadth} of {@code order} (the policy's own choice, then its entries by prior) and the plan
+     * proposals. When a start can search now, a start that must first cast its permanent is left out of the count.
+     * {@link CandStep#append}: the start to give as one more candidate when none is among them (the plan's, else the one
+     * the policy ranks highest). A function of its arguments.
      */
-    public static CandStep candidateStep(final List<SpellAbility> menuObjs, final List<Integer> order,
-            final java.util.function.IntUnaryOperator entryOfChoice, final int breadth, final int planHost,
-            final List<Integer> searchers, final List<Object> proposals) {
+    public static CandStep candidateStep(final List<Integer> order, final java.util.function.IntUnaryOperator entryOfChoice,
+            final int breadth, final Starts starts, final List<Object> proposals) {
         final CandStep cs = new CandStep();
         final List<Integer> cards = new ArrayList<>();
-        if (planHost >= 0) {
-            final int ch = menuChoice(menuObjs, planHost, false);
-            final int e = ch > 0 ? entryOfChoice.applyAsInt(ch) : -1;
-            if (e >= 0 && order.contains(e)) {
-                cs.entries.add(e);
-                cards.add(planHost);
-            }
+        boolean direct = false;
+        for (int ch : starts.byChoice.keySet()) {
+            direct |= !starts.castFirst.contains(ch);
         }
-        if (searchers != null) {
-            for (int id : searchers) {
-                final int ch = menuChoice(menuObjs, id, true);
-                final int e = ch > 0 ? entryOfChoice.applyAsInt(ch) : -1;
-                if (e >= 0 && order.contains(e) && !cs.entries.contains(e)) {
-                    cs.entries.add(e);
-                    cards.add(id);
+        int planEntry = -1;
+        for (java.util.Map.Entry<Integer, Integer> st : starts.byChoice.entrySet()) {
+            if (direct && starts.castFirst.contains(st.getKey())) {
+                continue;
+            }
+            final int e = entryOfChoice.applyAsInt(st.getKey());
+            if (e >= 0 && order.contains(e) && !cs.entries.contains(e)) {
+                cs.entries.add(e);
+                cards.add(st.getValue());
+                if (st.getKey() == starts.planChoice) {
+                    planEntry = e;
                 }
             }
         }
@@ -4262,7 +4372,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         if (proposals != null) {
             for (Object line : proposals) {
-                cs.proposal |= cards.contains(firstAction(line));
+                cs.proposal |= cards.contains(firstAction(line)[0]);
             }
         }
         boolean among = cs.proposal;
@@ -4270,13 +4380,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         for (int e : cs.entries) {
             among |= order.indexOf(e) < breadth;
             if (first < 0 || order.indexOf(e) < order.indexOf(first)) {
-                first = e; // the search highest in the order
+                first = e; // the start highest in the policy's order
             }
         }
-        if (planHost >= 0 && cards.get(0) == planHost) {
-            first = cs.entries.get(0); // the plan's own start when it is on the menu
-        }
-        cs.append = among ? -1 : first;
+        cs.append = among ? -1 : planEntry >= 0 ? planEntry : first;
         return cs;
     }
 
@@ -4365,7 +4472,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * among the ability and its sub-abilities, when it searches the library alone for one card into a hand or onto a
      * library; else null.
      */
-    static SpellAbility searchOfOne(final SpellAbility sa0) {
+    public static SpellAbility searchOfOne(final SpellAbility sa0) {
         SpellAbility sa = sa0;
         for (int n = 0; sa != null && n < 12; sa = sa.getSubAbility(), n++) {
             if (sa.getApi() == forge.game.ability.ApiType.ChangeZone && String.valueOf(sa.getParam("Origin")).contains("Library")) {
@@ -4374,25 +4481,101 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     return null;
                 }
                 final String d = sa.getParam("Destination");
-                return "Hand".equals(d) || "Library".equals(d) ? sa : null;
+                if ("Hand".equals(d) || "Library".equals(d)) {
+                    return sa;
+                }
+                if ("Exile".equals(d) && sa.hasParam("RememberChanged")) {
+                    // exiled, then given: a later part of the same ability puts the remembered card into the hand
+                    // (Beseech the Mirror: cast it if bargained, else to hand)
+                    SpellAbility x = sa.getSubAbility();
+                    for (int k = 0; x != null && k < 12; x = x.getSubAbility(), k++) {
+                        if (x.getApi() == forge.game.ability.ApiType.ChangeZone && "Exile".equals(x.getParam("Origin"))
+                                && "Hand".equals(x.getParam("Destination")) && "Remembered".equals(x.getParam("Defined"))) {
+                            return sa;
+                        }
+                    }
+                }
+                return null;
             }
         }
         return null;
     }
 
     /**
-     * The held cards whose search is on the menu (legal now) and can find a card the table has a line for (a card of the
-     * library whose value stands out from the no-new-card goldfish by the pick's rule, and that the search's own filter
-     * accepts): the casts that start the table's line. A landcycler in a hand with a kill spell in the library is not one.
+     * The seat's held searches, as {@link #takesCard} will read them when they resolve: by card id, the ability of a card
+     * in its hand or on its battlefield that searches its library for one card and gives it that card, and that can find
+     * a card that is not a land (a landcycler finds lands, which the table leaves to the land-drop relaxation). A card in
+     * hand counts with its abilities on the battlefield too (Wishclaw Talisman: cast it, then search). The cards'
+     * scripts are read, not the planner's model. Never throws.
      */
-    public List<Integer> lineSearchers(final Player me, final List<SpellAbility> menuObjs) {
-        final List<Integer> out = new ArrayList<>();
-        final forge.ai.simulation.ForcedWinSolver.NextDraws nd = nestedDraws;
-        final NestedCfg nc = nestedCfg;
-        if (nd == null || nc == null) {
-            return out;
-        }
+    static java.util.LinkedHashMap<Integer, SpellAbility> heldSearches(final Player me) {
+        final java.util.LinkedHashMap<Integer, SpellAbility> out = new java.util.LinkedHashMap<>();
         try {
+            final List<forge.game.card.Card> nonLands = new ArrayList<>();
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                if (!c.isLand()) {
+                    nonLands.add(c);
+                }
+            }
+            for (forge.game.zone.ZoneType z : new forge.game.zone.ZoneType[] {forge.game.zone.ZoneType.Hand, forge.game.zone.ZoneType.Battlefield}) {
+                for (forge.game.card.Card c : me.getCardsIn(z)) {
+                    for (SpellAbility sa : c.getSpellAbilities()) {
+                        final SpellAbility cz = searchOfOne(sa);
+                        if (cz == null) {
+                            continue;
+                        }
+                        boolean finds = false;
+                        for (int i = 0; i < nonLands.size() && !finds; i++) {
+                            finds = accepts(cz, nonLands.get(i), me);
+                        }
+                        if (finds) {
+                            out.put(c.getId(), sa);
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            out.clear();
+        }
+        return out;
+    }
+
+    /** The search's own filter (ChangeType) accepts the card. */
+    static boolean accepts(final SpellAbility cz, final forge.game.card.Card c, final Player me) {
+        return c.isValid(cz.getParamOrDefault("ChangeType", "Card").split(","), me, cz.getHostCard(), cz);
+    }
+
+    /** {@link #lineStarts}: by menu choice (1-based index of the menu's abilities) the card; the plan's own choice (0 = none); the choices that are the cast of a permanent whose search comes after. */
+    public static final class Starts {
+        public final java.util.LinkedHashMap<Integer, Integer> byChoice = new java.util.LinkedHashMap<>();
+        public int planChoice;
+        public final java.util.Set<Integer> castFirst = new java.util.TreeSet<>();
+    }
+
+    /**
+     * The starts of this decision's line that are legal now: the plan's first step when it is a cast or an activation on
+     * the menu; and, with a table, each held search that can find a card the table has a line for (a card of the library
+     * whose value stands out from the no-new-card goldfish by the pick's rule, and that the search's own filter
+     * accepts): the search itself when it is on the menu (a tutor spell, an ability of a permanent), else the cast of
+     * its card from hand (the permanent must be cast first; at the next decision the start is its ability).
+     */
+    public Starts lineStarts(final Player me, final List<SpellAbility> menuObjs) {
+        final Starts out = new Starts();
+        try {
+            final NestedPlan np = nestedPlan;
+            if (np != null && np.firstHost >= 0) {
+                final int ch = menuChoice(menuObjs, np.firstHost, np.firstRole == 2 ? 2 : 1);
+                if (ch > 0) {
+                    out.byChoice.put(ch, np.firstHost);
+                    out.planChoice = ch;
+                }
+            }
+            final forge.ai.simulation.ForcedWinSolver.NextDraws nd = nestedDraws;
+            final NestedCfg nc = nestedCfg;
+            if (nd == null || nc == null) {
+                return out;
+            }
             final double alpha = reachCfg().alpha;
             final List<forge.game.card.Card> lines = new ArrayList<>();
             for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Library)) {
@@ -4401,22 +4584,32 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     lines.add(c);
                 }
             }
-            for (int id : nd.searchers) {
-                final int ch = lines.isEmpty() ? 0 : menuChoice(menuObjs, id, true);
-                final SpellAbility cz = ch > 0 ? searchOfOne(menuObjs.get(ch - 1)) : null;
-                if (cz == null) {
+            if (lines.isEmpty()) {
+                return out;
+            }
+            for (java.util.Map.Entry<Integer, SpellAbility> h : heldSearches(me).entrySet()) {
+                final SpellAbility cz = searchOfOne(h.getValue());
+                boolean finds = false;
+                for (int i = 0; cz != null && i < lines.size() && !finds; i++) {
+                    finds = accepts(cz, lines.get(i), me);
+                }
+                if (!finds) {
                     continue;
                 }
-                final String[] type = cz.getParamOrDefault("ChangeType", "Card").split(",");
-                for (forge.game.card.Card c : lines) {
-                    if (c.isValid(type, me, cz.getHostCard(), cz)) {
-                        out.add(id);
-                        break;
+                final forge.game.card.Card host = h.getValue().getHostCard();
+                int ch = menuChoice(menuObjs, h.getKey(), 0);
+                if (ch <= 0 && host != null && host.isInZone(forge.game.zone.ZoneType.Hand) && !h.getValue().isSpell()) {
+                    ch = menuChoice(menuObjs, h.getKey(), 3); // the permanent's cast: its search comes after
+                    if (ch > 0 && !out.byChoice.containsKey(ch)) {
+                        out.castFirst.add(ch);
                     }
+                }
+                if (ch > 0) {
+                    out.byChoice.putIfAbsent(ch, h.getKey());
                 }
             }
         } catch (RuntimeException e) {
-            out.clear();
+            // what was found stands
         }
         return out;
     }

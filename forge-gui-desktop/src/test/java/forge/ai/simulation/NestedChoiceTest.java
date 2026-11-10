@@ -110,6 +110,22 @@ public class NestedChoiceTest extends AITest {
     /** {@code beforeLeaf}: what else happens in the play-out between the tutor and its leaf (null = nothing). */
     static Playout playout(final RlSearch search, final Game live, final String tutor,
             final java.util.function.Consumer<Playout> beforeLeaf) {
+        return playout(search, live, p -> find(p, ZoneType.Hand, tutor).getFirstSpellAbility(), beforeLeaf);
+    }
+
+    /** The library search of a permanent on the battlefield (Wishclaw Talisman's ability). */
+    static SpellAbility searchAbility(final Player p, final String name) {
+        for (SpellAbility sa : find(p, ZoneType.Battlefield, name).getSpellAbilities()) {
+            if (!sa.isSpell() && sa.getApi() == forge.game.ability.ApiType.ChangeZone) {
+                return sa;
+            }
+        }
+        throw new AssertionError("no search on " + name);
+    }
+
+    /** As above, for the ability {@code play} picks in the play-out copy (a spell from hand, or a permanent's ability). */
+    static Playout playout(final RlSearch search, final Game live, final java.util.function.Function<Player, SpellAbility> play,
+            final java.util.function.Consumer<Playout> beforeLeaf) {
         final Playout po = new Playout();
         final GameCopier copier = new GameCopier(live, true);
         po.g = copier.makeCopy();
@@ -145,7 +161,7 @@ public class NestedChoiceTest extends AITest {
                 return c;
             }
         });
-        final SpellAbility sa = find(me, ZoneType.Hand, tutor).getFirstSpellAbility();
+        final SpellAbility sa = play.apply(me);
         sa.setActivatingPlayer(me);
         Assert.assertTrue(((PlayerControllerAi) me.getController()).playChosenSpellAbility(sa), "cast the tutor");
         MyRandom.setRandom(new Random(42));
@@ -508,6 +524,15 @@ public class NestedChoiceTest extends AITest {
         final Player me = live.getPlayers().get(0);
         final ForcedWinSolver.NextDraws nd = on.openNestedDraws(live, me);
         System.out.println("NESTED4C Doomsday in hand, the root's table: " + table(nd));
+        // the rule itself, on the cards' own abilities: one card, from the library alone, into hand or onto the library
+        Assert.assertNull(RlSearch.searchOfOne(find(me, ZoneType.Hand, "Doomsday").getFirstSpellAbility()), "five cards, two zones");
+        final Game lv = root("Vampiric Tutor", "Island", REST);
+        Assert.assertNotNull(RlSearch.searchOfOne(find(lv.getPlayers().get(0), ZoneType.Hand, "Vampiric Tutor").getFirstSpellAbility()));
+        final Game le = root("Entomb", "Island", REST);
+        Assert.assertNull(RlSearch.searchOfOne(find(le.getPlayers().get(0), ZoneType.Hand, "Entomb").getFirstSpellAbility()), "to the graveyard");
+        final Game lb = root("Beseech the Mirror", "Island", REST);
+        Assert.assertNotNull(RlSearch.searchOfOne(find(lb.getPlayers().get(0), ZoneType.Hand, "Beseech the Mirror").getFirstSpellAbility()),
+                "exiled, then given");
         final Playout a = playout(on, live, "Doomsday");
         Assert.assertEquals(a.asks, 5, "Doomsday asks for five cards, one at a time");
         Assert.assertEquals(a.answered, 0, "none is answered from the table");
@@ -624,23 +649,23 @@ public class NestedChoiceTest extends AITest {
     // ------------------------------------------------------------------ nestedChoice.candidate
 
     /**
-     * The policy's four candidates do not hold the tutor's cast. The start of the table's line is the cast of the held
-     * card whose search can find the card with the line: Vampiric Tutor, not Troll of Khazad-dum's swampcycling. It is
-     * found missing and, with the key, given as the fifth candidate; already among the four, or the first step of a plan
-     * proposal, nothing is added. (The selection and the candidate list only: the search itself is not run here.)
+     * The policy's four candidates do not hold the tutor's cast. The start of the table's line is the search of the held
+     * card that can find the card with the line: Vampiric Tutor's cast. Troll of Khazad-dum's swampcycling finds lands only
+     * and is not a start; Wishclaw Talisman in hand must be cast first, which counts only when nothing can search now.
+     * The start is found missing and, with the key, given as the fifth candidate; among the four already, nothing is
+     * added. (The selection and the candidate list only: the search itself is not run here.)
      */
     @Test
     public void aLinesStartMissingFromThePolicysCandidatesIsFoundAndGiven() {
-        final RlSearch on = search("{\"maxNodes\":12000,\"askNodes\":" + ASK_NODES + ",\"candidate\":true}");
+        final String key = "{\"maxNodes\":12000,\"askNodes\":" + ASK_NODES + ",\"candidate\":true}";
+        final RlSearch on = search(key);
         final Game live = root("Vampiric Tutor", "Island", REST);
         final Player me = live.getPlayers().get(0);
         on.setNestedPlan(on.planNested(live, me, new ArrayList<>()), live);
         Assert.assertNull(on.nestedPlan(), "an any-card tutor: no plan, the table has the line");
-        final ForcedWinSolver.NextDraws nd = on.openNestedDraws(live, me);
-        Assert.assertNotNull(nd);
-        final Card tutor = find(me, ZoneType.Hand, "Vampiric Tutor"), troll = find(me, ZoneType.Hand, "Troll of Khazad-dûm");
-        Assert.assertTrue(nd.searchers.contains(tutor.getId()) && nd.searchers.contains(troll.getId()),
-                "both search the library in the planner's model: " + nd.searchers);
+        Assert.assertNotNull(on.openNestedDraws(live, me));
+        final Card tutor = find(me, ZoneType.Hand, "Vampiric Tutor"), troll = find(me, ZoneType.Hand, "Troll of Khazad-dûm"),
+                wish = find(me, ZoneType.Hand, "Wishclaw Talisman");
         // the menu: 1 Chart a Course, 2 Counterspell, 3 Wishclaw Talisman, 4 the Troll's spell, 5 its swampcycling, 6 the tutor
         SpellAbility cycle = null;
         for (SpellAbility sa : troll.getSpellAbilities()) {
@@ -650,58 +675,115 @@ public class NestedChoiceTest extends AITest {
         }
         Assert.assertNotNull(cycle, "the Troll's swampcycling");
         final List<SpellAbility> menu = new ArrayList<>(List.of(find(me, ZoneType.Hand, "Chart a Course").getFirstSpellAbility(),
-                find(me, ZoneType.Hand, "Counterspell").getFirstSpellAbility(), find(me, ZoneType.Hand, "Wishclaw Talisman").getFirstSpellAbility(),
+                find(me, ZoneType.Hand, "Counterspell").getFirstSpellAbility(), wish.getFirstSpellAbility(),
                 troll.getFirstSpellAbility(), cycle, tutor.getFirstSpellAbility()));
-        for (SpellAbility sa : menu) {
-            sa.setActivatingPlayer(me);
-        }
-        final List<Integer> searchers = on.lineSearchers(me, menu);
-        Assert.assertEquals(searchers, List.of(tutor.getId()), "only the tutor's search can find the card with the line");
+        final RlSearch.Starts st = on.lineStarts(me, menu);
+        Assert.assertEquals(st.byChoice.get(6), Integer.valueOf(tutor.getId()), "the tutor's cast: " + st.byChoice);
+        Assert.assertEquals(st.byChoice.get(3), Integer.valueOf(wish.getId()), "the Talisman's cast, its search comes after");
+        Assert.assertTrue(st.castFirst.contains(3) && !st.castFirst.contains(6));
+        Assert.assertFalse(st.byChoice.containsKey(4) || st.byChoice.containsKey(5), "the Troll finds lands only: " + st.byChoice);
         // the policy's order: pass (0) is its own choice, then entries 1..6 by prior: the tutor is seventh
         final List<Integer> order = new ArrayList<>(List.of(0, 1, 2, 3, 4, 5, 6));
-        final RlSearch.CandStep cs = RlSearch.candidateStep(menu, order, ch -> ch, 4, -1, searchers, null);
-        Assert.assertEquals(cs.entries, List.of(6));
+        final RlSearch.CandStep cs = RlSearch.candidateStep(order, ch -> ch, 4, st, null);
+        Assert.assertEquals(cs.entries, List.of(6), "a search that is legal now is the start; the Talisman's cast (among the four) is not counted");
         Assert.assertEquals(cs.append, 6, "missing from the four: the cast to give");
-        // key false: the list is left alone, the cast is not among the first four (never searched)
-        Assert.assertTrue(order.indexOf(6) >= 4);
-        // key true: it is given right after the four, and the search is run with breadth 5
-        Assert.assertTrue(RlSearch.appendEntry(order, cs.append, 4));
+        Assert.assertTrue(order.indexOf(6) >= 4, "key false: the list is left alone, the cast is never searched");
+        Assert.assertTrue(RlSearch.appendEntry(order, cs.append, 4), "key true: given right after the four (the search runs with breadth 5)");
         Assert.assertEquals(order, List.of(0, 1, 2, 3, 6, 4, 5), "the policy's four, then the cast");
         // among the four already: present, nothing to give
-        final RlSearch.CandStep in = RlSearch.candidateStep(menu, new ArrayList<>(List.of(0, 6, 1, 2, 3, 4, 5)), ch -> ch, 4, -1, searchers, null);
+        final RlSearch.CandStep in = RlSearch.candidateStep(new ArrayList<>(List.of(0, 6, 1, 2, 3, 4, 5)), ch -> ch, 4, st, null);
         Assert.assertEquals(in.append, -1);
         Assert.assertEquals(in.entries, List.of(6));
-        // no table line for a held search (the Troll alone): nothing is a start
-        final RlSearch.CandStep none = RlSearch.candidateStep(menu, new ArrayList<>(List.of(0, 1, 2, 3, 4, 5, 6)), ch -> ch, 4, -1,
-                new ArrayList<>(), null);
-        Assert.assertTrue(none.entries.isEmpty());
-        Assert.assertEquals(none.append, -1);
+        // the Talisman alone in hand: its cast is the start (the search is the next decision's)
+        final RlSearch onW = search(key);
+        final Game liveW = root("Island", "Island", REST);
+        final Player meW = liveW.getPlayers().get(0);
+        Assert.assertNotNull(onW.openNestedDraws(liveW, meW), "a held permanent that searches: the table is planned");
+        final Card wishW = find(meW, ZoneType.Hand, "Wishclaw Talisman");
+        final List<SpellAbility> menuW = new ArrayList<>(List.of(find(meW, ZoneType.Hand, "Chart a Course").getFirstSpellAbility(),
+                find(meW, ZoneType.Hand, "Counterspell").getFirstSpellAbility(), find(meW, ZoneType.Hand, "Troll of Khazad-dûm").getFirstSpellAbility(),
+                find(meW, ZoneType.Hand, "Island").getFirstSpellAbility(), wishW.getFirstSpellAbility()));
+        final RlSearch.Starts stW = onW.lineStarts(meW, menuW);
+        Assert.assertEquals(stW.byChoice, java.util.Map.of(5, wishW.getId()));
+        Assert.assertTrue(stW.castFirst.contains(5));
+        Assert.assertEquals(RlSearch.candidateStep(new ArrayList<>(List.of(0, 1, 2, 3, 4, 5)), ch -> ch, 4, stW, null).append, 5);
         // a plan's first step (Mystical Tutor's cast) is a start the same way
         final RlSearch onM = search("{\"candidate\":true}");
         final Game liveM = root(REST);
         final Player meM = liveM.getPlayers().get(0);
         final RlSearch.NestedPlan np = onM.planNested(liveM, meM, new ArrayList<>());
         Assert.assertNotNull(np);
+        onM.setNestedPlan(np, liveM);
         final Card mystical = find(meM, ZoneType.Hand, "Mystical Tutor");
         Assert.assertEquals(np.firstHost, mystical.getId(), "the plan starts with the tutor's cast: " + np.text);
         final List<SpellAbility> menuM = new ArrayList<>(List.of(find(meM, ZoneType.Hand, "Chart a Course").getFirstSpellAbility(),
                 find(meM, ZoneType.Hand, "Counterspell").getFirstSpellAbility(), find(meM, ZoneType.Hand, "Wishclaw Talisman").getFirstSpellAbility(),
                 find(meM, ZoneType.Hand, "Troll of Khazad-dûm").getFirstSpellAbility(), mystical.getFirstSpellAbility()));
-        final RlSearch.CandStep csM = RlSearch.candidateStep(menuM, new ArrayList<>(List.of(0, 1, 2, 3, 4, 5)), ch -> ch, 4, np.firstHost, null, null);
-        Assert.assertEquals(csM.append, 5, "the plan's start is missing from the four");
+        final RlSearch.Starts stM = onM.lineStarts(meM, menuM);
+        Assert.assertEquals(stM.planChoice, 5);
+        Assert.assertEquals(RlSearch.candidateStep(new ArrayList<>(List.of(0, 1, 2, 3, 4, 5)), ch -> ch, 4, stM, null).append, 5,
+                "the plan's start is missing from the four");
         // the values the added candidate is searched with are the play-out's own (hook level): the table's line raises the
         // cast above pass; at a leaf where the opponent's clock kills, it does not
         final Playout b = playout(on, live, "Vampiric Tutor");
         Assert.assertTrue(on.combineReach(V_TUTOR, b.leaf) > on.combineReach(V_PASS, passLeaf(on, live)), "searched and chosen over pass");
-        final RlSearch on2 = search("{\"maxNodes\":12000,\"askNodes\":" + ASK_NODES + ",\"candidate\":true}");
+        final RlSearch on2 = search(key);
         final Game live2 = root("Vampiric Tutor", "Island;Grizzly Bears", REST);
         on2.openNestedDraws(live2, live2.getPlayers().get(0));
         final Playout c = playout(on2, live2, "Vampiric Tutor", po -> po.me.setLife(2, null));
         Assert.assertEquals(c.leaf[0], 0.0, 1e-12);
         Assert.assertTrue(on2.combineReach(V_TUTOR, c.leaf) < V_PASS, "searched and not chosen: " + on2.combineReach(V_TUTOR, c.leaf));
-        System.out.println("NESTEDCAND table searchers " + nd.searchers + " -> line searchers " + searchers + " (tutor " + tutor.getId()
-                + ", troll " + troll.getId() + "); missing: append entry " + cs.append + ", order " + order + "; plan start " + np.firstHost
-                + " append " + csM.append);
+        System.out.println("NESTEDCAND starts " + st.byChoice + " cast-first " + st.castFirst + " (tutor " + tutor.getId() + ", troll "
+                + troll.getId() + ", talisman " + wish.getId() + "); missing: append entry " + cs.append + ", order " + order
+                + "; Talisman alone " + stW.byChoice + "; plan start choice " + stM.planChoice);
+    }
+
+    /**
+     * The four tutors of the R4 audit, each through the play-out's hook on the same position: which of them the table
+     * answers (pick and floor), and which is a start of the line on the menu. Mystical Tutor is the plan's too.
+     */
+    @Test
+    public void theFourTutorsEndToEndAtHookLevel() {
+        final String key = "{\"nodes\":1,\"maxNodes\":1,\"askNodes\":" + ASK_NODES + ",\"candidate\":true}"; // the plan shut: the table alone
+        // Wishclaw Talisman on the battlefield with its counters: the activation
+        final RlSearch onW = search(key);
+        final Game liveW = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame("Chart a Course;Island;Counterspell",
+                BF + ";Wishclaw Talisman|Counters:WISH=3", 20, "", "Island", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + REST));
+        final Player meW = liveW.getPlayers().get(0);
+        Assert.assertNotNull(onW.openNestedDraws(liveW, meW), "the Talisman's ability is a held search");
+        final SpellAbility act = searchAbility(meW, "Wishclaw Talisman");
+        final RlSearch.Starts stW = onW.lineStarts(meW, new ArrayList<>(List.of(find(meW, ZoneType.Hand, "Chart a Course").getFirstSpellAbility(), act)));
+        Assert.assertEquals(stW.byChoice, java.util.Map.of(2, act.getHostCard().getId()), "the activation is the start");
+        Assert.assertTrue(stW.castFirst.isEmpty());
+        final Playout w = playout(onW, liveW, p -> searchAbility(p, "Wishclaw Talisman"), null);
+        Assert.assertEquals(w.picked, "Doomsday", "Wishclaw Talisman's activation");
+        Assert.assertTrue(RlSearch.nestedPotOf(w.ctx) > 0);
+        Assert.assertEquals(find(w.me, ZoneType.Hand, "Doomsday").getName(), "Doomsday", "the card is in hand in the play-out");
+        // Beseech the Mirror: exiled, then given (four lands)
+        final RlSearch onB = search(key);
+        final Game liveB = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame("Chart a Course;Beseech the Mirror;Counterspell",
+                BF + ";Swamp;Swamp", 20, "", "Island", 20, "human").replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + REST));
+        final Player meB = liveB.getPlayers().get(0);
+        final ForcedWinSolver.NextDraws ndB = onB.openNestedDraws(liveB, meB);
+        Assert.assertNotNull(ndB, "Beseech the Mirror is a held search");
+        final RlSearch.Starts stB = onB.lineStarts(meB, new ArrayList<>(List.of(find(meB, ZoneType.Hand, "Beseech the Mirror").getFirstSpellAbility())));
+        Assert.assertEquals(stB.byChoice.size(), 1);
+        final Playout bm = playout(onB, liveB, "Beseech the Mirror");
+        Assert.assertEquals(bm.picked, "Doomsday", "Beseech the Mirror");
+        Assert.assertTrue(RlSearch.nestedPotOf(bm.ctx) > 0);
+        // Vampiric Tutor and Mystical Tutor (the table alone)
+        for (String t : new String[] {"Vampiric Tutor", "Mystical Tutor"}) {
+            final RlSearch on = search(key);
+            final Game live = root(t, "Island", REST);
+            Assert.assertNotNull(on.openNestedDraws(live, live.getPlayers().get(0)));
+            final Playout x = playout(on, live, t);
+            Assert.assertEquals(x.picked, "Doomsday", t);
+            Assert.assertTrue(RlSearch.nestedPotOf(x.ctx) > 0);
+        }
+        System.out.println("NESTEDCAND four tutors at hook level: Wishclaw activation pick " + w.picked + " floor " + RlSearch.nestedPotOf(w.ctx)
+                + " leaf " + w.leaf[0] + "; Beseech pick " + bm.picked + " floor " + RlSearch.nestedPotOf(bm.ctx) + " leaf " + bm.leaf[0]
+                + " (table: " + table(ndB) + ")");
     }
 
     @Test
