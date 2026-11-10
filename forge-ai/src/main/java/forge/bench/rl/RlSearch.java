@@ -2036,16 +2036,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return "?";
         }
         final RlCandidates.Cand c = m.cands.get(i);
-        if (c.host != null) {
-            return c.host.getName();
+        switch (c.kind) {
+            case RlSchema.K_PASS: return "pass";
+            case RlSchema.K_YES: return "yes";
+            case RlSchema.K_NO: return "no";
+            case RlSchema.K_KEEP: return "keep";
+            case RlSchema.K_MULLIGAN: return "mulligan";
+            case RlSchema.K_PLAY_FIRST: return "play";
+            case RlSchema.K_DRAW_FIRST: return "draw";
+            case RlSchema.K_NONE: return "none";
+            default: break;
         }
-        if (c.name != null) {
-            return c.name;
+        String base = c.host != null ? c.host.getName() : c.name != null ? c.name
+                : c.tgt0 instanceof forge.game.card.Card ? ((forge.game.card.Card) c.tgt0).getName()
+                : c.tgt0 instanceof Player ? "player" : null;
+        final String k = c.key;
+        if (k != null && (k.startsWith("top:") || k.startsWith("rest:"))) {
+            base = (base == null ? "" : base + ":") + k.substring(0, k.indexOf(':'));
+        } else if (k != null && (k.startsWith("i:") || k.startsWith("v:"))) {
+            base = (base == null ? "" : base + ":") + k;
         }
-        if (c.tgt0 instanceof forge.game.card.Card) {
-            return ((forge.game.card.Card) c.tgt0).getName();
-        }
-        return c.tgt0 instanceof Player ? "player" : "kind" + c.kind;
+        return base != null ? base : "kind" + c.kind;
     }
 
     private void exploreCount(final Map<String, int[]> into, final int family, final int seat) {
