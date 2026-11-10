@@ -4790,6 +4790,8 @@ public final class ForcedWinSolver {
         public final java.util.Map<String, Double> byName = new java.util.TreeMap<>();
         /** The names in the order they were planned: cards that can end the game, then cards that choose from the library, then the rest. */
         public final List<String> order = new ArrayList<>();
+        /** The ids of the cards the seat holds that search its library (a spell in hand, an ability on the battlefield). */
+        public final List<Integer> searchers = new ArrayList<>();
         public long nodes;
         public int screens, groups;
         /** The allowance ran out before every name was planned; the call failed (the table is empty). */
@@ -4812,7 +4814,11 @@ public final class ForcedWinSolver {
             final boolean sig, final long maxNodes) {
         final NextDraws out = new NextDraws();
         try {
-            if (!hasEnder(g) || !holdsSearch(g)) {
+            if (!hasEnder(g)) {
+                return out;
+            }
+            out.searchers.addAll(heldSearches(g));
+            if (out.searchers.isEmpty()) {
                 return out;
             }
             final GoldfishOpts b = new GoldfishOpts();
@@ -4922,8 +4928,9 @@ public final class ForcedWinSolver {
         return false;
     }
 
-    /** integrate-1110: the seat holds a card that searches its library (a spell in hand, or an ability on the battlefield). */
-    private boolean holdsSearch(final Game g) {
+    /** integrate-1110: the cards the seat holds that search its library (a spell in hand, or an ability on the battlefield), by id. */
+    private List<Integer> heldSearches(final Game g) {
+        final List<Integer> out = new ArrayList<>();
         for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield}) {
             for (Card c : me.getCardsIn(z)) {
                 final ACard a = reader.card(g, me, c);
@@ -4932,12 +4939,13 @@ public final class ForcedWinSolver {
                 }
                 for (ForcedWinModel.Abil ab : z == ZoneType.Hand ? a.fromHand : a.onBattlefield) {
                     if (!ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP))) {
-                        return true;
+                        out.add(c.getId());
+                        break;
                     }
                 }
             }
         }
-        return false;
+        return out;
     }
 
     /** The planner can end the game with this card: it wins on entry or on a small library, or an ability wins, drains or mills. */
