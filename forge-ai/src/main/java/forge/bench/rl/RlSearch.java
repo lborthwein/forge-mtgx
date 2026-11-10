@@ -323,6 +323,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * choice. Needs plans with the solver; generic, no card or deck logic.
          */
         public boolean provenOnly = false;
+        /**
+         * solver-distill-cc-1109 (null = off, the default, and then absent from the JSON): exploration, for training-game
+         * generation only. {"eps": 0.1, "families": "CARDS,TARGETS,...", "priorityEps": 0.0}. At an ask of a listed family
+         * whose menu is a single pick or a subset, with probability eps the seat answers a uniformly drawn NEIGHBOUR of
+         * the policy's answer instead (another candidate for a single pick; for a subset one candidate swapped, added or
+         * dropped; always a valid answer of the menu). With priorityEps and provenOnly, a priority decision is with that
+         * probability another candidate drawn in proportion to the policy's own probabilities. Every draw is seeded from
+         * the game seed and the decision; each deviation and the count of eligible asks are in the game's summary. Generic:
+         * no card or deck logic. Never part of a pilot that is read or deployed.
+         */
+        public JsonObject explore;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -385,7 +396,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly"));
+                "provenOnly", "explore"));
+
+        /** explore.families as trimmed names (empty when absent). */
+        static List<String> exploreFamilyNames(final JsonObject ex) {
+            final List<String> out = new ArrayList<>();
+            if (ex != null && ex.has("families")) {
+                for (String f : ex.get("families").getAsString().split(",")) {
+                    if (!f.trim().isEmpty()) {
+                        out.add(f.trim());
+                    }
+                }
+            }
+            return out;
+        }
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -403,6 +427,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
             if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
             if (o.has("provenOnly")) c.provenOnly = o.get("provenOnly").getAsBoolean();
+            if (o.has("explore") && !o.get("explore").isJsonNull()) {
+                c.explore = o.getAsJsonObject("explore");
+                for (String k : c.explore.keySet()) {
+                    if (!java.util.Arrays.asList("eps", "families", "priorityEps").contains(k)) {
+                        throw new IllegalArgumentException("explore: unknown key " + k);
+                    }
+                }
+                for (String f : exploreFamilyNames(c.explore)) {
+                    final int i = RlSchema.FAMILIES.indexOf(f);
+                    if (i <= 0 || i == RlSchema.F_PRIORITY || i == RlSchema.F_BLOCK) {
+                        throw new IllegalArgumentException("explore: family not supported: " + f);
+                    }
+                }
+            }
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
             if (o.has("leaf")) c.leaf = o.get("leaf").getAsString();
             if (o.has("playout")) c.playout = o.get("playout").getAsString();
@@ -712,6 +750,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (provenOnly) {
                 o.addProperty("provenOnly", true); // solver-distill-cc-1109: only when on
+            }
+            if (explore != null) {
+                o.add("explore", explore); // solver-distill-cc-1109: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -1505,7 +1546,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
         if (cfg.provenOnly) {
-            return provenOnlyDecide(g, me, m, frame, menuObjs, sb);
+            return provenOnlyDecide(g, me, m, frame, greedy, menuObjs, sb);
         }
         // search-bones-1015 (d): S-b searches a respond point (their spell on top, a counter in our menu)
         final boolean respond = sb != null && !g.getStack().isEmpty() && sb.respondPoint(g, menuObjs);
@@ -1956,6 +1997,228 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     public Tap tap;
 
+    // ---- solver-distill-cc-1109: exploration (cfg.explore), training-game generation only
+    private java.util.Set<Integer> exploreFams;
+    private final Map<String, int[]> exploreEligible = new TreeMap<>(), exploreDeviated = new TreeMap<>();
+    private final JsonArray exploreRows = new JsonArray();
+
+    private boolean exploreFamily(final int family) {
+        if (cfg.explore == null) {
+            return false;
+        }
+        if (exploreFams == null) {
+            final java.util.Set<Integer> fs = new java.util.TreeSet<>();
+            for (String f : Config.exploreFamilyNames(cfg.explore)) {
+                fs.add(RlSchema.FAMILIES.indexOf(f));
+            }
+            exploreFams = fs;
+        }
+        return exploreFams.contains(family);
+    }
+
+    /** The asks the spec answers by itself (the mulligan rules and the choice scorer), whatever exploration does. */
+    private boolean scorerAsk(final int family) {
+        if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.mullKeep != null || cfg.keepGate && cfg.reach != null)
+                && family == RlSchema.F_MULLIGAN) {
+            return true;
+        }
+        return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
+                || family == RlSchema.F_ORDER && scorer().config().pile);
+    }
+
+    private java.util.SplittableRandom exploreRng(final RlWire.Decide frame, final long salt) {
+        return new java.util.SplittableRandom(LookaheadSearch.mix(LookaheadSearch.mix(gameSeed, 0xE8910EL ^ salt),
+                frame.decIdx * 2L + frame.seat));
+    }
+
+    private static String candLabel(final RlCandidates.Menu m, final int i) {
+        if (i < 0 || i >= m.C()) {
+            return "?";
+        }
+        final RlCandidates.Cand c = m.cands.get(i);
+        if (c.host != null) {
+            return c.host.getName();
+        }
+        if (c.name != null) {
+            return c.name;
+        }
+        if (c.tgt0 instanceof forge.game.card.Card) {
+            return ((forge.game.card.Card) c.tgt0).getName();
+        }
+        return c.tgt0 instanceof Player ? "player" : "kind" + c.kind;
+    }
+
+    private void exploreCount(final Map<String, int[]> into, final int family, final int seat) {
+        final int[] a = into.computeIfAbsent(RlSchema.familyName(family), k -> new int[2]);
+        if (seat >= 0 && seat < 2) {
+            a[seat]++;
+        }
+    }
+
+    /**
+     * With probability eps a uniformly drawn valid neighbour of the policy's answer (null = the policy's answer stands).
+     * An ask is eligible when the policy's answer has at least one valid neighbour.
+     */
+    private short[] exploreAnswer(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final short[] greedy) {
+        if (greedy == null || m.mode != RlSchema.M_SINGLE && m.mode != RlSchema.M_SUBSET || m.validate(greedy) != null) {
+            return null;
+        }
+        final int c = m.C();
+        final List<short[]> nb = new ArrayList<>();
+        final List<String> how = new ArrayList<>();
+        final boolean[] in = new boolean[c];
+        for (short x : greedy) {
+            in[x] = true;
+        }
+        if (m.mode == RlSchema.M_SINGLE) {
+            for (int i = 0; i < c; i++) {
+                final short[] t = {(short) i};
+                if (!in[i] && m.validate(t) == null) {
+                    nb.add(t);
+                    how.add("single");
+                }
+            }
+        } else {
+            for (int j = 0; j < greedy.length; j++) {          // drop one, or swap one
+                final short[] d = new short[greedy.length - 1];
+                for (int k = 0, w = 0; k < greedy.length; k++) {
+                    if (k != j) {
+                        d[w++] = greedy[k];
+                    }
+                }
+                if (m.validate(d) == null) {
+                    nb.add(d);
+                    how.add("drop");
+                }
+                for (int i = 0; i < c; i++) {
+                    if (!in[i]) {
+                        final short[] t = greedy.clone();
+                        t[j] = (short) i;
+                        if (m.validate(t) == null) {
+                            nb.add(t);
+                            how.add("swap");
+                        }
+                    }
+                }
+            }
+            for (int i = 0; i < c; i++) {                       // add one
+                if (!in[i]) {
+                    final short[] t = java.util.Arrays.copyOf(greedy, greedy.length + 1);
+                    t[greedy.length] = (short) i;
+                    if (m.validate(t) == null) {
+                        nb.add(t);
+                        how.add("add");
+                    }
+                }
+            }
+        }
+        if (nb.isEmpty()) {
+            return null;
+        }
+        exploreCount(exploreEligible, m.family, frame.seat);
+        final java.util.SplittableRandom rnd = exploreRng(frame, 0L);
+        final double eps = cfg.explore.has("eps") ? cfg.explore.get("eps").getAsDouble() : 0.0;
+        if (rnd.nextDouble() >= eps) {
+            return null;
+        }
+        final int pick = rnd.nextInt(nb.size());
+        final short[] alt = nb.get(pick);
+        exploreCount(exploreDeviated, m.family, frame.seat);
+        final JsonObject row = new JsonObject();
+        row.addProperty("d", frame.decIdx);
+        row.addProperty("s", frame.seat);
+        row.addProperty("t", g.getPhaseHandler().getTurn());
+        row.addProperty("f", RlSchema.familyName(m.family));
+        row.addProperty("how", how.get(pick));
+        row.addProperty("n", nb.size());
+        final JsonArray from = new JsonArray(), to = new JsonArray();
+        for (short x : greedy) {
+            from.add(candLabel(m, x));
+        }
+        for (short x : alt) {
+            to.add(candLabel(m, x));
+        }
+        row.add("from", from);
+        row.add("to", to);
+        if (m.source != null) {
+            row.addProperty("src", m.source.getName());
+        }
+        exploreRows.add(row);
+        return alt;
+    }
+
+    /**
+     * With probability priorityEps another candidate of a priority menu, drawn in proportion to the policy's own
+     * probabilities (-1 = the policy's choice stands). provenOnly only.
+     */
+    private int explorePriority(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy) {
+        final double eps = cfg.explore != null && cfg.explore.has("priorityEps") ? cfg.explore.get("priorityEps").getAsDouble() : 0.0;
+        final int c = m.C();
+        if (eps <= 0 || c < 2) {
+            return -1;
+        }
+        int others = 0;
+        for (int i = 0; i < c; i++) {
+            if (i != greedy && m.cands.get(i).kind > 0) {
+                others++;
+            }
+        }
+        if (others == 0) {
+            return -1;
+        }
+        exploreCount(exploreEligible, RlSchema.F_PRIORITY, frame.seat);
+        final java.util.SplittableRandom rnd = exploreRng(frame, 0x9A1L);
+        if (rnd.nextDouble() >= eps) {
+            return -1;
+        }
+        double[] pr = null;
+        try {
+            final RlSearchClient.Scores sc = client().score(RlWire.encodeDecide(frame));
+            if (sc.status == RlWire.ST_OK && sc.probs.length == c) {
+                pr = new double[c];
+                for (int i = 0; i < c; i++) {
+                    pr[i] = sc.probs[i];
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            drop();
+        }
+        double sum = 0;
+        final double[] w = new double[c];
+        for (int i = 0; i < c; i++) {
+            w[i] = i != greedy && m.cands.get(i).kind > 0 ? (pr == null ? 1.0 : Math.max(pr[i], 1e-6)) : 0.0;
+            sum += w[i];
+        }
+        double u = rnd.nextDouble() * sum;
+        int pick = -1;
+        for (int i = 0; i < c; i++) {
+            if (w[i] > 0) {
+                pick = i;
+                u -= w[i];
+                if (u <= 0) {
+                    break;
+                }
+            }
+        }
+        if (pick < 0) {
+            return -1;
+        }
+        exploreCount(exploreDeviated, RlSchema.F_PRIORITY, frame.seat);
+        final JsonObject row = new JsonObject();
+        row.addProperty("d", frame.decIdx);
+        row.addProperty("s", frame.seat);
+        row.addProperty("t", g.getPhaseHandler().getTurn());
+        row.addProperty("f", "PRIORITY");
+        row.addProperty("n", others);
+        row.addProperty("from", greedy >= 0 && greedy < c ? candLabel(m, greedy) : "?");
+        row.addProperty("to", candLabel(m, pick));
+        if (pr != null) {
+            row.addProperty("p", Math.round(pr[pick] * 1000) / 1000.0);
+        }
+        exploreRows.add(row);
+        return pick;
+    }
+
     /** solver-distill-cc-1109 (cfg.provenOnly): this game's decisions left to the policy, and its plain sink rows. */
     private int provenOnlyPolicy, provenOnlyRows;
 
@@ -1964,7 +2227,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * which goes to the hook at once as in the full search. Nothing else is searched.
      */
     private int provenOnlyDecide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
-            final List<SpellAbility> menuObjs, final PlanSearch sb) {
+            final int greedy, final List<SpellAbility> menuObjs, final PlanSearch sb) {
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0);
         if (cfg.valueSink != null && m.C() >= 2) {
@@ -1993,6 +2256,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     tap("proven_line", stage, null, 0, RlSeat.PrioritySearch.HOOK);
                     return RlSeat.PrioritySearch.HOOK;
                 }
+            }
+        }
+        if (cfg.explore != null) {
+            final int ex = explorePriority(g, m, frame, greedy);
+            if (ex >= 0) {
+                tap("explore", null, null, 0, ex);
+                return ex;
             }
         }
         provenOnlyPolicy++;
@@ -2496,6 +2766,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public boolean choiceAsk(final int family) {
+        if (exploreFamily(family)) {
+            return true;
+        }
         if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.mullKeep != null || cfg.keepGate && cfg.reach != null)
                 && family == RlSchema.F_MULLIGAN) {
             return true;
@@ -2517,6 +2790,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     private short[] decideChoice0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
+        if (exploreFamily(m.family)) {
+            final short[] ex = exploreAnswer(g, m, frame, greedy);
+            if (ex != null) {
+                return ex;
+            }
+            if (!scorerAsk(m.family)) {
+                return null; // this family is here for exploration only
+            }
+        }
         if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
             return keepAnswer(g, me, m, frame, greedy);
         }
@@ -3170,6 +3452,26 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (cfg.provenOnly) {
             o.addProperty("proven_only_policy", provenOnlyPolicy); // solver-distill-cc-1109: only when on
             o.addProperty("proven_only_rows", provenOnlyRows);
+        }
+        if (cfg.explore != null) {
+            final JsonObject ex = new JsonObject(); // solver-distill-cc-1109: only when on
+            final JsonObject el = new JsonObject(), dv = new JsonObject();
+            for (Map.Entry<String, int[]> e : exploreEligible.entrySet()) {
+                final JsonArray a2 = new JsonArray();
+                a2.add(e.getValue()[0]);
+                a2.add(e.getValue()[1]);
+                el.add(e.getKey(), a2);
+            }
+            for (Map.Entry<String, int[]> e : exploreDeviated.entrySet()) {
+                final JsonArray a2 = new JsonArray();
+                a2.add(e.getValue()[0]);
+                a2.add(e.getValue()[1]);
+                dv.add(e.getKey(), a2);
+            }
+            ex.add("eligible", el);
+            ex.add("deviated", dv);
+            ex.add("rows", exploreRows);
+            o.add("explore", ex);
         }
         o.addProperty("departures", departures);
         o.addProperty("stack_skipped", searchStackSkipped);
