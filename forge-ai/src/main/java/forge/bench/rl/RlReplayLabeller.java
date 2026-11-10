@@ -480,7 +480,15 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                     got[3], r, key};
             return;
         }
-        row(seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, payload, (Integer) got[3], r, sr);
+        // relax-label-1110 (off by default, and then the row is exactly as before): the seat's relaxed-planning distance
+        final JsonObject rx = RELAX > 0 && search == null && fatal == null && FATAL.get() == null
+                ? relaxLabel(p, seat, ord, phase, g.getStack().size(), r) : null;
+        if (rx == null) {
+            row(seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, payload, (Integer) got[3], r, sr);
+        } else {
+            row(seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, payload, (Integer) got[3], r, sr, null, null,
+                    -1, rx);
+        }
         if (NearMiss.on() && search == null && fatal == null && FATAL.get() == null) {
             nearMiss(p, seat, ord, turn, tbe, phase, g.getStack().size(), payload, r, key);
         }
@@ -611,6 +619,111 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             nmMs += ms;
             row(seat, ord, turn, tbe, phase, stack, null, (byte[]) got[1], (Integer) got[5], rr, null, null, null, -1, x);
         }
+    }
+
+    // ------------------------------------------------------------------------------------------- relaxed-line distance
+
+    /**
+     * relax-label-1110: the most generic relaxations to try (0 = off, the default, and then no row changes). A labelled
+     * position of the seat to move gets {@code relax_r}: 0 when a line exists now (the win check's verdict or the planner
+     * screen), else the fewest relaxations (one more own land untapped, or one card drawn from the seat's unknown library,
+     * {@link ChoiceScorer}'s pass-3 machinery) before the planner screen finds a line; -1 when none within RELAX. Its
+     * {@code relax_p} is the share of draw samples with a line at that distance (1 for lands only). Generic: zones, types
+     * and mana abilities only, no card names. Run on a throwaway copy under the bench isolation; the live game never moves.
+     */
+    public static final int RELAX = Integer.getInteger("forge.bench.label.relax", 0);
+    public static final int RELAX_DRAWS = Integer.getInteger("forge.bench.label.relaxDraws", 2);
+    public static final int RELAX_NODES = Integer.getInteger("forge.bench.label.relaxNodes", 30000);
+    public static final long RELAX_MS = Long.getLong("forge.bench.label.relaxMs", 2000L);
+    /** relax-label-1110: false (default) = only the seat's own MAIN1 with an empty stack; true = every labelled position. */
+    public static final boolean RELAX_ALL = Boolean.getBoolean("forge.bench.label.relaxAll");
+    private int rxRows = 0, rxFound = 0;
+    private double rxMs = 0;
+    private forge.ai.simulation.ForcedWinSolver.Config rxCfg;
+
+    private JsonObject relaxLabel(final Player p, final int seat, final int ord, final String phase, final int stack,
+            final HonestLabel.Result r) {
+        final Game g = game;
+        if (!RELAX_ALL && (stack != 0 || !"MAIN1".equals(phase) || g.getPhaseHandler().getPlayerTurn() != p)) {
+            return null;
+        }
+        final JsonObject x = new JsonObject();
+        x.addProperty("relax_max", RELAX);
+        x.addProperty("relax_draws", RELAX_DRAWS);
+        if ("win".equals(r.check) && !Double.isNaN(r.pWin) && r.pWin > 1e-9) {
+            x.addProperty("relax_r", 0);
+            x.addProperty("relax_p", r.pWin);
+            x.addProperty("relax_how", "verdict");
+            rxRows++;
+            rxFound++;
+            return x;
+        }
+        final long t0 = System.nanoTime();
+        final forge.ai.simulation.ForcedWinSolver.Screen s;
+        final int[] r0lines = new int[1];
+        try {
+            final Object[] got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+                final Game c;
+                final Player pc;
+                synchronized (g) {
+                    final forge.ai.simulation.GameCopier copier = new forge.ai.simulation.GameCopier(g, true);
+                    copier.setCopyPending(forge.ai.simulation.GameCopier.SOLVER_COPY_PENDING);
+                    copier.setCopyFidelity(1);
+                    c = copier.makeCopy();
+                    pc = (Player) copier.find(p);
+                }
+                if (rxCfg == null) {
+                    rxCfg = spec.relaxScreenConfig();
+                }
+                // R = 0: the planner screen on the position as it stands
+                final forge.ai.simulation.ForcedWinSolver.Screen s0 = forge.ai.simulation.ForcedWinSolver.withReader(pc,
+                        rxCfg, forge.ai.simulation.ForcedWinSolver.newSharedReader())
+                        .screen(c, new ArrayList<>(), RELAX_NODES, RELAX_MS);
+                if (s0.lines > 0) {
+                    return new Object[] {null, s0.lines};
+                }
+                final ChoiceScorer.Config cc = new ChoiceScorer.Config();
+                cc.lineOnly = true;
+                cc.relax = RELAX;
+                cc.relaxDraws = RELAX_DRAWS;
+                cc.screenNodes = RELAX_NODES;
+                cc.screenMs = RELAX_MS;
+                cc.solverCfg = rxCfg;
+                final java.util.Set<Integer> kl = spec.infoState && infoStates != null ? infoStates.known(p, p)
+                        : knownLib[seat] == null ? null : knownLib[seat].known(p);
+                final long key = RlSearch.splitmix(uid ^ (0x52454c4158L + 2L * ord + seat));
+                return new Object[] {ChoiceScorer.relaxDistanceForTest(cc, c, pc,
+                        cd -> kl != null && kl.contains(cd.getId()), key), 0};
+            }));
+            s = (forge.ai.simulation.ForcedWinSolver.Screen) got[0];
+            r0lines[0] = (Integer) got[1];
+        } catch (RuntimeException ex) {
+            System.err.println("[relax] " + Long.toUnsignedString(uid) + ":" + seat + ":" + ord + " failed: " + ex);
+            x.addProperty("relax_r", -2);
+            x.addProperty("relax_how", "error");
+            return x;
+        }
+        final double ms = (System.nanoTime() - t0) / 1e6;
+        rxRows++;
+        rxMs += ms;
+        x.addProperty("relax_ms", Math.round(ms));
+        if (s == null) {
+            x.addProperty("relax_r", 0);
+            x.addProperty("relax_p", 1.0);
+            x.addProperty("relax_how", "screen");
+            x.addProperty("relax_lines", r0lines[0]);
+            rxFound++;
+            return x;
+        }
+        final boolean found = s.relaxR != Integer.MAX_VALUE && s.relaxR > 0;
+        x.addProperty("relax_r", found ? s.relaxR : -1);
+        x.addProperty("relax_p", found && !Double.isNaN(s.relaxP) ? s.relaxP : 0.0);
+        x.addProperty("relax_how", s.relaxHow == null ? (found ? "?" : "none") : s.relaxHow);
+        x.addProperty("relax_screens", s.relaxScreens);
+        if (found) {
+            rxFound++;
+        }
+        return x;
     }
 
     /** nearmiss-gen-1109: the schema of a near-miss copy row (an original row keeps its own). */

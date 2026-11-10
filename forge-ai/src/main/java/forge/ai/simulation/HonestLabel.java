@@ -260,6 +260,11 @@ public final class HonestLabel {
             return c;
         }
 
+        /** relax-label-1110: the win check's solver config, for the relaxed-distance screen of a labelled position. */
+        public ForcedWinSolver.Config relaxScreenConfig() {
+            return winConfig();
+        }
+
         /** The loss check's (the opponent's) solver config: exact (one world, the position as it stands), act=false. */
         ForcedWinSolver.Config lossConfig() {
             final JsonObject o = defaults();
