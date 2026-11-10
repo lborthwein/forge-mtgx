@@ -45,13 +45,15 @@ public class OwnerLinesTest extends forge.ai.AITest {
         solverCfg.addProperty("act", "false");
         solverCfg.addProperty("defense", "false");
         final JsonArray ps = root.getAsJsonArray("positions");
-        final int[][] budgets = {{4000, 12000}, {12000, 48000}, {40000, 160000}};
+        final int[][] budgets = "true".equals(System.getProperty("owner.quick")) ? new int[][] {{12000, 48000}}
+                : new int[][] {{4000, 12000}, {12000, 48000}, {40000, 160000}};
         for (JsonElement e : ps) {
             final JsonObject o = e.getAsJsonObject();
             final String id = o.get("game").getAsString();
             final String frame = o.get("state").getAsString();
             System.out.println("OWNERLINES " + id + " win=" + o.get("win") + " go_turn=" + o.get("go_turn")
-                    + " own_turns_after_go=" + o.get("own_turns_after_go") + " pile=" + o.get("pile"));
+                    + " own_turns_after_go=" + o.get("own_turns_after_go") + " pile=" + o.get("pile")
+                    + (o.has("he_did") ? " he_did=" + o.get("he_did") : ""));
             try {
                 final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
                 final Player me = g.getPlayers().get(0);
