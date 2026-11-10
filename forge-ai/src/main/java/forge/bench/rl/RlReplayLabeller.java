@@ -875,7 +875,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             "state_sha", "s2t", "row_kind", "choice_ord", "r3", "r3_sha", "r3_ranker", "cap", "cap_hits", "worlds_capped",
             "proof_cap", "lib_tag", "lib_takes", "lib_w", "lib_seqs", "lib_why", "known_top", "known_pinned", "dp_meter",
             "line_text", "afford", "lib_exact_why", // endstep-rows-1103: line_text only with -Dforge.bench.lineText (diagnostics)
-            "schema", "nm_of", "nm_k", "nm_kind", "nm_edit", "nm_lib", "nm_frame_eq", "nm_seed", "nm_ms", "nm_w2"}; // nearmiss-gen-1109
+            "schema", "nm_of", "nm_k", "nm_kind", "nm_edit", "nm_lib", "nm_frame_eq", "nm_seed", "nm_ms", "nm_w2", // nearmiss-gen-1109
+            "relax_r", "relax_p", "relax_how", "relax_screens", "relax_ms", "relax_max", "relax_draws", "relax_lines"}; // relax-label-1110
 
     /**
      * rollout-budget-1101 (review #160 S2-2): a step row whose proof check was capped says so (proof_cap): its "no proof"
