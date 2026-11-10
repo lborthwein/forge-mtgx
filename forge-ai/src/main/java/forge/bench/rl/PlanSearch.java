@@ -1275,6 +1275,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             }
             int n = 0;
             double sum = 0, sq = 0;
+            boolean failedWorld = false;
+            if (js >= 0 && js < r.values.length) {
+                for (double b : r.values[js]) {
+                    failedWorld |= b == Double.NEGATIVE_INFINITY; // a play-out of the setup failed: the search never plays it
+                }
+            }
             if (js >= 0 && jc >= 0 && js < r.values.length && jc < r.values.length) {
                 for (int w = 0; w < Math.min(r.values[js].length, r.values[jc].length); w++) {
                     final double a = r.values[jc][w], b = r.values[js][w];
@@ -1286,13 +1292,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     sq += (a - b) * (a - b);
                 }
             }
-            boolean worse = false;
-            if (n >= 2) {
+            boolean worse = failedWorld;
+            if (!worse && n >= 2) {
                 final double mean = sum / n;
                 final double se = Math.sqrt(Math.max(0.0, (sq - n * mean * mean) / (n - 1)) / n);
                 worse = mean > spec.setupMargin && mean > rs.departZ() * se;
             }
-            lastSetup = "n=" + n + " d=" + (n == 0 ? "-" : String.valueOf(Math.round(sum / n * 1000) / 1000.0)) + (worse ? " veto" : " take");
+            lastSetup = "n=" + n + " d=" + (n == 0 ? "-" : String.valueOf(Math.round(sum / n * 1000) / 1000.0))
+                    + (failedWorld ? " failed" : "") + (worse ? " veto" : " take");
             st.setupNote = lastSetup;
             if (!worse) {
                 driver.solver().adopt(((LinePlan) st.plans.get(st.setup)).line);
