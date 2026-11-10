@@ -1558,6 +1558,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             o.addProperty("setupTakes", setupTakes);
             o.addProperty("setupVetoes", setupVetoes);
             o.addProperty("setupChosen", setupChosen);
+            o.addProperty("setupLines", driver.solver().setupLines);
+            o.addProperty("setupWinNow", driver.solver().setupWinNow);
         }
         if (spec.lineHorizon) {
             o.addProperty("horizonExtends", horizonExtends); // line-adoption-1107 (only when on)

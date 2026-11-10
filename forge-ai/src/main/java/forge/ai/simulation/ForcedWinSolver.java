@@ -2558,8 +2558,11 @@ public final class ForcedWinSolver {
         return out;
     }
 
-    /** SETUP (report only): calls, those with a goldfish line, and those that proposed steps for this turn. */
-    public int setupCalls, setupLines, setupProposals;
+    /**
+     * SETUP (report only): calls, those with a goldfish line, those whose line wins this turn (left to the offense, which
+     * proposed nothing here), and those that proposed steps for this turn.
+     */
+    public int setupCalls, setupLines, setupWinNow, setupProposals;
 
     /**
      * solver-distill-cc-1109 (SETUP): the planner's own play for this turn when its kill is more than a turn away: the
@@ -2589,6 +2592,8 @@ public final class ForcedWinSolver {
             setupLines++;
             final Line whole = gf.bestLine;
             if (whole.winTurn < 1) {
+                setupWinNow++;
+                receipt("FORCED_WIN setup" + tag() + " turn=" + ph.getTurn() + " winNow (no offense line) " + whole);
                 return null; // wins this turn: the offense proposes and verifies that
             }
             final List<Step> pre = new ArrayList<>();
