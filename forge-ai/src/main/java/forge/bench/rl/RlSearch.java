@@ -1698,6 +1698,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                             h.addProperty("gf_turn", gf.bestTurn);
                             h.addProperty("gf_direct", gf.direct);
                         }
+                        if (reachCfg().sinkSamples > 0) {
+                            final forge.ai.simulation.ForcedWinSolver.Goldfish gs = goldfishSampled(liveKnow, g, me,
+                                    reachCfg().sinkSamples, -1L);
+                            if (!gs.failed && !Double.isNaN(gs.g)) {
+                                h.addProperty("gfs", gs.g);
+                                h.addProperty("gfs_p", gs.p);
+                            }
+                        }
                     } catch (RuntimeException e) {
                         System.err.println("[rlsearch] value root labels failed: " + e);
                     } finally {
@@ -2962,8 +2970,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * the planner found in a world is a fact about that world, not a noisy estimate.
          */
         public double depart = 0.0;
+        /**
+         * Labels only (0 = off; never read to decide): the value sink's rows also carry the SAMPLED goldfish of the seat
+         * there ({@code gfs}: the mean over this many orders of its unknown library of the planner's gamma^turn with the
+         * next draws known, {@code gfs_p}: the share of orders with a line). A lone piece of a kill scores what its
+         * partners' draws are worth; the unsampled goldfish scores it 0.
+         */
+        public int sinkSamples = 0;
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
-                "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart"));
+                "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart",
+                "sinkSamples"));
 
         public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
             final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
@@ -2999,6 +3015,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("oppDirect")) c.oppDirect = o.get("oppDirect").getAsBoolean();
             if (o.has("gamma")) c.gamma = o.get("gamma").getAsDouble();
             if (o.has("depart")) c.depart = o.get("depart").getAsDouble();
+            if (o.has("sinkSamples")) c.sinkSamples = o.get("sinkSamples").getAsInt();
             return c;
         }
     }
@@ -3136,6 +3153,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).goldfish(g, top, o);
     }
 
+    /**
+     * Labels only: {@link #goldfishFull} over {@code samples} orders of the seat's unknown library (the next draws of each
+     * order known to the plan; the land-drop relaxation stays). The seed is the game's, the decision's and the caller's
+     * salt, so a row's label is a function of the game. Never read to decide.
+     */
+    forge.ai.simulation.ForcedWinSolver.Goldfish goldfishSampled(final RlKnowledge k, final Game g, final Player p,
+            final int samples, final long salt) {
+        final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+        o.samples = samples;
+        o.maxNodes = 4L * o.nodes * samples;
+        o.ms = 10_000L; // node caps only: the caller runs it off the work clock
+        o.seed = splitmix(uid ^ (0x9E3779B97F4A7C15L * (sinkDecIdx + 1)) ^ salt);
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).goldfish(g, knownTopOf(k, p), o);
+    }
+
     @Override
     public double[] leafReach(final Object copyCtx, final Game g, final Player me) {
         if (cfg.reach == null) {
@@ -3145,7 +3178,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final RlKnowledge k = copyCtx instanceof CopyCtx ? ((CopyCtx) copyCtx).know : null;
         // {R_me, R_opp, then cost (report only): planner nodes, s0 capped, skipped, per-card screens, per-card capped; then
         // the value sink's leaf row (labels only, never read to decide): goldfish, its turn, 1 = this leaf is a sink row}
-        final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0};
+        // [10], [11]: the sink row's sampled goldfish and its share of orders with a line (labels only; reach.sinkSamples)
+        final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0, Double.NaN, Double.NaN};
         if (rc.gate && !reachOn) {
             out[0] = 0.0; // the root showed no potential: no screens for the seat at this decision's leaves
         } else {
@@ -3168,6 +3202,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (!gf.failed && !Double.isNaN(gf.g)) {
                     out[7] = gf.g;
                     out[8] = gf.bestTurn;
+                }
+                if (rc.sinkSamples > 0) {
+                    final forge.ai.simulation.ForcedWinSolver.Goldfish gs = goldfishSampled(k, g, me, rc.sinkSamples,
+                            leafSeen.get());
+                    if (!gs.failed && !Double.isNaN(gs.g)) {
+                        out[10] = gs.g;
+                        out[11] = gs.p;
+                    }
                 }
             } catch (RuntimeException e) {
                 // no label
@@ -3225,6 +3267,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (!Double.isNaN(r[7])) {
             h.addProperty("gf", r[7]);
             h.addProperty("gf_turn", (int) r[8]);
+        }
+        if (r.length >= 12 && !Double.isNaN(r[10])) {
+            h.addProperty("gfs", r[10]);
+            h.addProperty("gfs_p", r[11]);
         }
         h.addProperty("w", hit ? 1 : LEAF_KEEP);
         valueRecs.add(labelRecord(h, payload));

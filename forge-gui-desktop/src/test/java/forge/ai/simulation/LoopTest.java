@@ -108,6 +108,38 @@ public class LoopTest extends forge.ai.AITest {
     }
 
     @Test
+    public void aLonePieceHasSampledPotential() {
+        // Pestermite in hand, five lands, Kiki-Jiki one of eight unknown library cards: no line as it stands (the
+        // unsampled goldfish is 0), but the orders of the library that bring Kiki-Jiki within the plan's draws have one
+        final String lib = "Mountain;Mountain;Island;" + KIKI + ";Mountain;Island;Mountain;Island";
+        final String frame = ForcedWinSolverTest.frame("Pestermite", LANDS, 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + lib);
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = solver(me, true);
+        final ForcedWinSolver.GoldfishOpts plain = new ForcedWinSolver.GoldfishOpts();
+        plain.ms = -1L;
+        Assert.assertEquals(s.goldfish(g, s.knownTop(g), plain).g, 0.0, 1e-9, "one piece, the partner unknown");
+        final ForcedWinSolver.GoldfishOpts o = new ForcedWinSolver.GoldfishOpts();
+        o.ms = -1L;
+        o.samples = 8;
+        o.seed = 11L;
+        o.maxNodes = 4L * o.nodes * o.samples;
+        final ForcedWinSolver.Goldfish gs = s.goldfish(g, s.knownTop(g), o);
+        System.out.println("LOOP sampled goldfish g=" + gs.g + " p=" + gs.p + " samples=" + gs.samples + " screens=" + gs.screens
+                + " nodes=" + gs.nodes + " cut=" + gs.cut);
+        Assert.assertFalse(gs.failed);
+        Assert.assertTrue(gs.p > 0 && gs.g > 0, "some orders bring the partner: p=" + gs.p + " g=" + gs.g);
+        Assert.assertTrue(gs.g < 0.8 + 1e-9, "never above a kill next turn");
+        // with the piece gone the same orders have nothing
+        final String frame2 = ForcedWinSolverTest.frame("", LANDS, 20, "", "", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + lib);
+        final Game g2 = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame2);
+        final ForcedWinSolver s2 = solver(g2.getPlayers().get(0), true);
+        Assert.assertEquals(s2.goldfish(g2, s2.knownTop(g2), o).g, 0.0, 1e-9, "no piece, no potential");
+    }
+
+    @Test
     public void reachOverTheDraw() {
         // the partner in play, five lands, Kiki-Jiki one of two unknown library cards: half the draws make the line
         Assert.assertEquals(reach(LANDS + ";Pestermite", "", KIKI + ";Mountain", true).p, 0.5, 1e-9);
