@@ -249,6 +249,15 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
     }
 
     @Override
+    public Boolean payToPrevent(final forge.game.cost.Cost cost, final SpellAbility sa) {
+        final Boolean b = solver.answerEntryPay(sa); // planner-mana-1110 (null unless the active line names this land)
+        if (b != null) {
+            count("payToPrevent");
+        }
+        return b;
+    }
+
+    @Override
     public boolean confirmTrigger(final WrappedAbility w) {
         final boolean b = probe(() -> solver.answerConfirmTrigger(w));
         if (b) {
