@@ -81,6 +81,14 @@ public final class ForcedWinProbe {
 
     /** labeller-v2 (c): set by a planScry reader around its learning (false = v1). */
     static final ThreadLocal<Boolean> PLAN_SCRY = ThreadLocal.withInitial(() -> false);
+    /**
+     * integrate-1110: true (on this thread) only while {@link ForcedWinSolver#potential} runs. solver-distill-cc-1109's
+     * keepGate asks for a hand's potential before the game starts, and made EVERY probe's sandbox of a not-started game
+     * play as a started one ({@link #inPlay}). That also changed what a probe learns when the live branch's labeller
+     * reaches a not-started game (a mulligan-bottom row) with every key of that lane off. Now only the potential check's
+     * own probes do it; any other probe of a not-started game is what it was on the live branch.
+     */
+    static final ThreadLocal<Boolean> PRE_GAME = ThreadLocal.withInitial(() -> false);
 
     /**
      * ledger-sweep-1107, ledger row 45 ({@code -Dforge.probeEmptyDraw=true}, off by default). A probe runs in a copy of
@@ -296,7 +304,9 @@ public final class ForcedWinProbe {
                 o.error = "stack";
                 return o;
             }
-            inPlay(g);
+            if (PRE_GAME.get()) {
+                inPlay(g); // integrate-1110: only for the caller that asked (see PRE_GAME)
+            }
             g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
             final ProbeAi probeAi = new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace);
             probeAi.planScry = PLAN_SCRY.get();

@@ -4641,6 +4641,18 @@ public final class ForcedWinSolver {
      */
     public boolean potential(final Game g, final List<Integer> knownTop, final GoldfishOpts o, final int maxNames,
             final boolean sig, final long maxNodes) {
+        // integrate-1110: this call's probes (and only they) play a not-started game's sandbox as a started one
+        final boolean prevPreGame = ForcedWinProbe.PRE_GAME.get();
+        ForcedWinProbe.PRE_GAME.set(true);
+        try {
+            return potential0(g, knownTop, o, maxNames, sig, maxNodes);
+        } finally {
+            ForcedWinProbe.PRE_GAME.set(prevPreGame);
+        }
+    }
+
+    private boolean potential0(final Game g, final List<Integer> knownTop, final GoldfishOpts o, final int maxNames,
+            final boolean sig, final long maxNodes) {
         try {
             boolean ender = false;
             final java.util.Set<String> seen = new java.util.HashSet<>();

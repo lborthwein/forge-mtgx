@@ -2171,8 +2171,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
             return keepAnswer(g, me, m, frame, greedy);
         }
-        if (m.family == RlSchema.F_MULLIGAN) {
-            return cfg.keepGate && cfg.reach != null ? keepGateAnswer(g, me, m, frame, greedy) : null;
+        // integrate-1110: solver-distill-cc-1109 returned here for EVERY mulligan ask, so a choiceScorer whose families
+        // hold MULLIGAN never scored one any more, also with keepGate off. Only the keepGate answers here now; with it
+        // off the ask goes on to the scorer as it does on the live branch.
+        if (m.family == RlSchema.F_MULLIGAN && cfg.keepGate && cfg.reach != null) {
+            return keepGateAnswer(g, me, m, frame, greedy);
         }
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
