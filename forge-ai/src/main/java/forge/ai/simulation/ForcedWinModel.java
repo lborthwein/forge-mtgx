@@ -245,6 +245,82 @@ public final class ForcedWinModel {
         }
     }
 
+    /**
+     * sdcc-probeobj-1111 (set only by a probeObjects reader): what a sandbox saw when an ability was played with one
+     * object of ours (a card name) as its target or as the permanent sacrificed for its cost.
+     */
+    static final class ObjSeen {
+        /** The ability as observed with this object: its cost and its effects (what the object's leaving caused included). */
+        Abil abil;
+        /**
+         * Where the object was once everything had resolved: 0 = where it was, {@link Abil#SELF_HAND} our hand,
+         * {@link Abil#SELF_GRAVEYARD} our graveyard, {@link Abil#SELF_EXILE} exile, -1 = somewhere the plan has no place for.
+         */
+        int to;
+        /** Other cards moved in ways no effect kind expresses (a token or a library card entered the battlefield). */
+        boolean unmapped;
+
+        /**
+         * The width search can play the ability on this object: everything it did is in the model, and it did something
+         * (an effect other than a shuffle, or the object came back to our hand).
+         */
+        boolean usable() {
+            if (unmapped || to < 0 || abil == null) {
+                return false;
+            }
+            for (Eff e : abil.effects) {
+                if (e.kind != EffKind.SHUFFLE) {
+                    return true;
+                }
+            }
+            return to == Abil.SELF_HAND;
+        }
+
+        @Override
+        public String toString() {
+            return (abil == null ? "?" : abil.effects.toString()) + (to == 0 ? "" : to == Abil.SELF_HAND ? ">hand"
+                    : to == Abil.SELF_GRAVEYARD ? ">graveyard" : to == Abil.SELF_EXILE ? ">exile" : ">?")
+                    + (unmapped ? " unmapped" : "");
+        }
+    }
+
+    /**
+     * sdcc-probeobj-1111 (set only by a probeObjects reader; null otherwise): the object an ability needs before it can
+     * be played, as the engine showed it. Nothing is read from the card's text or name: {@link #valid} holds the names
+     * of our cards the engine's own validity check accepts, {@link #seen} those a sandbox then played the ability with
+     * (one run per name: objects in play in the position first, then cards in our hand, else a stand-in of ours put
+     * into the zone), each with what that run did.
+     */
+    static final class ObjNeed {
+        /** {@link #SAC}: a permanent of ours sacrificed as a cost; {@link #TARGET}: the one card the ability targets. */
+        String role = "";
+        static final String SAC = "sac", TARGET = "target";
+        /** TARGET: which link of the ability's chain targets (0 = the ability itself). */
+        int link;
+        /** The zone the object is in: "Battlefield" or "Graveyard". */
+        String zone = "Battlefield";
+        final java.util.Set<String> valid = new java.util.TreeSet<>();
+        final Map<String, ObjSeen> seen = new java.util.concurrent.ConcurrentSkipListMap<>();
+        /** Names a sandbox could not play it with. */
+        final java.util.Set<String> tried = new java.util.concurrent.ConcurrentSkipListSet<>();
+        /** A sandbox played it on a card the opponent controls (the width model holds no such card: never planned). */
+        boolean opp;
+
+        boolean anyUsable() {
+            for (ObjSeen o : seen.values()) {
+                if (o.usable()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public String toString() {
+            return "needs " + role + ":" + zone + " seen=" + seen + (opp ? " +opp" : "") + " valid=" + valid.size();
+        }
+    }
+
     /** ENGINE: a step found by the engine search (any legal action, targets recorded); ATTACK: attack with everything. */
     /** REPEAT (search-bones-1015): a loop body found by the engine search's cycle table, repeated a number of times. */
     enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK, REPEAT, MAIN }
@@ -306,6 +382,8 @@ public final class ForcedWinModel {
         java.util.Set<String> sacNames;
         List<String> optCosts;
         boolean alt;
+        /** sdcc-probeobj-1111 (set only by a probeObjects reader; null otherwise, and then nothing changes). */
+        ObjNeed obj;
 
         boolean has(EffKind k) {
             for (Eff e : effects) {
@@ -391,7 +469,8 @@ public final class ForcedWinModel {
         public String toString() {
             return kind + (targetVariant != null ? "@" + targetVariant : "") + "[" + costString() + " -> " + effects
                     + (selfTo == 0 ? "" : " selfTo" + selfTo)
-                    + (storm ? " storm" : "") + (unplayable ? " UNPLAYABLE " + probeNote : "") + "]";
+                    + (storm ? " storm" : "") + (unplayable ? " UNPLAYABLE " + probeNote : "")
+                    + (obj == null ? "" : " " + obj) + "]";
         }
     }
 
@@ -443,6 +522,8 @@ public final class ForcedWinModel {
         boolean loopChecked, loopHaste;
         /** planLoops: the loop starts by casting this card (an Aura) on a partner that could already tap. */
         boolean loopFromHand;
+        /** sdcc-probeobj-1111: an ability of it holds an {@link ObjNeed} (false unless a probeObjects reader learned it). */
+        boolean hasObj;
 
         ACard instance(int newId) {
             final ACard a = new ACard();
@@ -473,6 +554,7 @@ public final class ForcedWinModel {
             a.loopChecked = loopChecked;
             a.loopHaste = loopHaste;
             a.loopFromHand = loopFromHand;
+            a.hasObj = hasObj;
             return a;
         }
 
@@ -942,12 +1024,15 @@ public final class ForcedWinModel {
             // sdcc-draws-1110: so does a probeSettle reader (its templates hold what the settled sandbox moved)
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
             // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
-            final String key = (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
+            // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
+            final String key = (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
                     + (probeSettle ? "settle|" : "") + c.getName();
             ACard t = templates.get(key);
             if (t == null) {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
+                final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
+                ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
                 ForcedWinProbe.TUTOR_CAST.set(tutorCast);
@@ -959,9 +1044,24 @@ public final class ForcedWinModel {
                     ForcedWinProbe.PROBE_SETTLE.set(prevSettle);
                     ForcedWinProbe.TUTOR_CAST.set(prevTc);
                     ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
+                    ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                }
+            } else if (probeObjects && t.hasObj && !forge.ai.AiWork.spent()) {
+                // sdcc-probeobj-1111: the template was learned at the card's first sight; objects of ours that are in play
+                // or in our hand now and that no sandbox has tried the ability with yet are tried here, once per name
+                final boolean prevSettle = ForcedWinProbe.PROBE_SETTLE.get(), prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
+                ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
+                ForcedWinProbe.PROBE_OBJECTS.set(true);
+                try {
+                    ForcedWinProbe.extendObjects(t, live, me, c, seed, probeStats);
+                } catch (RuntimeException | StackOverflowError e) {
+                    t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "object probe failed: " + e;
+                } finally {
+                    ForcedWinProbe.PROBE_SETTLE.set(prevSettle);
+                    ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                 }
             }
             if (loopProbe != null && !t.loopChecked) {
@@ -999,6 +1099,13 @@ public final class ForcedWinModel {
          * of our library, or returns it to our hand, no longer leaves it on the battlefield in the plan.
          */
         boolean sourceLeaves;
+
+        /**
+         * sdcc-probeobj-1111 (solver key probeObjects; false = off, and then nothing changes): an ability that targets
+         * one card, or sacrifices another permanent as a cost, is played in the sandbox with an object of ours (one run
+         * per card name) and keeps what the engine accepted and did ({@link ObjNeed}), under its own template keys.
+         */
+        boolean probeObjects;
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
         interface LoopProbe {
@@ -1329,6 +1436,25 @@ public final class ForcedWinModel {
             for (ACard a : p.battlefield) {
                 for (Abil ab : a.onBattlefield) {
                     chooses |= !ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                }
+            }
+            // sdcc-probeobj-1111 (a probeObjects reader only): an ability whose object is a card in our graveyard needs the
+            // graveyard's cards (not the library's)
+            boolean gyObjects = false;
+            if (probeObjects && !chooses) {
+                for (int side = 0; side < 2; side++) {
+                    for (ACard a : side == 0 ? p.hand : p.battlefield) {
+                        for (Abil ab : side == 0 ? a.fromHand : a.onBattlefield) {
+                            gyObjects |= ab.obj != null && "Graveyard".equals(ab.obj.zone);
+                        }
+                    }
+                }
+            }
+            if (libraryIfUseful && gyObjects) {
+                final List<Card> gy = new ArrayList<>(me.getCardsIn(ZoneType.Graveyard));
+                gy.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                for (Card c : gy) {
+                    p.graveyard.add(card(live, me, c));
                 }
             }
             if (libraryIfUseful && chooses) {

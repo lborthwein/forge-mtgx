@@ -104,6 +104,12 @@ public final class ForcedWinPlanner {
         final List<Integer> sacIds = new ArrayList<>();
         int castFree = -1;
         boolean free;
+        /**
+         * sdcc-probeobj-1111 (set only by a probeObjects plan; -1 otherwise, and then nothing changes): the id of the
+         * permanent of ours this step's ability targets, and which link of the ability targets it (the follower sets
+         * that target). A permanent sacrificed as the step's cost is in {@link #sacIds}.
+         */
+        int objTarget = -1, objLink;
 
         Step(AbilKind kind, ACard host, Abil ab, int floatColor) {
             this.kind = kind;
@@ -169,6 +175,8 @@ public final class ForcedWinPlanner {
             s.sacIds.addAll(sacIds);
             s.castFree = castFree;
             s.free = free;
+            s.objTarget = objTarget;
+            s.objLink = objLink;
             s.cacPlayed = cacPlayed == null ? null : new ArrayList<>(cacPlayed);
             s.payFloats = payFloats == null ? null : new ArrayList<>(payFloats);
             if (body != null) {
@@ -251,7 +259,8 @@ public final class ForcedWinPlanner {
             return kind + "|" + hostId + "|" + desc + "|" + costKey + "|" + targetRefs + "|" + triggerRef + "|" + pickName
                     + "|" + floatColor + "|" + targetVariant + (cac == null ? "" : "|cac" + cac)
                     + (payFloats == null ? "" : "|pay" + payFloats) + (xValue >= 0 ? "|X" + xValue : "")
-                    + (free ? "|free" : "") + (sacIds.isEmpty() ? "" : "|sac" + sacIds) + (castFree >= 0 ? "|cast" + castFree : "");
+                    + (free ? "|free" : "") + (sacIds.isEmpty() ? "" : "|sac" + sacIds) + (castFree >= 0 ? "|cast" + castFree : "")
+                    + (objTarget >= 0 ? "|obj" + objTarget : "");
         }
 
         boolean isSpell() {
@@ -274,7 +283,7 @@ public final class ForcedWinPlanner {
             }
             return (free ? "FREE-" : "") + kind + ":" + hostName + (floatColor >= 0 ? "->" + ForcedWinModel.SHORT[floatColor] : "")
                     + (optCosts == null ? "" : "+" + optCosts) + (sacIds.isEmpty() ? "" : " sac" + sacIds)
-                    + (castFree >= 0 ? " cast" + castFree : "")
+                    + (castFree >= 0 ? " cast" + castFree : "") + (objTarget >= 0 ? " on[" + objTarget + "]" : "")
                     + (targetRefs.isEmpty() ? "" : "->" + targetRefs) + (triggerRef == null ? "" : " trigger->" + triggerRef)
                     + (pickName == null ? "" : " pick=" + pickName)
                     + (targetVariant != null ? "@" + targetVariant : "")
@@ -425,6 +434,14 @@ public final class ForcedWinPlanner {
          * any other goes to our hand when that was observed.
          */
         boolean tutorCast;
+        /**
+         * sdcc-probeobj-1111 (solverCfg probeObjects; false = off, the default, and then nothing changes): an ability
+         * with an observed object need ({@link ForcedWinModel.ObjNeed}) is a move when a permanent of ours in play has a
+         * name a sandbox played it with and the width model can express what that run did. One branch per such
+         * permanent (by name and tapped state): the object is sacrificed or targeted, goes where the sandbox left it,
+         * and the effects observed with that object resolve.
+         */
+        boolean probeObjects;
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -954,7 +971,8 @@ public final class ForcedWinPlanner {
                 }
             }
             for (Abil ab : a.fromHand) {
-                if (ab.unplayable || ab.cardTargets && ab.kind != AbilKind.LAND) {
+                final boolean objAb = objMove(ab) && !pending; // sdcc-probeobj-1111 (false when off)
+                if (ab.unplayable || ab.cardTargets && ab.kind != AbilKind.LAND && !objAb) {
                     continue;
                 }
                 if (pending && ab.kind != AbilKind.SPELL) {
@@ -964,7 +982,8 @@ public final class ForcedWinPlanner {
                     continue;
                 }
                 final String k = a.name + "|" + ab.kind + "|" + ab.costKey + "|" + ab.desc + "|" + ab.targetVariant;
-                if (!tried.add(k) || !pending && !allowed(s, a, ab)) {
+                if (!tried.add(k) || !pending && !(objAb ? (s.sorcery || ab.instant) && handOk(s, ab) && hasObject(s, ab, -1)
+                        : allowed(s, a, ab))) {
                     continue;
                 }
                 final List<S> into = isWinny(a, ab) || ab.has(EffKind.PILE) ? first
@@ -1027,11 +1046,12 @@ public final class ForcedWinPlanner {
                 }
             }
             for (Abil ab : a.onBattlefield) {
-                if (ab.unplayable || ab.cardTargets) {
+                final boolean objAb = objMove(ab); // sdcc-probeobj-1111 (false when off)
+                if (ab.unplayable || ab.cardTargets && !objAb) {
                     continue;
                 }
                 final String k = "bf" + bi + "|" + ab.desc + "|" + ab.costKey + "|" + ab.targetVariant;
-                if (!tried.add(k) || !allowedBf(s, p, ab)) {
+                if (!tried.add(k) || !(objAb ? allowedBfCost(s, p, ab) && hasObject(s, ab, bi) : allowedBf(s, p, ab))) {
                     continue;
                 }
                 final List<S> into = ab.has(EffKind.DRAW) || ab.has(EffKind.WIN) ? second : third;
@@ -1166,6 +1186,10 @@ public final class ForcedWinPlanner {
     }
 
     private boolean allowedBf(S s, Perm p, Abil ab) {
+        return allowedBfCost(s, p, ab) && !ab.effects.isEmpty();
+    }
+
+    private boolean allowedBfCost(S s, Perm p, Abil ab) {
         if (!s.sorcery && !ab.instant && ab.kind != AbilKind.FLOAT || !handOk(s, ab)) {
             return false;
         }
@@ -1175,7 +1199,93 @@ public final class ForcedWinPlanner {
         if (ab.loyalty && (p.activated || p.loyalty + ab.loyaltyDelta < 0)) {
             return false;
         }
-        return !ab.effects.isEmpty();
+        return true;
+    }
+
+    /** sdcc-probeobj-1111: the ability is planned through its observed object need (never with the key off). */
+    private boolean objMove(Abil ab) {
+        return lim.probeObjects && ab.obj != null;
+    }
+
+    /**
+     * sdcc-probeobj-1111: the places of {@code s} that hold an object the ability was played with, usably: indices of
+     * our battlefield (not {@code selfIdx}), or of our known graveyard for a need there; one per card name (and, in play,
+     * tapped state).
+     */
+    private List<Integer> objects(S s, Abil ab, int selfIdx) {
+        final List<Integer> out = new ArrayList<>();
+        final Set<String> kinds = new HashSet<>();
+        final boolean gy = "Graveyard".equals(ab.obj.zone);
+        final int n = gy ? s.gyPool.size() : s.bf.size();
+        for (int i = 0; i < n; i++) {
+            final int c = gy ? s.gyPool.get(i) : s.bf.get(i).card;
+            if (c < 0 || c >= cards.size() || !gy && i == selfIdx) {
+                continue;
+            }
+            final ACard pc = cards.get(c);
+            final ForcedWinModel.ObjSeen seen = ab.obj.seen.get(pc.name);
+            if (seen != null && seen.usable() && kinds.add(pc.name + (!gy && s.bf.get(i).tapped ? "|t" : "|u"))) {
+                out.add(i);
+            }
+        }
+        return out;
+    }
+
+    private boolean hasObject(S s, Abil ab, int selfIdx) {
+        return !objects(s, ab, selfIdx).isEmpty();
+    }
+
+    /**
+     * sdcc-probeobj-1111: between the mana payment and {@link #afterPay}: one branch per object of ours the ability was
+     * played with in a sandbox (for a sacrifice the cheapest loss first). The object leaves as the sandbox saw it leave
+     * (sacrificed, returned to our hand, exiled), and the effects that run observed resolve: they hold what the object's
+     * leaving caused, so nothing is added for it.
+     */
+    private void objBranches(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, List<S> out) {
+        final ForcedWinModel.ObjNeed need = ab.obj;
+        final boolean sac = ForcedWinModel.ObjNeed.SAC.equals(need.role);
+        final boolean gy = "Graveyard".equals(need.zone);
+        final int selfIdx = self == null ? -1 : s.bf.indexOf(self);
+        final List<Integer> choices = objects(s, ab, selfIdx);
+        if (sac) {
+            choices.sort(Comparator.comparingInt((Integer i) -> s.bf.get(i).tapped ? 0 : 1)
+                    .thenComparingInt(i -> cards.get(s.bf.get(i).card).sourceColors == 0 ? 0 : 1)
+                    .thenComparingInt(i -> cards.get(s.bf.get(i).card).onBattlefield.size())
+                    .thenComparingInt(i -> cards.get(s.bf.get(i).card).id));
+        }
+        for (int i : choices.subList(0, Math.min(choices.size(), lim.classes))) {
+            final S v = s.copy();
+            final Step st = step.copy();
+            final Perm vSelf = selfIdx < 0 ? null : v.bf.get(selfIdx);
+            final int card = gy ? v.gyPool.get(i) : v.bf.get(i).card;
+            final ACard pc = cards.get(card);
+            final ForcedWinModel.ObjSeen seen = need.seen.get(pc.name);
+            if (sac) {
+                st.sacIds.add(pc.id);
+            } else {
+                st.objTarget = pc.id;
+                st.objLink = need.link;
+            }
+            if (seen.to != 0 && gy) {
+                v.gyPool.remove(i);
+            } else if (seen.to != 0) {
+                v.bf.remove(i);
+                v.devotion -= pc.bluePips;
+                if (pc.emptyDrawWin) {
+                    v.emptyDrawWin = false;
+                    for (Perm q : v.bf) {
+                        v.emptyDrawWin |= cards.get(q.card).emptyDrawWin;
+                    }
+                }
+                if (seen.to == Abil.SELF_GRAVEYARD) {
+                    v.gyPool.add(card);
+                }
+            }
+            if (seen.to == Abil.SELF_HAND) {
+                v.hand.add(card);
+            }
+            afterPay(v, st, vSelf, host, handIdx, a, seen.abil, false, out, null);
+        }
     }
 
     private List<S> apply(S s0, int handIdx, int bfIdx, ACard a, Abil ab) {
@@ -1287,6 +1397,10 @@ public final class ForcedWinPlanner {
      * the key off, exactly {@link #afterPay}.
      */
     private void afterCost(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, boolean free, List<S> out) {
+        if (objMove(ab) && !free) {
+            objBranches(s, step, self, host, handIdx, a, ab, out); // sdcc-probeobj-1111
+            return;
+        }
         if (!lim.tutorCast || ab.sacN <= 0 || free) {
             afterPay(s, step, self, host, handIdx, a, ab, free, out, null);
             return;

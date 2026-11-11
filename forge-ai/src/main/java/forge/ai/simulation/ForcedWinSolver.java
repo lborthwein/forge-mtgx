@@ -323,6 +323,15 @@ public final class ForcedWinSolver {
          */
         public boolean sourceLeaves = false;
         /**
+         * sdcc-probeobj-1111 (false = off: the reader, its templates, every plan and every follower are unchanged). An
+         * ability that needs one object (a card it targets on the battlefield or in a graveyard, another permanent
+         * sacrificed as its cost) is learned by playing it in the sandbox with objects of ours, one run per card name
+         * (those in the position first, else a stand-in), and keeps which names the engine accepted and what each run
+         * did ({@link ForcedWinModel.ObjNeed}). The planner plays it on a permanent in play it was observed with; the
+         * follower sets that target, or answers the sacrifice with that permanent.
+         */
+        public boolean probeObjects = false;
+        /**
          * ledger-sweep2-1107 (off by default): battlefield mana sources' colors and amounts are read from the position at every
          * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
          */
@@ -852,6 +861,7 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
+            c.probeObjects = "true".equals(get.apply("probeObjects")); // sdcc-probeobj-1111
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.landEntersProbe = "true".equals(get.apply("landEntersProbe")); // sdcc-etb-1110
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
@@ -926,7 +936,8 @@ public final class ForcedWinSolver {
                 + (probeSettle ? " probeSettle" : "")
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
-                + (sourceLeaves ? " sourceLeaves" : "");
+                + (sourceLeaves ? " sourceLeaves" : "")
+                + (probeObjects ? " probeObjects" : ""); // sdcc-probeobj-1111
         }
     }
 
@@ -1415,6 +1426,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.sourceLeaves) {
             this.reader.sourceLeaves = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
+        }
+        if (cfg.probeObjects) {
+            this.reader.probeObjects = true; // sdcc-probeobj-1111: our own cards only (its own template keys)
         }
     }
 
@@ -3947,6 +3961,7 @@ public final class ForcedWinSolver {
         lim.depth = cfg.planDepth; // solver-distill-cc-1109 (18 = the default)
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
+        lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
         return lim;
     }
 
@@ -6324,7 +6339,7 @@ public final class ForcedWinSolver {
     private forge.ai.LineAnswers liveLine;
 
     private void liveAnswers() {
-        if (!cfg.tutorCast) {
+        if (!cfg.tutorCast && !cfg.probeObjects) {
             return;
         }
         final PlayerControllerAi pc = PlayerControllerAi.cacOf(me);
@@ -6525,6 +6540,7 @@ public final class ForcedWinSolver {
             fo.costLine = cfg.engineCostChoice;
             fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
             fo.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
+            fo.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
             return fo;
         }
 
@@ -6535,6 +6551,12 @@ public final class ForcedWinSolver {
          * that casts them so their own asks are answered). The follower answers the engine's asks of those steps.
          */
         boolean tutorCast;
+        /**
+         * sdcc-probeobj-1111 (false = off): the line may hold steps whose ability targets a named permanent of ours
+         * ({@link Step#objTarget}) or sacrifices one as its cost ({@link Step#sacIds}); the follower sets the target
+         * and answers the cost.
+         */
+        boolean probeObjects;
 
         /** The free steps the step just taken casts (the cursor moves past them), and their recorded tokens (null = none). */
         private List<String> absorbFree() {
@@ -6628,7 +6650,7 @@ public final class ForcedWinSolver {
 
         /** The permanents a step of ours sacrifices as a cost, among the valid ones; null = not ours, or not all there. */
         CardCollectionView costCards(final SpellAbility sa, final CardCollectionView valid, final int amount) {
-            final Step st = tutorCast ? stepOf(sa) : null;
+            final Step st = tutorCast || probeObjects ? stepOf(sa) : null;
             if (st == null || st.sacIds.isEmpty() || st.sacIds.size() != amount || valid == null) {
                 return null;
             }
@@ -6938,6 +6960,9 @@ public final class ForcedWinSolver {
             if (st.targetVariant != null && !ForcedWinProbe.setPlayerTargets(sa, me, st.targetVariant)) {
                 return null;
             }
+            if (st.objTarget >= 0 && !ForcedWinProbe.setObjectTarget(sa, st.objLink, g.findById(st.objTarget))) {
+                return null; // sdcc-probeobj-1111: the line's object is gone or no longer a legal target
+            }
             if (st.phyrexianLife && sa.hasParam("AIPhyrexianPayment")) {
                 sa.getMapParams().remove("AIPhyrexianPayment");
             }
@@ -7133,7 +7158,7 @@ public final class ForcedWinSolver {
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
             this.f = f;
-            if (f.tutorCast) {
+            if (f.tutorCast || f.probeObjects) {
                 // sdcc-tutorcast-1110: the line's free cast, its card and its cost cards, through the controller's own seam
                 // (the live seat's controller gets the same answers from the solver: ForcedWinSolver#liveAnswers). A
                 // re-planned follower (verifyReplan) is read through the field, so the answers follow it.
@@ -7215,7 +7240,9 @@ public final class ForcedWinSolver {
                     final Line fresh = rp.apply(f.line);
                     if (fresh != null) {
                         final boolean keep = f.putBackKeep, keepEnginePay = f.enginePay, keepTutorCast = f.tutorCast;
+                        final boolean keepObjects = f.probeObjects;
                         f = new Follower(fresh);
+                        f.probeObjects = keepObjects; // sdcc-probeobj-1111
                         f.putBackKeep = keep; // next-turn-1107
                         f.tutorCast = keepTutorCast; // sdcc-tutorcast-1110: the re-planned line may search and cast too
                         if (keepEnginePay) {
