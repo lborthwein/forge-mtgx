@@ -2875,6 +2875,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private short[] decideChoice0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
         lastReason = RlSeat.IMIT_CHOICE;
+        if (cfg.aux != null) {
+            auxLabel(g, me, frame); // sdcc-aux-1111: a choice ask the search sees is labelled as a priority is
+        }
         if (exploreFamily(m.family)) {
             final short[] ex = exploreAnswer(g, m, frame, greedy);
             if (ex != null) {
@@ -2957,6 +2960,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public short[] decideBlocks(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
+        if (cfg.aux != null) {
+            auxLabel(g, me, frame); // sdcc-aux-1111: labels only; the block search below is as it was
+        }
         if (cfg.blocks <= 0) {
             return null;
         }
@@ -3987,10 +3993,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private final java.util.concurrent.ConcurrentHashMap<Integer, Object> auxReaders = new java.util.concurrent.ConcurrentHashMap<>();
     /** sdcc-aux-1111: this game's aux records, one per priority decision of the seat (see AUX_*). */
     private final List<double[]> auxRecs = new ArrayList<>();
+    private final java.util.Set<Integer> auxSeen = new java.util.HashSet<>();
     private double[] lastAux;
 
-    /** This game's aux labels so far: {@code [dec_idx, gf, gf_turn, gf_opp, gf_opp_turn, reach]} per decision (NaN as null). */
+    /**
+     * This game's aux labels so far (null without the spec's {@code aux}): {@code [dec_idx, gf, gf_turn, gf_opp,
+     * gf_opp_turn, reach]} per labelled decision, in decision order; null = that label is absent.
+     */
+    @Override
     public JsonArray auxJson() {
+        if (cfg.aux == null) {
+            return null;
+        }
         final JsonArray out = new JsonArray();
         for (double[] a : auxRecs) {
             final JsonArray r = new JsonArray();
@@ -4007,11 +4021,6 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             out.add(r);
         }
         return out;
-    }
-
-    /** True when this search labels its decisions for an auxiliary head (GAME_END and the tape then carry {@code aux}). */
-    public boolean aux() {
-        return cfg.aux != null;
     }
 
     private static long threadCpuNanos() {
@@ -4038,6 +4047,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * of their own, never read by any decision. A failure leaves the label absent.
      */
     private void auxLabel(final Game g, final Player me, final RlWire.Decide frame) {
+        if (!auxSeen.add(frame.decIdx)) {
+            return; // one record per decision
+        }
         final double[] a = new double[AUX_N];
         java.util.Arrays.fill(a, Double.NaN);
         a[AUX_DEC] = frame.decIdx;

@@ -195,6 +195,31 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
     }
 
+    /**
+     * sdcc-aux-1111: the aux labels of this game's searches (null when no search has the spec's {@code aux}), in
+     * dec_idx order: GAME_END and the tape carry them as {@code aux}.
+     */
+    public JsonArray auxJson() {
+        final JsonArray a = search == null ? null : search.auxJson();
+        final JsonArray b = searchAlt == null ? null : searchAlt.auxJson();
+        if (a == null && b == null) {
+            return null;
+        }
+        final Map<Integer, com.google.gson.JsonElement> by = new TreeMap<>();
+        for (JsonArray x : new JsonArray[] {a, b}) {
+            if (x != null) {
+                for (com.google.gson.JsonElement e : x) {
+                    by.put(e.getAsJsonArray().get(0).getAsInt(), e);
+                }
+            }
+        }
+        final JsonArray out = new JsonArray();
+        for (com.google.gson.JsonElement e : by.values()) {
+            out.add(e);
+        }
+        return out;
+    }
+
     /** {@code [[dec_idx, reason, [steps...]], ...]} in dec_idx order (see {@link #IMIT_LINE}). */
     public JsonArray imitJson() {
         final JsonArray out = new JsonArray();
@@ -579,6 +604,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
          * adopted); the seat gives no answer (the bridge asks the hook again), and the decision is marked overridden.
          */
         int HOOK = -3;
+
+        /**
+         * sdcc-aux-1111: this game's dense solver labels for a learner's auxiliary head (the spec's {@code aux}; null
+         * without it): {@code [[dec_idx, gf, gf_turn, gf_opp, gf_opp_turn, reach], ...]}. Never read to decide.
+         */
+        default JsonArray auxJson() {
+            return null;
+        }
 
         /** sdcc-imit-1111: the spec's {@code imit} (false by default, and then nothing changes): label the answers. */
         default boolean imit() {

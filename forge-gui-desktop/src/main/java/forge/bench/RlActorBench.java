@@ -1366,6 +1366,12 @@ public final class RlActorBench {
                 end.addProperty("imit_choice_rows", seat.imitChoiceRows); // sdcc-imit2-1111: a line's choice asks as rows
                 end.addProperty("imit_map_failed", seat.imitMapFailed);
             }
+            final JsonArray auxLabels = seat.auxJson();
+            if (auxLabels != null) {
+                // sdcc-aux-1111 (only with the spec's aux): dense solver labels for a learner's auxiliary head,
+                // [[dec_idx, gf, gf_turn, gf_opp, gf_opp_turn, reach], ...]; never read to decide
+                end.add("aux", auxLabels);
+            }
             if (searchAlt != null) {
                 end.add("search_alt", searchAlt.summary()); // choice-search-1105 (only when on)
                 end.addProperty("search_alt_seat", seat.altSeat);
@@ -1450,6 +1456,9 @@ public final class RlActorBench {
                 t.addProperty("imit_hook_rows", seat.imitHookRows);
                 t.addProperty("imit_choice_rows", seat.imitChoiceRows);
                 t.addProperty("imit_map_failed", seat.imitMapFailed);
+            }
+            if (end.has("aux")) {
+                t.add("aux", end.get("aux")); // sdcc-aux-1111
             }
             if (end.has("search_alt")) {
                 t.add("search_alt", end.get("search_alt")); // choice-search-1105
