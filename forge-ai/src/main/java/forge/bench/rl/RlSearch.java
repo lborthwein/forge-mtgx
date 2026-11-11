@@ -851,6 +851,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
+        if (forge.ai.simulation.LeakTrace.ON) {
+            forge.ai.simulation.LeakTrace.arm(g, me, null); // live-leak-1111 (diagnostics; off: nothing)
+        }
         pendingWindow = null;
         liveMacro = null;
         lastForced = false;
@@ -1272,6 +1275,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public short[] decideBlocks(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
+        if (forge.ai.simulation.LeakTrace.ON) {
+            forge.ai.simulation.LeakTrace.arm(g, me, null); // live-leak-1111 (diagnostics; off: nothing)
+        }
         if (cfg.blocks <= 0) {
             return null;
         }

@@ -382,7 +382,11 @@ public class GameCopier {
         // another thread than the original (forge.game.IndependentCopies).
         forge.game.IndependentCopies.enter();
         try {
-            return makeCopy0(advanceToPhase, aiPlayer);
+            final Game copy = makeCopy0(advanceToPhase, aiPlayer);
+            if (LeakTrace.ON) {
+                LeakTrace.copied(origGame, copy); // live-leak-1111 (diagnostics; off: nothing)
+            }
+            return copy;
         } finally {
             forge.game.IndependentCopies.exit();
         }
