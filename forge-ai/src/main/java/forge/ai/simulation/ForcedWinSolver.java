@@ -393,6 +393,34 @@ public final class ForcedWinSolver {
          * information (a line that needs the top card was found on the real order and taken when the worlds agreed).
          */
         public boolean hideOwnLibrary = false;
+        /**
+         * sdcc-leak-1111 (a correctness fix, so ON whenever {@link #hideOwnLibrary} is; this key, "true", brings the old
+         * behaviour back for identity checks). With {@code hideOwnLibrary} the seat must not learn anything from the real
+         * order of its library or from the opponent's hidden hand. Two places did:
+         * <ul>
+         * <li>the width model's sandbox probes (a card's template, a land's entry, the loop probe) copied the game they
+         * were asked about, the real one at the seat's decision, and played in it: a probe that draws, digs or reveals
+         * read the real top cards, and one that looks at the opponent's hand read the real hand. Now the sandbox is
+         * scrubbed first ({@link ForcedWinProbe#scrub});</li>
+         * <li>the engine root and the play-out worlds shuffled the unknown cards starting from their real order, so
+         * the worlds a seed gives (and with them the answer) changed with an order the seat cannot see, although no
+         * card was read. Now the unknown cards are put in id order before the shuffle (as {@code infoState} already
+         * did in the play-out worlds).</li>
+         * </ul>
+         */
+        public boolean hiddenOrderLegacy = false;
+
+        /** sdcc-leak-1111: the hidden zones are kept out of the probes and of the worlds' seeds. */
+        public boolean hideHidden() {
+            return hideOwnLibrary && !hiddenOrderLegacy;
+        }
+        /**
+         * sdcc-leak-1111 (ported from the dark-arch lane's t2-break-on-counter; off by default): a followed line whose
+         * spell left the stack without resolving (countered, or fizzled) is broken at once, so the seat plans again from
+         * the position it is in, instead of playing out the rest of a line that can no longer win. Live seat only
+         * ({@link #liveSeat}); the search's play-out copies keep the old follower.
+         */
+        public boolean breakOnCounter = false;
         /** BVW opt-in generator: affordance probes also start from a belief-redrawn, own-library-shuffled root. */
         public boolean honestProbes = false;
         /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
@@ -930,6 +958,8 @@ public final class ForcedWinSolver {
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
+            c.breakOnCounter = "true".equals(get.apply("breakOnCounter")); // sdcc-leak-1111
+            c.hiddenOrderLegacy = "true".equals(get.apply("hiddenOrderLegacy")); // sdcc-leak-1111
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
             c.threatExtraTurns = intOr(get.apply("threatExtraTurns"), c.threatExtraTurns);
@@ -1495,6 +1525,15 @@ public final class ForcedWinSolver {
         if (cfg.probeObjects) {
             this.reader.probeObjects = true; // sdcc-probeobj-1111: our own cards only (its own template keys)
         }
+        if (cfg.hideHidden()) {
+            hideProbes(); // sdcc-leak-1111
+        }
+    }
+
+    /** sdcc-leak-1111: this solver's readers scrub their sandboxes ({@link ForcedWinProbe#HIDE}); never switched back. */
+    public void hideProbes() {
+        this.reader.hideLibrary = true;
+        this.oppReader.hideLibrary = true;
     }
 
     public Config config() {
@@ -1637,6 +1676,28 @@ public final class ForcedWinSolver {
         }
     }
 
+    /** breakOnCounter: this solver follows lines in the live game (set by the live seat's driver, not a play-out copy's). */
+    public boolean liveSeat;
+
+    /** breakOnCounter: host ids of spells that resolved in the live game since they were last cast by a line. */
+    final Set<Integer> resolvedHosts = Collections.synchronizedSet(new HashSet<>());
+
+    /** breakOnCounter: live-game listener (read-only): spells that resolved (not fizzled). */
+    public static final class SpellWatch {
+        final ForcedWinSolver solver;
+
+        SpellWatch(ForcedWinSolver solver) {
+            this.solver = solver;
+        }
+
+        @com.google.common.eventbus.Subscribe
+        public void on(forge.game.event.GameEventSpellResolved e) {
+            if (e.spell() != null && !e.hasFizzled() && e.spell().getHostCard() != null) {
+                solver.resolvedHosts.add(e.spell().getHostCard().getId());
+            }
+        }
+    }
+
     /** order-memory-1102 (infoState): the game's state; the known top and the other known ids at the last read. */
     private InfoStates infoStates;
     private final Set<Integer> isTop = new HashSet<>(), isPinned = new HashSet<>();
@@ -1647,6 +1708,9 @@ public final class ForcedWinSolver {
             return;
         }
         watching = true;
+        if (cfg.breakOnCounter && liveSeat) {
+            live.subscribeToEvents(new SpellWatch(this)); // breakOnCounter
+        }
         if (cfg.infoState) {
             infoStates = InfoStates.find(live); // review #172 S2: find only (attached at bind, on the game thread)
         } else {
@@ -2836,6 +2900,9 @@ public final class ForcedWinSolver {
     /** search-bones-1015: follow {@code line} (a {@link Proposal#line}) from the next priority on. */
     public void adopt(Object line) {
         active = follower((Line) line);
+        if (cfg.breakOnCounter && liveSeat) {
+            active.resolved = resolvedHosts; // breakOnCounter
+        }
         liveAnswers(); // sdcc-tutorcast-1110 (off: nothing)
         taken++;
     }
@@ -3831,6 +3898,7 @@ public final class ForcedWinSolver {
             final List<Integer> kt = knownTop(live);
             el.ownKnownTop = kt == null ? 0 : kt.size();
             el.ownPinned = pinnedIn(me); // known-lib-1102 (empty unless noted)
+            el.ownCanonical = cfg.hideHidden(); // sdcc-leak-1111
         }
         el.wall = decisionWall;
         // bvw-step1-build-1024: budget=counter: the engine's move steps per search are capped (0 = none), no deadline,
@@ -4611,10 +4679,11 @@ public final class ForcedWinSolver {
                     if (world != 0 && keepDealtHand()) {
                         continue; // deck-belief-1105: the redraw dealt this world's hand
                     }
-                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng, redraw);
+                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng, redraw, cfg.hideHidden());
                 }
-                if (cfg.infoState) {
+                if (cfg.infoState || cfg.hideHidden()) {
                     // order-memory-1102: the known cards below the top stay at their index; canonical unknown order
+                    // (sdcc-leak-1111: canonical with hideOwnLibrary too)
                     shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, pinnedIn(cm), rng, true);
                 } else {
                     shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, rng);
@@ -4883,8 +4952,14 @@ public final class ForcedWinSolver {
                 }
             }
             final java.util.LinkedHashMap<String, List<Card>> byName = new java.util.LinkedHashMap<>();
-            for (int i = k; i < lib.size(); i++) {
-                byName.computeIfAbsent(lib.get(i).getName(), x -> new ArrayList<>()).add(lib.get(i));
+            final List<Card> unknownCards = new ArrayList<>(lib.subList(k, lib.size()));
+            if (cfg.hideHidden()) {
+                // sdcc-leak-1111: the names in id order, not in the library's real order (it broke ties between names
+                // with as many copies, and chose which names a maxNames cap kept)
+                unknownCards.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+            }
+            for (Card c : unknownCards) {
+                byName.computeIfAbsent(c.getName(), x -> new ArrayList<>()).add(c);
             }
             out.unknown = lib.size() - k;
             if (out.unknown <= 0) {
@@ -5574,7 +5649,8 @@ public final class ForcedWinSolver {
             if (cfg.staleStatics) {
                 g.staleStatics = true; // pr209-followups: a belief world; the probes' copies of it skip swapped-out cards' statics
             }
-            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), pinnedIn(cm), rng, cfg.infoState);
+            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), pinnedIn(cm), rng,
+                    cfg.infoState || cfg.hideHidden()); // sdcc-leak-1111
             return g;
         }
     }
@@ -6226,12 +6302,12 @@ public final class ForcedWinSolver {
                             continue; // deck-belief-1105: the redraw dealt this world's hand
                         }
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
-                        hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw);
+                        hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw, cfg.hideHidden());
                     }
                     if (libArrange != null) {
                         libArrange.apply(cm, rng); // e1-q8-1101: an exact-draw sequence at the first hidden slots
-                    } else if (cfg.infoState) {
-                        shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng, true); // order-memory-1102
+                    } else if (cfg.infoState || cfg.hideHidden()) {
+                        shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng, true); // order-memory-1102, sdcc-leak-1111
                     } else {
                         shuffleUnknownOwnLibrary(cm, line, rng);
                     }
@@ -6407,6 +6483,15 @@ public final class ForcedWinSolver {
     }
 
     static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng, Redraw knowledge) {
+        hideOrSample(live, liveMe, liveOpp, opp, hide, rng, knowledge, false);
+    }
+
+    /**
+     * sdcc-leak-1111: {@code canonical} puts their hidden cards in id order before the shuffle, so the world a seed
+     * gives does not change with the real order of cards the seat cannot see (false = as before).
+     */
+    static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng, Redraw knowledge,
+            boolean canonical) {
         final forge.game.player.PlayerView myView = liveMe.getView();
         final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
         final List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
@@ -6420,6 +6505,9 @@ public final class ForcedWinSolver {
             } else {
                 pool.add(c);
             }
+        }
+        if (canonical) {
+            pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
         }
         Collections.shuffle(pool, rng);
         final List<Card> newHand = new ArrayList<>(keep);
@@ -7061,6 +7149,18 @@ public final class ForcedWinSolver {
             String why = "";
         }
 
+        /** breakOnCounter: the live game's resolved spell hosts (null = off) and the spell step awaiting resolution. */
+        Set<Integer> resolved;
+        int pendingSpell = -1;
+
+        /** breakOnCounter: the line casts a spell now; its resolution is checked once the stack is empty again. */
+        private void castNow(final SpellAbility sa, final Step st) {
+            if (resolved != null && sa.isSpell()) {
+                resolved.remove(st.hostId); // a card cast again (a loop, a recast) must resolve again
+                pendingSpell = st.hostId;
+            }
+        }
+
         Set<Integer> reserved() {
             final Set<Integer> out = new HashSet<>();
             for (int i = cursor; i < line.steps.size(); i++) {
@@ -7094,6 +7194,7 @@ public final class ForcedWinSolver {
             }
             cursor++;
             executed.put(st.hostId, st);
+            castNow(sa, st); // breakOnCounter
             choices = new ForcedWinChoices.Cursor(withFree(st.cac, absorbFree())); // sdcc-tutorcast-1110 (none: st.cac)
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
@@ -7108,6 +7209,18 @@ public final class ForcedWinSolver {
                 // (R3-5: a response line acts on top of the opponent's item)
                 n.waiting = true;
                 return n;
+            }
+            if (resolved != null && pendingSpell >= 0 && g.getStack().isEmpty()) {
+                // breakOnCounter: our line's last spell has left the stack; did it resolve?
+                final int host = pendingSpell;
+                pendingSpell = -1;
+                if (!resolved.contains(host)) {
+                    n.broken = true;
+                    broken = true;
+                    n.why = "spell did not resolve: host " + host;
+                    why = n.why;
+                    return n;
+                }
             }
             final PhaseHandler ph = g.getPhaseHandler();
             if (line.offMain && !offMainDone) {
@@ -7235,6 +7348,7 @@ public final class ForcedWinSolver {
                 cursor++;
             }
             executed.put(st.hostId, st);
+            castNow(sa, st); // breakOnCounter
             final List<String> freeToks = inRepeat ? null : absorbFree(); // sdcc-tutorcast-1110 (no free step: null)
             choices = new ForcedWinChoices.Cursor(withFree(st.cac, freeToks)); // kill-line-1106 (planDiscard; none = empty)
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
