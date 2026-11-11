@@ -458,15 +458,17 @@ final class ForcedWinEngine {
         long pathCards;
         /**
          * sdcc-order-1111 (engineFocus; false = off, and then nothing changes): the depth-first search is repeated with a
-         * growing allowance of unproductive moves per line (0, 1, 2, ...), each repetition this turn first and then across
+         * growing allowance for unproductive moves per line (0, 1, 2, ...), each repetition this turn first and then across
          * the turn, so the lines made only of moves that do something for us are searched before any other. A move is
          * productive when the position after it shows a gain the engine can read without knowing the card: the opponent
-         * lost life, library, hand or a creature or gained poison; we gained a token or a permanent, untapped one, have
-         * more mana to spend, searched our library, took a card back into our hand, or can play an ability we could not
-         * (see {@link #focusGain}). Anything else (a draw from the unknown library included) spends one of the line's
-         * allowance. A move class seen only unproductive in this search is not applied again where the allowance is
-         * spent, and classes on winning lines are tried first ({@link #focusKillers}). The branching cap counts applied
-         * moves only. Not with an engine valuer ({@link #order}) or the frontier.
+         * lost life, library, hand or a creature or gained poison; we gained life, a token or a permanent, untapped one,
+         * have more mana to spend, raised the storm count without drawing, searched our library, took a card back into
+         * our hand, or can play an ability we could not (see {@link #focusGain}). Anything else spends the line's
+         * allowance: 1 for floating mana, 2 for any other move (a draw from the unknown library included). A move class
+         * seen only unproductive in this search is not applied again where the allowance does not cover it, moves of
+         * interchangeable cards are tried once, and classes on this solver's earlier winning lines are tried first
+         * ({@link #focusKillers}). The branching cap counts applied moves only. Not with an engine valuer
+         * ({@link #order}) or the frontier.
          */
         boolean focus;
         /** sdcc-order-1111 (with focus; null = this search only): move classes of this solver's earlier winning lines. */
@@ -2368,7 +2370,8 @@ final class ForcedWinEngine {
     }
 
     /**
-     * engineFocus: the search, repeated with an allowance of 0, 1, 2, ... unproductive moves per line; each repetition
+     * engineFocus: the search, repeated with an allowance of 0, 1, 2, ... per line (an unproductive mana float spends 1
+     * of it, any other unproductive move 2); each repetition
      * searches this turn and then (twoTurns) the lines that pass the turn once. The passes share the search's nodes. It
      * ends at a win, at the budget, or when a repetition left no move out.
      */
@@ -2386,7 +2389,20 @@ final class ForcedWinEngine {
                 seen.clear();
                 table.clear();
                 root.focusLeft = d;
-                win = dfs(root, 0);
+                if (pass == 1 && deadline != Long.MAX_VALUE) {
+                    // the lines across the turn get a share of the time left (half at allowance 0, then a third), so
+                    // this turn's lines at the next allowance are reached; a share that ends is not an exhausted search
+                    final long now = forge.game.WorkClock.nanoTime();
+                    stageEnd = now + Math.max(0L, deadline - now) / (d == 0 ? 2 : 3);
+                }
+                try {
+                    win = dfs(root, 0);
+                    if (stageEnd != 0 && forge.game.WorkClock.nanoTime() > stageEnd) {
+                        focusCut = true;
+                    }
+                } finally {
+                    stageEnd = 0;
+                }
             }
             if (!focusCut || out()) {
                 break;
@@ -2411,7 +2427,11 @@ final class ForcedWinEngine {
         return win;
     }
 
-    /** A move's class: its kind, card name, ability text and colour, and its targets by name (ids left out). */
+    /**
+     * A move's class: its kind, card name, ability text and colour, the state of its card, and its targets by name and
+     * state (ids left out). The same ability in another state of its card or target is another class: what it did
+     * untapped says nothing about what it does once the target is tapped or new.
+     */
     private String focusClass(Node node, Step mv) {
         if (mv.pass) {
             return mv.toEnd ? "PASS_END" : "PASS";
@@ -2419,24 +2439,23 @@ final class ForcedWinEngine {
         if (mv.kind == AbilKind.ATTACK) {
             return "ATTACK";
         }
-        final StringBuilder sb = new StringBuilder(64);
+        final StringBuilder sb = new StringBuilder(96);
         sb.append(mv.kind).append('|').append(mv.hostName).append('|').append(mv.desc).append('|').append(mv.floatColor);
-        for (String ref : mv.targetRefs) {
-            final int at = ref.indexOf(':');
-            final String r = at < 0 ? ref : ref.substring(at + 1);
-            String name = "?";
-            try {
+        try {
+            sb.append('|').append(focusCardState(node.g.findById(mv.hostId), node.me));
+            for (String ref : mv.targetRefs) {
+                final int at = ref.indexOf(':');
+                final String r = at < 0 ? ref : ref.substring(at + 1);
                 final int id = Integer.parseInt(r.substring(1));
                 if (r.charAt(0) == 'C') {
                     final Card c = node.g.findById(id);
-                    name = c == null ? "?" : c.getName();
+                    sb.append('|').append(c == null ? "?" : c.getName()).append(focusCardState(c, node.me));
                 } else {
-                    name = id == node.me.getId() ? "me" : "opp";
+                    sb.append('|').append(id == node.me.getId() ? "me" : "opp");
                 }
-            } catch (RuntimeException e) {
-                name = "?";
             }
-            sb.append('|').append(name);
+        } catch (RuntimeException e) {
+            sb.append("|?").append(mv.targetRefs);
         }
         return sb.toString();
     }
@@ -2462,35 +2481,27 @@ final class ForcedWinEngine {
         return sb.toString();
     }
 
-    /** The move's class with the state of its card and of its targets: equal keys at one node are the same move. */
+    /** The move's class with its cost and forced answers: equal keys at one node are the same move of interchangeable cards. */
     private String focusTwinKey(Node node, Step mv, String cls) {
-        final StringBuilder sb = new StringBuilder(cls);
-        try {
-            sb.append('#').append(mv.costKey).append('#').append(mv.xValue).append('#').append(mv.triggerRef).append('#')
-                    .append(mv.pickName).append('#').append(mv.cac).append('#').append(mv.payFloats).append('#')
-                    .append(focusCardState(node.g.findById(mv.hostId), node.me));
-            for (String ref : mv.targetRefs) {
-                final int at = ref.indexOf(':');
-                final String r = at < 0 ? ref : ref.substring(at + 1);
-                sb.append('#').append(at < 0 ? "" : ref.substring(0, at)).append(r.charAt(0) == 'C'
-                        ? focusCardState(node.g.findById(Integer.parseInt(r.substring(1))), node.me) : r);
-            }
-        } catch (RuntimeException e) {
-            sb.append('#').append(mv.hostId).append(mv.targetRefs); // not read: the move stands for itself
-        }
-        return sb.toString();
+        return cls + '#' + mv.costKey + '#' + mv.xValue + '#' + mv.triggerRef + '#' + mv.pickName + '#' + mv.cac + '#'
+                + mv.payFloats;
     }
 
-    /** 0 killers, 1 seen productive, 2 not seen, 3 pass and attack (kept first when the engine put them first), 4 seen unproductive only. */
+    /** 0 killers (classes of earlier winning lines), 1 the engine's own order, 2 classes seen unproductive only. */
     private int focusRank(Step mv, String cls, boolean first) {
         if (mv.pass || mv.kind == AbilKind.ATTACK) {
-            return first ? -1 : 3;
+            return first ? -1 : 1;
         }
         if (lim.focusKillers != null && lim.focusKillers.contains(cls)) {
             return 0;
         }
         final int[] h = focusSeen.get(cls);
-        return h == null ? 2 : h[1] > 0 ? 1 : 4;
+        return h == null || h[1] > 0 ? 1 : 2;
+    }
+
+    /** What an unproductive move spends of a line's allowance: a mana float 1, any other move 2. */
+    private static int focusPrice(Step mv) {
+        return mv.kind == AbilKind.FLOAT ? 1 : 2;
     }
 
     private FocusSig focusSig(Node n) {
@@ -2581,20 +2592,29 @@ final class ForcedWinEngine {
      */
     private String focusGain(Node node, Step mv, Applied a) {
         final FocusSig ns = focusSig(node), cs = focusSig(a.child);
+        // the mana sources made or untapped on this line and not floated since: floating one again is a loop's step
         final Set<Integer> fresh = new HashSet<>();
         if (!mv.pass) {
+            if (node.fresh != null) {
+                fresh.addAll(node.fresh);
+            }
             for (Integer id : cs.untappedIds) {
                 if (!ns.untappedIds.contains(id)) {
                     fresh.add(id);
                 }
             }
+            if (mv.kind == AbilKind.FLOAT) {
+                fresh.remove(mv.hostId);
+            }
+            fresh.retainAll(cs.untappedIds);
         }
         a.child.fresh = fresh;
         if (mv.pass) {
             return "pass";
         }
-        for (int i = 0; i <= 4; i++) {
-            if (cs.pv[i] > ns.pv[i]) {
+        for (int i = 0; i < PROGRESS; i++) {
+            // the storm count (5) only when nothing was drawn: a spell that only draws is not progress by being cast
+            if (cs.pv[i] > ns.pv[i] && (i != 5 || cs.library >= ns.library)) {
                 return "progress" + i;
             }
         }
@@ -2606,6 +2626,9 @@ final class ForcedWinEngine {
                 return "permanent";
             }
         }
+        if (a.pickLibrary) {
+            return "search";
+        }
         for (java.util.Map.Entry<String, Integer> e : cs.untapped.entrySet()) {
             if (e.getValue() > ns.untapped.getOrDefault(e.getKey(), 0)) {
                 return "untap";
@@ -2615,10 +2638,7 @@ final class ForcedWinEngine {
             return "mana";
         }
         if (mv.kind == AbilKind.FLOAT && node.fresh != null && node.fresh.contains(mv.hostId)) {
-            return "floatFresh"; // a source the last move untapped or made: tapped again at once (a loop's step)
-        }
-        if (a.pickLibrary) {
-            return "search";
+            return "floatFresh";
         }
         for (Integer id : cs.hand) {
             if (ns.offLibrary.contains(id)) {
@@ -2626,6 +2646,7 @@ final class ForcedWinEngine {
             }
         }
         if (cs.library >= ns.library) {
+            // not after a draw: what a card from the unknown library makes playable is luck's
             final Set<String> before = focusPlayable(node);
             for (String k : focusPlayable(a.child)) {
                 if (!before.contains(k)) {
@@ -2636,12 +2657,36 @@ final class ForcedWinEngine {
         return null;
     }
 
+    /** The attacks this search declared without winning, by {@link #focusCombatKey}. */
+    private final Set<String> focusAttacks = new HashSet<>();
+
+    /** A combat as far as its result goes: our creatures that can attack and theirs, with their state, life and poison. */
+    private static String focusCombatKey(Node n) {
+        final List<String> xs = new ArrayList<>();
+        final StringBuilder sb = new StringBuilder(128);
+        for (Player o : n.me.getOpponents()) {
+            sb.append(o.getLife()).append('/').append(o.getPoisonCounters()).append(';');
+            for (Card c : o.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isCreature() || c.isPlaneswalker()) {
+                    xs.add("o" + c.getName() + focusCardState(c, n.me));
+                }
+            }
+        }
+        for (Card c : n.me.getCreaturesInPlay()) {
+            if (!c.isTapped() && !c.isSick()) {
+                xs.add("m" + c.getName() + focusCardState(c, n.me));
+            }
+        }
+        java.util.Collections.sort(xs);
+        return sb.append(xs).toString();
+    }
+
     /**
-     * engineFocus: as {@link #dfs0}, with the node's allowance of unproductive moves ({@link Node#focusLeft}): a move
-     * whose class this search has seen only unproductive is not applied when none is left; an applied move that proves
-     * unproductive spends one (and is not followed when none is left). Moves are tried killers first, then classes seen
-     * productive, unseen ones, pass and attack, and classes seen unproductive last; the branching cap counts applied
-     * moves. Draws are not set apart (they spend the allowance).
+     * engineFocus: as {@link #dfs0}, with the node's allowance for unproductive moves ({@link Node#focusLeft}): a move
+     * whose class this search has seen only unproductive is not applied when the allowance does not cover it; an applied
+     * move that proves unproductive spends its price (and is not followed when that is more than is left). Moves are
+     * tried killers first, then in the engine's order, classes seen only unproductive last; the branching cap counts
+     * applied moves. Draws are not set apart (they spend the allowance).
      */
     private List<Step> dfs0Focus(Node node, int depth) {
         if (out() || depth >= lim.depth) {
@@ -2692,7 +2737,23 @@ final class ForcedWinEngine {
                 c = focusClass(node, mv); // a variant added below
             }
             final boolean fixed = mv.pass || mv.kind == AbilKind.ATTACK;
-            if (!variant && !fixed && left <= 0 && !pre.containsKey(mv)) {
+            // this turn's search: an attack that does not win leaves only the second main phase (1 of the allowance); the
+            // same combat is not declared again where that is not covered
+            final boolean attackOnly = mv.kind == AbilKind.ATTACK && !lim.passTurn && !node.passed;
+            String combat = null;
+            if (attackOnly && left < 1) {
+                try {
+                    combat = focusCombatKey(node);
+                } catch (RuntimeException ex) {
+                    combat = null;
+                }
+                if (combat != null && focusAttacks.contains(combat)) {
+                    focusCut = true;
+                    st.focusSkips++;
+                    continue;
+                }
+            }
+            if (!variant && !fixed && left < focusPrice(mv) && !pre.containsKey(mv)) {
                 final int[] h = focusSeen.get(c);
                 if (h != null && h[1] == 0) {
                     focusCut = true; // seen only unproductive, and no allowance left: not applied
@@ -2718,9 +2779,6 @@ final class ForcedWinEngine {
                         : a.won ? "WON" : a.child == null ? "no-rest(" + a.why + ")" : "rest"));
             }
             if (a == null) {
-                if (!fixed) {
-                    focusSeen.computeIfAbsent(c, k -> new int[2])[0]++;
-                }
                 continue;
             }
             if (a.rec != null) {
@@ -2738,6 +2796,7 @@ final class ForcedWinEngine {
                     expandPay(node, mv, a, moves, at, variants, pre);
                 }
             }
+            final int sizeBefore = moves.size();
             if (mv.pickName == null && !a.pickCandidates.isEmpty()) {
                 int k = 0;
                 for (String name : a.pickCandidates) {
@@ -2762,6 +2821,7 @@ final class ForcedWinEngine {
                     variants.add(v);
                 }
             }
+            final int added = moves.size() - sizeBefore;
             focusClassOf.put(mv, c);
             if (a.won) {
                 final List<Step> path = new ArrayList<>(node.path);
@@ -2787,10 +2847,7 @@ final class ForcedWinEngine {
                 }
             }
             if (a.child == null) {
-                if (!fixed) {
-                    focusSeen.computeIfAbsent(c, k -> new int[2])[0]++;
-                }
-                continue;
+                continue; // a move that did not come to rest says nothing about its class
             }
             String gain;
             try {
@@ -2798,8 +2855,11 @@ final class ForcedWinEngine {
             } catch (RuntimeException ex) {
                 gain = "error"; // not read: followed as a productive move
             }
-            if (mv.kind == AbilKind.ATTACK && gain == null) {
-                gain = "attack";
+            if (mv.kind == AbilKind.ATTACK) {
+                gain = attackOnly ? null : gain == null ? "attack" : gain;
+                if (combat != null) {
+                    focusAttacks.add(combat);
+                }
             }
             if (!fixed) {
                 final int[] h = focusSeen.computeIfAbsent(c, k -> new int[2]);
@@ -2816,11 +2876,19 @@ final class ForcedWinEngine {
             if (TRACE) {
                 ForcedWinSolver.receipt("FW_ENGINE   focus " + mv + " gain=" + gain + " left=" + left);
             }
-            final int cost = gain != null ? 0 : 1;
+            final int cost = gain != null ? 0 : mv.kind == AbilKind.ATTACK ? 1 : focusPrice(mv);
             if (cost > left) {
                 focusCut = true;
                 st.focusSkips++;
+                final boolean drew = focusSig(a.child).library < focusSig(node).library;
                 a.child = null;
+                if (!variant && added > 0 && drew) {
+                    // an unproductive draw: its forced-answer variants (which card goes back, what a trigger aims at)
+                    // are left out with it
+                    for (int k = 0; k < added; k++) {
+                        variants.remove(moves.remove(mi + 1));
+                    }
+                }
                 continue;
             }
             a.child.focusLeft = left - cost;
