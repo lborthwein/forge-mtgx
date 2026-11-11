@@ -1024,8 +1024,24 @@ public final class ForcedWinModel {
             return n;
         }
 
+        /**
+         * sdcc-leak-1111: this reader's sandboxes hide what the seat cannot know ({@link ForcedWinProbe#HIDE}); set by
+         * a solver with {@code hideOwnLibrary} and without {@code hiddenOrderLegacy}. False: plain copies, as before.
+         */
+        volatile boolean hideLibrary;
+
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         synchronized ACard card(Game live, Player me, Card c) {
+            final boolean prevHide = ForcedWinProbe.HIDE.get();
+            ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
+            try {
+                return card0(live, me, c);
+            } finally {
+                ForcedWinProbe.HIDE.set(prevHide);
+            }
+        }
+
+        private ACard card0(Game live, Player me, Card c) {
             // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
             // sdcc-draws-1110: so does a probeSettle reader (its templates hold what the settled sandbox moved)
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
@@ -1217,7 +1233,13 @@ public final class ForcedWinModel {
                     if (c == null || c.getOwner() != me) {
                         return null; // not a card of this game (a screen's granted copy): its own values stand
                     }
-                    return landEntry(live, me, position, root, byId, land, c, battlefield, hand);
+                    final boolean prevHide = ForcedWinProbe.HIDE.get();
+                    ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111
+                    try {
+                        return landEntry(live, me, position, root, byId, land, c, battlefield, hand);
+                    } finally {
+                        ForcedWinProbe.HIDE.set(prevHide);
+                    }
                 }
             };
         }

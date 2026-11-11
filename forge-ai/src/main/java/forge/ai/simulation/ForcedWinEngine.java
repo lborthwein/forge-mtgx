@@ -463,6 +463,8 @@ final class ForcedWinEngine {
         int ownKnownTop = -1;
         /** known-lib-1102: our library's pinned cards in the root copy (kept at their index with the known top; null none). */
         java.util.Set<Integer> ownPinned = null;
+        /** sdcc-leak-1111: the root's unknown library cards are put in id order before the shuffle (false = as before). */
+        boolean ownCanonical = false;
         /** honest-belief-1020: the solver's re-draw of the opponents' hidden cards at the root (null = off). */
         ForcedWinSolver.Redraw redraw;
         /**
@@ -2037,10 +2039,11 @@ final class ForcedWinEngine {
                     lim.redraw.apply(live, liveMe, root.g, root.me, rng); // honest-belief-1020
                 }
                 for (Player o : root.me.getOpponents()) {
-                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng, lim.redraw);
+                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng, lim.redraw,
+                            lim.ownCanonical);
                 }
                 if (lim.ownKnownTop >= 0) {
-                    ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, lim.ownPinned, rng);
+                    ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, lim.ownPinned, rng, lim.ownCanonical);
                 }
             }
             root.ids = cloneScope(forge.util.IdScope.capture());

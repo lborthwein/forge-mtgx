@@ -64,6 +64,7 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
         this.me = me;
         this.scoped = scoped;
         this.solver = new ForcedWinSolver(me, cfg);
+        this.solver.liveSeat = scoped; // breakOnCounter: the live seat's driver (a play-out copy's driver is not scoped)
         final AtomicInteger[] counters = new AtomicInteger[IdScope.Kind.values().length];
         final int base = PROBE_ID_BASE + PROBE_ID_STRIDE * Math.floorMod(me.getId(), 2);
         for (int i = 0; i < counters.length; i++) {
