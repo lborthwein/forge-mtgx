@@ -194,6 +194,7 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                     o.askMs = Long.parseLong(c[5]);
                     o.dev = c[6];
                     o.pass = Boolean.parseBoolean(c[7]);
+                    o.pool = c.length <= 8 || Boolean.parseBoolean(c[8]);
                     o.seed = 0x5DCCL * 31 + line;
                     final JsonObject out = new JsonObject();
                     out.addProperty("tag", ask.get("tag").getAsString());
@@ -213,6 +214,10 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                                 } catch (RuntimeException | Error ex) {
                                     s = null;
                                 }
+                                if (s != null && x.has("mode")) {
+                                    s.mode = x.get("mode").getAsInt();
+                                    s.card = x.has("card") && !x.get("card").isJsonNull() ? x.get("card").getAsString() : null;
+                                }
                             }
                             snaps.add(s);
                         }
@@ -231,6 +236,7 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                             x.addProperty("o", labels.get(i));
                             if (!Double.isNaN(r.value)) {
                                 x.addProperty("w", Math.round(r.value * 1e4) / 1e4);
+                                x.addProperty("w_own", Math.round(r.raw * 1e4) / 1e4);
                                 x.addProperty("kills", r.kills);
                                 x.addProperty("worlds", r.worlds);
                             }

@@ -58,6 +58,13 @@ public final class WhatIf {
         /** Main-loop steps of one advance (to our next main phase), at most. */
         public int maxSteps = 600;
         public long seed;
+        /**
+         * Kill lines are pooled across the options of one world (true, the default): a line found for one option also
+         * counts for every option it is compatible with (see {@link Snapshot#mode}), so a kill that does not depend on
+         * the choice gives every option the same value, and a search that happened to miss it for one option does not
+         * decide the ask. False: each option counts only the lines its own probes found.
+         */
+        public boolean pool = true;
     }
 
     /** One option's position: the applied copy itself (never played on; every world is a copy of it). */
@@ -69,6 +76,16 @@ public final class WhatIf {
         final int prioSeat;
         final boolean pregame;
         public String fail;
+        /**
+         * How this option relates to its card ({@link #card}, a card name; names, so that positions rebuilt from a
+         * stored state pool as copies of one game do): {@link #ADDS} it (a library search's pick:
+         * a pooled line that plays another option's card is not this option's), {@link #REMOVES} it (a discard, a
+         * bottomed card: a pooled line that plays it is not this option's), {@link #NOTHING} (declining a search:
+         * only lines that play no option's card), or {@link #OWN} (no pooling: only its own lines).
+         */
+        public int mode = OWN;
+        public String card;
+        public static final int OWN = 0, ADDS = 1, REMOVES = 2, NOTHING = 3;
 
         Snapshot(final Game g, final Player me, final Object ids, final int knownTop, final int prioSeat,
                 final boolean pregame) {
@@ -132,6 +149,9 @@ public final class WhatIf {
         public final List<Integer> turnsRun = new ArrayList<>();
         /** Probes stopped by the node cap or the clock (the search did not exhaust). */
         public int capped;
+        /** The value from this option's own lines only (no pooling); = value when pooling is off. */
+        public double raw = Double.NaN;
+        public final List<Integer> rawTurns = new ArrayList<>();
     }
 
     /** The whole ask's result. */
@@ -326,12 +346,17 @@ public final class WhatIf {
             final boolean share0 = !o.pass;
             final int[] kill0 = new int[n];
             final String[] line0 = new String[n];
+            @SuppressWarnings("unchecked")
+            final java.util.Set<String>[] hosts0 = new java.util.Set[n];
             java.util.Arrays.fill(kill0, -2);
             boolean cutNow = false;
             for (int w = 0; w < K && !cutNow; w++) {
                 final World[] ws = new World[n];
                 final int[] killTurn = new int[n];
                 java.util.Arrays.fill(killTurn, -1);
+                @SuppressWarnings("unchecked")
+                final java.util.Set<String>[] killHosts = new java.util.Set[n];
+                final String[] killLine = new String[n];
                 int done = 0;
                 for (int t = 0; t < T && !cutNow; t++) {
                     // a stage: own turn t of world w, for every option still open
@@ -340,6 +365,8 @@ public final class WhatIf {
                     final int[] found = new int[n];
                     final String[] lines = new String[n];
                     final String[] fails = new String[n];
+                    @SuppressWarnings("unchecked")
+                    final java.util.Set<String>[] hosts = new java.util.Set[n];
                     java.util.Arrays.fill(found, -1);
                     boolean any = false;
                     for (int i = 0; i < n; i++) {
@@ -370,6 +397,7 @@ public final class WhatIf {
                             if (kill0[i] >= 0) {
                                 found[i] = kill0[i];
                                 lines[i] = line0[i];
+                                hosts[i] = hosts0[i];
                             }
                             continue;
                         }
@@ -391,10 +419,13 @@ public final class WhatIf {
                         if (l != null) {
                             found[i] = t + l.winTurn;
                             lines[i] = String.valueOf(l);
+                            hosts[i] = new java.util.HashSet<>();
+                            names(l.steps, ws[i].g, hosts[i]);
                         }
                         if (t == 0 && share0 && w == 0) {
                             kill0[i] = l == null ? -1 : found[i];
                             line0[i] = lines[i];
+                            hosts0[i] = hosts[i];
                         }
                     }
                     if (cutNow) {
@@ -416,10 +447,8 @@ public final class WhatIf {
                         }
                         if (found[i] >= 0 && killTurn[i] < 0) {
                             killTurn[i] = found[i];
-                            if (r.bestTurn < 0 || found[i] < r.bestTurn) {
-                                r.bestTurn = found[i];
-                                r.line = lines[i];
-                            }
+                            killHosts[i] = hosts[i];
+                            killLine[i] = lines[i];
                         }
                     }
                     ask.stages++;
@@ -430,14 +459,51 @@ public final class WhatIf {
                 }
                 if (done > 0) {
                     // the world counts with the own turns every option played in it (all of them unless the budget cut it)
+                    final java.util.Set<String> optionCards = new java.util.HashSet<>();
+                    for (int i = 0; i < n; i++) {
+                        if (options.get(i) != null && options.get(i).card != null) {
+                            optionCards.add(options.get(i).card);
+                        }
+                    }
                     for (int i = 0; i < n; i++) {
                         final Result r = ask.results.get(i);
-                        if (r.fail == null) {
-                            r.worlds++;
-                            r.killTurns.add(killTurn[i]);
-                            r.turnsRun.add(done);
-                            if (killTurn[i] >= 0) {
-                                r.kills++;
+                        if (r.fail != null) {
+                            continue;
+                        }
+                        // the earliest line of this world this option may count: its own, and with pooling the other
+                        // options' lines that do not depend on a card this option does not have
+                        int turn = killTurn[i];
+                        String line = killLine[i];
+                        final Snapshot me = options.get(i);
+                        if (o.pool && me.mode != Snapshot.OWN) {
+                            for (int j = 0; j < n; j++) {
+                                final Snapshot other = options.get(j);
+                                if (j == i || killTurn[j] < 0 || other == null || other.mode == Snapshot.OWN
+                                        || ask.results.get(j).fail != null || turn >= 0 && killTurn[j] >= turn) {
+                                    continue;
+                                }
+                                boolean ok = true;
+                                for (String id : killHosts[j]) {
+                                    if (me.mode == Snapshot.REMOVES ? id.equals(me.card) : !id.equals(me.card) && optionCards.contains(id)) {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                                if (ok) {
+                                    turn = killTurn[j];
+                                    line = "(pooled) " + killLine[j];
+                                }
+                            }
+                        }
+                        r.worlds++;
+                        r.killTurns.add(turn);
+                        r.rawTurns.add(killTurn[i]);
+                        r.turnsRun.add(done);
+                        if (turn >= 0) {
+                            r.kills++;
+                            if (r.bestTurn < 0 || turn < r.bestTurn) {
+                                r.bestTurn = turn;
+                                r.line = line;
                             }
                         }
                     }
@@ -451,6 +517,11 @@ public final class WhatIf {
                     }
                     r.value = sum / r.worlds;
                     r.p = r.kills / (double) r.worlds;
+                    double rs = 0;
+                    for (int k : r.rawTurns) {
+                        rs += k < 0 ? 0 : Math.pow(o.gamma, k);
+                    }
+                    r.raw = rs / r.worlds;
                 }
             }
         } catch (RuntimeException | StackOverflowError e) {
@@ -468,6 +539,26 @@ public final class WhatIf {
             ask.nanos = System.nanoTime() - real0;
         }
         return ask;
+    }
+
+    /** The names of the cards a line's steps play, pick or sacrifice (loop bodies included). */
+    private static void names(final List<ForcedWinPlanner.Step> steps, final Game g, final java.util.Set<String> out) {
+        for (ForcedWinPlanner.Step st : steps) {
+            if (st.hostId >= 0 && st.hostName != null) {
+                out.add(st.hostName);
+            }
+            for (List<Integer> ids : List.of(st.picks, st.pile, st.sacIds)) {
+                for (int id : ids) {
+                    final Card c = g.findById(id);
+                    if (c != null) {
+                        out.add(c.getName());
+                    }
+                }
+            }
+            if (st.body != null) {
+                names(st.body, g, out);
+            }
+        }
     }
 
     /** A world of an option: a copy of its snapshot, the unknown library in the world's order, at our first main phase. */
@@ -578,7 +669,7 @@ public final class WhatIf {
     public static void receipt(final String tag, final List<String> labels, final Ask a, final Opts o) {
         final StringBuilder sb = new StringBuilder("FORCED_WIN whatif ").append(tag).append(" K=").append(o.worlds)
                 .append(" T=").append(o.horizon).append(" nodes=").append(o.nodes).append(" dev=").append(o.dev)
-                .append(o.pass ? " pass" : "").append(" stages=").append(a.stages).append(a.cut ? " CUT" : "")
+                .append(o.pass ? " pass" : "").append(o.pool ? " pool" : "").append(" stages=").append(a.stages).append(a.cut ? " CUT" : "")
                 .append(" probes=").append(a.probes).append(" engineNodes=").append(a.nodes).append(" ms=")
                 .append(a.nanos / 1_000_000).append(" workMs=").append(a.workNanos / 1_000_000)
                 .append(" (goldfish: no opponent, their hand unknown)");
@@ -587,7 +678,8 @@ public final class WhatIf {
             final Result r = a.results.get(i);
             ForcedWinSolver.receipt("FORCED_WIN whatif   option " + (i < labels.size() ? labels.get(i) : "#" + i) + " v="
                     + (Double.isNaN(r.value) ? "n/a" : String.valueOf(Math.round(r.value * 1000) / 1000.0)) + " kills=" + r.kills
-                    + "/" + r.worlds + " killTurns=" + r.killTurns + " probes=" + r.probes + " nodes=" + r.nodes
+                    + "/" + r.worlds + " killTurns=" + r.killTurns + (r.rawTurns.equals(r.killTurns) ? "" : " ownTurns=" + r.rawTurns)
+                    + " probes=" + r.probes + " nodes=" + r.nodes
                     + (r.capped > 0 ? " capped=" + r.capped : "") + (r.fail != null ? " fail=" + r.fail : "")
                     + (r.line != null ? " line(t" + r.bestTurn + ")=" + r.line : ""));
         }

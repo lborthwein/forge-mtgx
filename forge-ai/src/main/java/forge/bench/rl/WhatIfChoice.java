@@ -38,13 +38,13 @@ public final class WhatIfChoice {
         public int worlds = 3, horizon = 4, nodes = 60, maxSteps = 600;
         public long probeMs = 1500, askMs = 60_000;
         public double gamma = 0.8, alpha = 1.0;
-        public boolean pass = false, shadow = false;
+        public boolean pass = false, shadow = false, pool = true;
         public String dev = "ai";
         /** Real-time guard of one ask, ms (0 = none): checked between options' applications only. */
         public long realMs = 0;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("worlds", "horizon", "nodes", "probeMs",
-                "askMs", "gamma", "alpha", "pass", "shadow", "dev", "maxSteps", "realMs"));
+                "askMs", "gamma", "alpha", "pass", "shadow", "dev", "maxSteps", "realMs", "pool"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -62,6 +62,7 @@ public final class WhatIfChoice {
             if (o.has("alpha")) c.alpha = o.get("alpha").getAsDouble();
             if (o.has("pass")) c.pass = o.get("pass").getAsBoolean();
             if (o.has("shadow")) c.shadow = o.get("shadow").getAsBoolean();
+            if (o.has("pool")) c.pool = o.get("pool").getAsBoolean();
             if (o.has("dev")) c.dev = o.get("dev").getAsString();
             if (o.has("maxSteps")) c.maxSteps = o.get("maxSteps").getAsInt();
             if (o.has("realMs")) c.realMs = o.get("realMs").getAsLong();
@@ -82,6 +83,7 @@ public final class WhatIfChoice {
             o.addProperty("alpha", alpha);
             o.addProperty("pass", pass);
             o.addProperty("shadow", shadow);
+            o.addProperty("pool", pool);
             o.addProperty("dev", dev);
             o.addProperty("maxSteps", maxSteps);
             if (realMs > 0) {
@@ -99,6 +101,7 @@ public final class WhatIfChoice {
             w.askMs = askMs;
             w.gamma = gamma;
             w.pass = pass;
+            w.pool = pool;
             w.dev = dev;
             w.maxSteps = maxSteps;
             w.seed = seed;
@@ -206,6 +209,22 @@ public final class WhatIfChoice {
                     }
                     if (r.fail == null && out[0] != null) {
                         snap = out[0];
+                        // how the option relates to its card, for the pooling of kill lines
+                        if (pregame && o.steps.length == 1) {
+                            snap.mode = WhatIf.Snapshot.REMOVES;
+                            snap.card = m.cands.get(o.steps[0]).host.getName();
+                        } else if (!pregame && o.pileIds == null && o.steps.length == 0 && search) {
+                            snap.mode = WhatIf.Snapshot.NOTHING;
+                        } else if (!pregame && o.pileIds == null && o.steps.length == 1) {
+                            final Card h = m.cands.get(o.steps[0]).host;
+                            if (search) {
+                                snap.mode = WhatIf.Snapshot.ADDS;
+                                snap.card = h.getName();
+                            } else if (h.isInZone(ZoneType.Hand) && h.getOwner() == me) {
+                                snap.mode = WhatIf.Snapshot.REMOVES;
+                                snap.card = h.getName();
+                            }
+                        }
                     }
                 }
                 snaps.add(snap);
@@ -304,6 +323,9 @@ public final class WhatIfChoice {
                 x.addProperty("o", s.options.get(i).label);
                 if (!Double.isNaN(r.value)) {
                     x.addProperty("w", Math.round(r.value * 1e4) / 1e4);
+                    if (r.raw != r.value) {
+                        x.addProperty("w_own", Math.round(r.raw * 1e4) / 1e4);
+                    }
                     x.addProperty("kills", r.kills);
                     x.addProperty("worlds", r.worlds);
                 }
@@ -368,6 +390,10 @@ public final class WhatIfChoice {
                 x.addProperty("state", sn.dump());
                 x.addProperty("knownTop", sn.knownTop());
                 x.addProperty("pregame", sn.pregame());
+                x.addProperty("mode", sn.mode);
+                if (sn.card != null) {
+                    x.addProperty("card", sn.card);
+                }
                 x.addProperty("me", sn.seat());
             }
             arr.add(x);
