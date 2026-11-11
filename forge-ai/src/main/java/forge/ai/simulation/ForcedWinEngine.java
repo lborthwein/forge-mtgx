@@ -467,7 +467,7 @@ final class ForcedWinEngine {
          * allowance: 1 for floating mana, 2 for any other move (a draw from the unknown library included). A move class
          * seen only unproductive in this search is not applied again where the allowance does not cover it, moves of
          * interchangeable cards are tried once, and classes on this solver's earlier winning lines are tried first
-         * ({@link #focusKillers}). The branching cap counts applied moves only. Not with an engine valuer
+         * ({@link #focusKillers}). The branching cap counts the moves followed. Not with an engine valuer
          * ({@link #order}) or the frontier.
          */
         boolean focus;
@@ -2380,6 +2380,7 @@ final class ForcedWinEngine {
         passCap = nodeCap;
         passStart = st.nodes;
         List<Step> win = null;
+        long turnNanos = 0; // the time this turn's searches took so far
         for (int d = 0; d <= lim.depth && win == null; d++) {
             st.focusDepth = Math.max(st.focusDepth, d);
             focusCut = false;
@@ -2389,11 +2390,13 @@ final class ForcedWinEngine {
                 seen.clear();
                 table.clear();
                 root.focusLeft = d;
+                final long t0 = forge.game.WorkClock.nanoTime();
                 if (pass == 1 && deadline != Long.MAX_VALUE) {
-                    // the lines across the turn get a share of the time left (half at allowance 0, then a third), so
-                    // this turn's lines at the next allowance are reached; a share that ends is not an exhausted search
-                    final long now = forge.game.WorkClock.nanoTime();
-                    stageEnd = now + Math.max(0L, deadline - now) / (d == 0 ? 2 : 3);
+                    // the lines across the turn leave time for this turn's lines at the next allowances: four times
+                    // what this turn's searches took so far, at most half of what is left (a turn's search that was
+                    // cheap leaves them nearly all of it); a share that ends is not an exhausted search
+                    final long rest = Math.max(0L, deadline - t0);
+                    stageEnd = t0 + rest - Math.min(rest / 2, 4 * turnNanos);
                 }
                 try {
                     win = dfs(root, 0);
@@ -2402,6 +2405,9 @@ final class ForcedWinEngine {
                     }
                 } finally {
                     stageEnd = 0;
+                    if (pass == 0) {
+                        turnNanos += forge.game.WorkClock.nanoTime() - t0;
+                    }
                 }
             }
             if (!focusCut || out()) {
@@ -2686,7 +2692,7 @@ final class ForcedWinEngine {
      * whose class this search has seen only unproductive is not applied when the allowance does not cover it; an applied
      * move that proves unproductive spends its price (and is not followed when that is more than is left). Moves are
      * tried killers first, then in the engine's order, classes seen only unproductive last; the branching cap counts
-     * applied moves. Draws are not set apart (they spend the allowance).
+     * followed moves. Draws are not set apart (they spend the allowance).
      */
     private List<Step> dfs0Focus(Node node, int depth) {
         if (out() || depth >= lim.depth) {
@@ -2763,9 +2769,6 @@ final class ForcedWinEngine {
             }
             if (!variant && tried >= lim.branching) {
                 continue;
-            }
-            if (!variant) {
-                tried++;
             }
             final Applied a;
             if (pre.containsKey(mv)) {
@@ -2892,6 +2895,9 @@ final class ForcedWinEngine {
                 continue;
             }
             a.child.focusLeft = left - cost;
+            if (!variant) {
+                tried++; // the branching cap counts the moves followed, not the ones applied and left out
+            }
             final List<Step> r = descendShared(node, mv, a, depth, null, 0);
             if (r != null) {
                 return r;
