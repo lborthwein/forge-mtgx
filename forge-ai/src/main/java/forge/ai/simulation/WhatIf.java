@@ -292,7 +292,8 @@ public final class WhatIf {
         el.xVariants = cfg.xVariants;
         el.costChoice = cfg.engineCostChoice;
         el.focus = cfg.engineFocus;
-        el.ownKnownTop = -1;
+        el.ownKnownTop = -1; // the world's own order (sampled in start), never the real one
+        el.ownCanonical = true; // sdcc-leak-1111: their hidden cards in id order before the root's shuffle
         return el;
     }
 
@@ -491,7 +492,7 @@ public final class WhatIf {
                 final Random rng = new Random(LookaheadSearch.mix(seed, 2));
                 for (Player opp : w.me.getOpponents()) {
                     // their unseen hand leaves the game (the solver's unopposed world)
-                    ForcedWinSolver.hideOrSample(s.g, s.me, (Player) s.g.getPlayer(opp.getId()), opp, true, rng, null);
+                    ForcedWinSolver.hideOrSample(s.g, s.me, (Player) s.g.getPlayer(opp.getId()), opp, true, rng, null, true);
                 }
             }
             reorder(w.me, s.knownTop, seed);
