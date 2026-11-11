@@ -2814,7 +2814,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (scorer == null) {
             scorer = new ChoiceScorer(ChoiceScorer.Config.parse(cfg.choiceScorer), index, obsVersion, uid);
             final ChoiceScorer.Config sc = scorer.config();
-            if (sc.screenNodes > 0 || sc.pile) {
+            if (sc.screenNodes > 0 || sc.pile || sc.whatIf != null) {
                 sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();
             }
         }
@@ -2903,6 +2903,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final boolean scored = v != null;
         if (sc.config().shadow) {
             alt = null;
+        }
+        if (scored && sc.config().whatIf != null && !sc.config().shadow) {
+            // sdcc-whatif-1111 (off: nothing): the engine's what-if over the scored options; shadow keeps alt
+            alt = WhatIfChoice.answer(sc.config(), sc.config().whatIf, g, me, m, s, greedy, alt, liveKnow, seed,
+                    Long.toUnsignedString(uid) + ":" + frame.decIdx);
         }
         if (alt != null && s.chosen != null && s.chosen.pileIds != null) {
             sc.adoptPile(g, s.chosen);

@@ -92,6 +92,8 @@ public final class ChoiceScorer {
         public int pileTop = 6;
         public int pileNodes = 30000;
         public long pileMs = 1500;
+        /** sdcc-whatif-1111 (null = off, the default, and then absent from the JSON): {@link WhatIfChoice}. */
+        public WhatIfChoice.Config whatIf;
         /** Cards never answered by a copy whose frame depends on the opponent's hidden hand ({@link #hiddenGuard}). */
         public boolean guard = true;
         /** The solver's config for the screen (spec's plans.solverCfg; not a JSON key). */
@@ -103,7 +105,7 @@ public final class ChoiceScorer {
         public boolean probeOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
-                "settleSteps", "margin", "noDecline", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig"));
+                "settleSteps", "margin", "noDecline", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig", "whatIf"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -156,6 +158,9 @@ public final class ChoiceScorer {
             if (o.has("pileTop")) c.pileTop = o.get("pileTop").getAsInt();
             if (o.has("pileNodes")) c.pileNodes = o.get("pileNodes").getAsInt();
             if (o.has("pileMs")) c.pileMs = o.get("pileMs").getAsLong();
+            if (o.has("whatIf") && !o.get("whatIf").isJsonNull()) {
+                c.whatIf = WhatIfChoice.Config.parse(o.getAsJsonObject("whatIf")); // sdcc-whatif-1111
+            }
             return c;
         }
 
@@ -216,6 +221,9 @@ public final class ChoiceScorer {
             o.addProperty("pileTop", pileTop);
             o.addProperty("pileNodes", pileNodes);
             o.addProperty("pileMs", pileMs);
+            if (whatIf != null) {
+                o.add("whatIf", whatIf.toJson()); // sdcc-whatif-1111: only when on
+            }
             return o;
         }
     }
@@ -248,6 +256,8 @@ public final class ChoiceScorer {
         public long copyNanos, runNanos, featNanos, totalNanos;
         public boolean overBudget;
         public Option chosen;
+        /** sdcc-whatif-1111: the what-if's row of this ask (null = off or not run). */
+        public JsonObject whatIf;
     }
 
     /** Frames at most for one opening-hand ask. */
@@ -1003,6 +1013,9 @@ public final class ChoiceScorer {
             a.add(x);
         }
         r.add("options", a);
+        if (s.whatIf != null) {
+            r.add("whatif", s.whatIf); // sdcc-whatif-1111
+        }
         return r;
     }
 
