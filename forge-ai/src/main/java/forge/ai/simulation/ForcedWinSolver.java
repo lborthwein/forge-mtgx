@@ -222,6 +222,15 @@ public final class ForcedWinSolver {
          * wins, bisected between doublings ({@link ForcedWinEngine.Limits#loopBisect}).
          */
         public boolean engineLoopBisect = false;
+        /**
+         * sdcc-loops-1111 (off by default: nothing changes; read with cycles and engineLongLoops): unbounded resource loops in
+         * the engine search ({@link ForcedWinEngine.Limits#loopCredit}): a mana-positive round is a loop, fast-forwarded to
+         * what our cards could spend; X costs at the largest X our mana pays; a land tapped before a sacrifice takes it;
+         * "yes" to our optional triggers and two chained trigger targets as move variants.
+         */
+        public boolean engineLoopCredit = false;
+        /** sdcc-loops-1111: the most repetitions of such a loop ({@link ForcedWinEngine.Limits#creditCap}). */
+        public int engineLoopCreditCap = 96;
         /** engine-reach-1107 (0 = off): {@link ForcedWinEngine.Limits#frontierAfterPct}. */
         public int engineFrontierPct = 0;
         /**
@@ -835,6 +844,8 @@ public final class ForcedWinSolver {
             c.engineOutletNodes = intOr(get.apply("engineOutletNodes"), c.engineOutletNodes); // engine-reach-1107
             c.engineLoopHoist = "true".equals(get.apply("engineLoopHoist")); // loop-exec-1107
             c.engineLoopBisect = "true".equals(get.apply("engineLoopBisect")); // loop-exec-1107
+            c.engineLoopCredit = "true".equals(get.apply("engineLoopCredit")); // sdcc-loops-1111
+            c.engineLoopCreditCap = intOr(get.apply("engineLoopCreditCap"), c.engineLoopCreditCap);
             c.engineFrontierPct = intOr(get.apply("engineFrontierPct"), c.engineFrontierPct); // engine-reach-1107
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
@@ -3524,6 +3535,8 @@ public final class ForcedWinSolver {
             el.loopHoist = cfg.engineLoopHoist; // loop-exec-1107
             el.loopBisect = cfg.engineLoopBisect; // loop-exec-1107
         }
+        el.loopCredit = cfg.engineLoopCredit; // sdcc-loops-1111
+        el.creditCap = cfg.engineLoopCreditCap;
         el.frontierAfterPct = cfg.engineFrontierPct; // engine-reach-1107
         if (cfg.engineVerify) {
             final int[] tries = {0};
@@ -4024,6 +4037,8 @@ public final class ForcedWinSolver {
             el.loopHoist = cfg.engineLoopHoist;
             el.loopBisect = cfg.engineLoopBisect;
         }
+        el.loopCredit = cfg.engineLoopCredit; // sdcc-loops-1111
+        el.creditCap = cfg.engineLoopCreditCap;
         el.stalePlayerStatics = cfg.stalePlayerStatics;
         el.offBattlefieldLimits = cfg.offBattlefieldLimits;
         el.historyLki = cfg.historyLki;
@@ -6391,7 +6406,7 @@ public final class ForcedWinSolver {
 
     /** The optional trigger whose target the active line forced: yes. False = not ours. */
     public boolean answerConfirmTrigger(forge.game.trigger.WrappedAbility wrapper) {
-        return active != null && active.triggers.confirms(wrapper);
+        return active != null && (active.triggers.confirms(wrapper) || active.triggers.confirmsOwn(wrapper, me));
     }
 
     /** Tap or untap while a line is active: the rules' default (untap our own, tap theirs); null = not ours. */
@@ -7399,8 +7414,8 @@ public final class ForcedWinSolver {
 
         @Override
         public boolean confirmTrigger(forge.game.trigger.WrappedAbility wrapper) {
-            if (f.triggers.confirms(wrapper)) {
-                return true;
+            if (f.triggers.confirms(wrapper) || f.triggers.confirmsOwn(wrapper, getPlayer())) {
+                return true; // sdcc-loops-1111: a step that says yes to our optional triggers (engineLoopCredit lines only)
             }
             if (f.costLine && wrapper != null && wrapper.getHostCard() != null) {
                 // R3-4 (b): the line's recorded answer to our optional trigger
