@@ -725,7 +725,29 @@ public final class ForcedWinSolver {
             return on;
         }
 
-        public static Config fromProps(java.util.function.Function<String, String> get) {
+        /**
+         * sdcc-integ2-1111 (tests only; absent = nothing changes): the system property forge.ai.forcedWin.defaults,
+         * "key=value,key=value", is the value of every key a config does not name, so a suite can run with keys on.
+         */
+        public static Config fromProps(final java.util.function.Function<String, String> named) {
+            final String defaults = System.getProperty("forge.ai.forcedWin.defaults");
+            if (defaults == null || defaults.isEmpty()) {
+                return fromProps0(named);
+            }
+            final java.util.Map<String, String> dm = new java.util.HashMap<>();
+            for (String kv : defaults.split(",")) {
+                final int eq = kv.indexOf('=');
+                if (eq > 0) {
+                    dm.put(kv.substring(0, eq).trim(), kv.substring(eq + 1).trim());
+                }
+            }
+            return fromProps0(k -> {
+                final String v = named.apply(k);
+                return v != null ? v : dm.get(k);
+            });
+        }
+
+        private static Config fromProps0(java.util.function.Function<String, String> get) {
             final Config c = new Config();
             final String budget = get.apply("budget");
             if (budget != null && !budget.isEmpty() && !"ms".equals(budget) && !"counter".equals(budget)) {
