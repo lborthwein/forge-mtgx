@@ -463,7 +463,7 @@ final class ForcedWinEngine {
          * productive when the position after it shows a gain the engine can read without knowing the card: the opponent
          * lost life, library, hand or a creature or gained poison; we gained life, a token or a permanent, untapped one,
          * have more mana to spend, raised the storm count without drawing, searched our library, took a card back into
-         * our hand, or can play an ability we could not (see {@link #focusGain}). Anything else spends the line's
+         * our hand, moved an attached permanent to another bearer, or can play an ability we could not (see {@link #focusGain}). Anything else spends the line's
          * allowance: 1 for floating mana, 2 for any other move (a draw from the unknown library included). A move class
          * seen only unproductive in this search is not applied again where the allowance does not cover it, moves of
          * interchangeable cards are tried once, and classes on this solver's earlier winning lines are tried first
@@ -2349,6 +2349,9 @@ final class ForcedWinEngine {
         long[] pv;
         final java.util.Map<String, Integer> bf = new java.util.HashMap<>(), untapped = new java.util.HashMap<>();
         final Set<Integer> untappedIds = new HashSet<>(), offLibrary = new HashSet<>(), hand = new HashSet<>();
+        final Set<Integer> onBattlefield = new HashSet<>();
+        /** Our attached permanents: card id -> what it is attached to (a card's id, or -1 - a player's id). */
+        final java.util.Map<Integer, Integer> attached = new java.util.HashMap<>();
         int mana, library, oppCreatures;
         /** The abilities we can play and pay for (card name and text; targets not checked); filled when first asked. */
         Set<String> playable;
@@ -2519,6 +2522,11 @@ final class ForcedWinEngine {
         for (Card c : n.me.getCardsIn(ZoneType.Battlefield)) {
             s.bf.merge(c.getName(), 1, Integer::sum);
             s.offLibrary.add(c.getId());
+            s.onBattlefield.add(c.getId());
+            final forge.game.GameEntity on = c.getEntityAttachedTo();
+            if (on != null) {
+                s.attached.put(c.getId(), on instanceof Card ? on.getId() : -1 - on.getId());
+            }
             if (!c.isTapped()) {
                 s.untapped.merge(c.getName(), 1, Integer::sum);
                 s.untappedIds.add(c.getId());
@@ -2642,6 +2650,13 @@ final class ForcedWinEngine {
         }
         if (cs.mana > ns.mana) {
             return "mana";
+        }
+        for (java.util.Map.Entry<Integer, Integer> e : cs.attached.entrySet()) {
+            // a permanent of ours that was on the battlefield is now attached to something else (an Equipment moved):
+            // what its old and new bearer can do changed; the table stops a line that only moves it back and forth
+            if (ns.onBattlefield.contains(e.getKey()) && !e.getValue().equals(ns.attached.get(e.getKey()))) {
+                return "attached";
+            }
         }
         if (mv.kind == AbilKind.FLOAT && node.fresh != null && node.fresh.contains(mv.hostId)) {
             return "floatFresh";
