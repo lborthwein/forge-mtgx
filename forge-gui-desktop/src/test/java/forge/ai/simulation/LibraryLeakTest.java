@@ -33,7 +33,8 @@ import forge.game.zone.ZoneType;
  * that. {@code leak.pile=known}: a position whose library top is its {@code pile} is told so (notePlaced), and only
  * the cards below it are reordered. {@code leak.cfg=k=v,...} overrides solver keys (to switch components off).
  * With {@code -Dforge.ai.leakTrace=true} each run also prints which component read a real-order copy
- * ({@link LeakTrace}). Without the positions property the test does nothing.
+ * ({@link LeakTrace}); {@code -Dleak.tpl=true} also prints the learned card templates' hashes. Without the positions
+ * property the test does nothing.
  */
 public class LibraryLeakTest extends forge.ai.AITest {
 
@@ -159,6 +160,14 @@ public class LibraryLeakTest extends forge.ai.AITest {
                             + " | " + cut(best.text, 400)));
             for (String l : LeakTrace.report(head + " TRACE", true)) {
                 System.out.println(l);
+            }
+            if (Boolean.getBoolean("leak.tpl")) {
+                // the card templates this run's probes learned (name=hash), to compare between orders
+                final java.util.TreeMap<String, String> tpl = new java.util.TreeMap<>();
+                for (java.util.Map.Entry<String, JsonElement> t : JsonParser.parseString(s.reader.exportJson()).getAsJsonObject().entrySet()) {
+                    tpl.put(t.getKey(), Integer.toHexString(t.getValue().toString().hashCode()));
+                }
+                System.out.println(head + " TPL " + tpl);
             }
         } catch (RuntimeException | Error ex) {
             System.out.println(head + " failed: " + cut(ex, 200));
