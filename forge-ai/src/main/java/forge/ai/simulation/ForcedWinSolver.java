@@ -305,6 +305,24 @@ public final class ForcedWinSolver {
          */
         public boolean planLoops = false;
         /**
+         * sdcc-tutorcast-1110 (off by default, and then nothing changes): the width model knows a spell that searches our
+         * library for a card and lets us cast it at once without paying its mana cost. The reader's probes observe the
+         * effect ({@link ForcedWinModel.EffKind#TUTOR_CAST}: which of our cards the engine offers to cast, one sandbox
+         * each), the optional additional cost that unlocks it and what the engine accepts as its payment (a sacrificed
+         * permanent), and a search that reaches our hand by way of exile (a tutor). The planner pays the cost (a branch
+         * per permanent), branches over the searched card as for a tutor and goes on with that card cast for free; the
+         * follower casts the spell with its optional cost, answers the cost, the search, the engine's offer to cast and
+         * then the cast spell's own asks.
+         */
+        public boolean tutorCast = false;
+        /**
+         * sdcc-tutorcast-1110 (false = off: the reader, its templates and every plan are unchanged). The probes also
+         * note where an activated ability leaves its own source once it has resolved (the top of our library, our
+         * hand, exile, our graveyard; not as its cost), and the planner moves it there instead of leaving it on the
+         * battlefield: without it a plan could use such a permanent again, or sacrifice it, after it had left.
+         */
+        public boolean sourceLeaves = false;
+        /**
          * ledger-sweep2-1107 (off by default): battlefield mana sources' colors and amounts are read from the position at every
          * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
          */
@@ -816,6 +834,8 @@ public final class ForcedWinSolver {
             c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
+            c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
+            c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
@@ -887,7 +907,9 @@ public final class ForcedWinSolver {
                 + (oppHoldPoints ? " oppHoldPoints" : "")
                 + (oppResponse ? " oppResponse ms=" + oppResponseMs + " N=" + oppResponseNodes + " D=" + oppResponseDepth : "")
                 + (probeSettle ? " probeSettle" : "")
-                + (planOrder != 0 ? " planOrder=" + planOrder : "");
+                + (planOrder != 0 ? " planOrder=" + planOrder : "")
+                + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (sourceLeaves ? " sourceLeaves" : "");
         }
     }
 
@@ -1371,6 +1393,12 @@ public final class ForcedWinSolver {
             // sdcc-draws-1110: our own cards' models (own template keys); the defense's opponent reader is as before
             this.reader.probeSettle = true;
         }
+        if (cfg.tutorCast) {
+            this.reader.tutorCast = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
+        }
+        if (cfg.sourceLeaves) {
+            this.reader.sourceLeaves = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
+        }
     }
 
     public Config config() {
@@ -1463,6 +1491,7 @@ public final class ForcedWinSolver {
             return Decision.NONE;
         }
         active = follower(line);
+        liveAnswers(); // sdcc-tutorcast-1110 (off: nothing)
         taken++;
         final Follower.Next n = active.next(live, me);
         if (n.action != null) {
@@ -2673,6 +2702,7 @@ public final class ForcedWinSolver {
     /** search-bones-1015: follow {@code line} (a {@link Proposal#line}) from the next priority on. */
     public void adopt(Object line) {
         active = follower((Line) line);
+        liveAnswers(); // sdcc-tutorcast-1110 (off: nothing)
         taken++;
     }
 
@@ -3899,6 +3929,7 @@ public final class ForcedWinSolver {
         lim.expandCap = cfg.planExpandCap;
         lim.depth = cfg.planDepth; // solver-distill-cc-1109 (18 = the default)
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
+        lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
         return lim;
     }
 
@@ -4807,7 +4838,8 @@ public final class ForcedWinSolver {
             return false;
         }
         for (ForcedWinModel.Abil ab : a.fromHand) {
-            if (!ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP))) {
+            if (!ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                    || ab.has(EffKind.TUTOR_CAST))) {
                 return true;
             }
         }
@@ -4855,7 +4887,8 @@ public final class ForcedWinSolver {
             boolean chooses = false;
             for (ACard kc : pos.knownTop) {
                 for (ForcedWinModel.Abil ab : kc.fromHand) {
-                    chooses |= !ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                    chooses |= !ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                            || ab.has(EffKind.TUTOR_CAST));
                 }
             }
             if (chooses && pos.library.isEmpty()) {
@@ -5024,7 +5057,8 @@ public final class ForcedWinSolver {
                 pos.knownTop.add(nc);
                 boolean chooses = false;
                 for (ForcedWinModel.Abil ab : nc.fromHand) {
-                    chooses |= !ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                    chooses |= !ab.unplayable && (ab.has(EffKind.PILE) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                            || ab.has(EffKind.TUTOR_CAST));
                 }
                 if (chooses && pos.library.isEmpty()) {
                     // the drawn card searches or piles our library: its contents (as the reader gives them when it chooses)
@@ -6110,6 +6144,8 @@ public final class ForcedWinSolver {
                         }
                     } else if (st.kind == AbilKind.LAND) {
                         sb.append(" landDrop=").append(me.getLandsPlayedThisTurn()).append('/').append(me.getMaxLandPlays());
+                    } else if (st.optCosts != null && !st.optCosts.isEmpty()) {
+                        sa = ForcedWinProbe.locateOpt(host, me, st.desc, st.costKey, st.optCosts); // sdcc-tutorcast-1110
                     } else {
                         sa = ForcedWinProbe.locate(host, me, st.desc, st.costKey, st.kind == AbilKind.ACTIVATE);
                     }
@@ -6138,6 +6174,14 @@ public final class ForcedWinSolver {
                             sb.append(" activations=").append(sa.getActivationsThisTurn());
                         } else if (!ComputerUtilCost.canPayCost(sa, me, false)) {
                             sb.append(" pay=no");
+                            if (!st.sacIds.isEmpty()) {
+                                // sdcc-tutorcast-1110: where the permanents the line sacrifices are
+                                for (int id : st.sacIds) {
+                                    final Card sc = g.findById(id);
+                                    sb.append(" sac=").append(sc == null ? "gone" : sc.getName() + "@"
+                                            + (sc.getZone() == null ? null : sc.getZone().getZoneType()));
+                                }
+                            }
                         } else {
                             sb.append(" playable");
                         }
@@ -6237,10 +6281,60 @@ public final class ForcedWinSolver {
     }
 
     public Boolean answerConfirm(SpellAbility sa, String message) {
+        if (active != null && active.tutorCast) {
+            final Boolean cast = active.castConfirm(sa); // sdcc-tutorcast-1110: "cast it?" of a step that searches to cast
+            if (cast != null) {
+                return cast;
+            }
+        }
         if (active == null || active.done || message == null || !message.toLowerCase().contains("shuffle")) {
             return null;
         }
         return Boolean.FALSE;
+    }
+
+    /**
+     * sdcc-tutorcast-1110 (tutorCast only): the live seat's controller asks the active line for its free cast, the card
+     * of a play effect and the cards of a cost through {@link forge.ai.LineAnswers}, as a play-out's {@link LineAi}
+     * does. Installed once, at the first line this solver follows; without an active line every answer is null.
+     */
+    private forge.ai.LineAnswers liveLine;
+
+    private void liveAnswers() {
+        if (!cfg.tutorCast) {
+            return;
+        }
+        final PlayerControllerAi pc = PlayerControllerAi.cacOf(me);
+        if (pc == null || pc.getLineAnswers() != null) {
+            return; // not a Forge AI seat, or the seat has its answers (ours, set before)
+        }
+        if (liveLine != null) {
+            pc.setLineAnswers(liveLine);
+            return;
+        }
+        liveLine = new forge.ai.LineAnswers() {
+            @Override
+            public Boolean castFromEffect(final SpellAbility tgtSA) {
+                final Boolean b = active == null ? null : active.castFromEffect(tgtSA, me);
+                if (b != null) {
+                    receipt("FORCED_WIN free-cast" + tag() + " turn=" + me.getGame().getPhaseHandler().getTurn() + " card="
+                            + tgtSA.getHostCard().getName() + " cast=" + b);
+                }
+                return b;
+            }
+
+            @Override
+            public Card playChoice(final SpellAbility sa, final Iterable<? extends forge.game.GameEntity> options) {
+                return active == null ? null : active.playChoice(sa, options);
+            }
+
+            @Override
+            public CardCollectionView costCards(final SpellAbility sa, final String part, final CardCollectionView valid,
+                    final int amount) {
+                return active == null ? null : active.costCards(sa, valid, amount);
+            }
+        };
+        pc.setLineAnswers(liveLine);
     }
 
     public ImmutablePair<CardCollection, CardCollection> answerLook(CardCollection topN) {
@@ -6404,7 +6498,123 @@ public final class ForcedWinSolver {
             fo.uncapped = cfg.loopMacro && cfg.loopMacro3; // review #154 S2: its own key
             fo.costLine = cfg.engineCostChoice;
             fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
+            fo.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
             return fo;
+        }
+
+        /**
+         * sdcc-tutorcast-1110 (false = off, and then nothing below is reached): the line may hold steps cast with an
+         * optional additional cost, steps that sacrifice a named permanent as a cost, and free steps (a card a step
+         * searches for and casts without paying its mana cost: never played from priority, registered with the step
+         * that casts them so their own asks are answered). The follower answers the engine's asks of those steps.
+         */
+        boolean tutorCast;
+
+        /** The free steps the step just taken casts (the cursor moves past them), and their recorded tokens (null = none). */
+        private List<String> absorbFree() {
+            List<String> toks = null;
+            while (tutorCast && cursor < line.steps.size() && line.steps.get(cursor).free) {
+                final Step fs = line.steps.get(cursor++);
+                executed.put(fs.hostId, fs);
+                final List<String> t = fs.cacPlayed != null ? fs.cacPlayed : fs.cac;
+                if (t != null) {
+                    toks = toks == null ? new ArrayList<>() : toks;
+                    toks.addAll(t);
+                }
+            }
+            return toks;
+        }
+
+        private static List<String> withFree(final List<String> own, final List<String> free) {
+            if (free == null) {
+                return own;
+            }
+            final List<String> out = new ArrayList<>(own == null ? List.of() : own);
+            out.addAll(free);
+            return out;
+        }
+
+        /** The played step whose card is the host of {@code sa}, or null. */
+        private Step stepOf(final SpellAbility sa) {
+            return sa == null || sa.getHostCard() == null ? null : executed.get(sa.getHostCard().getId());
+        }
+
+        private static boolean searchesToCast(final Step st) {
+            for (Eff e : st.effects) {
+                if (e.kind == EffKind.TUTOR_CAST) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** A play effect's "which card" of a step of ours: the card the line casts for free, or null. */
+        Card playChoice(final SpellAbility sa, final Iterable<? extends forge.game.GameEntity> options) {
+            final Step st = tutorCast ? stepOf(sa) : null;
+            if (st == null || st.castFree < 0 || options == null) {
+                return null;
+            }
+            for (forge.game.GameEntity o : options) {
+                if (o instanceof Card c && c.getId() == st.castFree) {
+                    return c;
+                }
+            }
+            return null;
+        }
+
+        /** "Cast it?" of a play effect of a step of ours that searches to cast: yes for the line's free cast, no otherwise; null = not ours. */
+        Boolean castConfirm(final SpellAbility sa) {
+            if (!tutorCast || sa == null || sa.getApi() != ApiType.Play) {
+                return null;
+            }
+            final Step st = stepOf(sa);
+            return st == null || !searchesToCast(st) ? null : Boolean.valueOf(st.castFree >= 0);
+        }
+
+        /**
+         * An effect offers to cast {@code tgtSA}: TRUE for the line's free step of that card (its player targets set as
+         * the line planned them), FALSE for a card a step of ours searched for and the line keeps; null = not ours.
+         */
+        Boolean castFromEffect(final SpellAbility tgtSA, final Player me) {
+            if (!tutorCast || tgtSA == null || tgtSA.getHostCard() == null) {
+                return null;
+            }
+            final int id = tgtSA.getHostCard().getId();
+            final Step fs = executed.get(id);
+            if (fs != null && fs.free) {
+                tgtSA.setActivatingPlayer(me);
+                if (fs.targetVariant != null && !ForcedWinProbe.setPlayerTargets(tgtSA, me, fs.targetVariant)) {
+                    return Boolean.FALSE;
+                }
+                freeCasts++;
+                return Boolean.TRUE;
+            }
+            for (Step st : executed.values()) {
+                if (st.castFree != id && st.picks.contains(id) && searchesToCast(st)) {
+                    return Boolean.FALSE;
+                }
+            }
+            return null;
+        }
+
+        /** sdcc-tutorcast-1110 (report only): free casts this follower answered. */
+        int freeCasts;
+
+        /** The permanents a step of ours sacrifices as a cost, among the valid ones; null = not ours, or not all there. */
+        CardCollectionView costCards(final SpellAbility sa, final CardCollectionView valid, final int amount) {
+            final Step st = tutorCast ? stepOf(sa) : null;
+            if (st == null || st.sacIds.isEmpty() || st.sacIds.size() != amount || valid == null) {
+                return null;
+            }
+            final CardCollection out = new CardCollection();
+            for (int id : st.sacIds) {
+                for (Card c : valid) {
+                    if (c.getId() == id) {
+                        out.add(c);
+                    }
+                }
+            }
+            return out.size() == amount ? out : null;
         }
 
         /**
@@ -6455,7 +6665,7 @@ public final class ForcedWinSolver {
             }
             cursor++;
             executed.put(st.hostId, st);
-            choices = new ForcedWinChoices.Cursor(st.cac);
+            choices = new ForcedWinChoices.Cursor(withFree(st.cac, absorbFree())); // sdcc-tutorcast-1110 (none: st.cac)
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
             n.action = sa;
@@ -6596,12 +6806,13 @@ public final class ForcedWinSolver {
                 cursor++;
             }
             executed.put(st.hostId, st);
-            choices = new ForcedWinChoices.Cursor(st.cac); // kill-line-1106 (planDiscard; none = empty)
+            final List<String> freeToks = inRepeat ? null : absorbFree(); // sdcc-tutorcast-1110 (no free step: null)
+            choices = new ForcedWinChoices.Cursor(withFree(st.cac, freeToks)); // kill-line-1106 (planDiscard; none = empty)
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
             floatDone = 0;
             if (cacLine || costLine) {
-                choices = new ForcedWinChoices.Cursor(st.cacPlayed != null ? st.cacPlayed : st.cac);
+                choices = new ForcedWinChoices.Cursor(withFree(st.cacPlayed != null ? st.cacPlayed : st.cac, freeToks));
             }
             n.action = sa;
             return n;
@@ -6689,7 +6900,10 @@ public final class ForcedWinSolver {
                 }
                 return null;
             }
-            SpellAbility sa = ForcedWinProbe.locate(host, me, st.desc, st.costKey, st.kind == AbilKind.ACTIVATE);
+            // sdcc-tutorcast-1110: a step cast with optional additional costs is the engine's ability with those costs added
+            SpellAbility sa = st.optCosts != null && !st.optCosts.isEmpty()
+                    ? ForcedWinProbe.locateOpt(host, me, st.desc, st.costKey, st.optCosts)
+                    : ForcedWinProbe.locate(host, me, st.desc, st.costKey, st.kind == AbilKind.ACTIVATE);
             if (sa == null) {
                 return null;
             }
@@ -6893,6 +7107,28 @@ public final class ForcedWinSolver {
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
             this.f = f;
+            if (f.tutorCast) {
+                // sdcc-tutorcast-1110: the line's free cast, its card and its cost cards, through the controller's own seam
+                // (the live seat's controller gets the same answers from the solver: ForcedWinSolver#liveAnswers). A
+                // re-planned follower (verifyReplan) is read through the field, so the answers follow it.
+                setLineAnswers(new forge.ai.LineAnswers() {
+                    @Override
+                    public Boolean castFromEffect(final SpellAbility tgtSA) {
+                        return LineAi.this.f.castFromEffect(tgtSA, getPlayer());
+                    }
+
+                    @Override
+                    public Card playChoice(final SpellAbility sa, final Iterable<? extends forge.game.GameEntity> options) {
+                        return LineAi.this.f.playChoice(sa, options);
+                    }
+
+                    @Override
+                    public CardCollectionView costCards(final SpellAbility sa, final String part, final CardCollectionView valid,
+                            final int amount) {
+                        return LineAi.this.f.costCards(sa, valid, amount);
+                    }
+                });
+            }
             if (f.costLine) {
                 // R3-4 (b): the line's recorded cost cards (a COST token of the step), else Forge AI's
                 setCacHook(new forge.ai.CacHook() {
@@ -6952,9 +7188,10 @@ public final class ForcedWinSolver {
                     replanner = null;
                     final Line fresh = rp.apply(f.line);
                     if (fresh != null) {
-                        final boolean keep = f.putBackKeep, keepEnginePay = f.enginePay;
+                        final boolean keep = f.putBackKeep, keepEnginePay = f.enginePay, keepTutorCast = f.tutorCast;
                         f = new Follower(fresh);
                         f.putBackKeep = keep; // next-turn-1107
+                        f.tutorCast = keepTutorCast; // sdcc-tutorcast-1110: the re-planned line may search and cast too
                         if (keepEnginePay) {
                             f.enginePay = true; // ledger-sweep-1107 (row 60): the re-planned line's recorded payments too
                             f.payRecord = true;
@@ -7069,6 +7306,10 @@ public final class ForcedWinSolver {
                     }
                 }
                 return false;
+            }
+            final Boolean cast = f.castConfirm(sa); // sdcc-tutorcast-1110 (off, or not such a step: null)
+            if (cast != null) {
+                return cast;
             }
             return super.confirmAction(sa, mode, message, options, cardToShow, params);
         }

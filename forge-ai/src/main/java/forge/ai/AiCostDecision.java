@@ -118,6 +118,16 @@ public class AiCostDecision extends CostDecisionMakerBase {
     @Override
     public PaymentDecision review(final CostPart part, final PaymentDecision decision) {
         final PlayerControllerAi pc = PlayerControllerAi.cacOf(player); // the wrapped controller on a taped seat
+        if (pc != null && pc.getLineAnswers() != null && decision != null && decision.cards != null
+                && !decision.cards.isEmpty() && part instanceof CostPartWithList) {
+            // sdcc-tutorcast-1110: the line this seat follows named the cards of this cost part (no line: nothing here)
+            final CardCollection lineValid = validCards(part, decision);
+            final CardCollectionView line = lineValid == null ? null : pc.getLineAnswers().costCards(ability,
+                    part.getClass().getSimpleName(), lineValid, decision.cards.size());
+            if (line != null && line.size() == decision.cards.size() && lineValid.containsAll(line)) {
+                return PaymentDecision.card(line);
+            }
+        }
         if (pc == null || !pc.dpInstrumented() || decision == null || part instanceof forge.game.cost.CostPartMana
                 || part instanceof forge.game.cost.CostTap || part instanceof forge.game.cost.CostUntap) {
             return reviewCac(part, decision);

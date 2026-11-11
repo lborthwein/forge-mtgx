@@ -91,6 +91,19 @@ public final class ForcedWinPlanner {
          * line needed UU).
          */
         final List<Integer> anyColors = new ArrayList<>();
+        /**
+         * sdcc-tutorcast-1110 (set only by a tutorCast plan; null / false / -1 / empty otherwise, and then nothing
+         * changes). optCosts: the optional additional costs the step's spell is cast with (the engine's type names: the
+         * follower adds them to the ability). sacIds: the permanents of ours it sacrifices as a cost (the follower
+         * answers the cost with them). castFree: the id of the card this step searches for and casts without paying its
+         * mana cost; the cast is the next step, which is {@link #free}: it is never played from priority, the follower
+         * answers the engine's offer and then that spell's own asks. A search of such a step with no castFree puts its
+         * card into our hand (an offer is declined).
+         */
+        List<String> optCosts;
+        final List<Integer> sacIds = new ArrayList<>();
+        int castFree = -1;
+        boolean free;
 
         Step(AbilKind kind, ACard host, Abil ab, int floatColor) {
             this.kind = kind;
@@ -103,6 +116,7 @@ public final class ForcedWinPlanner {
             this.targetVariant = ab == null ? null : ab.targetVariant;
             this.effects = ab == null ? List.of() : List.copyOf(ab.effects);
             this.floatColor = floatColor;
+            this.optCosts = ab == null || ab.optCosts == null ? null : List.copyOf(ab.optCosts);
         }
 
         private Step() {
@@ -151,6 +165,10 @@ public final class ForcedWinPlanner {
             s.expHand = expHand;
             s.expLib = expLib;
             s.anyColors.addAll(anyColors);
+            s.optCosts = optCosts;
+            s.sacIds.addAll(sacIds);
+            s.castFree = castFree;
+            s.free = free;
             s.cacPlayed = cacPlayed == null ? null : new ArrayList<>(cacPlayed);
             s.payFloats = payFloats == null ? null : new ArrayList<>(payFloats);
             if (body != null) {
@@ -232,7 +250,8 @@ public final class ForcedWinPlanner {
             }
             return kind + "|" + hostId + "|" + desc + "|" + costKey + "|" + targetRefs + "|" + triggerRef + "|" + pickName
                     + "|" + floatColor + "|" + targetVariant + (cac == null ? "" : "|cac" + cac)
-                    + (payFloats == null ? "" : "|pay" + payFloats) + (xValue >= 0 ? "|X" + xValue : "");
+                    + (payFloats == null ? "" : "|pay" + payFloats) + (xValue >= 0 ? "|X" + xValue : "")
+                    + (free ? "|free" : "") + (sacIds.isEmpty() ? "" : "|sac" + sacIds) + (castFree >= 0 ? "|cast" + castFree : "");
         }
 
         boolean isSpell() {
@@ -253,7 +272,9 @@ public final class ForcedWinPlanner {
             if (kind == AbilKind.REPEAT) {
                 return "REPEAT" + times + "x" + body;
             }
-            return kind + ":" + hostName + (floatColor >= 0 ? "->" + ForcedWinModel.SHORT[floatColor] : "")
+            return (free ? "FREE-" : "") + kind + ":" + hostName + (floatColor >= 0 ? "->" + ForcedWinModel.SHORT[floatColor] : "")
+                    + (optCosts == null ? "" : "+" + optCosts) + (sacIds.isEmpty() ? "" : " sac" + sacIds)
+                    + (castFree >= 0 ? " cast" + castFree : "")
                     + (targetRefs.isEmpty() ? "" : "->" + targetRefs) + (triggerRef == null ? "" : " trigger->" + triggerRef)
                     + (pickName == null ? "" : " pick=" + pickName)
                     + (targetVariant != null ? "@" + targetVariant : "")
@@ -396,6 +417,14 @@ public final class ForcedWinPlanner {
          * depth-first search needed (a 19-step kill was found at 36,270 nodes instead of 15,170).
          */
         static final int SHALLOW_PCT = 10;
+        /**
+         * sdcc-tutorcast-1110 (solverCfg tutorCast; false = off, the default, and then nothing changes): an ability with
+         * an observed "sacrifice another permanent" cost branches over the permanents the engine accepts, and an
+         * observed {@link EffKind#TUTOR_CAST} branches over the library's cards as a tutor does: a card the engine
+         * offered to cast for free is cast (its own step, {@link Step#free}, once the searching spell has resolved),
+         * any other goes to our hand when that was observed.
+         */
+        boolean tutorCast;
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -507,9 +536,12 @@ public final class ForcedWinPlanner {
         boolean won;
         String how = "";
         boolean dead;
+        /** sdcc-tutorcast-1110: the card the ability being resolved casts for free once it has resolved (-1 = none). */
+        int pendingFree = -1;
 
         S copy() {
             final S s = new S();
+            s.pendingFree = pendingFree;
             s.turnIdx = turnIdx;
             s.sorcery = sorcery;
             s.preMain = preMain;
@@ -936,7 +968,8 @@ public final class ForcedWinPlanner {
                     continue;
                 }
                 final List<S> into = isWinny(a, ab) || ab.has(EffKind.PILE) ? first
-                        : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP) ? second : third;
+                        : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                                || ab.has(EffKind.TUTOR_CAST) ? second : third;
                 if (winFirst) {
                     place(apply(s, hi, -1, a, ab), into, isWinny(a, ab) && !staysAsWin(a, ab), wins, late);
                 } else {
@@ -966,7 +999,8 @@ public final class ForcedWinPlanner {
                     final S b = s.copy();
                     bindHand(b, lazyAt, c);
                     final List<S> into = isWinny(a, ab) || ab.has(EffKind.PILE) ? first
-                            : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP) ? second : third;
+                            : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                                || ab.has(EffKind.TUTOR_CAST) ? second : third;
                     final List<S> res = apply(b, s, lazyAt, -1, a, ab);
                     if (winFirst) {
                         place(res, into, isWinny(a, ab) && !staysAsWin(a, ab), wins, late);
@@ -1190,7 +1224,7 @@ public final class ForcedWinPlanner {
             if (!free && !pay(s, ab, self, step)) {
                 return out;
             }
-            afterPay(s, step, self, host, handIdx, a, ab, free, out);
+            afterCost(s, step, self, host, handIdx, a, ab, free, out);
             return out;
         }
         // solver-gaps-1015: the bounded payment search: the same cast paid in each payment order, distinct results only
@@ -1206,7 +1240,7 @@ public final class ForcedWinPlanner {
             if (!ok || !paid.add(v.key() + st.phyrexianLife)) {
                 continue;
             }
-            afterPay(v, st, vSelf, host, handIdx, a, ab, false, out);
+            afterCost(v, st, vSelf, host, handIdx, a, ab, false, out);
         }
         return out;
     }
@@ -1229,7 +1263,7 @@ public final class ForcedWinPlanner {
             if (!ok || !paid.add(remainder(v) + st.phyrexianLife)) {
                 continue;
             }
-            afterPay(v, st, vSelf, host, handIdx, a, ab, false, out);
+            afterCost(v, st, vSelf, host, handIdx, a, ab, false, out);
         }
     }
 
@@ -1246,8 +1280,61 @@ public final class ForcedWinPlanner {
         return left + Arrays.toString(s.pool) + s.life;
     }
 
-    /** The rest of {@link #apply} once the cost is paid: the step is played and its effects resolve into {@code out}. */
-    private void afterPay(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, boolean free, List<S> out) {
+    /**
+     * sdcc-tutorcast-1110: between the mana payment and {@link #afterPay}: an observed "sacrifice another permanent"
+     * cost branches over the permanents in play whose name the engine accepted (one per name and tapped state; tapped
+     * and plain ones first, so a source tapped for this very spell is the first choice). Without such a cost, or with
+     * the key off, exactly {@link #afterPay}.
+     */
+    private void afterCost(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, boolean free, List<S> out) {
+        if (!lim.tutorCast || ab.sacN <= 0 || free) {
+            afterPay(s, step, self, host, handIdx, a, ab, free, out, null);
+            return;
+        }
+        if (ab.sacNames == null) {
+            return;
+        }
+        final int selfIdx = self == null ? -1 : s.bf.indexOf(self);
+        final List<Integer> choices = new ArrayList<>();
+        final Set<String> kinds = new HashSet<>();
+        for (int i = 0; i < s.bf.size(); i++) {
+            final Perm p = s.bf.get(i);
+            final ACard pc = cards.get(p.card);
+            if (i != selfIdx && ab.sacNames.contains(pc.name) && kinds.add(pc.name + (p.tapped ? "|t" : "|u"))) {
+                choices.add(i);
+            }
+        }
+        // the cheapest loss first: a tapped permanent, then one that makes no mana, then one with fewer abilities
+        choices.sort(Comparator.comparingInt((Integer i) -> s.bf.get(i).tapped ? 0 : 1)
+                .thenComparingInt(i -> cards.get(s.bf.get(i).card).sourceColors == 0 ? 0 : 1)
+                .thenComparingInt(i -> cards.get(s.bf.get(i).card).onBattlefield.size())
+                .thenComparingInt(i -> cards.get(s.bf.get(i).card).id));
+        for (int i : choices.subList(0, Math.min(choices.size(), lim.classes))) {
+            final S v = s.copy();
+            final Step st = step.copy();
+            final Perm vSelf = selfIdx < 0 ? null : v.bf.get(selfIdx);
+            final Perm gone = v.bf.remove(i);
+            final ACard pc = cards.get(gone.card);
+            v.gyPool.add(gone.card);
+            v.devotion -= pc.bluePips;
+            if (pc.emptyDrawWin) {
+                v.emptyDrawWin = false;
+                for (Perm q : v.bf) {
+                    v.emptyDrawWin |= cards.get(q.card).emptyDrawWin;
+                }
+            }
+            st.sacIds.add(pc.id);
+            afterPay(v, st, vSelf, host, handIdx, a, ab, false, out, pc.dies);
+        }
+    }
+
+    /**
+     * The rest of {@link #apply} once the cost is paid: the step is played and its effects resolve into {@code out}.
+     * {@code pre} (sdcc-tutorcast-1110; null = none): effects that resolve before the ability's own (what a permanent
+     * sacrificed as its cost does on leaving play).
+     */
+    private void afterPay(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, boolean free, List<S> out,
+            List<Eff> pre) {
         s.steps.add(step);
         if (handIdx >= 0) {
             s.hand.remove(Integer.valueOf(host));
@@ -1282,10 +1369,16 @@ public final class ForcedWinPlanner {
                 sacked = self;
             }
         }
+        // sdcc-tutorcast-1110 (a sourceLeaves reader's template only): the ability takes its own source off the battlefield
+        // sdcc-integ-1110: never together with an observed SELF_TO_LIBRARY effect (probeSettle), which moves it itself
+        final Perm left = self != null && sacked == null && ab.selfTo != 0 && !ab.has(EffKind.SELF_TO_LIBRARY) ? self : null;
         if (ab.kind == AbilKind.CYCLE) {
             s.gyPool.add(host);
         }
         final List<Eff> effs = new ArrayList<>();
+        if (pre != null) {
+            effs.addAll(pre);
+        }
         if (ab.kind == AbilKind.SPELL && a.permanent) {
             final Perm p = new Perm();
             p.card = host;
@@ -1314,20 +1407,99 @@ public final class ForcedWinPlanner {
         }
         // an instant or sorcery goes to our graveyard after it resolves (not while it resolves: Doomsday's own pile)
         // sdcc-draws-1110: unless it was observed going to our library instead (a SELF_TO_LIBRARY effect, probeSettle only)
-        final boolean toGraveyard = handIdx >= 0 && ab.kind == AbilKind.SPELL && !a.permanent
+        final boolean toGraveyard = (handIdx >= 0 || step.free) && ab.kind == AbilKind.SPELL && !a.permanent
                 && !ab.has(EffKind.SELF_TO_LIBRARY);
         if (sacked != null) {
             // the ability's observed (or folded-in) effects already hold what the sacrifice itself causes
             s.bf.remove(sacked);
             s.gyPool.add(sacked.card);
         }
+        if (left != null) {
+            s.bf.remove(left);
+        }
         final int before = out.size();
         resolve(s, effs, 0, 0, ab, out);
+        if (left != null) {
+            // where the engine left it once the ability had resolved (observed): the top of our library, our hand, ...
+            for (int i = before; i < out.size(); i++) {
+                final S x = out.get(i);
+                if (ab.selfTo == ForcedWinModel.Abil.SELF_TOP) {
+                    x.lib.add(0, left.card);
+                } else if (ab.selfTo == ForcedWinModel.Abil.SELF_HAND) {
+                    x.hand.add(left.card);
+                } else if (ab.selfTo == ForcedWinModel.Abil.SELF_GRAVEYARD) {
+                    x.gyPool.add(left.card);
+                }
+            }
+        }
         if (toGraveyard) {
             for (int i = before; i < out.size(); i++) {
                 out.get(i).gyPool.add(host);
             }
         }
+        if (lim.tutorCast) {
+            // sdcc-tutorcast-1110: the searched card is cast now, the searching spell having resolved and left the stack
+            final List<S> done = new ArrayList<>(out.subList(before, out.size()));
+            boolean any = false;
+            for (S x : done) {
+                any |= x.pendingFree >= 0;
+            }
+            if (any) {
+                out.subList(before, out.size()).clear();
+                for (S x : done) {
+                    if (x.pendingFree < 0 || x.won || x.dead) {
+                        x.pendingFree = -1;
+                        out.add(x);
+                    } else {
+                        castFree(x, out);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * sdcc-tutorcast-1110: the card {@link S#pendingFree} is cast without paying its mana cost: its printed spell (never
+     * an alternative cost or an optional-cost variant; each player-target variant is a branch), whose other printed
+     * costs are still paid. The cast is a step of its own ({@link Step#free}); it counts as a spell cast and its effects
+     * resolve as when cast from hand. A card with no such spell is not a branch (the search does not offer it).
+     */
+    private void castFree(S x, List<S> out) {
+        final int c = x.pendingFree;
+        x.pendingFree = -1;
+        final ACard a = cards.get(c);
+        for (Abil fab : freeSpells(a)) {
+            final S n = x.copy();
+            if (fab.life > 0) {
+                if (n.life <= fab.life) {
+                    continue;
+                }
+                n.life -= fab.life;
+            }
+            if (fab.discardHand) {
+                while (discardLazy(n)) {
+                    // sdcc-integ-1110: with planOrder (ORDER_LAZY) too, each unchosen card goes as in the paid cast
+                }
+                n.gyPool.addAll(n.hand);
+                n.hand.clear();
+            }
+            final Step st = new Step(AbilKind.SPELL, a, fab, -1);
+            st.free = true;
+            afterPay(n, st, null, c, -1, a, fab, false, out, null);
+        }
+    }
+
+    /** sdcc-tutorcast-1110: the printed spells of a card that an effect can cast for free in this model. */
+    private static List<Abil> freeSpells(ACard a) {
+        final List<Abil> out = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        for (Abil fab : a.fromHand) {
+            if (fab.kind == AbilKind.SPELL && !fab.unplayable && !fab.cardTargets && !fab.alt && fab.optCosts == null
+                    && fab.sacN == 0 && fab.returnN == 0 && seen.add(fab.costKey + "|" + fab.desc + "|" + fab.targetVariant)) {
+                out.add(fab);
+            }
+        }
+        return out;
     }
 
     private static int bestFloatColour(int mask) {
@@ -1591,6 +1763,54 @@ public final class ForcedWinPlanner {
                     }
                     for (int i = 0; i < size; i++) {
                         n.lib.add(UNKNOWN);
+                    }
+                    resolve(n, effs, ei + 1, 0, ab, out);
+                }
+                return;
+            }
+            case TUTOR_CAST: {
+                // sdcc-tutorcast-1110 (only a tutorCast reader observes it): search our library for a card: one the engine
+                // offered to cast for free is cast once this ability has resolved (S#pendingFree), any other goes to our
+                // hand when that was observed. The library is shuffled, as after a tutor.
+                if (!lim.tutorCast || step == null) {
+                    resolve(s, effs, ei + 1, 0, ab, out);
+                    return;
+                }
+                final List<Integer> pool = new ArrayList<>(s.libPool);
+                for (int e2 : s.lib) {
+                    if (e2 >= 0) {
+                        pool.add(e2);
+                    }
+                }
+                final List<Integer> cast = new ArrayList<>(), keep = new ArrayList<>();
+                for (int c : pool) {
+                    final ACard ca = cards.get(c);
+                    if (e.names != null && e.names.contains(ca.name) && !freeSpells(ca).isEmpty()) {
+                        cast.add(c);
+                    } else if (e.n > 0) {
+                        keep.add(c);
+                    }
+                }
+                final List<Integer> picks = castClasses(cast);
+                final int nCast = picks.size();
+                picks.addAll(classes(keep));
+                for (int k = 0; k < picks.size(); k++) {
+                    final int c = picks.get(k);
+                    final S n = s.copy();
+                    n.libPool = new ArrayList<>(pool);
+                    n.libPool.remove(Integer.valueOf(c));
+                    final Step st = n.steps.get(n.steps.size() - 1);
+                    st.picks.add(cards.get(c).id);
+                    final int size = n.lib.size() - 1;
+                    n.lib = new ArrayList<>();
+                    for (int i = 0; i < size; i++) {
+                        n.lib.add(UNKNOWN);
+                    }
+                    if (k < nCast && n.pendingFree < 0) {
+                        n.pendingFree = c;
+                        st.castFree = cards.get(c).id;
+                    } else {
+                        n.hand.add(c);
                     }
                     resolve(n, effs, ei + 1, 0, ab, out);
                 }
@@ -1959,6 +2179,43 @@ public final class ForcedWinPlanner {
             out.add(other);
         }
         return out;
+    }
+
+    /**
+     * sdcc-tutorcast-1110: the cards a search may cast for free, one per name, in an order of trial ({@link #castGroup},
+     * then observed affordance), at most {@link Limits#classes}.
+     */
+    private List<Integer> castClasses(List<Integer> from) {
+        final List<Integer> out = new ArrayList<>();
+        final Set<String> names = new HashSet<>();
+        for (int r : from) {
+            if (names.add(cards.get(r).name)) {
+                out.add(r);
+            }
+        }
+        out.sort(Comparator.comparingInt((Integer c) -> castGroup(cards.get(c))).thenComparingInt(c -> cards.get(c).order())
+                .thenComparingInt(c -> cards.get(c).id));
+        return new ArrayList<>(out.subList(0, Math.min(out.size(), lim.classes)));
+    }
+
+    /** An order of trial only (never a rule): wins when cast, orders the library, wins on a condition, draws or searches, other. */
+    private static int castGroup(ACard a) {
+        int g = 4;
+        for (Abil ab : freeSpells(a)) {
+            if (ab.has(EffKind.WIN) || ab.storm && (ab.has(EffKind.DRAIN) || ab.has(EffKind.MILL_OPP))
+                    || a.permanent && a.winsOnEntry) {
+                return 0;
+            }
+            if (ab.has(EffKind.PILE)) {
+                g = Math.min(g, 1);
+            } else if (isWinny(a, ab)) {
+                g = Math.min(g, 2);
+            } else if (ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                    || ab.has(EffKind.TUTOR_CAST)) {
+                g = Math.min(g, 3);
+            }
+        }
+        return g;
     }
 
     private int leftover(List<Integer> from) {
