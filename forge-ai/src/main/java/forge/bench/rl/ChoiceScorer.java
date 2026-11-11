@@ -254,6 +254,8 @@ public final class ChoiceScorer {
     static final int MULL_FRAMES = 120;
 
     private boolean guardSwap = false;
+    /** sdcc-leak-1111: the guard's second probe, our own unknown library cards reversed ({@link #swapOwnHidden}). */
+    private boolean guardSwapOwn = false;
     private Object screenReader;
     private int pileSeen = 0;
     /** The chosen pile of the resolution in progress (top first), and the picks already given; null when none. */
@@ -286,6 +288,9 @@ public final class ChoiceScorer {
                 }
                 if (cfg.probeOpp || guardSwap) {
                     swapOpponentHidden(copy, me, k);
+                }
+                if (guardSwapOwn) {
+                    swapOwnHidden(copy, me, k); // sdcc-leak-1111
                 }
                 k.attach();
                 final RlFeaturizer f = new RlFeaturizer(index);
@@ -408,6 +413,36 @@ public final class ChoiceScorer {
                 at--;
             }
         }
+    }
+
+    /**
+     * sdcc-leak-1111: our own library cards whose place the seat does not know, in reverse order among their own
+     * positions (the cards it knows stay). A frame that changes read the real order of our library: an answer replayed
+     * on a copy of the real game drew from it (a resolution that draws before it asks is replayed whole: Brainstorm's
+     * put-backs were scored with three more real cards in hand).
+     */
+    private static void swapOwnHidden(final Game g, final Player me, final RlKnowledge k) {
+        final int seat = k.seatOf(me);
+        final List<Card> lib = new ArrayList<>(new forge.game.card.CardCollection(me.getCardsIn(ZoneType.Library)));
+        final List<Integer> at = new ArrayList<>();
+        for (int i = 0; i < lib.size(); i++) {
+            if (seat < 0 || !k.knows(seat, lib.get(i))) {
+                at.add(i);
+            }
+        }
+        if (at.size() < 2) {
+            return;
+        }
+        final List<Card> out = new ArrayList<>(lib);
+        for (int j = 0; j < at.size(); j++) {
+            out.set(at.get(j), lib.get(at.get(at.size() - 1 - j)));
+        }
+        me.getZone(ZoneType.Library).setCards(out);
+    }
+
+    /** sdcc-leak-1111: the own-library guard is on with the solver's hideOwnLibrary (and not hiddenOrderLegacy). */
+    private boolean ownGuard() {
+        return cfg.solverCfg != null && cfg.solverCfg.hideHidden();
     }
 
     /** The ask's options with their frames; values are the caller's batched pass ({@link #choose}). */
@@ -539,6 +574,18 @@ public final class ChoiceScorer {
         } finally {
             guardSwap = was;
         }
+        if (ownGuard()) {
+            // sdcc-leak-1111: the same check for our own library's unknown order
+            guardSwapOwn = true;
+            try {
+                final ChoiceApply.Result c = ChoiceApply.applyPicks(g, me, pick, seed, cfg.settleSteps, cfg.fidelity, fr);
+                if (c.fail == null && !Arrays.equals(a.payload, c.payload)) {
+                    return "ownHidden";
+                }
+            } finally {
+                guardSwapOwn = false;
+            }
+        }
         return null;
     }
 
@@ -586,6 +633,19 @@ public final class ChoiceScorer {
             }
         } finally {
             guardSwap = was;
+        }
+        if (ownGuard()) {
+            // sdcc-leak-1111: a sequence replayed on a copy that drew from our real library is not scored
+            guardSwapOwn = true;
+            try {
+                final ChoiceApply.Result c = ChoiceApply.applyPicks(g, me, probe, probe, seed, cfg.settleSteps, cfg.fidelity, fr);
+                if (a.fail == null && c.fail == null && !Arrays.equals(a.payload, c.payload)) {
+                    s.unsupported = "ownHidden";
+                    return;
+                }
+            } finally {
+                guardSwapOwn = false;
+            }
         }
         s.unsupported = null;
         s.menuOptions = seqs.size();
