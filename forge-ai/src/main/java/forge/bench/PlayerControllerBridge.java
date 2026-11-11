@@ -1024,13 +1024,41 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             final List<SpellAbility> p) {
         try {
             isolated(getGame(), () -> {
-                la.hookAnswered(getGame(), getPlayer(), tok, echoHookPriority(menu, p), p);
+                final JsonObject echo = echoHookPriority(menu, p);
+                la.hookAnswered(getGame(), getPlayer(), tok, echo, p);
+                // sdcc-imit2-1111: a mana ability is no candidate of a priority menu. The line floats it for its next
+                // action, and in the seat's action space the answer at that priority is that action: the priorities
+                // floated at (same turn and phase, nothing in between) take it as their label when their own menu
+                // names it. A pass, a step no menu names or another phase ends the run.
+                final SpellAbility a = p == null || p.isEmpty() ? null : p.get(0);
+                final forge.game.phase.PhaseHandler ph = getGame().getPhaseHandler();
+                if (!hookFloats.isEmpty() && (hookFloatTurn != ph.getTurn() || hookFloatPhase != ph.getPhase())) {
+                    hookFloats.clear();
+                }
+                if (a != null && a.isManaAbility()) {
+                    hookFloatTurn = ph.getTurn();
+                    hookFloatPhase = ph.getPhase();
+                    hookFloats.add(new Object[] {menu, tok});
+                } else {
+                    if (a != null && echo.has("choice") && !echo.get("choice").isJsonNull()) {
+                        for (Object[] f : hookFloats) {
+                            la.hookRelabel(getGame(), getPlayer(), f[1], echoHookPriority((List<SpellAbility>) f[0], p));
+                        }
+                    }
+                    hookFloats.clear();
+                }
                 return null;
             });
         } catch (RuntimeException e) {
+            hookFloats.clear();
             counters.instrument("hookShadow.failed");
         }
     }
+
+    /** sdcc-imit2-1111: the recorded line priorities just answered with a mana ability, {menu, token}; their turn, phase. */
+    private final List<Object[]> hookFloats = new ArrayList<>();
+    private int hookFloatTurn = -1;
+    private forge.game.phase.PhaseType hookFloatPhase;
 
     /**
      * sdcc-imit2-1111: the plan hook's priority answer as an echo. A line's step is an ability the line prepared itself
@@ -1179,6 +1207,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 if (shadow != null) {
                     hookShadowAnswered((BenchSession.LocalAnswerer) shadow[0], (List<SpellAbility>) shadow[1], shadow[2], p);
                 } else if (rec) {
+                    hookFloats.clear();
                     // no row (a pass-only, unposable or capped menu): what the hook did there
                     final SpellAbility a = p == null || p.isEmpty() ? null : p.get(0);
                     note(a == null ? "imit.prio.noRow.pass" : a.isManaAbility() ? "imit.prio.noRow.mana" : "imit.prio.noRow.action");
@@ -1186,6 +1215,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 return p;
             }
             if (shadow != null) {
+                hookFloats.clear();
                 note("imit.prio.noOpinion"); // sdcc-imit2-1111: the seat is asked this priority itself
             }
         }

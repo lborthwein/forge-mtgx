@@ -129,6 +129,16 @@ public final class BenchSession {
         }
 
         /**
+         * sdcc-imit2-1111: an earlier priority of the line ({@code prepared}: its {@link #hookPrepare} token, or null
+         * for the handed-over one) was answered with a mana ability, which no priority menu names; {@code answer} is
+         * the line's next action as an echo against THAT priority's menu (the action the mana was floated for). Default:
+         * nothing.
+         */
+        default void hookRelabel(forge.game.Game game, forge.game.player.Player player, Object prepared,
+                com.google.gson.JsonObject answer) {
+        }
+
+        /**
          * Called where the bridge publishes a delegated echo (this answerer delegated, Forge decided), before the
          * closed-channel return: Forge's answer in the ask's own answer shape, plus the raw decision where the
          * bridge has one (priority: the returned {@code List<SpellAbility>}, whose targets Forge's AI has already

@@ -160,9 +160,44 @@ public class RlImitLabelsTest {
             return b;
         }
 
+        /** The hook just floated mana: its next priority answer is its own (the action the mana is for). */
+        boolean floated;
+        int prio;
+
         @Override
         public java.util.List<forge.game.spellability.SpellAbility> priority(final PlayerControllerBridge c) {
-            return mine("priority") ? c.getAi().chooseSpellAbilityToPlay() : PlayerControllerBridge.NO_OPINION;
+            if (floated) {
+                floated = false;
+                did.merge("afterFloat", 1, Integer::sum);
+                return c.getAi().chooseSpellAbilityToPlay();
+            }
+            if (!mine("priority")) {
+                return PlayerControllerBridge.NO_OPINION;
+            }
+            if (prio++ % 3 == 1) {
+                // as a line's pay-float step: a mana ability of an untapped land, before the action it pays for
+                final forge.game.player.Player me = c.getPlayer();
+                final forge.game.phase.PhaseHandler ph = me.getGame().getPhaseHandler();
+                if (ph.isPlayerTurn(me) && ph.getPhase().isMain() && me.getGame().getStack().isEmpty()) {
+                    for (forge.game.card.Card land : me.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+                        if (!land.isLand() || land.isTapped()) {
+                            continue;
+                        }
+                        for (forge.game.spellability.SpellAbility m : land.getManaAbilities()) {
+                            final forge.game.spellability.SpellAbility a = m.copy(me);
+                            a.setActivatingPlayer(me);
+                            if (a.canPlay() && forge.ai.ComputerUtilCost.canPayCost(a, me, false)) {
+                                floated = true;
+                                did.merge("float", 1, Integer::sum);
+                                final java.util.List<forge.game.spellability.SpellAbility> out = new java.util.ArrayList<>();
+                                out.add(a);
+                                return out;
+                            }
+                        }
+                    }
+                }
+            }
+            return c.getAi().chooseSpellAbilityToPlay();
         }
 
         @Override
@@ -364,5 +399,18 @@ public class RlImitLabelsTest {
         Assert.assertTrue(choice > 0 && byFamily.size() >= 3, "choice asks of several families were labelled: " + byFamily);
         Assert.assertTrue(byFamily.containsKey("ATTACK"), "the line's attack is a row");
         Assert.assertTrue(byFamily.containsKey("TARGETS"), "a step's targets are rows");
+        // a priority the hook answered with a mana ability: no candidate of its menu, so no label, unless the hook's
+        // next action is on that menu (then the priority is labelled with the action the mana was floated for)
+        Assert.assertTrue(notes.getOrDefault("imit.prio.unmatched.mana", 0) > 0, "the stand-in floated mana at a recorded priority");
+        Assert.assertTrue(notes.getOrDefault("imit.prio.float.labelled", 0) > 0, "a float took its action as the label");
+        int counted = -notes.getOrDefault("imit.prio.float.labelled", 0);
+        for (java.util.Map.Entry<String, Integer> e : notes.entrySet()) {
+            if (e.getKey().contains(".unmatched.")) {
+                counted += e.getValue();
+            }
+        }
+        Assert.assertEquals(unmatched, counted, "every unlabelled added row is counted with its cause");
+        Assert.assertEquals(notes.getOrDefault("imit.choice.TARGETS.unmatched.map", 0).intValue(), 0,
+                "a targeted spell on the stack is named by its object");
     }
 }

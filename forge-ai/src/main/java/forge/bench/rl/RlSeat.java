@@ -402,8 +402,17 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             }
             final RlCandidates.Menu m = (RlCandidates.Menu) h[1];
             final short[] steps = priorityXSet(m, hookAnswer) ? m.fromEcho(hookAnswer) : null;
+            imitFloatHandoff = null;
             if (steps == null || m.validate(steps) != null) {
-                unmatched(RlSchema.F_PRIORITY, whyPriority(hookAnswer, steps), hookAnswer);
+                final String why = whyPriority(hookAnswer, steps);
+                unmatched(RlSchema.F_PRIORITY, why, hookAnswer);
+                if ("mana".equals(why)) {
+                    // the row exists (the seat's own DECIDE): it may take the action the mana is floated for
+                    final Shadow s = new Shadow(seatOf(g, player), m, (RlFeaturizer.Obs) h[3], null);
+                    s.dec = (Integer) h[0];
+                    s.row = (JsonArray) h[2];
+                    imitFloatHandoff = s;
+                }
                 return;
             }
             final JsonArray st = new JsonArray();
@@ -448,8 +457,18 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         if (steps != null && m.validate(steps) != null) {
             steps = null;
         }
+        if (steps == null && m.family == RlSchema.F_TARGETS && decision instanceof SpellAbility) {
+            // a targeted spell or ability on the stack: the echo's id is not the menu's; the objects are
+            steps = m.fromTargetsOf((SpellAbility) decision);
+            if (steps != null) {
+                note("imit.choice.TARGETS.byObject");
+            }
+        }
         if (steps == null) {
-            unmatched(m.family, prio ? whyPriority(hookAnswer, steps) : "map", hookAnswer);
+            // "empty": the answerer picked nothing where the ask requires a pick (no candidate set names that)
+            final boolean empty = !prio && hookAnswer != null && hookAnswer.has("choices")
+                    && hookAnswer.get("choices").isJsonArray() && hookAnswer.getAsJsonArray("choices").size() == 0;
+            unmatched(m.family, prio ? whyPriority(hookAnswer, steps) : empty ? "empty" : "map", hookAnswer);
             return;
         }
         label(s, steps, prio ? IMIT_LINE : IMIT_LINECHOICE);
@@ -458,6 +477,36 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             lineTargets(s.seat, g, player, s.obs, decision);
         }
     }
+
+    /**
+     * A line priority answered with a mana ability takes the line's next action as its label when its own menu names
+     * that action ({@code prepared}: that priority's frame, or null for the handed-over one). The mana was floated to
+     * pay it, and the seat's action space has no mana abilities: there the answer at that priority is the action.
+     */
+    @Override
+    public void hookRelabel(final Game g, final Player player, final Object prepared, final JsonObject answer) {
+        if (g != game || voidReason != null) {
+            return;
+        }
+        final Shadow s = prepared == null ? imitFloatHandoff : prepared instanceof Shadow ? (Shadow) prepared : null;
+        if (prepared == null) {
+            imitFloatHandoff = null;
+        }
+        if (s == null || s.dec < 0 || imit.containsKey(s.dec)) {
+            return;
+        }
+        short[] steps = priorityXSet(s.m, answer) ? s.m.fromEcho(answer) : null;
+        if (steps == null || steps.length != 1 || s.m.validate(steps) != null) {
+            note("imit.prio.float.offMenu");
+            return;
+        }
+        label(s, steps, IMIT_LINE);
+        imitMapFailed--;
+        note("imit.prio.float.labelled");
+    }
+
+    /** The handed-over priority the hook answered with a mana ability (see {@link #hookRelabel}), or null. */
+    private Shadow imitFloatHandoff;
 
     /**
      * False when the echoed ability has an X the line has not set yet (the payment chooses it) and the menu offers
