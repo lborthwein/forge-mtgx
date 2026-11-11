@@ -354,6 +354,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * Generic: no card or deck logic.
          */
         public boolean imit = false;
+        /**
+         * sdcc-aux-1111 (null = off, the default, and then absent from the JSON and nothing changes): dense solver
+         * labels for a learner's auxiliary OUTPUT head, never read to decide and never an input of the policy. At every
+         * priority decision of the seat: its goldfish (the planner's gamma^turn of the earliest unopposed line over five
+         * of its turns, {@link forge.ai.simulation.ForcedWinSolver#goldfish}) and its turn, the opponent's goldfish (its
+         * own cards and knowledge: a label may read them), and with {@code reach} the seat's one-draw reach. Label work
+         * runs off the work clock on readers of its own. Keys: {@link AuxCfg}. Generic: no card or deck logic.
+         */
+        public JsonObject aux;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -416,7 +425,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit", "aux"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -450,6 +459,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
             if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
             if (o.has("imit")) c.imit = o.get("imit").getAsBoolean();
+            if (o.has("aux") && !o.get("aux").isJsonNull()) {
+                c.aux = o.getAsJsonObject("aux");
+                AuxCfg.parse(c.aux); // a bad key fails at parse
+            }
             if (o.has("explore") && !o.get("explore").isJsonNull()) {
                 c.explore = o.getAsJsonObject("explore");
                 for (String k : c.explore.keySet()) {
@@ -782,6 +795,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (explore != null) {
                 o.add("explore", explore); // solver-distill-cc-1109: only when on
+            }
+            if (aux != null) {
+                o.add("aux", aux); // sdcc-aux-1111: only when on
             }
             if (imit) {
                 o.addProperty("imit", true); // sdcc-imit-1111: only when on
@@ -1575,6 +1591,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         sinkDecIdx = frame.decIdx;
         sinkSeat = frame.seat;
         sinkTurn = g.getPhaseHandler().getTurn();
+        if (cfg.aux != null) {
+            auxLabel(g, me, frame);
+        }
         if (cfg.reach != null) {
             try {
                 reachGate(g, me);
@@ -2299,6 +2318,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 h.addProperty("kind", "vplain");
                 provenance(h, g, frame, -1L);
                 h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+                auxHeader(h, frame.decIdx);
                 valueRecs.add(labelRecord(h, RlWire.encodeDecide(frame)));
                 provenOnlyRows++;
             } catch (RuntimeException e) {
@@ -3928,6 +3948,165 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("leafGfNodes")) c.leafGfNodes = o.get("leafGfNodes").getAsInt();
             if (o.has("leafGfMaxNodes")) c.leafGfMaxNodes = o.get("leafGfMaxNodes").getAsLong();
             return c;
+        }
+    }
+
+    /** sdcc-aux-1111: the keys of {@code aux} (see {@link Config#aux}). */
+    static final class AuxCfg {
+        /** The seat's goldfish, the opponent's goldfish, the seat's one-draw reach (needs the spec's {@code reach}). */
+        public boolean gf = true, opp = true, reach = false;
+        /** The goldfish's node cap of one screen and of the whole call (0 = the value sink labels': 1,500 and 6,000). */
+        public int nodes = 0;
+        public long maxNodes = 0;
+        static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("gf", "opp", "reach", "nodes",
+                "maxNodes"));
+
+        static AuxCfg parse(final JsonObject o) {
+            for (String k : o.keySet()) {
+                if (!KEYS.contains(k)) {
+                    throw new IllegalArgumentException("aux: unknown key " + k);
+                }
+            }
+            final AuxCfg c = new AuxCfg();
+            if (o.has("gf")) c.gf = o.get("gf").getAsBoolean();
+            if (o.has("opp")) c.opp = o.get("opp").getAsBoolean();
+            if (o.has("reach")) c.reach = o.get("reach").getAsBoolean();
+            if (o.has("nodes")) c.nodes = o.get("nodes").getAsInt();
+            if (o.has("maxNodes")) c.maxNodes = o.get("maxNodes").getAsLong();
+            return c;
+        }
+    }
+
+    /** Index of an aux record: the decision, then per label its value, turn / nodes, and wall and CPU milliseconds. */
+    static final int AUX_DEC = 0, AUX_GF = 1, AUX_GF_TURN = 2, AUX_GF_NODES = 3, AUX_GF_MS = 4, AUX_GF_CPU = 5, AUX_GFO = 6,
+            AUX_GFO_TURN = 7, AUX_GFO_NODES = 8, AUX_GFO_MS = 9, AUX_GFO_CPU = 10, AUX_REACH = 11, AUX_REACH_NODES = 12,
+            AUX_REACH_MS = 13, AUX_REACH_CPU = 14, AUX_N = 15;
+    private AuxCfg auxCfg;
+    private forge.ai.simulation.ForcedWinSolver.Config auxSolverCfg;
+    /** The labels' own affordance readers, one per player id for this game: the pilot's are never touched. */
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Object> auxReaders = new java.util.concurrent.ConcurrentHashMap<>();
+    /** sdcc-aux-1111: this game's aux records, one per priority decision of the seat (see AUX_*). */
+    private final List<double[]> auxRecs = new ArrayList<>();
+    private double[] lastAux;
+
+    /** This game's aux labels so far: {@code [dec_idx, gf, gf_turn, gf_opp, gf_opp_turn, reach]} per decision (NaN as null). */
+    public JsonArray auxJson() {
+        final JsonArray out = new JsonArray();
+        for (double[] a : auxRecs) {
+            final JsonArray r = new JsonArray();
+            r.add((int) a[AUX_DEC]);
+            for (int i : new int[] {AUX_GF, AUX_GF_TURN, AUX_GFO, AUX_GFO_TURN, AUX_REACH}) {
+                if (Double.isNaN(a[i])) {
+                    r.add(com.google.gson.JsonNull.INSTANCE);
+                } else if (i == AUX_GF_TURN || i == AUX_GFO_TURN) {
+                    r.add((int) a[i]);
+                } else {
+                    r.add(Math.round(a[i] * 1e4) / 1e4);
+                }
+            }
+            out.add(r);
+        }
+        return out;
+    }
+
+    /** True when this search labels its decisions for an auxiliary head (GAME_END and the tape then carry {@code aux}). */
+    public boolean aux() {
+        return cfg.aux != null;
+    }
+
+    private static long threadCpuNanos() {
+        try {
+            return java.lang.management.ManagementFactory.getThreadMXBean().getCurrentThreadCpuTime();
+        } catch (RuntimeException e) {
+            return 0L;
+        }
+    }
+
+    private forge.ai.simulation.ForcedWinSolver.Goldfish auxGoldfish(final Game g, final Player p, final AuxCfg ac) {
+        final Object reader = auxReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+        if (ac.nodes > 0) {
+            o.nodes = ac.nodes;
+        }
+        o.maxNodes = ac.maxNodes > 0 ? ac.maxNodes : 4L * o.nodes;
+        o.ms = 10_000L; // node caps only: label work runs off the work clock
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, auxSolverCfg, reader).goldfish(g, knownTopOf(liveKnow, p), o);
+    }
+
+    /**
+     * sdcc-aux-1111: the dense labels of this decision's position (cfg.aux). Labels only: off the work clock, on readers
+     * of their own, never read by any decision. A failure leaves the label absent.
+     */
+    private void auxLabel(final Game g, final Player me, final RlWire.Decide frame) {
+        final double[] a = new double[AUX_N];
+        java.util.Arrays.fill(a, Double.NaN);
+        a[AUX_DEC] = frame.decIdx;
+        final forge.game.WorkClock.Clock clock = forge.game.WorkClock.install(null);
+        try {
+            if (auxCfg == null) {
+                auxCfg = AuxCfg.parse(cfg.aux);
+                auxSolverCfg = cfg.plans != null ? PlanSearch.Spec.parse(cfg.plans).solverConfig()
+                        : new forge.ai.simulation.ForcedWinSolver.Config();
+                auxSolverCfg.sharedReader = false;
+                auxSolverCfg.honestProbes = false;
+            }
+            final AuxCfg ac = auxCfg;
+            if (ac.gf) {
+                final long t = System.nanoTime(), c = threadCpuNanos();
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gf = auxGoldfish(g, me, ac);
+                a[AUX_GF_MS] = (System.nanoTime() - t) / 1e6;
+                a[AUX_GF_CPU] = (threadCpuNanos() - c) / 1e6;
+                a[AUX_GF_NODES] = gf.nodes;
+                if (!gf.failed && !Double.isNaN(gf.g)) {
+                    a[AUX_GF] = gf.g;
+                    a[AUX_GF_TURN] = gf.bestTurn;
+                }
+            }
+            if (ac.opp && me.getOpponents().size() == 1) {
+                final long t = System.nanoTime(), c = threadCpuNanos();
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gf = auxGoldfish(g, me.getOpponents().get(0), ac);
+                a[AUX_GFO_MS] = (System.nanoTime() - t) / 1e6;
+                a[AUX_GFO_CPU] = (threadCpuNanos() - c) / 1e6;
+                a[AUX_GFO_NODES] = gf.nodes;
+                if (!gf.failed && !Double.isNaN(gf.g)) {
+                    a[AUX_GFO] = gf.g;
+                    a[AUX_GFO_TURN] = gf.bestTurn;
+                }
+            }
+            if (ac.reach && cfg.reach != null) {
+                final long t = System.nanoTime(), c = threadCpuNanos();
+                final ReachCfg rc = reachCfg();
+                final Object reader = auxReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.Reach r = forge.ai.simulation.ForcedWinSolver
+                        .withReader(me, auxSolverCfg, reader).reach(g, knownTopOf(liveKnow, me), rc.opts());
+                a[AUX_REACH_MS] = (System.nanoTime() - t) / 1e6;
+                a[AUX_REACH_CPU] = (threadCpuNanos() - c) / 1e6;
+                a[AUX_REACH_NODES] = r.nodes;
+                if (!r.failed && !Double.isNaN(r.p)) {
+                    a[AUX_REACH] = r.p;
+                }
+            }
+        } catch (RuntimeException e) {
+            System.err.println("[rlsearch] aux labels failed: " + e);
+        } finally {
+            forge.game.WorkClock.install(clock);
+        }
+        lastAux = a;
+        auxRecs.add(a);
+    }
+
+    /** The value sink's plain row also carries the decision's aux labels and their cost (report only). */
+    private void auxHeader(final JsonObject h, final int decIdx) {
+        final double[] a = lastAux;
+        if (cfg.aux == null || a == null || (int) a[AUX_DEC] != decIdx) {
+            return;
+        }
+        final String[] names = {null, "aux_gf", "aux_gf_turn", "aux_gf_nodes", "aux_gf_ms", "aux_gf_cpu", "aux_gfo", "aux_gfo_turn",
+                "aux_gfo_nodes", "aux_gfo_ms", "aux_gfo_cpu", "aux_reach", "aux_reach_nodes", "aux_reach_ms", "aux_reach_cpu"};
+        for (int i = 1; i < AUX_N; i++) {
+            if (!Double.isNaN(a[i])) {
+                h.addProperty(names[i], Math.round(a[i] * 1e4) / 1e4);
+            }
         }
     }
 
