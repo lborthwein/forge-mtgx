@@ -354,6 +354,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * Generic: no card or deck logic.
          */
         public boolean imit = false;
+        /**
+         * sdcc-go-1111 (false = off, the default, and then absent from the JSON and nothing changes; needs provenOnly
+         * and plans): the POLICY decides when a solver line starts. At a plan point where the solver holds a proven line
+         * (or a likely one, with lineGo), the line is taken only if the policy's own answer at that priority is the
+         * line's first step (a candidate of its ordinary menu; a pass when the line begins by waiting). That decision
+         * stays the policy's own, trainable row. Any other answer of the policy is played as it is and the line is not
+         * taken at this priority (the solver may propose it again at a later plan point). The policy is not told that a
+         * line exists: no frame changes. Once started, the hook follows the line as before (those rows are overridden).
+         * A line whose first step no candidate of the menu names is taken as before (counted {@code forced}).
+         * Generic: no card or deck logic.
+         */
+        public boolean lineAsk = false;
+        /**
+         * sdcc-go-1111 (with lineAsk; default 0.5, a TRAINING prior: a spec that is read or deployed sets 0): when the
+         * policy's answer is not the line's first step, the line is taken regardless with this probability (the
+         * decision is then overridden, as every line take was before, and with imit its label's reason is
+         * {@link RlSeat#IMIT_LINESTART}). Seeded from the game seed and the decision.
+         */
+        public double lineAskEps = 0.5;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -416,7 +435,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit", "lineAsk", "lineAskEps"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -450,6 +469,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
             if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
             if (o.has("imit")) c.imit = o.get("imit").getAsBoolean();
+            if (o.has("lineAsk")) c.lineAsk = o.get("lineAsk").getAsBoolean();
+            if (o.has("lineAskEps")) c.lineAskEps = o.get("lineAskEps").getAsDouble();
+            if (o.has("lineAskEps") && !c.lineAsk) {
+                throw new IllegalArgumentException("search: lineAskEps needs lineAsk");
+            }
+            if (c.lineAsk && (!o.has("provenOnly") || !o.get("provenOnly").getAsBoolean() || !o.has("plans"))) {
+                throw new IllegalArgumentException("search: lineAsk needs provenOnly and plans");
+            }
+            if (c.lineAskEps < 0 || c.lineAskEps > 1) {
+                throw new IllegalArgumentException("search: lineAskEps must be in [0, 1]");
+            }
             if (o.has("explore") && !o.get("explore").isJsonNull()) {
                 c.explore = o.getAsJsonObject("explore");
                 for (String k : c.explore.keySet()) {
@@ -786,6 +816,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (imit) {
                 o.addProperty("imit", true); // sdcc-imit-1111: only when on
             }
+            if (lineAsk) {
+                o.addProperty("lineAsk", true); // sdcc-go-1111: only when on
+                o.addProperty("lineAskEps", lineAskEps);
+            }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
             }
@@ -989,6 +1023,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 ps1.provenOnly = cfg.provenOnly;
                 ps1.lineGo = cfg.provenOnly ? cfg.lineGo : 0.0;
                 ps1.planEvery = cfg.provenOnly && cfg.planEvery;
+                ps1.lineAsk = cfg.provenOnly && cfg.lineAsk; // sdcc-go-1111
                 planSearches.put(p.getId(), ps1);
                 b.planHook = ps1;
             }
@@ -1566,6 +1601,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public int reason() {
         return lastReason;
+    }
+
+    @Override
+    public boolean lineAsk() {
+        return cfg.lineAsk;
     }
 
     private int decide0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
@@ -2316,7 +2356,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (sb.planPoint(g, menuObjs)) {
                 final PlanSearch.Stage stage = sb.propose(g, me, m, menuObjs, t0, bt0);
-                if (stage.hook) {
+                if (stage.hook && stage.ask) {
+                    // sdcc-go-1111 (cfg.lineAsk): the policy's own answer decides whether the held line starts
+                    final int go = lineAskDecide(g, m, frame, greedy, menuObjs, sb);
+                    if (go != LINE_DECLINED) {
+                        planRow(g, frame, stage, null, new ArrayList<Integer>(), -1, t0);
+                        planDecided(g, stage, null, t0);
+                        tap("proven_line", stage, null, 0, go);
+                        return go;
+                    }
+                } else if (stage.hook) {
                     planRow(g, frame, stage, null, new ArrayList<Integer>(), -1, t0);
                     planDecided(g, stage, null, t0);
                     tap("proven_line", stage, null, 0, RlSeat.PrioritySearch.HOOK);
@@ -2335,6 +2384,97 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         provenOnlyPolicy++;
         tap("proven_only", null, null, 0, -1);
         return -1;
+    }
+
+    // ---- sdcc-go-1111 (cfg.lineAsk)
+    private static final int LINE_DECLINED = Integer.MIN_VALUE;
+    /** Test only (-Drl.lineAskTest): "noPeek" = every held line is declined before it is looked at; "declineAll" = after. */
+    static String lineAskTest() {
+        return System.getProperty("rl.lineAskTest", "");
+    }
+
+    /** This game's held lines: offered, started by the policy's own answer, by lineAskEps, taken as before, declined. */
+    private int lineAskOffered, lineAskPolicy, lineAskEps, lineAskForced, lineAskDeclined;
+    private final JsonArray lineAskRows = new JsonArray();
+
+    /**
+     * The held line of {@code sb} at this priority: {@link RlSeat.PrioritySearch#HOOK_OWN} (the policy's answer is the
+     * line's first step: the line starts and the decision stays the policy's), {@link RlSeat.PrioritySearch#HOOK} (it
+     * starts regardless: lineAskEps, or a first step the menu cannot name; overridden as before), or
+     * {@link #LINE_DECLINED} (not taken now; the policy's answer is played).
+     */
+    private int lineAskDecide(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
+            final List<SpellAbility> menuObjs, final PlanSearch sb) {
+        lineAskOffered++;
+        final JsonObject row = new JsonObject();
+        row.addProperty("d", frame.decIdx);
+        row.addProperty("s", frame.seat);
+        row.addProperty("t", g.getPhaseHandler().getTurn());
+        row.addProperty("own", greedy);
+        if (sb.askLikely()) {
+            row.addProperty("likely", true);
+        }
+        lineAskRows.add(row);
+        if ("noPeek".equals(lineAskTest())) {
+            sb.askDecline();
+            lineAskDeclined++;
+            row.addProperty("o", "declined");
+            return LINE_DECLINED;
+        }
+        // the line's first step is looked at inside the observer isolation (a scratch random stream; id counters, AI
+        // caches, card memory and express state put back), so a line that is then declined has not moved the live game
+        final Object[] peek = forge.bench.PlayerControllerBridge.isolated(g, () -> {
+            final SpellAbility[] first = sb.askPeek(g);
+            if (first == null) {
+                return new Object[] {-1, "noFirstStep"};
+            }
+            try {
+                final JsonObject echo = forge.bench.PlayerControllerBridge.echoHookPriority(menuObjs,
+                        first[0] == null ? null : java.util.Collections.singletonList(first[0]));
+                final short[] steps = RlSeat.priorityXSet(m, echo) ? m.fromEcho(echo) : null;
+                if (steps != null && steps.length == 1 && m.validate(steps) == null) {
+                    return new Object[] {(int) steps[0], null};
+                }
+                return new Object[] {-1, echo.has("why") ? echo.get("why").getAsString() : steps == null ? "offMenu" : "invalid"};
+            } catch (RuntimeException e) {
+                return new Object[] {-1, "error"};
+            }
+        });
+        final int step = (Integer) peek[0];
+        final String why = (String) peek[1];
+        if (step < 0) {
+            // no candidate names the line's first step: nothing to ask, the line is taken as before
+            sb.askStart(g);
+            lineAskForced++;
+            row.addProperty("o", "forced");
+            row.addProperty("why", why);
+            return RlSeat.PrioritySearch.HOOK;
+        }
+        row.addProperty("c", step);
+        row.addProperty("k", m.cands.get(step).kind); // the candidate kind (RlSchema.K_*): pass, cast, activate, land
+        if ("declineAll".equals(lineAskTest())) {
+            sb.askDecline();
+            lineAskDeclined++;
+            row.addProperty("o", "declined");
+            return LINE_DECLINED;
+        }
+        if (greedy == step) {
+            sb.askStart(g);
+            lineAskPolicy++;
+            row.addProperty("o", "policy");
+            return RlSeat.PrioritySearch.HOOK_OWN;
+        }
+        final java.util.SplittableRandom rnd = exploreRng(frame, 0x60A5CL);
+        if (cfg.lineAskEps > 0 && rnd.nextDouble() < cfg.lineAskEps) {
+            sb.askStart(g);
+            lineAskEps++;
+            row.addProperty("o", "eps");
+            return RlSeat.PrioritySearch.HOOK;
+        }
+        sb.askDecline();
+        lineAskDeclined++;
+        row.addProperty("o", "declined");
+        return LINE_DECLINED;
     }
 
     private void tap(final String why, final PlanSearch.Stage stage, final LookaheadSearch.GivenResult r, final int given,
@@ -3533,6 +3673,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (cfg.provenOnly) {
             o.addProperty("proven_only_policy", provenOnlyPolicy); // solver-distill-cc-1109: only when on
             o.addProperty("proven_only_rows", provenOnlyRows);
+        }
+        if (cfg.lineAsk) {
+            final JsonObject la = new JsonObject(); // sdcc-go-1111: only when on
+            la.addProperty("offered", lineAskOffered);
+            la.addProperty("policy", lineAskPolicy);
+            la.addProperty("eps", lineAskEps);
+            la.addProperty("forced", lineAskForced);
+            la.addProperty("declined", lineAskDeclined);
+            la.add("rows", lineAskRows);
+            o.add("line_ask", la);
         }
         if (cfg.explore != null) {
             final JsonObject ex = new JsonObject(); // solver-distill-cc-1109: only when on

@@ -1111,10 +1111,51 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     final List<Integer> likelyTurns = new ArrayList<>();
     final List<Double> likelyBelief = new ArrayList<>();
 
+    // ---- sdcc-go-1111 (RlSearch cfg.lineAsk; false = off, and then nothing below is reached)
+    /** Set by RlSearch with cfg.lineAsk: {@link #propose} holds a proven (or likely) line for the policy's decision. */
+    boolean lineAsk;
+    /** The line held at this priority (null = none), whether it is a likely one, and its belief share. */
+    private Object askLine;
+    private boolean askLikely;
+    private double askBelief;
+
+    /** The held line's first answer at this priority ({@link ForcedWinSolver#peekFirst}); the live game is not moved. */
+    SpellAbility[] askPeek(final Game g) {
+        final Object line = askLine;
+        return line == null ? null : driver.probe(() -> driver.solver().peekFirst(g, line));
+    }
+
+    boolean askLikely() {
+        return askLikely;
+    }
+
+    /** The held line is taken now, exactly as {@link #propose} takes one without lineAsk. */
+    void askStart(final Game g) {
+        final Object line = askLine;
+        askLine = null;
+        driver.solver().adopt(line);
+        handoff = true;
+        if (askLikely) {
+            likelyLinesTaken++;
+            likelyTurns.add(g.getPhaseHandler().getTurn());
+            likelyBelief.add(askBelief);
+        } else {
+            provenLinesTaken++;
+            provenTurns.add(g.getPhaseHandler().getTurn());
+        }
+    }
+
+    /** The held line is not taken at this priority (the solver may propose it again at a later plan point). */
+    void askDecline() {
+        askLine = null;
+    }
+
     /** What the plan stage decided before (or instead of) S-c's play-outs. */
     static final class Stage {
         /** The search hands the priority to the hook (a proven line was adopted). */
         boolean hook;
+        /** sdcc-go-1111 (lineAsk): with {@link #hook}, the line is held for the policy's decision, not adopted yet. */
+        boolean ask;
         /** kill-line-1106 (plans.lineDuel): this point scores the default against the best line. */
         boolean duel;
         /** The plan candidates for the play-outs (empty = none: S-c alone), their labels and kinds. */
@@ -1182,6 +1223,18 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     proven = pr;
                 }
             }
+            if (proven != null && lineAsk) {
+                // sdcc-go-1111 (RlSearch cfg.lineAsk): the line is held, not adopted: the seat's policy decides
+                askLine = proven.line;
+                askLikely = false;
+                askBelief = proven.pBelief;
+                st.hook = true;
+                st.ask = true;
+                st.note = "proven-line (ask) " + proven.text;
+                st.ms = (System.nanoTime() - t0) / 1e6;
+                proposeMs.add(st.ms);
+                return st;
+            }
             if (proven != null) {
                 // (b) a proven node: take it, no play-outs
                 solver.adopt(proven.line);
@@ -1206,6 +1259,17 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                                         || pr.pBelief == likely.pBelief && pr.steps < likely.steps)) {
                             likely = pr;
                         }
+                    }
+                    if (likely != null && lineAsk) {
+                        askLine = likely.line; // sdcc-go-1111: as the proven line above
+                        askLikely = true;
+                        askBelief = likely.pBelief;
+                        st.hook = true;
+                        st.ask = true;
+                        st.note = "likely-line (ask) P=" + likely.pBelief + " turn+" + likely.winTurn + " " + likely.text;
+                        st.ms = (System.nanoTime() - t0) / 1e6;
+                        proposeMs.add(st.ms);
+                        return st;
                     }
                     if (likely != null) {
                         solver.adopt(likely.line);

@@ -168,6 +168,12 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
      * line's attack, a cost's cards), answered by the plan hook or, as in the copies that verified the line, by Forge AI.
      */
     public static final int IMIT_LINECHOICE = 8;
+    /**
+     * sdcc-go-1111 (the search spec's lineAsk): the priority at which a line was started although the policy's own
+     * answer was another one (lineAskEps, or a first step that could not be asked): the line's first step. With
+     * lineAsk the handed-over decision carries this reason instead of {@link #IMIT_LINE}; the followed steps keep theirs.
+     */
+    public static final int IMIT_LINESTART = 9;
     /** dec_idx → {reason, the steps played}: overridden decisions whose played answer a search component chose. */
     private final Map<Integer, Object[]> imit = new TreeMap<>();
     /** Line priorities the plan hook played that got a row of their own, and those whose answer no candidate matched. */
@@ -403,6 +409,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             final RlCandidates.Menu m = (RlCandidates.Menu) h[1];
             final short[] steps = priorityXSet(m, hookAnswer) ? m.fromEcho(hookAnswer) : null;
             imitFloatHandoff = null;
+            final int reason = (Integer) h[4];
+            if (reason == 0) {
+                // sdcc-go-1111 (lineAsk): the policy's own start of the line: its row and answer stand, unlabelled
+                if (steps != null && m.validate(steps) == null) {
+                    lineTargets(seatOf(g, player), g, player, (RlFeaturizer.Obs) h[3], decision);
+                }
+                return;
+            }
             if (steps == null || m.validate(steps) != null) {
                 final String why = whyPriority(hookAnswer, steps);
                 unmatched(RlSchema.F_PRIORITY, why, hookAnswer);
@@ -421,7 +435,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             }
             ((JsonArray) h[2]).set(4, st); // the tape row carries the answer played
             final int seat = seatOf(g, player);
-            imitMark(seat, (Integer) h[0], IMIT_LINE, steps);
+            imitMark(seat, (Integer) h[0], reason, steps);
             note("imit.prio.labelled");
             noteMatch(hookAnswer);
             lineTargets(seat, g, player, (RlFeaturizer.Obs) h[3], decision);
@@ -500,7 +514,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             note("imit.prio.float.offMenu");
             return;
         }
-        label(s, steps, IMIT_LINE);
+        final PrioritySearch ps = searchFor(s.seat);
+        label(s, steps, prepared == null && ps != null && ps.lineAsk() ? IMIT_LINESTART : IMIT_LINE); // sdcc-go-1111
         imitMapFailed--;
         note("imit.prio.float.labelled");
     }
@@ -512,7 +527,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
      * False when the echoed ability has an X the line has not set yet (the payment chooses it) and the menu offers
      * that ability at more than one X: no candidate is the answer played.
      */
-    private static boolean priorityXSet(final RlCandidates.Menu m, final JsonObject echo) {
+    static boolean priorityXSet(final RlCandidates.Menu m, final JsonObject echo) {
         if (echo == null || !echo.has("xUnset") || !echo.has("choice") || echo.get("choice").isJsonNull()) {
             return true;
         }
@@ -579,6 +594,18 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
          * adopted); the seat gives no answer (the bridge asks the hook again), and the decision is marked overridden.
          */
         int HOOK = -3;
+
+        /**
+         * sdcc-go-1111 (the search spec's lineAsk): as {@link #HOOK}, but the policy's own answer at this priority is
+         * the line's first step: the hook plays it (as the line prepared it) and the decision is NOT overridden: it
+         * is the policy's own, trainable choice to start the line.
+         */
+        int HOOK_OWN = -5;
+
+        /** sdcc-go-1111: the spec's {@code lineAsk} (false by default, and then nothing changes). */
+        default boolean lineAsk() {
+            return false;
+        }
 
         /** sdcc-imit-1111: the spec's {@code imit} (false by default, and then nothing changes): label the answers. */
         default boolean imit() {
@@ -1117,6 +1144,18 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 }
                 return null;
             }
+            if (alt == PrioritySearch.HOOK_OWN) {
+                // sdcc-go-1111 (lineAsk): the policy's own answer starts the line; the hook plays that step. The row
+                // is the policy's (not overridden, no label)
+                noteSent(seat, family, m, frame, d.steps);
+                noteVersion(seat, controllers[seat].substring(3), d.policyVersion);
+                forgeDecidedExtra.merge("planHookOwn", 1, Integer::sum);
+                if (imitOn(seat)) {
+                    // reason 0: no label for this decision; the step's prepared targets are still rows, as at a handoff
+                    imitHandoff = new Object[] {frame.decIdx, m, dec.get(dec.size() - 1), obs, 0};
+                }
+                return null;
+            }
             if (alt == PrioritySearch.HOOK) {
                 // search-bones-1015: the seat's plan hook plays this priority (the bridge asks it again)
                 noteSent(seat, family, m, frame, d.steps);
@@ -1124,7 +1163,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 overridden.add(frame.decIdx);
                 forgeDecidedExtra.merge("planHook", 1, Integer::sum);
                 if (imitOn(seat)) {
-                    imitHandoff = new Object[] {frame.decIdx, m, dec.get(dec.size() - 1), obs}; // sdcc-imit-1111
+                    imitHandoff = new Object[] {frame.decIdx, m, dec.get(dec.size() - 1), obs,
+                            search.lineAsk() ? IMIT_LINESTART : IMIT_LINE}; // sdcc-imit-1111; sdcc-go-1111: the reason
                 }
                 return null;
             }

@@ -1068,7 +1068,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * mana ability: never on a priority menu), {@code offMenu} (no entry of that card and kind), {@code ambiguous}.
      * {@code xUnset}: the ability has an X the line leaves to the payment (no X to name yet).
      */
-    private static JsonObject echoHookPriority(final List<SpellAbility> menu, final List<SpellAbility> p) {
+    public static JsonObject echoHookPriority(final List<SpellAbility> menu, final List<SpellAbility> p) {
         final JsonObject o = echoPriority(menu, p);
         final SpellAbility sa = p == null || p.isEmpty() ? null : p.get(0);
         if (sa == null) {

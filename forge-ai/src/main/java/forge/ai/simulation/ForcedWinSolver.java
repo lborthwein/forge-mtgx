@@ -2907,6 +2907,36 @@ public final class ForcedWinSolver {
         taken++;
     }
 
+    /**
+     * sdcc-go-1111 (RlSearch cfg.lineAsk): what a follower of {@code line} (a {@link Proposal#line}) would answer at
+     * the live game's current priority if the line were adopted now, without adopting it: {@code null} = the line
+     * cannot be started here (its first step is missing, or it is already played out); otherwise a one-element array
+     * holding the first action a priority menu can name (mana the line floats for it first is skipped), or
+     * {@code null} inside it for a pass (the line waits: an attack, a later turn, its own spell on the stack). A
+     * throw-away follower is stepped; the solver's own state (active line, counters, resolved spells) is not touched.
+     */
+    public SpellAbility[] peekFirst(final Game live, final Object line) {
+        try {
+            final Follower f = follower((Line) line);
+            for (int i = 0; i < 16; i++) {
+                final Follower.Next n = f.next(live, me);
+                if (n.action != null) {
+                    if (n.action.isManaAbility()) {
+                        continue; // a float: the next step is what the mana is for
+                    }
+                    return new SpellAbility[] {n.action};
+                }
+                if (n.waiting) {
+                    return new SpellAbility[] {null};
+                }
+                return null;
+            }
+            return null;
+        } catch (RuntimeException | StackOverflowError e) {
+            return null;
+        }
+    }
+
     /** search-bones-1015: the active line has been played to its end or broke (or none was adopted). */
     public boolean lineDone() {
         return active == null || active.done || active.broken;
