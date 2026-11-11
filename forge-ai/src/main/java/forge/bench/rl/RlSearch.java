@@ -345,6 +345,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * no card or deck logic. Never part of a pilot that is read or deployed.
          */
         public JsonObject explore;
+        /**
+         * sdcc-imit-1111 (false = off, the default, and then absent from the JSON and nothing changes): imitation labels
+         * for a learner. Each decision whose answer this search changed is reported with the kind of component that chose
+         * it and the steps played (GAME_END and the tape: {@code imit}, see {@link RlSeat#IMIT_LINE}); and each priority
+         * the plan hook plays while it follows a line is sent as a DECIDE of its own (an overridden decision labelled
+         * with the hook's answer), so the line's steps are rows a learner can imitate. The answers played are unchanged.
+         * Generic: no card or deck logic.
+         */
+        public boolean imit = false;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -407,7 +416,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -440,6 +449,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("provenOnly")) c.provenOnly = o.get("provenOnly").getAsBoolean();
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
             if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
+            if (o.has("imit")) c.imit = o.get("imit").getAsBoolean();
             if (o.has("explore") && !o.get("explore").isJsonNull()) {
                 c.explore = o.getAsJsonObject("explore");
                 for (String k : c.explore.keySet()) {
@@ -772,6 +782,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (explore != null) {
                 o.add("explore", explore); // solver-distill-cc-1109: only when on
+            }
+            if (imit) {
+                o.addProperty("imit", true); // sdcc-imit-1111: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -1531,11 +1544,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
         final forge.game.WorkClock.Span ws = workBegin();
+        lastReason = RlSeat.IMIT_SEARCH;
         try {
             return decide0(g, me, m, frame, greedy, menuObjs);
         } finally {
             workEnd(ws);
         }
+    }
+
+    /** sdcc-imit-1111: the kind of component behind the last answer (an RlSeat.IMIT_* code; 0 = a rule or fallback). */
+    private int lastReason;
+
+    @Override
+    public boolean imit() {
+        return cfg.imit;
+    }
+
+    @Override
+    public int reason() {
+        return lastReason;
     }
 
     private int decide0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
@@ -2297,6 +2324,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (cfg.explore != null) {
             final int ex = explorePriority(g, m, frame, greedy);
             if (ex >= 0) {
+                lastReason = RlSeat.IMIT_EXPLORE;
                 tap("explore", null, null, 0, ex);
                 return ex;
             }
@@ -2826,9 +2854,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     private short[] decideChoice0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
+        lastReason = RlSeat.IMIT_CHOICE;
         if (exploreFamily(m.family)) {
             final short[] ex = exploreAnswer(g, m, frame, greedy);
             if (ex != null) {
+                lastReason = RlSeat.IMIT_EXPLORE;
                 return ex;
             }
             if (!scorerAsk(m.family)) {
@@ -2836,9 +2866,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
+            lastReason = 0; // a rule, not a preference
             return keepAnswer(g, me, m, frame, greedy);
         }
         if (m.family == RlSchema.F_MULLIGAN) {
+            lastReason = RlSeat.IMIT_MULL;
             if (cfg.mullKeep != null) {
                 return mullKeepAnswer(g, me, m, frame, greedy);
             }
@@ -2909,6 +2941,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return null;
         }
         final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
+        lastReason = RlSeat.IMIT_BLOCK;
         try {
             return decideBlocks0(g, me, m, frame, greedy, objs);
         } finally {

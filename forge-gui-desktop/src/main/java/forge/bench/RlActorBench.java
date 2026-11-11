@@ -1344,6 +1344,13 @@ public final class RlActorBench {
             end.add("search", search.summary());
             // sdcc-solver-loop-1111: the answers the search changed away from the policy's own (all in `overridden`)
             end.addProperty("search_overridden", seat.searchOverridden);
+            if (seat.imitOn()) {
+                // sdcc-imit-1111 (only with the spec's imit): overridden decisions whose answer a search component
+                // chose, [[dec_idx, reason, [steps played]], ...]; line priorities sent as rows; unmatched hook answers
+                end.add("imit", seat.imitJson());
+                end.addProperty("imit_hook_rows", seat.imitHookRows);
+                end.addProperty("imit_map_failed", seat.imitMapFailed);
+            }
             if (searchAlt != null) {
                 end.add("search_alt", searchAlt.summary()); // choice-search-1105 (only when on)
                 end.addProperty("search_alt_seat", seat.altSeat);
@@ -1420,6 +1427,11 @@ public final class RlActorBench {
             t.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
             t.add("search", end.get("search"));
             t.add("search_overridden", end.get("search_overridden"));
+            if (end.has("imit")) {
+                t.add("imit", end.get("imit")); // sdcc-imit-1111
+                t.addProperty("imit_hook_rows", seat.imitHookRows);
+                t.addProperty("imit_map_failed", seat.imitMapFailed);
+            }
             if (end.has("search_alt")) {
                 t.add("search_alt", end.get("search_alt")); // choice-search-1105
                 t.add("search_alt_seat", end.get("search_alt_seat"));

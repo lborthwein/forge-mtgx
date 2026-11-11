@@ -145,6 +145,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return false;
         }
 
+        /** sdcc-imit-1111: true while this hook follows a line (its next priority answers are the line's steps). */
+        default boolean lineActive() {
+            return false;
+        }
+
         /** True = this hook declared the attack. */
         default boolean attack(Player attacker, Combat combat) {
             return false;
@@ -953,6 +958,53 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         return cacOnce(forge.ai.dp.Kind.PRIORITY, "chooseSpellAbilityToPlay", null, null, -1, -1, def);
     }
 
+    /**
+     * sdcc-imit-1111: while the plan hook follows a line and the session's answerer asks for it
+     * ({@link BenchSession.LocalAnswerer#wantsHook}; false by default, and then nothing here runs), this priority's ask
+     * is built for the answerer BEFORE the hook is asked, as it would be for the seat, inside the observer isolation (a
+     * scratch random stream; id counters, AI caches and memory put back), so the live game is not moved. Returns
+     * {answerer, menu, token}, or null.
+     */
+    private Object[] hookShadow() {
+        final BenchSession.LocalAnswerer la = session.getLocalAnswerer();
+        if (la == null || !planHook.lineActive() || !la.wantsHook(getGame(), getPlayer())) {
+            return null;
+        }
+        try {
+            return isolated(getGame(), () -> {
+                final int[] diag = new int[DIAG_LEN];
+                final JsonObject body = envelope(true);
+                final List<SpellAbility> menu = new ArrayList<>(legalSpellAbilities(diag));
+                body.add("menuDiag", menuDiagJson(diag, menu.size()));
+                final JsonArray items = new JsonArray();
+                items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
+                for (SpellAbility sa : menu) {
+                    items.add(StateEncoder.encodeSpellAbility(sa));
+                }
+                body.add("menu", items);
+                body.add("manaAbilities", new JsonArray()); // as for an observer: never read in-process
+                final Object tok = la.hookPrepare(getGame(), getPlayer(), "chooseSpellAbilityToPlay", "priority", body, menu);
+                return tok == null ? null : new Object[] {la, menu, tok};
+            });
+        } catch (RuntimeException e) {
+            counters.instrument("hookShadow.failed");
+            return null;
+        }
+    }
+
+    /** sdcc-imit-1111: the hook's answer {@code p} to the priority of {@link #hookShadow} (or the handed-over one). */
+    private void hookShadowAnswered(final BenchSession.LocalAnswerer la, final List<SpellAbility> menu, final Object tok,
+            final List<SpellAbility> p) {
+        try {
+            isolated(getGame(), () -> {
+                la.hookAnswered(getGame(), getPlayer(), tok, echoPriority(menu, p));
+                return null;
+            });
+        } catch (RuntimeException e) {
+            counters.instrument("hookShadow.failed");
+        }
+    }
+
     private List<SpellAbility> chooseSpellAbilityToPlayBridged() {
         count("chooseSpellAbilityToPlay");
         if (!bridged()) {
@@ -960,8 +1012,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
         if (planHook != null) {
             // search-bones-1015: the plan follower first (its answer is played, never asked)
+            final Object[] shadow = hookShadow(); // sdcc-imit-1111: null unless the answerer records a line's priorities
             final List<SpellAbility> p = planHook.priority(this);
             if (p != NO_OPINION) {
+                if (shadow != null) {
+                    hookShadowAnswered((BenchSession.LocalAnswerer) shadow[0], (List<SpellAbility>) shadow[1], shadow[2], p);
+                }
                 return p;
             }
         }
@@ -991,6 +1047,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             final List<SpellAbility> p = planHook.priority(this);
             if (p != NO_OPINION) {
                 takeEcho();
+                final BenchSession.LocalAnswerer la = session.getLocalAnswerer();
+                if (la != null && la.wantsHook(getGame(), getPlayer())) {
+                    hookShadowAnswered(la, menu, null, p); // sdcc-imit-1111: the handed-over decision's label
+                }
                 return p;
             }
         }

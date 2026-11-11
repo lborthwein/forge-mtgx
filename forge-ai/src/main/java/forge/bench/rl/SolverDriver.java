@@ -162,6 +162,12 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
     private int lcTurn = -1, lcCount;
     int lineChoiceAnswers, lineChoiceCapHits;
 
+    /** sdcc-imit-1111: a solver line is being followed. */
+    @Override
+    public boolean lineActive() {
+        return !solver.lineDone();
+    }
+
     @Override
     public boolean forgeChoices() {
         if (!lineChoices || !solver.lineActive()) {

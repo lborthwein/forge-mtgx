@@ -855,6 +855,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return h;
     }
 
+    /** sdcc-imit-1111: a solver line is being followed. */
+    @Override
+    public boolean lineActive() {
+        return !driver.solver().lineDone();
+    }
+
     @Override
     public boolean attack(final Player attacker, final Combat combat) {
         return worked(() -> driver.attack(attacker, combat));
