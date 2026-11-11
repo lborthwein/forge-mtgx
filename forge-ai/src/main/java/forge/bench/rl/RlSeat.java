@@ -32,6 +32,8 @@ import forge.game.spellability.SpellAbility;
  *       one turn the seat passes ({@code cap_hits}); a game is void after {@code maxDecisions} sent decisions.</li>
  *   <li><b>Refusals:</b> when the bridge (or {@code CombatUtil}) refuses a decoded answer, Forge decides; the dec_idx
  *       goes into {@code overridden} (GAME_END and the tape), counted per family in {@code census.refused}.</li>
+ *   <li><b>Search changes</b> (sdcc-solver-loop-1111): a decision whose answer an attached search changed away from the
+ *       policy's own is in {@code overridden} too ({@link #searchOverridden}); nothing changes without a search.</li>
  *   <li><b>Record mode:</b> the seat delegates EVERY ask, so the game is Forge Default's own; at each non-trivial
  *       Phase A ask it builds the DECIDE layout, and when the bridge echoes Forge's answer it maps the answer to
  *       candidate steps and sends a RECORD frame. A priority echo also yields one TARGETS row per targeting ability of
@@ -134,6 +136,22 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     public PrioritySearch search;
     /** S1: priority decisions whose candidate the search replaced. */
     public int searchDepartures = 0;
+
+    /**
+     * sdcc-solver-loop-1111: decisions whose answer the search changed away from the policy's own (a priority departure,
+     * a followed line step or an exploration deviation; a block-search or choice-scorer departure; a window's scheduled
+     * answer). Their dec_idx are also in {@link #overridden}, as a plan hook's handed-over priority is, so a learner
+     * never trains the played answer as the policy's choice (the server's row holds the policy's own steps and log-prob).
+     * Always 0 without a search.
+     */
+    public int searchOverridden = 0;
+
+    private void searchOverride(final int decIdx) {
+        if (overridden.isEmpty() || overridden.get(overridden.size() - 1) != decIdx) {
+            overridden.add(decIdx);
+            searchOverridden++;
+        }
+    }
 
     /** S1: the search hook (implemented by {@link RlSearch}). */
     public interface PrioritySearch {
@@ -690,6 +708,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 }
                 d.steps = new short[] {(short) alt};
                 searchDepartures++;
+                searchOverride(frame.decIdx);
             }
             final ChoiceWindow w = search.takeWindow();
             if (w != null) {
@@ -714,6 +733,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 } else {
                     d.steps = alt;
                     searchDepartures++;
+                    searchOverride(frame.decIdx);
                 }
             }
         }
@@ -721,6 +741,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             // choice-scorer-1106: the options applied on copies, one batched value pass (the policy's answer is the default)
             final short[] alt = search.decideChoice(g, player, m, frame, d.steps);
             if (alt != null && m.validate(alt) == null) {
+                if (!java.util.Arrays.equals(alt, d.steps)) {
+                    searchOverride(frame.decIdx); // an answer equal to the policy's own stays the policy's choice
+                }
                 d.steps = alt;
                 searchDepartures++;
             }
@@ -756,6 +779,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             if (forced >= 0 && forced != mine && m.validate(new short[] {(short) forced}) == null) {
                 d.steps = new short[] {(short) forced};
                 windowOverrides++;
+                searchOverride(frame.decIdx);
             }
             if (forced >= 0 && search != null && m.validate(new short[] {(short) forced}) == null) {
                 // r3-distill-1010: the label sink's choice record (a no-op unless the sink is on)
