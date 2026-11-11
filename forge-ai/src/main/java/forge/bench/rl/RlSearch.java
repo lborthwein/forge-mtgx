@@ -1544,7 +1544,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
         if (forge.ai.simulation.LeakTrace.ON) {
-            forge.ai.simulation.LeakTrace.arm(g, me, null); // sdcc-leak-1111 (diagnostics; off: nothing)
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
         final forge.game.WorkClock.Span ws = workBegin();
         lastReason = RlSeat.IMIT_SEARCH;
@@ -2848,7 +2848,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     public short[] decideChoice(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy) {
         if (forge.ai.simulation.LeakTrace.ON) {
-            forge.ai.simulation.LeakTrace.arm(g, me, null); // sdcc-leak-1111 (diagnostics; off: nothing)
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
         final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
         try {
@@ -2944,7 +2944,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     public short[] decideBlocks(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
         if (forge.ai.simulation.LeakTrace.ON) {
-            forge.ai.simulation.LeakTrace.arm(g, me, null); // sdcc-leak-1111 (diagnostics; off: nothing)
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
         if (cfg.blocks <= 0) {
             return null;
@@ -3295,7 +3295,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     public void scheduledAsk(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final String askKey, final int ordinal, final int scheduled, final int mine) {
         if (forge.ai.simulation.LeakTrace.ON) {
-            forge.ai.simulation.LeakTrace.arm(g, me, null); // sdcc-leak-1111 (diagnostics; off: nothing)
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
         final LiveMacro lm = liveMacro;
         if (cfg.labelSink == null || lm == null) {

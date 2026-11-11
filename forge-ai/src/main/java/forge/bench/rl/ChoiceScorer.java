@@ -300,6 +300,31 @@ public final class ChoiceScorer {
             }
 
             @Override
+            public java.util.Set<Integer> hidden(final Object ctx, final Game g, final Player me) {
+                if (!ownGuard()) {
+                    return null; // sdcc-leak-1111: off without the solver's hideOwnLibrary, or with hiddenOrderLegacy
+                }
+                final RlKnowledge k = ((RlFeaturizer) ctx).knowledge();
+                final int seat = k.seatOf(me);
+                final java.util.Set<Integer> out = new java.util.HashSet<>();
+                for (Card c : me.getCardsIn(ZoneType.Library)) {
+                    if (seat < 0 || !k.knows(seat, c)) {
+                        out.add(c.getId());
+                    }
+                }
+                for (Player o : g.getPlayers()) {
+                    if (o != me) {
+                        for (Card c : o.getCardsIn(ZoneType.Hand)) {
+                            if (seat < 0 || !k.knows(seat, c)) {
+                                out.add(c.getId());
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+
+            @Override
             public byte[] capture(final Object ctx, final Game g, final Player me) {
                 final long t = System.nanoTime();
                 final RlFeaturizer.Obs o = ((RlFeaturizer) ctx).observe(g, me, 0, false, null);
@@ -467,6 +492,10 @@ public final class ChoiceScorer {
             s.frames += o.frames.size();
             if (o.fail != null) {
                 s.failed++;
+            }
+            if (s.unsupported == null && ("ownHidden".equals(o.fail) || "oppHidden".equals(o.fail))) {
+                // sdcc-leak-1111: one option's replay read a card the seat did not know: the whole menu is the policy's
+                s.unsupported = o.fail;
             }
         }
         s.totalNanos = System.nanoTime() - t0;
@@ -767,6 +796,8 @@ public final class ChoiceScorer {
         }
         if (r.fail != null) {
             o.fail = r.fail;
+        } else if (r.hiddenOwn > 0 || r.hiddenOpp > 0) {
+            o.fail = r.hiddenOwn > 0 ? "ownHidden" : "oppHidden"; // sdcc-leak-1111 (Frames#hidden only)
         } else if (!Double.isNaN(r.terminal)) {
             o.terminal = r.terminal;
         } else if (r.payload != null) {

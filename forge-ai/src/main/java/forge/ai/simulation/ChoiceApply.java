@@ -40,6 +40,14 @@ public final class ChoiceApply {
         default ForcedWinSolver.Screen screen(Object ctx, Game g, Player me) {
             return null;
         }
+
+        /**
+         * sdcc-leak-1111: the ids of the copy's cards the seat does not know, among its own library and the other
+         * players' hands, before the answer is replayed; null = the hidden-read count is off (as before).
+         */
+        default java.util.Set<Integer> hidden(Object ctx, Game g, Player me) {
+            return null;
+        }
     }
 
     /** One applied answer. */
@@ -54,6 +62,49 @@ public final class ChoiceApply {
         /** Further picks of the same resolution that Forge AI answered (0 = this answer settled the whole choice). */
         public int tailAsks;
         public ForcedWinSolver.Screen screen;
+        /**
+         * sdcc-leak-1111 ({@link Frames#hidden} only): cards the seat did not know that the replay took out of our
+         * library, other than the forced picks (a draw, a mill, a dig), and that left another player's hand, before the
+         * frame. A frame after such a move shows a card the seat could not have known when it answered.
+         */
+        public int hiddenOwn, hiddenOpp;
+    }
+
+    /** sdcc-leak-1111: the copy's listener behind {@link Result#hiddenOwn} and {@link Result#hiddenOpp}. */
+    public static final class HiddenReads {
+        private final Result r;
+        private final int me;
+        private final java.util.Set<Integer> hidden, forced;
+        private final boolean[] reached;
+
+        HiddenReads(final Result r, final int me, final java.util.Set<Integer> hidden, final java.util.Set<Integer> forced,
+                final boolean[] reached) {
+            this.r = r;
+            this.me = me;
+            this.hidden = hidden;
+            this.forced = forced;
+            this.reached = reached;
+        }
+
+        @com.google.common.eventbus.Subscribe
+        public void on(final forge.game.event.GameEventCardChangeZone e) {
+            if (reached[0] || e.card() == null || e.from() == null || e.from().player() == null) {
+                return;
+            }
+            final int id = e.card().getId();
+            if (!hidden.contains(id) || forced.contains(id)) {
+                return;
+            }
+            final boolean mine = e.from().player().getId() == me;
+            if (mine && e.from().zoneType() == ZoneType.Library) {
+                if (!(e.to() != null && e.to().zoneType() == ZoneType.Library && e.to().player() != null
+                        && e.to().player().getId() == me)) {
+                    r.hiddenOwn++;
+                }
+            } else if (!mine && e.from().zoneType() == ZoneType.Hand) {
+                r.hiddenOpp++;
+            }
+        }
     }
 
     /** Why a resolving choice can't be replayed on a copy, or null. */
@@ -309,6 +360,14 @@ public final class ChoiceApply {
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 3)));
             r.copyNanos = System.nanoTime() - t0;
             final boolean[] reached = {false};
+            final java.util.Set<Integer> hidden = frames.hidden(ctx, g, me);
+            if (hidden != null && !hidden.isEmpty()) {
+                final java.util.Set<Integer> forced = new java.util.HashSet<>(picks);
+                if (order != null) {
+                    forced.addAll(order);
+                }
+                g.subscribeToEvents(new HiddenReads(r, me.getId(), hidden, forced, reached));
+            }
             final Runnable leaf = () -> {
                 if (!reached[0]) {
                     reached[0] = true;
