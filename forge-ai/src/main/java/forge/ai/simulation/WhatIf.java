@@ -68,6 +68,18 @@ public final class WhatIf {
          * decide the ask. False: each option counts only the lines its own probes found.
          */
         public boolean pool = true;
+        /**
+         * The two-step what-if (0 = off, the default): after the values above, every pair of options that add a card
+         * (a search's picks) is asked "if I also had that other card": the first option's position with the second's
+         * card moved from our library to our hand, one world, {@code second} own turns, {@code secondNodes} a probe.
+         * A kill whose line needs both cards gives each {@code secondDiscount * gamma^turn} (the price of the fetch
+         * or draw still to come); an option's value is the larger of its one-step and two-step values. At most
+         * {@code secondMax} pairs, in menu order.
+         */
+        public int second = 0;
+        public int secondNodes = 120;
+        public double secondDiscount = 0.5;
+        public int secondMax = 300;
     }
 
     /** One option's position: the applied copy itself (never played on; every world is a copy of it). */
@@ -155,6 +167,10 @@ public final class WhatIf {
         /** The value from this option's own lines only (no pooling); = value when pooling is off. */
         public double raw = Double.NaN;
         public final List<Integer> rawTurns = new ArrayList<>();
+        /** The two-step value (NaN = not asked), its partner's label index and its line. */
+        public double second = Double.NaN;
+        public int partner = -1;
+        public String line2;
     }
 
     /** The whole ask's result. */
@@ -166,6 +182,9 @@ public final class WhatIf {
         public long nanos, workNanos;
         public int probes;
         public long nodes;
+        /** Two-step pairs asked, and whether the budget cut them. */
+        public int pairs;
+        public boolean cut2;
     }
 
     private static final class World {
@@ -536,6 +555,9 @@ public final class WhatIf {
                     r.raw = rs / r.worlds;
                 }
             }
+            if (o.second > 0 && !ask.cut) {
+                second(options, cfg, o, ask, askEnd, killers);
+            }
         } catch (RuntimeException | StackOverflowError e) {
             ForcedWinSolver.receipt("FORCED_WIN whatif error " + e);
             for (Result r : ask.results) {
@@ -551,6 +573,81 @@ public final class WhatIf {
             ask.nanos = System.nanoTime() - real0;
         }
         return ask;
+    }
+
+    /** The two-step stage ({@link Opts#second}). */
+    private static void second(final List<Snapshot> options, final ForcedWinSolver.Config cfg, final Opts o, final Ask ask,
+            final long askEnd, final java.util.Set<String> killers) {
+        final List<Integer> adds = new ArrayList<>();
+        for (int i = 0; i < options.size(); i++) {
+            final Snapshot s = options.get(i);
+            if (s != null && s.mode == Snapshot.ADDS && s.card != null && ask.results.get(i).fail == null) {
+                adds.add(i);
+                ask.results.get(i).second = 0.0;
+            }
+        }
+        final Opts po = new Opts();
+        po.nodes = o.secondNodes;
+        po.probeMs = o.probeMs;
+        po.pass = false;
+        po.dev = o.dev;
+        po.maxSteps = o.maxSteps;
+        pairs:
+        for (int a = 0; a < adds.size(); a++) {
+            for (int b = a + 1; b < adds.size(); b++) {
+                if (ask.pairs >= o.secondMax || forge.game.WorkClock.nanoTime() >= askEnd) {
+                    ask.cut2 = true;
+                    break pairs;
+                }
+                final int i = adds.get(a), j = adds.get(b);
+                final Snapshot si = options.get(i), sj = options.get(j);
+                if (si.card.equals(sj.card)) {
+                    continue;
+                }
+                ask.pairs++;
+                final World w = start(si, LookaheadSearch.mix(o.seed, 0x2ECD00L), o, askEnd, sj.card);
+                for (int t = 0; t < o.second && !w.dead; t++) {
+                    if (t > 0 && !advance(w, false, o, askEnd)) {
+                        break;
+                    }
+                    final ForcedWinEngine.Limits lim = limits(cfg, po);
+                    lim.focusKillers = killers;
+                    lim.rootIds = w.ids;
+                    final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+                    final long now = forge.game.WorkClock.nanoTime();
+                    final Line l = ForcedWinEngine.search(w.g, w.me, lim, st,
+                            Math.min(askEnd, o.probeMs > 0 ? now + o.probeMs * 1_000_000L : Long.MAX_VALUE),
+                            LookaheadSearch.mix(LookaheadSearch.mix(o.seed, 0x2B0BEL + t), i * 1000L + j));
+                    ask.probes++;
+                    ask.nodes += st.nodes;
+                    ask.results.get(i).probes++;
+                    ask.results.get(i).nodes += st.nodes;
+                    if (l == null) {
+                        continue;
+                    }
+                    final java.util.Set<String> names = new java.util.HashSet<>();
+                    names(l.steps, w.g, names);
+                    if (names.contains(si.card) && names.contains(sj.card)) {
+                        final double v = o.secondDiscount * Math.pow(o.gamma, t + l.winTurn);
+                        for (int[] x : new int[][] {{i, j}, {j, i}}) {
+                            final Result r = ask.results.get(x[0]);
+                            if (v > r.second) {
+                                r.second = v;
+                                r.partner = x[1];
+                                r.line2 = String.valueOf(l);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        for (int i : adds) {
+            final Result r = ask.results.get(i);
+            if (!Double.isNaN(r.value) && r.second > r.value) {
+                r.value = r.second;
+            }
+        }
     }
 
     private static final java.util.regex.Pattern CARD_REF = java.util.regex.Pattern.compile("C(\\d+)");
@@ -591,6 +688,11 @@ public final class WhatIf {
 
     /** A world of an option: a copy of its snapshot, the unknown library in the world's order, at our first main phase. */
     private static World start(final Snapshot s, final long seed, final Opts o, final long wall) {
+        return start(s, seed, o, wall, null);
+    }
+
+    /** As above; {@code extra}: a card of that name is moved from our library to our hand first (the two-step). */
+    private static World start(final Snapshot s, final long seed, final Opts o, final long wall, final String extra) {
         final World w = new World();
         try {
             forge.util.IdScope.install(ForcedWinEngine.cloneScope(s.ids));
@@ -615,6 +717,22 @@ public final class WhatIf {
                 }
             }
             reorder(w.me, s.knownTop, seed);
+            if (extra != null) {
+                Card x = null;
+                int at = 0;
+                for (Card c : w.me.getCardsIn(ZoneType.Library)) {
+                    if (at++ >= s.knownTop && c.getName().equals(extra)) {
+                        x = c;
+                        break;
+                    }
+                }
+                if (x == null) {
+                    w.dead = true;
+                    w.line = "noExtra";
+                    return w;
+                }
+                w.g.getAction().moveToHand(x, null);
+            }
             if (s.pregame) {
                 ForcedWinProbe.toFirstMain(w.g, w.me);
             } else if (prio != null) {
@@ -698,7 +816,7 @@ public final class WhatIf {
         final StringBuilder sb = new StringBuilder("FORCED_WIN whatif ").append(tag).append(" K=").append(o.worlds)
                 .append(" T=").append(o.horizon).append(" nodes=").append(o.nodes).append(" dev=").append(o.dev)
                 .append(o.pass ? " pass" : "").append(o.pool ? " pool" : "").append(" stages=").append(a.stages).append(a.cut ? " CUT" : "")
-                .append(" probes=").append(a.probes).append(" engineNodes=").append(a.nodes).append(" ms=")
+                .append(o.second > 0 ? " pairs=" + a.pairs + (a.cut2 ? " CUT2" : "") : "").append(" probes=").append(a.probes).append(" engineNodes=").append(a.nodes).append(" ms=")
                 .append(a.nanos / 1_000_000).append(" workMs=").append(a.workNanos / 1_000_000)
                 .append(" (goldfish: no opponent, their hand unknown)");
         ForcedWinSolver.receipt(sb.toString());
@@ -709,6 +827,7 @@ public final class WhatIf {
                     + "/" + r.worlds + " killTurns=" + r.killTurns + (r.rawTurns.equals(r.killTurns) ? "" : " ownTurns=" + r.rawTurns)
                     + " probes=" + r.probes + " nodes=" + r.nodes
                     + (r.capped > 0 ? " capped=" + r.capped : "") + (r.fail != null ? " fail=" + r.fail : "")
+                    + (r.second > 0 ? " second=" + Math.round(r.second * 1000) / 1000.0 + " with #" + r.partner + " " + r.line2 : "")
                     + (r.line != null ? " line(t" + r.bestTurn + ")=" + r.line : ""));
         }
     }

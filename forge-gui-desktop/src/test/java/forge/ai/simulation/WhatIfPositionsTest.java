@@ -195,6 +195,10 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                     o.dev = c[6];
                     o.pass = Boolean.parseBoolean(c[7]);
                     o.pool = c.length <= 8 || Boolean.parseBoolean(c[8]);
+                    if (c.length > 9) {
+                        o.second = Integer.parseInt(c[9]); // name:K,T,nodes,probeMs,askMs,dev,pass,pool,second,secondNodes
+                        o.secondNodes = c.length > 10 ? Integer.parseInt(c[10]) : o.secondNodes;
+                    }
                     o.seed = 0x5DCCL * 31 + line;
                     final JsonObject out = new JsonObject();
                     out.addProperty("tag", ask.get("tag").getAsString());
@@ -229,6 +233,8 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                         out.addProperty("cut", a.cut);
                         out.addProperty("probes", a.probes);
                         out.addProperty("nodes", a.nodes);
+                        out.addProperty("pairs", a.pairs);
+                        out.addProperty("cut2", a.cut2);
                         WhatIf.receipt(ask.get("tag").getAsString() + " cfg=" + c[0], labels, a, o);
                         for (int i = 0; i < snaps.size(); i++) {
                             final WhatIf.Result r = a.results.get(i);
@@ -237,6 +243,11 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                             if (!Double.isNaN(r.value)) {
                                 x.addProperty("w", Math.round(r.value * 1e4) / 1e4);
                                 x.addProperty("w_own", Math.round(r.raw * 1e4) / 1e4);
+                                if (r.second > 0) {
+                                    x.addProperty("second", Math.round(r.second * 1e4) / 1e4);
+                                    x.addProperty("with", labels.get(r.partner));
+                                    x.addProperty("line2", r.line2.length() > 300 ? r.line2.substring(0, 300) : r.line2);
+                                }
                                 x.addProperty("kills", r.kills);
                                 x.addProperty("worlds", r.worlds);
                             }
