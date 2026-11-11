@@ -343,6 +343,13 @@ public final class ForcedWinSolver {
          * ({@link #readPosition}, the verification re-plan); the defense's reads of the opponent's cards are unchanged.
          */
         public boolean landEntersProbe = false;
+        /**
+         * sdcc-order-1111 (off by default, and then nothing changes): the engine search tries the lines made of productive
+         * moves first ({@link ForcedWinEngine.Limits#focus}): an allowance of unproductive moves per line that grows
+         * 0, 1, 2, ... while the budget lasts, read from the position after each move, with no card knowledge. The
+         * system property forge.ai.forcedWin.engineFocus is the value of a config that does not name the key (tests).
+         */
+        public boolean engineFocus = Boolean.getBoolean("forge.ai.forcedWin.engineFocus");
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -854,6 +861,9 @@ public final class ForcedWinSolver {
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.landEntersProbe = "true".equals(get.apply("landEntersProbe")); // sdcc-etb-1110
+            if (get.apply("engineFocus") != null) {
+                c.engineFocus = "true".equals(get.apply("engineFocus")); // sdcc-order-1111
+            }
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -926,6 +936,7 @@ public final class ForcedWinSolver {
                 + (probeSettle ? " probeSettle" : "")
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
                 + (sourceLeaves ? " sourceLeaves" : "");
         }
     }
@@ -3396,6 +3407,8 @@ public final class ForcedWinSolver {
      */
     /** choice-search-1105 (engineRerun): our nonland permanents at the turn's last engine run, and the reruns. */
     private java.util.Set<Integer> engineBoard;
+    /** sdcc-order-1111 (engineFocus): the move classes of this solver's earlier winning engine lines (tried first). */
+    private final java.util.Set<String> engineFocusKillers = new java.util.HashSet<>();
     public int engineReruns;
     private PhaseType enginePhase;
 
@@ -3557,6 +3570,10 @@ public final class ForcedWinSolver {
         el.xVariants = cfg.xVariants;
         el.stack = stackWindow;
         el.costChoice = cfg.engineCostChoice;
+        if (cfg.engineFocus) {
+            el.focus = true; // sdcc-order-1111
+            el.focusKillers = engineFocusKillers;
+        }
         final long t1 = forge.game.WorkClock.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
         long engineDeadline = deadlineAt(Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs),
