@@ -39,6 +39,9 @@ public final class WhatIf {
     private WhatIf() {
     }
 
+    /** Diagnostics ({@code -Dforge.ai.whatIf.trace}, with the receipts on): each probe's position and outcome. */
+    private static final boolean TRACE = System.getProperty("forge.ai.whatIf.trace") != null;
+
     /** The budgets (spec keys of {@code choiceScorer.whatIf}). */
     public static final class Opts {
         /** K: sampled orders of our unknown library. */
@@ -401,6 +404,11 @@ public final class WhatIf {
                             }
                             continue;
                         }
+                        if (TRACE) {
+                            ForcedWinSolver.receipt("FORCED_WIN whatif     probe option#" + i + " w=" + w + " t=" + t + " turn="
+                                    + ws[i].g.getPhaseHandler().getTurn() + " hand=" + ws[i].me.getCardsIn(ZoneType.Hand) + " bf="
+                                    + ws[i].me.getCardsIn(ZoneType.Battlefield));
+                        }
                         final ForcedWinEngine.Limits lim = limits(cfg, o);
                         lim.focusKillers = killers;
                         lim.rootIds = ws[i].ids;
@@ -415,6 +423,10 @@ public final class WhatIf {
                         steps[i] += st.steps;
                         if (st.capStops > 0 || st.deadlineStops > 0) {
                             capped[i]++;
+                        }
+                        if (TRACE) {
+                            ForcedWinSolver.receipt("FORCED_WIN whatif     -> " + (l == null ? "no kill" : String.valueOf(l)) + " nodes="
+                                    + st.nodes + " capStops=" + st.capStops + " deadlineStops=" + st.deadlineStops);
                         }
                         if (l != null) {
                             found[i] = t + l.winTurn;
@@ -541,7 +553,9 @@ public final class WhatIf {
         return ask;
     }
 
-    /** The names of the cards a line's steps play, pick or sacrifice (loop bodies included). */
+    private static final java.util.regex.Pattern CARD_REF = java.util.regex.Pattern.compile("C(\\d+)");
+
+    /** The names of the cards a line's steps play, pick, sacrifice or target (loop bodies included). */
     private static void names(final List<ForcedWinPlanner.Step> steps, final Game g, final java.util.Set<String> out) {
         for (ForcedWinPlanner.Step st : steps) {
             if (st.hostId >= 0 && st.hostName != null) {
@@ -550,6 +564,20 @@ public final class WhatIf {
             for (List<Integer> ids : List.of(st.picks, st.pile, st.sacIds)) {
                 for (int id : ids) {
                     final Card c = g.findById(id);
+                    if (c != null) {
+                        out.add(c.getName());
+                    }
+                }
+            }
+            // the cards a step targets ("0:C45": target 0 is card 45): a loop on a creature depends on that creature
+            final List<String> refs = new ArrayList<>(st.targetRefs);
+            if (st.targetVariant != null) {
+                refs.add(st.targetVariant);
+            }
+            for (String ref : refs) {
+                final java.util.regex.Matcher m = CARD_REF.matcher(ref);
+                while (m.find()) {
+                    final Card c = g.findById(Integer.parseInt(m.group(1)));
                     if (c != null) {
                         out.add(c.getName());
                     }
