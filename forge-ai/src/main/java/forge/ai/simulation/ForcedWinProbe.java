@@ -1058,7 +1058,8 @@ public final class ForcedWinProbe {
                 continue;
             }
             final AbilKind kind = sa0.isSpell() ? AbilKind.SPELL : sa0.isCycling() ? AbilKind.CYCLE : AbilKind.ACTIVATE;
-            final Abil base = ForcedWinModel.readCost(sa0, kind);
+            final Abil sacCost = sacObjectCost(sa0, kind); // sdcc-probeobj-1111 (null unless probeObjects)
+            final Abil base = sacCost != null ? sacCost : ForcedWinModel.readCost(sa0, kind);
             if (sa0.getApi() == forge.game.ability.ApiType.Counter) {
                 t.counter = true;
             }
@@ -1118,9 +1119,18 @@ public final class ForcedWinProbe {
                     return play(g, m, sa);
                 };
                 final long runSeed = ForcedWinSolver.mix(seed, id * 31L + variant++);
-                final Obs o = emptyDrawRetry(live, me, id, inHand, castIt, runSeed, st,
-                        run(live, me, id, inHand, castIt, runSeed, st), card.getName());
-                final Abil ab = withEffects(base, o, id, sa0, v);
+                // sdcc-probeobj-1111 (null unless probeObjects and the ability needs one object): played with objects of ours
+                final ObjCtx objs = objContext(live, me, card, sa0, base, sacCost != null, false, v, inHand,
+                        ForcedWinSolver.mix(runSeed, 0x4F424AL), st);
+                final ObjRun objRun = objs == null ? null : learnObjects(objs, sa0);
+                final Obs o = objRun != null ? objRun.obs : sacCost != null ? noObject()
+                        : emptyDrawRetry(live, me, id, inHand, castIt, runSeed, st,
+                                run(live, me, id, inHand, castIt, runSeed, st), card.getName());
+                final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
+                objAttach(t, ab, objs, objRun);
+                if (sacCost != null) {
+                    t.unmodeled = true; // as before the key (its cost was outside the model): the engine search may use it
+                }
                 ab.cardTargets = v == null && targetsAnything(sa0);
                 ab.handMask = handMask;
                 if (!ab.unplayable && (o.unmapped > 0 || ab.effects.isEmpty() && !t.permanent)) {
@@ -1245,7 +1255,8 @@ public final class ForcedWinProbe {
                         || "Hand".equals(sa0.getParam("ActivationZone")) || !sa0.isActivatedAbility()) {
                     continue;
                 }
-                final Abil base = ForcedWinModel.readCost(sa0, AbilKind.ACTIVATE);
+                final Abil sacCost = sacObjectCost(sa0, AbilKind.ACTIVATE); // sdcc-probeobj-1111 (null unless probeObjects)
+                final Abil base = sacCost != null ? sacCost : ForcedWinModel.readCost(sa0, AbilKind.ACTIVATE);
                 if (base == null) {
                     t.unmodeled = true;
                     continue;
@@ -1284,9 +1295,18 @@ public final class ForcedWinProbe {
                         return play(g, m, sa);
                     };
                     final long runSeed = ForcedWinSolver.mix(seed, id * 31L + variant++);
-                    final Obs o = emptyDrawRetry(live, me, id, onBattlefield, activate, runSeed, st,
-                            run(live, me, id, onBattlefield, activate, runSeed, st), card.getName());
-                    final Abil ab = withEffects(base, o, id, sa0, v);
+                    // sdcc-probeobj-1111 (null unless probeObjects and the ability needs one object)
+                    final ObjCtx objs = objContext(live, me, card, sa0, base, sacCost != null, true, v, onBattlefield,
+                            ForcedWinSolver.mix(runSeed, 0x4F424AL), st);
+                    final ObjRun objRun = objs == null ? null : learnObjects(objs, sa0);
+                    final Obs o = objRun != null ? objRun.obs : sacCost != null ? noObject()
+                            : emptyDrawRetry(live, me, id, onBattlefield, activate, runSeed, st,
+                                    run(live, me, id, onBattlefield, activate, runSeed, st), card.getName());
+                    final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
+                    objAttach(t, ab, objs, objRun);
+                    if (sacCost != null) {
+                        t.unmodeled = true; // as before the key (its cost was outside the model)
+                    }
                     ab.cardTargets = v == null && targetsAnything(sa0);
                     ab.handMask = handMask;
                     // sdcc-integ-1110: with probeSettle on as well, a source that went to our library is already an effect
@@ -1782,6 +1802,542 @@ public final class ForcedWinProbe {
                             g.getAction().moveToPlay(x, m, null, null);
                             return;
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ sdcc-probeobj-1111 (probeObjects)
+
+    /**
+     * sdcc-probeobj-1111 (solverCfg {@code probeObjects}; set by a probeObjects reader around its learning, false = as
+     * before). An ability that targets a card (a creature to copy, the permanent an Aura enchants) or sacrifices another
+     * permanent as a cost was played in the sandbox only when Forge AI found an object it liked there; else it was stored
+     * as unplayable ("not played"), or (a sacrifice cost) left out of the model. On: such an ability (one link that
+     * targets one card on the battlefield or in a graveyard; or one other permanent sacrificed) is played once per object
+     * of ours, by card name: those in the zone in the position first, then cards in our hand put there, and when none
+     * of those plays, a stand-in of ours from our library, graveyard or exile; last, for a target, a card the opponent
+     * controls (one in play, else one of ours handed over). The ability keeps the names the engine's validity check
+     * accepts, the names a sandbox played it with and what each run did ({@link ForcedWinModel.ObjNeed}). A stand-in
+     * enters with triggers off, so the run shows the ability and not the stand-in's own entering.
+     */
+    static final ThreadLocal<Boolean> PROBE_OBJECTS = ThreadLocal.withInitial(() -> false);
+    /** The most object names one sweep tries from the zone, from our hand, as stand-ins; and per ability in all. */
+    static final int OBJ_PRESENT = 4, OBJ_HAND = 2, OBJ_STANDINS = 3, OBJ_CAP = 12;
+
+    /** One ability's object sweep: where and how it is played. */
+    static final class ObjCtx {
+        Game live;
+        Player me;
+        Card card;
+        Abil cost;
+        boolean battlefield;
+        String v;
+        Setup hostSetup;
+        long seed;
+        Stats st;
+        ForcedWinModel.ObjNeed need;
+    }
+
+    static final class ObjRun {
+        ForcedWinModel.ObjSeen seen;
+        Obs obs;
+    }
+
+    /** The cost of an ability that sacrifices one other permanent, when a probeObjects reader is learning; else null. */
+    static Abil sacObjectCost(SpellAbility sa, AbilKind kind) {
+        if (!PROBE_OBJECTS.get() || ForcedWinModel.readCost(sa, kind) != null) {
+            return null;
+        }
+        final Abil with = ForcedWinModel.readCost(sa, kind, true);
+        return with != null && with.sacN == 1 ? with : null;
+    }
+
+    static Obs noObject() {
+        final Obs o = new Obs();
+        o.error = "no object";
+        return o;
+    }
+
+    /** The zone a targeting link's card is in, as far as the sweep goes: the battlefield or a graveyard; else null. */
+    static String objZone(SpellAbility l) {
+        final forge.game.spellability.TargetRestrictions tr = l.getTargetRestrictions();
+        final List<ZoneType> zones = tr == null ? null : tr.getZone();
+        return zones == null ? null : zones.contains(ZoneType.Battlefield) ? "Battlefield"
+                : zones.contains(ZoneType.Graveyard) ? "Graveyard" : null;
+    }
+
+    /** The index of the ability's one targeting link, when it targets one card in such a zone; -1 otherwise. */
+    static int objLink(SpellAbility sa) {
+        int at = -1, link = 0;
+        try {
+            for (SpellAbility l = sa; l != null; l = l.getSubAbility(), link++) {
+                if (!l.usesTargeting()) {
+                    continue;
+                }
+                final forge.game.spellability.TargetRestrictions tr = l.getTargetRestrictions();
+                if (at >= 0 || objZone(l) == null || tr.getMinTargets(l.getHostCard(), l) > 1
+                        || tr.getMaxTargets(l.getHostCard(), l) < 1) {
+                    return -1;
+                }
+                at = link;
+            }
+        } catch (RuntimeException e) {
+            return -1;
+        }
+        return at;
+    }
+
+    private static SpellAbility linkOf(SpellAbility sa, int link) {
+        SpellAbility l = sa;
+        for (int i = 0; i < link && l != null; i++) {
+            l = l.getSubAbility();
+        }
+        return l;
+    }
+
+    /** Make {@code obj} the one target of the ability's link (also the follower's: the line's object); false = illegal. */
+    static boolean setObjectTarget(SpellAbility sa, int link, Card obj) {
+        final SpellAbility l = linkOf(sa, link);
+        if (l == null || obj == null || !l.usesTargeting()) {
+            return false;
+        }
+        l.resetTargets();
+        if (!l.canTarget(obj)) {
+            return false;
+        }
+        l.getTargets().add(obj);
+        return sa.isTargetNumberValid();
+    }
+
+    /** The engine's validity check of the need (the target's valid cards, the sacrifice's type) on a card of ours. */
+    static boolean objAccepts(ForcedWinModel.ObjNeed need, SpellAbility sa, Card x, Player me) {
+        try {
+            if (ForcedWinModel.ObjNeed.SAC.equals(need.role)) {
+                for (forge.game.cost.CostPart p : sa.getPayCosts().getCostParts()) {
+                    if (p instanceof forge.game.cost.CostSacrifice s && !s.payCostFromSource() && s.getType() != null) {
+                        return x.isValid(s.getType().split(";"), me, sa.getHostCard(), sa);
+                    }
+                }
+                return false;
+            }
+            final SpellAbility l = linkOf(sa, need.link);
+            return l != null && x.isValid(l.getTargetRestrictions().getValidTgts(), me, l.getHostCard(), l);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** The sweep's context for one ability and player-target variant; null when the key is off or the shape is not covered. */
+    static ObjCtx objContext(Game live, Player me, Card card, SpellAbility sa0, Abil base, boolean sac, boolean battlefield,
+            String v, Setup hostSetup, long seed, Stats st) {
+        if (!PROBE_OBJECTS.get() || base == null) {
+            return null;
+        }
+        final int link = sac || v != null || !targetsAnything(sa0) ? -1 : objLink(sa0);
+        if (!sac && link < 0) {
+            return null;
+        }
+        final ObjCtx x = new ObjCtx();
+        x.live = live;
+        x.me = me;
+        x.card = card;
+        x.cost = base;
+        x.battlefield = battlefield;
+        x.v = v;
+        x.hostSetup = hostSetup;
+        x.seed = seed;
+        x.st = st;
+        x.need = new ForcedWinModel.ObjNeed();
+        x.need.role = sac ? ForcedWinModel.ObjNeed.SAC : ForcedWinModel.ObjNeed.TARGET;
+        x.need.link = Math.max(0, link);
+        x.need.zone = sac ? "Battlefield" : objZone(linkOf(sa0, link));
+        return x;
+    }
+
+    /** The template's ability from the first object's observation (its own copy: the need holds the observed one). */
+    static Abil objAbil(Abil seen) {
+        final Abil ab = seen.copyCost();
+        ab.targetVariant = seen.targetVariant;
+        ab.effects.addAll(seen.effects);
+        ab.counter = seen.counter;
+        return ab;
+    }
+
+    static void objAttach(ACard t, Abil ab, ObjCtx x, ObjRun first) {
+        if (x == null || first == null && x.need.valid.isEmpty()) {
+            return;
+        }
+        ab.obj = x.need;
+        t.hasObj = true;
+        if (ForcedWinSolver.RECEIPTS) {
+            ForcedWinSolver.receipt("FORCED_WIN probe-object card=" + x.card.getName() + " ability=" + ab.kind
+                    + (x.v == null ? "" : "@" + x.v) + " cost=" + ab.costString() + " " + x.need + " tried=" + x.need.tried
+                    + (first == null ? " none-played" : ""));
+        }
+    }
+
+    private static ZoneType zoneOf(ForcedWinModel.ObjNeed need) {
+        return "Graveyard".equals(need.zone) ? ZoneType.Graveyard : ZoneType.Battlefield;
+    }
+
+    /** Our cards in {@code zones}, one per name the need's check accepts and no sandbox has tried, in id order. */
+    private static List<Card> objCards(ObjCtx x, SpellAbility sa0, int max, boolean plainFirst, ZoneType... zones) {
+        final List<Card> out = new ArrayList<>();
+        final java.util.Set<String> names = new java.util.HashSet<>();
+        for (int pass = plainFirst ? 0 : 1; pass < 2; pass++) {
+            for (ZoneType z : zones) {
+                final List<Card> cs = new ArrayList<>(x.me.getCardsIn(z));
+                cs.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+                for (Card c : cs) {
+                    if (out.size() >= max) {
+                        return out;
+                    }
+                    if (c.getId() == x.card.getId() || c.getOwner() != x.me || c.isFaceDown() || !x.need.valid.contains(c.getName())
+                            || x.need.seen.containsKey(c.getName()) || x.need.tried.contains(c.getName())
+                            || names.contains(c.getName())) {
+                        continue;
+                    }
+                    // a stand-in with no trigger or replacement effect of its own first
+                    if (pass == 0 && !(c.getTriggers().isEmpty() && c.getReplacementEffects().isEmpty())) {
+                        continue;
+                    }
+                    names.add(c.getName());
+                    out.add(c);
+                }
+            }
+        }
+        return out;
+    }
+
+    private static ObjRun tryObject(ObjCtx x, SpellAbility sa0, Card obj) {
+        final ForcedWinModel.ObjNeed need = x.need;
+        if (need.seen.size() + need.tried.size() >= OBJ_CAP) {
+            return null;
+        }
+        final ObjRun r = probeObject(x, sa0, obj.getId(), false);
+        if (r == null) {
+            need.tried.add(obj.getName());
+        } else {
+            need.seen.put(obj.getName(), r.seen);
+        }
+        return r;
+    }
+
+    /** The most card names of ours one ability's targets are checked for. */
+    static final int OBJ_NAMES = 60;
+
+    /**
+     * The names of our cards the engine lets the ability target, asked of the engine itself in one sandbox: each of our
+     * cards (one per name, up to {@link #OBJ_NAMES}) is put into the need's zone with triggers off, and the ability's
+     * own legality check is read (an Aura's enchant restriction, protection and the like included). Nothing is played.
+     */
+    static java.util.Set<String> targetNames(ObjCtx x) {
+        final java.util.Set<String> ok = new java.util.TreeSet<>();
+        final ForcedWinModel.ObjNeed need = x.need;
+        final ZoneType zone = zoneOf(need);
+        final String desc = x.cost.desc, costKey = x.cost.costKey;
+        final int hostId = x.card.getId();
+        run(x.live, x.me, hostId, x.hostSetup, (g, m, c) -> {
+            final java.util.Set<String> names = new java.util.HashSet<>();
+            g.getTriggerHandler().setSuppressAllTriggers(true);
+            try {
+                for (ZoneType z : new ZoneType[] {zone, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile,
+                        ZoneType.Battlefield}) {
+                    final List<Card> cs = new ArrayList<>(m.getCardsIn(z));
+                    cs.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+                    for (Card y : cs) {
+                        if (y.getOwner() != m || y.getId() == hostId || y.isFaceDown() || names.contains(y.getName())) {
+                            continue;
+                        }
+                        if (names.size() >= OBJ_NAMES) {
+                            return false;
+                        }
+                        names.add(y.getName());
+                        if (zone == ZoneType.Battlefield && !(y.isInPlay() && y.getController() == m)) {
+                            if (!y.isPermanent()) {
+                                continue;
+                            }
+                            g.getAction().moveToPlay(y, m, null, null);
+                        } else if (zone == ZoneType.Graveyard && !y.isInZone(ZoneType.Graveyard)) {
+                            g.getAction().moveToGraveyard(y, null);
+                        }
+                        final Card y2 = g.findById(y.getId());
+                        final Card hc = g.findById(hostId);
+                        final SpellAbility sa = hc == null ? null : locate(hc, m, desc, costKey, x.battlefield);
+                        final SpellAbility l = sa == null ? null : linkOf(sa, need.link);
+                        if (y2 == null || l == null) {
+                            continue;
+                        }
+                        sa.setActivatingPlayer(m);
+                        if (y2.isInZone(zone) && l.canTarget(y2)) {
+                            ok.add(y2.getName());
+                        }
+                    }
+                }
+            } finally {
+                g.getTriggerHandler().setSuppressAllTriggers(false);
+            }
+            return false;
+        }, ForcedWinSolver.mix(x.seed, 0x4E414D45L), null);
+        return ok;
+    }
+
+    /**
+     * The sweep (see {@link #PROBE_OBJECTS}). Returns the run the template's ability is read from: the first whose
+     * outcome the width model can plan, else the first that played; null when no object of ours or of the opponent's
+     * let the sandbox play the ability.
+     */
+    static ObjRun learnObjects(ObjCtx x, SpellAbility sa0) {
+        final ForcedWinModel.ObjNeed need = x.need;
+        if (ForcedWinModel.ObjNeed.TARGET.equals(need.role)) {
+            need.valid.addAll(targetNames(x));
+        } else {
+            for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard,
+                    ZoneType.Exile}) {
+                for (Card c : x.me.getCardsIn(z)) {
+                    if (c.getOwner() == x.me && c.getId() != x.card.getId() && !c.isFaceDown() && objAccepts(need, sa0, c, x.me)) {
+                        need.valid.add(c.getName());
+                    }
+                }
+            }
+        }
+        final List<ObjRun> runs = new ArrayList<>();
+        final List<Card> order = new ArrayList<>(objCards(x, sa0, OBJ_PRESENT, false, zoneOf(need)));
+        order.addAll(objCards(x, sa0, OBJ_HAND, false, ZoneType.Hand));
+        if (zoneOf(need) == ZoneType.Graveyard) {
+            order.addAll(objCards(x, sa0, OBJ_HAND, false, ZoneType.Battlefield)); // a permanent a line may put there
+        }
+        for (Card c : order) {
+            final ObjRun r = need.seen.containsKey(c.getName()) ? null : tryObject(x, sa0, c);
+            if (r != null) {
+                runs.add(r);
+            }
+        }
+        if (runs.isEmpty()) {
+            for (Card c : objCards(x, sa0, OBJ_STANDINS, true, ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile,
+                    ZoneType.Battlefield)) {
+                final ObjRun r = tryObject(x, sa0, c);
+                if (r != null) {
+                    runs.add(r);
+                    break;
+                }
+            }
+        }
+        if (runs.isEmpty() && ForcedWinModel.ObjNeed.TARGET.equals(need.role)) {
+            final ObjRun r = probeObject(x, sa0, -1, true);
+            if (r != null) {
+                need.opp = true;
+                return r;
+            }
+        }
+        for (ObjRun r : runs) {
+            if (r.seen.usable()) {
+                return r;
+            }
+        }
+        return runs.isEmpty() ? null : runs.get(0);
+    }
+
+    /**
+     * One sandbox run of the ability with the card {@code oid} of ours as its object (put into the need's zone first when
+     * it is elsewhere, triggers off); {@code opp}: with a card the opponent controls instead (the first in the zone the
+     * engine lets the ability target; on the battlefield, else one of ours handed over). Null when the sandbox did not
+     * play it with that object.
+     */
+    static ObjRun probeObject(ObjCtx x, SpellAbility sa0, int oid, boolean opp) {
+        final ForcedWinModel.ObjNeed need = x.need;
+        final boolean sac = ForcedWinModel.ObjNeed.SAC.equals(need.role);
+        final ZoneType zone = zoneOf(need);
+        final String desc = x.cost.desc, costKey = x.cost.costKey;
+        final int[] target = {oid};
+        final Setup setup = (g, m, c) -> {
+            if (x.hostSetup != null) {
+                x.hostSetup.apply(g, m, c);
+            }
+            final Card o = opp ? null : g.findById(oid);
+            if (o == null) {
+                return;
+            }
+            g.getTriggerHandler().setSuppressAllTriggers(true);
+            try {
+                if (zone == ZoneType.Battlefield && !(o.isInPlay() && o.getController() == m)) {
+                    g.getAction().moveToPlay(o, m, null, null);
+                } else if (zone == ZoneType.Graveyard && !o.isInZone(ZoneType.Graveyard)) {
+                    g.getAction().moveToGraveyard(o, null);
+                }
+            } finally {
+                g.getTriggerHandler().setSuppressAllTriggers(false);
+            }
+            final Card o2 = g.findById(oid);
+            if (o2 != null && o2.isInPlay()) {
+                o2.setSickness(false);
+            }
+        };
+        final Act act = (g, m, c) -> {
+            final Card hc = g.findById(c.getId());
+            final SpellAbility sa = hc == null ? null : locate(hc, m, desc, costKey, x.battlefield);
+            if (sa == null) {
+                return false;
+            }
+            sa.setActivatingPlayer(m);
+            if (x.v != null && !setPlayerTargets(sa, m, x.v)) {
+                return false;
+            }
+            if (sac) {
+                return !(x.v == null && targetsAnything(sa)) && g.findById(oid) != null && play(g, m, sa);
+            }
+            if (!opp) {
+                return setObjectTarget(sa, need.link, g.findById(oid)) && play(g, m, sa);
+            }
+            Player other = null;
+            for (Player p : m.getOpponents()) {
+                other = p;
+            }
+            if (other == null) {
+                return false;
+            }
+            for (Card y : new ArrayList<>(other.getCardsIn(zone))) {
+                if (setObjectTarget(sa, need.link, y)) {
+                    target[0] = y.getId();
+                    return play(g, m, sa);
+                }
+            }
+            if (zone != ZoneType.Battlefield) {
+                return false;
+            }
+            // none in play: one of our own cards is handed to the opponent (never a card of theirs we cannot see)
+            final java.util.Set<String> names = new java.util.HashSet<>();
+            int tries = 0;
+            for (ZoneType z : new ZoneType[] {ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile}) {
+                final List<Card> cs = new ArrayList<>(m.getCardsIn(z));
+                cs.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+                for (Card y : cs) {
+                    if (y.getOwner() != m || y.getId() == hc.getId() || !y.isPermanent() || !names.add(y.getName())) {
+                        continue;
+                    }
+                    if (tries++ >= 16) {
+                        return false;
+                    }
+                    g.getTriggerHandler().setSuppressAllTriggers(true);
+                    try {
+                        final Card moved = g.getAction().moveToPlay(y, m, null, null);
+                        if (moved != null && moved.isInPlay()) {
+                            moved.addTempController(other, g.getNextTimestamp());
+                            g.getAction().controllerChangeZoneCorrection(moved);
+                        }
+                    } finally {
+                        g.getTriggerHandler().setSuppressAllTriggers(false);
+                    }
+                    final Card y2 = g.findById(y.getId());
+                    final Card host2 = g.findById(c.getId());
+                    final SpellAbility sa2 = host2 == null ? null : locate(host2, m, desc, costKey, x.battlefield);
+                    if (y2 != null && sa2 != null && y2.isInPlay()) {
+                        sa2.setActivatingPlayer(m);
+                        if (setObjectTarget(sa2, need.link, y2)) {
+                            target[0] = y2.getId();
+                            return play(g, m, sa2);
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+        final java.util.function.Consumer<ProbeAi> tune = !sac ? null : ai -> ai.setCacHook(new forge.ai.CacHook() {
+            @Override
+            public CardCollectionView costCards(PlayerControllerAi c, SpellAbility sa, String part, CardCollectionView valid,
+                    int amount, CardCollectionView def) {
+                if (amount == 1 && valid != null) {
+                    for (Card y : valid) {
+                        if (y.getId() == oid) {
+                            return new CardCollection(y);
+                        }
+                    }
+                }
+                return def;
+            }
+        });
+        final Obs o = run(x.live, x.me, x.card.getId(), setup, act, ForcedWinSolver.mix(x.seed, opp ? -7L : oid * 67L + 5), x.st,
+                tune);
+        if (o.error != null || !o.played) {
+            return null;
+        }
+        String end = null;
+        final String mine = "MOVE " + target[0] + " ";
+        for (String line : o.trace) {
+            if (line.startsWith(mine)) {
+                end = line.split(" ")[3];
+            }
+        }
+        if (sac && end == null) {
+            return null; // the engine paid with another permanent: this one it did not accept
+        }
+        final ObjRun r = new ObjRun();
+        r.obs = o;
+        r.seen = new ForcedWinModel.ObjSeen();
+        // (a card that was in our graveyard and is there again has moved: somewhere the plan has no place for)
+        r.seen.to = opp ? -1 : end == null ? 0 : end.equals("Hand@me") ? Abil.SELF_HAND
+                : end.equals("Graveyard@me") && zone == ZoneType.Battlefield ? Abil.SELF_GRAVEYARD
+                : end.equals("Exile@me") ? Abil.SELF_EXILE : -1;
+        final Abil ab = x.cost.copyCost();
+        ab.targetVariant = x.v;
+        effectsFromTrace(o, x.card.getId(), ab, sa0);
+        ab.effects.addAll(o.effects);
+        ab.counter = sa0.getApi() == forge.game.ability.ApiType.Counter;
+        ab.cardTargets = !sac;
+        r.seen.abil = ab;
+        r.seen.unmapped = o.unmapped > 0;
+        r.seen.again = x.battlefield && x.cost.tapSelf && o.hostEnd == 0 && !o.hostTapped && !opp; // sdcc-bridge-1111
+        return r;
+    }
+
+    /**
+     * A template learned earlier (see {@link ForcedWinModel.Reader#card}): each of its abilities with a need is tried
+     * with the objects of ours that are in the need's zone or in our hand now, whose name the engine's check accepted
+     * and no sandbox has tried yet. An ability that no object had played so far becomes playable with the first that does.
+     */
+    static void extendObjects(ACard t, Game live, Player me, Card card, long seed, Stats st) {
+        for (int side = 0; side < 2; side++) {
+            final boolean bf = side == 1;
+            for (Abil ab : bf ? t.onBattlefield : t.fromHand) {
+                final ForcedWinModel.ObjNeed need = ab.obj;
+                if (need == null || ab.handMask != -1 || need.seen.size() + need.tried.size() >= OBJ_CAP) {
+                    continue;
+                }
+                final ObjCtx x = new ObjCtx();
+                x.live = live;
+                x.me = me;
+                x.card = card;
+                x.cost = ab;
+                x.battlefield = bf;
+                x.v = ab.targetVariant;
+                x.need = need;
+                x.st = st;
+                x.seed = ForcedWinSolver.mix(seed, card.getId() * 71L + (ab.desc + ab.costKey + ab.targetVariant).hashCode());
+                final List<Card> cands = objCards(x, null, OBJ_PRESENT, false, zoneOf(need), ZoneType.Hand, ZoneType.Battlefield);
+                if (cands.isEmpty()) {
+                    continue;
+                }
+                SpellAbility sa0 = locate(card, me, ab.desc, ab.costKey, bf);
+                if (sa0 == null) {
+                    continue;
+                }
+                sa0 = sa0.copy(me);
+                x.hostSetup = bf ? (g, m, c) -> toBattlefield(g, m, c) : (g, m, c) -> {
+                    if (!c.isInZone(ZoneType.Hand)) {
+                        g.getAction().moveToHand(c, null);
+                    }
+                };
+                for (Card c : cands) {
+                    final ObjRun r = tryObject(x, sa0, c);
+                    if (r != null && ab.unplayable) {
+                        ab.unplayable = false;
+                        ab.probeNote = "";
+                    }
+                    if (ForcedWinSolver.RECEIPTS) {
+                        ForcedWinSolver.receipt("FORCED_WIN probe-object-more card=" + card.getName() + " ability=" + ab.kind
+                                + " object=" + c.getName() + " " + (r == null ? "not played" : r.seen.toString()));
                     }
                 }
             }
