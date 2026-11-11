@@ -106,6 +106,7 @@ public class RlSearchOverriddenTest {
             Assert.assertNull(a.guardError);
             Assert.assertEquals(a.seat.searchOverridden, 0, "no search, no search override");
             Assert.assertTrue(changed(a.tape, off).isEmpty(), "no search: every row is the policy's own answer");
+            Assert.assertFalse(a.end.has("search_overridden") || a.tape.has("search_overridden"), "no key without a search");
             // ---- exploration at choice asks and at priority
             final RlActorBench.Cfg cfg = RlActorBenchTest.cfg("train");
             cfg.search = RlSearch.Config.parse(JsonParser.parseString(SPEC).getAsJsonObject());
@@ -118,6 +119,8 @@ public class RlSearchOverriddenTest {
             Assert.assertEquals(ints(p.tape.getAsJsonArray("overridden")), over, "the tape's list is GAME_END's");
             Assert.assertTrue(over.containsAll(ch), "game " + i + ": changed " + ch + " not all in overridden " + over);
             Assert.assertEquals(p.seat.searchOverridden, ch.size(), "one search override per changed answer");
+            Assert.assertEquals(p.end.get("search_overridden").getAsInt(), ch.size(), "GAME_END reports the count");
+            Assert.assertEquals(p.tape.get("search_overridden").getAsInt(), ch.size(), "and the tape");
             final TreeSet<Integer> rows = new TreeSet<>();
             for (JsonElement e : p.end.getAsJsonObject("search").getAsJsonObject("explore").getAsJsonArray("rows")) {
                 final JsonObject r = e.getAsJsonObject();

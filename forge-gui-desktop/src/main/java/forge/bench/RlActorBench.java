@@ -1342,6 +1342,8 @@ public final class RlActorBench {
             // S1: the look-ahead's worker threads' CPU is not in cpu_ms (the game thread's)
             end.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
             end.add("search", search.summary());
+            // sdcc-solver-loop-1111: the answers the search changed away from the policy's own (all in `overridden`)
+            end.addProperty("search_overridden", seat.searchOverridden);
             if (searchAlt != null) {
                 end.add("search_alt", searchAlt.summary()); // choice-search-1105 (only when on)
                 end.addProperty("search_alt_seat", seat.altSeat);
@@ -1417,6 +1419,7 @@ public final class RlActorBench {
         if (search != null) {
             t.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
             t.add("search", end.get("search"));
+            t.add("search_overridden", end.get("search_overridden"));
             if (end.has("search_alt")) {
                 t.add("search_alt", end.get("search_alt")); // choice-search-1105
                 t.add("search_alt_seat", end.get("search_alt_seat"));
