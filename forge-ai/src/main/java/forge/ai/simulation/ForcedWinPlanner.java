@@ -931,10 +931,14 @@ public final class ForcedWinPlanner {
             s.landDrop = false;
             final Perm p = new Perm();
             p.card = host;
-            p.tapped = a.entersTapped;
+            // sdcc-etb-1110 (landEntersProbe; null = off, or not known for this card): the engine's answer for this position
+            // and the battlefield the line has built, not the template's from the card's first sight. A land that enters
+            // tapped makes no mana this turn; the pass untaps it.
+            final int[] entry = landEntry(s, host, a);
+            p.tapped = entry == null ? a.entersTapped : entry[0] != 0;
             s.bf.add(p);
             // solver-gaps-1015: the life its entering cost (a shock land paid untapped), as observed
-            s.life += Math.min(0, a.landLife);
+            s.life += Math.min(0, entry == null ? a.landLife : entry[1]);
             if (s.life <= 0) {
                 return;
             }
@@ -1001,6 +1005,50 @@ public final class ForcedWinPlanner {
                 out.get(i).gyPool.add(host);
             }
         }
+    }
+
+    /**
+     * sdcc-etb-1110 (landEntersProbe): the land entries this plan has asked its position for: by card index where the
+     * answer holds on every battlefield (or is unknown), else by card index and battlefield.
+     */
+    private final Map<Integer, int[]> landAnywhere = new HashMap<>();
+    private final Map<String, int[]> landOnBoard = new HashMap<>();
+
+    /**
+     * sdcc-etb-1110: how the land {@code a} (card index {@code host}) enters as our land drop in {@code s} (the land is
+     * out of the hand, not yet on the battlefield): {1 = tapped, life change} as the position's sandbox observed it on
+     * the battlefield the line has now ({@link ForcedWinModel.LandEntry}; asked once per card, and once per battlefield
+     * where that matters to the card, in a plan), or null when the position has none (the key is off) or does not know
+     * this card.
+     */
+    private int[] landEntry(S s, int host, ACard a) {
+        if (pos.landEntry == null) {
+            return null;
+        }
+        if (landAnywhere.containsKey(host)) {
+            return landAnywhere.get(host);
+        }
+        final int[] bf = new int[s.bf.size()];
+        for (int i = 0; i < bf.length; i++) {
+            bf[i] = cards.get(s.bf.get(i).card).id;
+        }
+        Arrays.sort(bf);
+        final String key = host + Arrays.toString(bf);
+        final int[] known = landOnBoard.get(key);
+        if (known != null) {
+            return known;
+        }
+        final int[] hand = new int[s.hand.size()];
+        for (int i = 0; i < hand.length; i++) {
+            hand[i] = cards.get(s.hand.get(i)).id;
+        }
+        final int[] entry = pos.landEntry.enters(a, bf, hand);
+        if (entry == null || entry.length > 2 && entry[2] != 0) {
+            landAnywhere.put(host, entry);
+        } else {
+            landOnBoard.put(key, entry);
+        }
+        return entry;
     }
 
     private static int bestFloatColour(int mask) {

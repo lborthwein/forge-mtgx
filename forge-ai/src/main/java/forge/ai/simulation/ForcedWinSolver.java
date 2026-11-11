@@ -288,6 +288,22 @@ public final class ForcedWinSolver {
          * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
          */
         public boolean sourceColorsLive = false;
+        /**
+         * sdcc-etb-1110 (false = off, the default, and then nothing changes): how a land of ours enters (tapped or not, and
+         * the life that costs) is asked of the position a plan starts at, not of the template learned at the card's first
+         * sight in the game: when a plan plays a land, that land is played as our land drop in a sandbox copy of the
+         * position and the engine's result is read back, once per land name and position (a land with nothing of its own
+         * that could change how it enters, in a game where nothing in play replaces entries, keeps its template: no sandbox)
+         * ({@link ForcedWinModel.Reader#landEntry}). A land that enters tapped under a condition on the board (unless we
+         * control two or fewer other lands) learned early kept "untapped" for the game: 120 candidate lines that all tap
+         * it on the turn it enters tapped, none legal. A land with a replacement effect of its own is asked again when
+         * the line has changed our battlefield before it plays the land (another land drop and the pass, lands a cost
+         * returned): the sandbox's battlefield is made the plan's first. A choice on entry (pay life or enter tapped) is
+         * the sandbox's Forge AI's, as for the template, but in the position as it is (its turn, its main phase, no
+         * floating mana), which is where the seat's own controller will answer it. Our own positions only
+         * ({@link #readPosition}, the verification re-plan); the defense's reads of the opponent's cards are unchanged.
+         */
+        public boolean landEntersProbe = false;
         public double loopEps = 0.005;
         public int loopMarginalCap = 64;
         /**
@@ -791,6 +807,7 @@ public final class ForcedWinSolver {
             c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
+            c.landEntersProbe = "true".equals(get.apply("landEntersProbe")); // sdcc-etb-1110
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
@@ -5072,6 +5089,9 @@ public final class ForcedWinSolver {
                 if (cfg.sourceColorsLive && hp != null) {
                     ForcedWinModel.Reader.readSourceColors(hp, pg); // ledger-sweep2-1107
                 }
+                if (cfg.landEntersProbe && hp != null) {
+                    hp.landEntry = reader.landEntry(g, pg); // sdcc-etb-1110 (its sandboxes copy the probe root, as the reader's)
+                }
                 return hp;
             }));
         }
@@ -5081,6 +5101,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.sourceOutput && pos != null) {
             ForcedWinModel.Reader.readSourceOutputs(pos, me); // kill-line-1106
+        }
+        if (cfg.landEntersProbe && pos != null) {
+            pos.landEntry = reader.landEntry(live, me); // sdcc-etb-1110: asked when a plan from this position plays a land
         }
         return pos;
     }
@@ -6287,6 +6310,9 @@ public final class ForcedWinSolver {
         if (cfg.sourceOutput) {
             ForcedWinModel.Reader.readSourceOutputs(pos, p);
         }
+        if (cfg.landEntersProbe) {
+            pos.landEntry = reader.landEntry(g, p); // sdcc-etb-1110: this world's position, as the live seat would ask
+        }
         final ForcedWinPlanner.Limits lim = limits();
         lim.nodes = cfg.nodes;
         lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
@@ -7386,6 +7412,11 @@ public final class ForcedWinSolver {
                 + (planFailEngineTakes == 0 ? "" : " planFailEngineTakes=" + planFailEngineTakes)
                 + (verifyReplans == 0 ? "" : " verifyReplans=" + verifyReplans + "/" + verifyReplanLines)
                 + " copies=" + copies + " " + reader.probeStats.summary()
+                // sdcc-etb-1110 (only when used): land-entry sandboxes and those whose answer was not the template's; sandboxes
+                // on a battlefield a plan had changed and those whose answer was not the position's
+                + (reader.landProbes + reader.landPlain == 0 ? "" : " landProbes=" + reader.landProbes + " landDiffers="
+                        + reader.landDiffers + (reader.landContexts == 0 ? "" : " landContexts=" + reader.landContexts
+                                + " landContextDiffers=" + reader.landContextDiffers) + " landPlain=" + reader.landPlain)
                 + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)
                 + (loopMarginals + loopVariantCuts == 0 ? "" : " loopMarginals=" + loopMarginals + " loopVariants="
                         + loopVariants + " loopVariantCuts=" + loopVariantCuts); // choice-search-1105 (only when used)
