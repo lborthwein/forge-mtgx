@@ -216,6 +216,8 @@ public final class ForcedWinPlanner {
          * it on the ability before paying).
          */
         int xValue = -1;
+        /** sdcc-loops-1111 (engineLoopCredit only; transient, not copied): an engine move whose X can only be zero now. */
+        boolean xZero;
         /**
          * solver-cap12-1030 R3-4 (a) review fix (engineX in Forge's move order only; false = off): a single-target variant
          * past the first few (Forge AI's target and {@code targetVariants} more), searched after the node's other moves so

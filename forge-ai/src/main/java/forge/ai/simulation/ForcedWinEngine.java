@@ -287,6 +287,23 @@ final class ForcedWinEngine {
          * our hand holds at least the ancestor's cards (draws are kept, the library may shrink), with progress.
          */
         boolean looseCycles = false;
+        /**
+         * sdcc-loops-1111 (engineLoopCredit; false = off, nothing changes; needs cycles and longLoops): unbounded resource
+         * loops. (1) A round back to an ancestor's position that only adds mana to our pool is a loop (the credit); a loop
+         * that moves no kill counter is fast-forwarded to the count at which the pool covers what our cards could spend
+         * (an X cost: twice the opponents' life), or our tokens their life and blockers, at most {@link #creditCap}; the
+         * search then goes on from that position before any hoist, and a loop that moves a kill counter is fast-forwarded
+         * inside an outlet search too. (2) An X cost is offered at the largest X our mana pays; a move whose X can only be
+         * zero goes last. (3) A land just played is tapped for mana first when a sacrifice cost of ours could take it. (4)
+         * Trigger answers: an optional trigger of ours that Forge AI declines is tried with "yes", and after a forced
+         * trigger target the next targeting trigger's targets branch too (two chained targets). Loop bodies are located
+         * by name (fungible copies).
+         */
+        boolean loopCredit = false;
+        /** sdcc-loops-1111: the most repetitions of a credit loop one fast-forward plays. */
+        int creditCap = 96;
+        /** sdcc-loops-1111: nodes of the sink search after a mana loop. */
+        int sinkNodes = 24;
         // M3 engine-reach-1107: frontier
         /**
          * engine-reach-1107 (0 = off): the share of the time, in percent, the depth-first search keeps; the rest goes to a frontier
@@ -879,6 +896,67 @@ final class ForcedWinEngine {
         return null;
     }
 
+    /**
+     * sdcc-loops-1111 ({@link Limits#loopCredit}): the moves back to an ancestor with the same position (coarse key) whose
+     * counters this node's dominate, with more mana in our pool: one round of an unbounded-mana loop.
+     */
+    private static List<Step> creditBody(Node child) {
+        final List<Step> p = child.path;
+        final String key = child.coarse();
+        Node a = child.parent;
+        for (int len = 1; a != null && len <= p.size(); len++, a = a.parent) {
+            final Step st = p.get(p.size() - len);
+            if (st.pass || st.kind == AbilKind.ATTACK || st.kind == AbilKind.REPEAT) {
+                return null;
+            }
+            if (a.pv != null && child.pv[MANA] > a.pv[MANA] && dominates(child.pv, a.pv) && key.equals(a.coarse())) {
+                return new ArrayList<>(p.subList(p.size() - len, p.size()));
+            }
+        }
+        return null;
+    }
+
+    /** sdcc-loops-1111: a loop body's steps as copies located by name (the cards a loop moves around are fungible). */
+    private static List<Step> byName(List<Step> body) {
+        final List<Step> out = new ArrayList<>();
+        for (Step b : body) {
+            final Step c = b.copy();
+            c.byName = true;
+            out.add(c);
+        }
+        return out;
+    }
+
+    /** A repetition's gain: progress; with {@link Limits#loopCredit} also mana or cards with no counter lower. */
+    private boolean gained(long[] now, long[] before) {
+        return lim.loopCredit ? macroGain(now, before) : progressed(now, before);
+    }
+
+    /** sdcc-loops-1111: a repetition moved a kill counter (the opponents' life, library or poison). */
+    private static boolean killRate(long[] now, long[] prev) {
+        return prev != null && (now[0] > prev[0] || now[1] > prev[1] || now[3] > prev[3]);
+    }
+
+    /**
+     * sdcc-loops-1111 ({@link Limits#loopCredit}): the count of a loop that moves no kill counter and no storm count:
+     * where our tokens reach their ceiling, else where the mana in our pool does ({@link #ceilings}), at the measured
+     * rate; at most {@link Limits#creditCap}. Any other loop keeps {@link #goalCap}.
+     */
+    private int creditCap(Node from, long[] now, long[] prev, int reps) {
+        final int cap = goalCap(now, prev, reps);
+        if (!lim.loopCredit || prev == null || killRate(now, prev) || now[5] > prev[5]) {
+            return cap;
+        }
+        final int idx = now[4] > prev[4] ? 4 : now[MANA] > prev[MANA] ? MANA : -1;
+        if (idx < 0) {
+            return cap;
+        }
+        final long[] ceil = ceilings(from.g, from.me, false);
+        final long rate = now[idx] - prev[idx];
+        final long need = Math.max(0, (ceil[idx] - now[idx] + rate - 1) / rate);
+        return (int) Math.min(reps + (long) lim.creditCap, reps + need);
+    }
+
     /** The result of fast-forwarding a loop: a win (its path), or the node after the last repetition that progressed. */
     static final class Forward {
         List<Step> win;
@@ -1134,7 +1212,11 @@ final class ForcedWinEngine {
         int reps = played;
         Node cur = from;
         int chunk = 1;
-        int cap = goalCap(from.pv, a1 == null ? null : a1.pv, reps);
+        int cap = creditCap(from, from.pv, a1 == null ? null : a1.pv, reps); // sdcc-loops-1111 (off: goalCap)
+        // sdcc-loops-1111: a loop that only adds mana or tokens (its count is creditCap's) has its outlet after the count
+        // (the sink search, the pass and attack): none is searched at the doublings
+        final boolean manaOnly = lim.loopCredit && a1 != null && a1.pv != null && !killRate(from.pv, a1.pv)
+                && from.pv[5] <= a1.pv[5] && (from.pv[4] > a1.pv[4] || from.pv[MANA] > a1.pv[MANA]);
         Node lowNode = cur; // loop-exec-1107 (loopBisect): the last count whose outlet search found no win
         int lowReps = reps;
         while (reps < cap && !out()) {
@@ -1178,7 +1260,7 @@ final class ForcedWinEngine {
                     a.child.passed = next.passed;
                     next = a.child;
                 }
-                if (!progressed(next.pv, before)) {
+                if (!gained(next.pv, before)) {
                     failed = true;
                     break;
                 }
@@ -1203,7 +1285,7 @@ final class ForcedWinEngine {
             cur = next;
             reps += done;
             chunk *= 2;
-            if (lim.loopOutlets && reps < cap) {
+            if (lim.loopOutlets && reps < cap && !manaOnly && !(lim.loopCredit && inOutlet)) {
                 List<Step> win = outletSearch(cur, from, prefix, body, reps);
                 if (win != null) {
                     if (lim.loopBisect) {
@@ -1269,6 +1351,84 @@ final class ForcedWinEngine {
         }
     }
 
+    /**
+     * sdcc-loops-1111 ({@link Limits#loopCredit}): the sinks of a mana loop, from the position its fast-forward reached:
+     * a search whose first ply is only the moves that pay an X above zero, with {@link Limits#sinkNodes} nodes. Inside it
+     * only a loop that moves a kill counter is fast-forwarded (as in an outlet search). The node's game is copied, not
+     * played on.
+     */
+    private List<Step> sinkSearch(Node n) {
+        final int nodes = lim.nodes;
+        final java.util.Map<String, List<long[]>> keep = new java.util.HashMap<>(table);
+        lim.nodes = Math.min(nodes, st.nodes + lim.sinkNodes);
+        inOutlet = true;
+        sinkPly = true;
+        try {
+            return dfs(n, 0);
+        } finally {
+            sinkPly = false;
+            inOutlet = false;
+            lim.nodes = nodes;
+            table.clear();
+            table.putAll(keep);
+            forge.util.IdScope.install(cloneScope(n.ids));
+        }
+    }
+
+    /** sdcc-loops-1111: the next node's moves are a sink search's first ply (X above zero only). */
+    private boolean sinkPly;
+    /** sdcc-loops-1111: the next node's only move is PASS ({@link #passSwing}). */
+    private boolean passPly;
+
+    /**
+     * sdcc-loops-1111 ({@link Limits#loopCredit}): after a loop that made creature tokens, when our creatures' power
+     * covers the opponent's life past one blocker each of theirs: pass the turn and search our next main phase (the
+     * attack is its first move), three nodes. Also in the this-turn pass: the loop's kill is the attack a turn later.
+     */
+    private List<Step> passSwing(Node n) {
+        if (n.passed || !lethalNextTurn(n)) {
+            return null;
+        }
+        final int nodes = lim.nodes;
+        final boolean pass = lim.passTurn;
+        final java.util.Map<String, List<long[]>> keep = new java.util.HashMap<>(table);
+        lim.nodes = Math.min(nodes, st.nodes + 3);
+        lim.passTurn = true;
+        inOutlet = true;
+        passPly = true;
+        try {
+            return dfs(n, 0);
+        } finally {
+            passPly = false;
+            inOutlet = false;
+            lim.passTurn = pass;
+            lim.nodes = nodes;
+            table.clear();
+            table.putAll(keep);
+        }
+    }
+
+    /** sdcc-loops-1111: our creatures' power, less the strongest one per creature of the opponent's, covers their life. */
+    private static boolean lethalNextTurn(Node n) {
+        Player opp = null;
+        for (Player o : n.me.getOpponents()) {
+            opp = o;
+        }
+        if (opp == null) {
+            return false;
+        }
+        final List<Integer> pw = new ArrayList<>();
+        for (Card c : n.me.getCreaturesInPlay()) {
+            pw.add(Math.max(0, c.getNetCombatDamage()));
+        }
+        pw.sort(java.util.Collections.reverseOrder());
+        int power = 0;
+        for (int i = opp.getCreaturesInPlay().size(); i < pw.size(); i++) {
+            power += pw.get(i);
+        }
+        return power >= opp.getLife();
+    }
+
     // ------------------------------------------------------------------ loop-exec-1107: loop counts by search
 
     /**
@@ -1290,7 +1450,7 @@ final class ForcedWinEngine {
                 a.child.passed = next.passed;
                 next = a.child;
             }
-            if (!progressed(next.pv, before)) {
+            if (!gained(next.pv, before)) {
                 return null;
             }
             before = next.pv;
@@ -1483,7 +1643,7 @@ final class ForcedWinEngine {
                     ap.child.passed = next.passed;
                     next = ap.child;
                 }
-                if (!progressed(next.pv, before)) {
+                if (!gained(next.pv, before)) {
                     failed = true;
                     break;
                 }
@@ -2084,6 +2244,7 @@ final class ForcedWinEngine {
                     variants.add(v);
                 }
             }
+            creditVariants(mv, a, moves, mi + 1, variants); // sdcc-loops-1111 (off: nothing)
             if (a.won) {
                 final List<Step> path = new ArrayList<>(node.path);
                 path.add(mv);
@@ -2174,11 +2335,20 @@ final class ForcedWinEngine {
             outletSkip = null; // first ply only
             moves.removeIf(m -> skip.contains(m.kind + "|" + m.hostId + "|" + m.desc));
         }
+        if (sinkPly) {
+            sinkPly = false; // sdcc-loops-1111: first ply only
+            moves.removeIf(m -> m.xValue <= 0);
+        }
+        if (passPly) {
+            passPly = false; // sdcc-loops-1111: first ply only
+            moves.removeIf(m -> !m.pass || m.toEnd);
+        }
         if (TRACE) {
             ForcedWinSolver.receipt("FW_ENGINE node depth=" + depth + " path=" + node.path + " moves=" + moves);
         }
         int tried = 0;
         final Set<Step> variants = new HashSet<>();
+        final Set<Step> deferred = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()); // sdcc-loops-1111
         // labeller-v2 (a)/(e): variants applied while ranking, kept for their turn in the loop (by identity)
         final java.util.Map<Step, Applied> pre = new java.util.IdentityHashMap<>();
         final List<Applied> luck = lim.verify != null ? new ArrayList<>() : null; // unified-search-1106
@@ -2189,7 +2359,7 @@ final class ForcedWinEngine {
             // picks, its trigger targets) have their own cap and no longer crowd the other moves out (Natural Order's
             // variants used every branch, so casting Llanowar Elves first was never tried)
             // R3-4 (a): an X variant (xValue >= 0, engineX only) is a variant of its move, like a forced pick
-            final boolean variant = variants.contains(mv) || mv.xValue >= 0;
+            final boolean variant = variants.contains(mv) || mv.xValue >= 0 || deferred.contains(mv);
             if (out() || !variant && tried >= lim.branching) {
                 if (out()) {
                     break;
@@ -2213,6 +2383,20 @@ final class ForcedWinEngine {
             if (a == null) {
                 continue;
             }
+            final boolean again = deferred.contains(mv);
+            if (lim.loopCredit && !again && !a.won && a.declined && a.rec == null && !mv.pass && mv.kind != AbilKind.ATTACK
+                    && mv.kind != AbilKind.REPEAT && !TriggerTargets.saysYes(mv.triggerRef)) {
+                // sdcc-loops-1111: Forge AI declined an optional trigger of ours: the "yes" variant is searched first, this
+                // move (already applied) right after it
+                final Step v = mv.copy();
+                v.triggerRef = mv.triggerRef == null ? "Y" : "Y>" + mv.triggerRef;
+                moves.add(mi + 1, v);
+                variants.add(v);
+                moves.add(mi + 2, mv);
+                pre.put(mv, a);
+                deferred.add(mv);
+                continue;
+            }
             if (a.rec != null) {
                 if (a.rec.miss && !a.won) {
                     continue; // a forced answer that did not apply: the same play as another variant
@@ -2227,6 +2411,9 @@ final class ForcedWinEngine {
                 if (lim.pay && mv.payFloats == null && (mv.cac == null || mv.cac.isEmpty())) {
                     expandPay(node, mv, a, moves, at, variants, pre);
                 }
+            }
+            if (again) {
+                a.declined = false; // its "yes" variant is already in the list
             }
             if (mv.pickName == null && !a.pickCandidates.isEmpty()) {
                 // the move searched our library: try it again with each of a few forced picks next (biggest first)
@@ -2254,6 +2441,7 @@ final class ForcedWinEngine {
                     variants.add(v);
                 }
             }
+            creditVariants(mv, a, moves, mi + 1, variants); // sdcc-loops-1111 (off: nothing)
             if (a.won) {
                 final List<Step> path = new ArrayList<>(node.path);
                 path.add(mv);
@@ -2298,6 +2486,38 @@ final class ForcedWinEngine {
             }
         }
         return null;
+    }
+
+    /**
+     * sdcc-loops-1111 ({@link Limits#loopCredit}): further forced-answer variants of an applied move, inserted at
+     * {@code at}: "yes" to an optional trigger of ours Forge AI declined; the first trigger's targets under a "yes"; and
+     * after one forced trigger target the next targeting trigger's targets (two chained targets).
+     */
+    private void creditVariants(Step mv, Applied a, List<Step> moves, int at, Set<Step> variants) {
+        if (!lim.loopCredit || mv.pass || mv.kind == AbilKind.ATTACK || mv.kind == AbilKind.REPEAT) {
+            return;
+        }
+        final List<String> refs = new ArrayList<>();
+        final int n = TriggerTargets.chainLength(mv.triggerRef);
+        if (a.declined && !TriggerTargets.saysYes(mv.triggerRef)) {
+            refs.add(mv.triggerRef == null ? "Y" : "Y>" + mv.triggerRef);
+        }
+        final List<String> next = mv.triggerRef != null && n == 0 ? a.triggerCandidates : n == 1 ? a.nextTriggerCandidates
+                : List.<String>of();
+        int k = 0;
+        for (String ref : next) {
+            if (k++ >= lim.triggerVariants) {
+                break;
+            }
+            refs.add(mv.triggerRef + ">" + ref);
+        }
+        int i = 0;
+        for (String ref : refs) {
+            final Step v = mv.copy();
+            v.triggerRef = ref;
+            moves.add(at + i++, v);
+            variants.add(v);
+        }
     }
 
     /**
@@ -2400,6 +2620,7 @@ final class ForcedWinEngine {
                     variants.add(v);
                 }
             }
+            creditVariants(mv, a, moves, mi + 1, variants); // sdcc-loops-1111 (off: nothing)
             for (int vi = mi + 1; vi < moves.size() && vi <= mi + (moves.size() - before); vi++) {
                 final Step vs = moves.get(vi);
                 if (variants.contains(vs) && !baseOf.containsKey(vs)) {
@@ -2581,12 +2802,49 @@ final class ForcedWinEngine {
                 body = looseCycleBody(a.child); // engine-reach-1107
                 played = 1;
             }
-            if (body != null && inOutlet) {
+            if (body == null && lim.loopCredit && lim.longLoops) {
+                body = creditBody(a.child); // sdcc-loops-1111: back at an ancestor's position with more mana
+                played = 1;
+            }
+            if (body != null && inOutlet && !(lim.loopCredit && lim.longLoops
+                    && killRate(a.child.pv, ancestor(a.child, body.size()) == null ? null : ancestor(a.child, body.size()).pv))) {
                 st.pruned++;
                 return null;
             }
             if (body != null) {
+                if (lim.loopCredit) {
+                    body = byName(body); // sdcc-loops-1111
+                }
                 final Forward fw = fastForward(a.child, body, played);
+                boolean searched = false;
+                if (fw.win == null && lim.loopCredit && fw.node != null && !inOutlet && fw.node.pv[4] > a.child.pv[4]) {
+                    final List<Step> r = passSwing(fw.node); // sdcc-loops-1111: the loop made tokens: pass and attack
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                    if (r != null) {
+                        return r;
+                    }
+                }
+                if (fw.win == null && lim.loopCredit && fw.node != null && fw.node.pv[MANA] > a.child.pv[MANA]) {
+                    // sdcc-loops-1111: the loop left more mana in our pool: spend it from here first (the outlet is the
+                    // whole search below), before the loop is tried from earlier nodes
+                    searched = true;
+                    if (!seenDominated(fw.node)) {
+                        final long held = fw.node.g != a.child.g ? a.child.cards : 0;
+                        pathCards += held;
+                        final List<Step> r;
+                        try {
+                            final List<Step> sink = inOutlet ? null : sinkSearch(fw.node);
+                            r = sink != null ? sink : dfs(fw.node, depth + 1);
+                        } finally {
+                            pathCards -= held;
+                        }
+                        if (r != null) {
+                            return r;
+                        }
+                    } else {
+                        st.pruned++;
+                    }
+                }
                 if (fw.win != null) {
                     final List<Step> w = wonVerified(fw.win, node); // solver-gaps-1104 (off = fw.win)
                     if (w != null || lim.verify == null) {
@@ -2598,6 +2856,9 @@ final class ForcedWinEngine {
                     if (hw != null) {
                         return hw;
                     }
+                }
+                if (searched) {
+                    return null;
                 }
                 if (fw.node != null && !seenDominated(fw.node)) {
                     // review #11: while the REPEAT node is searched, its parent link keeps the DFS child's copy too
@@ -2775,6 +3036,24 @@ final class ForcedWinEngine {
         if (lim.floatMana) {
             floatMoves(me, needed, keys, floats);
         }
+        final List<Step> xZero = new ArrayList<>();
+        if (lim.loopCredit) {
+            // sdcc-loops-1111: a land just played is tapped for mana first when a sacrifice cost of ours could take it
+            // (its mana is otherwise lost with it); a move whose X can only be zero waits behind the node's other moves
+            final Step lf = last != null && last.kind == AbilKind.LAND ? landFloat(g, me, last.hostId, needed) : null;
+            if (lf != null && keys.add("float|" + lf.hostId + "|" + lf.floatColor)) {
+                rep.add(0, lf);
+            }
+            for (List<Step> xs : List.of(act, spells)) {
+                for (java.util.Iterator<Step> it = xs.iterator(); it.hasNext();) {
+                    final Step m = it.next();
+                    if (m.xZero) {
+                        xZero.add(m);
+                        it.remove();
+                    }
+                }
+            }
+        }
         final List<Step> out = new ArrayList<>(rep);
         if (lim.floatFirst) {
             for (java.util.Iterator<Step> it = floats.iterator(); it.hasNext();) {
@@ -2790,6 +3069,7 @@ final class ForcedWinEngine {
         out.addAll(spells);
         out.addAll(floats);
         out.addAll(lands);
+        out.addAll(xZero); // sdcc-loops-1111 (off: empty)
         if (node.afterLoop != null) {
             // R2-3 (the outlet search): after a loop's checkpoint its body's own moves are not searched again
             final Set<String> bodyKeys = new HashSet<>();
@@ -2840,6 +3120,63 @@ final class ForcedWinEngine {
             out.addAll(wide);
         }
         return out;
+    }
+
+    /**
+     * sdcc-loops-1111 ({@link Limits#loopCredit}): the float of the untapped land {@code id} of ours (a colour our cards
+     * need, else its first), when an activated ability of a permanent of ours has a sacrifice cost this land could pay.
+     * Null when there is none.
+     */
+    private static Step landFloat(Game g, Player me, int id, int needed) {
+        final Card land = g.findById(id);
+        if (land == null || !land.isInPlay() || !land.isLand() || land.isTapped() || land.getController() != me) {
+            return null;
+        }
+        boolean outlet = false;
+        scan:
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            for (SpellAbility sa : c.getSpellAbilities()) {
+                if (!sa.isActivatedAbility() || sa.getPayCosts() == null) {
+                    continue;
+                }
+                for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+                    if (part instanceof forge.game.cost.CostSacrifice cs && (cs.payCostFromSource() ? c == land
+                            : land.isValid(cs.getType().split(";"), me, c, sa))) {
+                        outlet = true;
+                        break scan;
+                    }
+                }
+            }
+        }
+        if (!outlet) {
+            return null;
+        }
+        for (SpellAbility m : land.getManaAbilities()) {
+            if (m.getPayCosts() == null) {
+                continue;
+            }
+            final SpellAbility mc = m.copy(me);
+            mc.setActivatingPlayer(me);
+            if (!mc.canPlay() || !ComputerUtilCost.canPayCost(mc, me, false) || mc.getManaPart() == null) {
+                continue;
+            }
+            int first = -1;
+            for (int i = 0; i < 6; i++) {
+                if (!mc.canProduce(ForcedWinModel.SHORT[i])) {
+                    continue;
+                }
+                if (i < 5 && (needed & (1 << i)) != 0) {
+                    return Step.floatMana(land.getId(), land.getName(), m.getDescription(), i);
+                }
+                if (first < 0) {
+                    first = i;
+                }
+            }
+            if (first >= 0) {
+                return Step.floatMana(land.getId(), land.getName(), m.getDescription(), first);
+            }
+        }
+        return null;
     }
 
     /**
@@ -2971,6 +3308,9 @@ final class ForcedWinEngine {
     /** One step per target variant of a legal ability; with {@link Limits#xChoice} also its X variants (R3-4 a). */
     private List<Step> variants(Game g, Player me, Card c, SpellAbility sa0, String desc, String costKey) {
         final List<Step> out = variants0(g, me, c, sa0, desc, costKey);
+        if (lim.loopCredit && !lim.xChoice && !out.isEmpty()) {
+            return creditX(out, sa0, me); // sdcc-loops-1111
+        }
         if (!lim.xChoice || out.isEmpty()) {
             return out;
         }
@@ -2994,6 +3334,39 @@ final class ForcedWinEngine {
                 all.add(v);
             }
         }
+        return all;
+    }
+
+    /**
+     * sdcc-loops-1111 ({@link Limits#loopCredit}): an ability with X in its mana cost is offered first at the largest X
+     * our mana pays (pool and sources), then as Forge AI pays it; when that X is zero the moves are marked to go last.
+     */
+    private List<Step> creditX(List<Step> out, SpellAbility sa0, Player me) {
+        final int x;
+        try {
+            final forge.game.cost.Cost pc = sa0.getPayCosts();
+            if (pc == null || !pc.hasManaCost() || pc.getTotalMana().countX() == 0) {
+                return out;
+            }
+            final SpellAbility sa = sa0.copy(me);
+            sa.setActivatingPlayer(me);
+            x = forge.ai.ComputerUtilMana.determineLeftoverMana(sa, me, false); // the X itself (each X of the cost is counted)
+        } catch (RuntimeException e) {
+            return out;
+        }
+        if (x <= 0) {
+            for (Step base : out) {
+                base.xZero = true;
+            }
+            return out;
+        }
+        final List<Step> all = new ArrayList<>();
+        for (Step base : out) {
+            final Step v = base.copy();
+            v.xValue = x;
+            all.add(v);
+        }
+        all.addAll(out);
         return all;
     }
 
@@ -3373,11 +3746,66 @@ final class ForcedWinEngine {
         Card forcedHost;
 
         boolean confirms(forge.game.trigger.WrappedAbility w) {
-            return forcedHost != null && w != null && w.getHostCard() != null && w.getHostCard().getId() == forcedHost.getId();
+            if (w == null || w.getHostCard() == null) {
+                return false;
+            }
+            if (forcedHost != null && w.getHostCard().getId() == forcedHost.getId()) {
+                return true;
+            }
+            return forcedHosts != null && forcedHosts.contains(w.getHostCard().getId());
+        }
+
+        /**
+         * sdcc-loops-1111 (engineLoopCredit): the forced answer in trigger order. {@link #forced} is ">"-separated: "Y"
+         * answers our optional triggers yes; each other part is the target of the next targeting trigger of ours in the
+         * step's window (two chained targets: "C33>C32"). A single ref (every line made with the key off) is one part.
+         */
+        final List<String> chain = new ArrayList<>();
+        boolean yes;
+        /** The targeting triggers of ours seen in this window, and the hosts forced after the first. */
+        int level;
+        Set<Integer> forcedHosts;
+        /** Engine only (set by MoveAi under loopCredit): also record the targets of the trigger after the forced ones. */
+        boolean deep;
+        List<String> nextCandidates = List.of();
+        /** Engine only: Forge AI declined an optional trigger of ours in this window. */
+        boolean declined;
+
+        /** sdcc-loops-1111: our own optional trigger while the step says yes. */
+        boolean confirmsOwn(forge.game.trigger.WrappedAbility w, Player me) {
+            return yes && ownOptional(w, me);
+        }
+
+        static boolean ownOptional(forge.game.trigger.WrappedAbility w, Player me) {
+            return w != null && !w.isMandatory() && w.getHostCard() != null && w.getActivatingPlayer() == me;
+        }
+
+        /** The number of forced targets in a trigger ref, and whether it says yes to optional triggers. */
+        static int chainLength(String ref) {
+            int n = 0;
+            if (ref != null) {
+                for (String t : ref.split(">")) {
+                    n += t.equals("Y") ? 0 : 1;
+                }
+            }
+            return n;
+        }
+
+        static boolean saysYes(String ref) {
+            return ref != null && (ref.equals("Y") || ref.startsWith("Y>"));
         }
 
         TriggerTargets(String forced) {
             this.forced = forced;
+            if (forced != null) {
+                for (String t : forced.split(">")) {
+                    if (t.equals("Y")) {
+                        yes = true;
+                    } else {
+                        chain.add(t);
+                    }
+                }
+            }
         }
 
         /**
@@ -3392,14 +3820,48 @@ final class ForcedWinEngine {
 
         /** Handle the forced trigger (played here); the rest go back to Forge AI. */
         List<SpellAbility> apply(Game g, Player me, List<SpellAbility> abilities) {
-            if (seen) {
+            // sdcc-loops-1111: past the first targeting trigger only a chained ref or the engine's deep record goes on
+            final boolean more = chain.size() > 1 || deep;
+            if (seen && !more) {
                 return abilities;
             }
             final List<SpellAbility> rest = new ArrayList<>();
             for (SpellAbility sa : abilities) {
-                final SpellAbility slot = seen || !sa.isTrigger() || sa.getActivatingPlayer() != me ? null
+                final SpellAbility slot = seen && !more || !sa.isTrigger() || sa.getActivatingPlayer() != me ? null
                         : LookaheadSearch.singleTargetSlot(sa);
                 if (slot == null || firstTargeting(sa) != slot) {
+                    rest.add(sa);
+                    continue;
+                }
+                final int lv = level++;
+                if (lv > 0) {
+                    // sdcc-loops-1111: the next trigger in the chain: its forced target, or (engine) its candidates
+                    if (lv < chain.size()) {
+                        final String f = chain.get(lv);
+                        final int fl2 = f.indexOf("+F");
+                        final String ref2 = fl2 < 0 ? f : f.substring(0, fl2);
+                        if (LookaheadSearch.applyTarget(slot, ref2, g) && sa.isTargetNumberValid()) {
+                            if (forcedHosts == null) {
+                                forcedHosts = new HashSet<>();
+                            }
+                            forcedHosts.add(sa.getHostCard().getId());
+                            forge.ai.ComputerUtil.playStack(sa, me, g);
+                            if (fl2 >= 0) {
+                                final SpellAbility m = ChooseACard.floatSa(g, me, Integer.parseInt(ref2.substring(1)),
+                                        Integer.parseInt(f.substring(fl2 + 2)));
+                                if (m == null || !forge.ai.ComputerUtil.handlePlayingSpellAbility(me, m, null)) {
+                                    floatFailed = true;
+                                }
+                            }
+                            continue;
+                        }
+                    } else if (deep && lv == chain.size() && nextCandidates.isEmpty()) {
+                        nextCandidates = wide ? wideCandidates(g, me, sa, slot) : List.of();
+                        if (TRACE) {
+                            ForcedWinSolver.receipt("FW_ENGINE   trigger#" + lv + " " + sa.getHostCard().getName() + " candidates "
+                                    + nextCandidates);
+                        }
+                    }
                     rest.add(sa);
                     continue;
                 }
@@ -3431,6 +3893,7 @@ final class ForcedWinEngine {
                     }
                     ForcedWinSolver.receipt("FW_ENGINE   trigger " + sa.getHostCard().getName() + " candidates " + sb);
                 }
+                final String forced = chain.isEmpty() ? null : chain.get(0); // a single ref: the whole string, as before
                 final int fl = forced == null ? -1 : forced.indexOf("+F");
                 final String ref = fl < 0 ? forced : forced.substring(0, fl);
                 if (forced != null && LookaheadSearch.applyTarget(slot, ref, g) && sa.isTargetNumberValid()) {
@@ -3607,6 +4070,9 @@ final class ForcedWinEngine {
         String why = "";
         List<String> triggerCandidates = List.of();
         List<String> pickCandidates = List.of();
+        /** sdcc-loops-1111 (loopCredit): the targets of the trigger after the forced ones; an optional trigger declined. */
+        List<String> nextTriggerCandidates = List.of();
+        boolean declined;
         /** labeller-v2 (a): the move's choice points (null = v1). */
         ForcedWinChoices.Recorder rec;
     }
@@ -3702,6 +4168,7 @@ final class ForcedWinEngine {
                 ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap); // labeller-v2 (a)
             }
             ai.lim = lim;
+            ai.triggers.deep = lim.loopCredit; // sdcc-loops-1111
             if (lim.triggerTargets) {
                 ai.triggers.wide = true; // solver-gaps-1104
                 ai.triggers.cap = lim.triggerVariants;
@@ -3738,6 +4205,8 @@ final class ForcedWinEngine {
             }
             final Applied a = new Applied();
             a.triggerCandidates = ai.triggers.candidates;
+            a.nextTriggerCandidates = ai.triggers.nextCandidates;
+            a.declined = ai.triggers.declined;
             a.pickCandidates = ai.picks.candidates;
             a.rec = ai.rec;
             a.won = me.hasWon() || me.getOpponents().stream().anyMatch(Player::hasLost);
@@ -4022,6 +4491,20 @@ final class ForcedWinEngine {
         public boolean confirmTrigger(forge.game.trigger.WrappedAbility wrapper) {
             if (triggers.confirms(wrapper)) {
                 return true;
+            }
+            if (lim.loopCredit && TriggerTargets.ownOptional(wrapper, getPlayer())) {
+                // sdcc-loops-1111: our optional trigger: yes when the move says so; Forge AI's no is recorded (a variant)
+                if (triggers.yes) {
+                    return true;
+                }
+                if (!(rec != null && lim.costChoice)) {
+                    final boolean def = super.confirmTrigger(wrapper);
+                    triggers.declined |= !def;
+                    if (TRACE) {
+                        ForcedWinSolver.receipt("FW_ENGINE   optional trigger " + wrapper.getHostCard().getName() + " ai=" + def);
+                    }
+                    return def;
+                }
             }
             if (rec != null && lim.costChoice && wrapper != null && wrapper.getHostCard() != null) {
                 // R3-4 (b), engineCostChoice: our optional trigger ("you may") is a choice point: Forge AI's answer and
