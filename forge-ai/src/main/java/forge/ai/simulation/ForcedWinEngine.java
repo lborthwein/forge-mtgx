@@ -1435,6 +1435,12 @@ final class ForcedWinEngine {
         if (n.passed || !lethalNextTurn(n)) {
             return null;
         }
+        // sdcc-integ2-1111: tokens that can attack at once (haste) win by the line's own attack this turn, as with the
+        // key off; a pass would leave that attack to whoever declares for the seat (and the tokens may not last the turn)
+        final List<Step> now = swingNow(n);
+        if (now != null) {
+            return now;
+        }
         final int nodes = lim.nodes;
         final boolean pass = lim.passTurn;
         final java.util.Map<String, List<long[]>> keep = new java.util.HashMap<>(table);
@@ -1446,6 +1452,33 @@ final class ForcedWinEngine {
             return dfs(n, 0);
         } finally {
             passPly = false;
+            inOutlet = false;
+            lim.passTurn = pass;
+            lim.nodes = nodes;
+            table.clear();
+            table.putAll(keep);
+        }
+    }
+
+    /** sdcc-integ2-1111: the next node's only move is the attack ({@link #swingNow}). */
+    private boolean attackPly;
+
+    /**
+     * sdcc-integ2-1111 ({@link Limits#loopCredit}): after a loop that made creature tokens, the attack alone, this turn
+     * (the root and one node after it). Null when there is no attack or it does not win.
+     */
+    private List<Step> swingNow(Node n) {
+        final int nodes = lim.nodes;
+        final boolean pass = lim.passTurn;
+        final java.util.Map<String, List<long[]>> keep = new java.util.HashMap<>(table);
+        lim.nodes = Math.min(nodes, st.nodes + 2);
+        lim.passTurn = false;
+        inOutlet = true;
+        attackPly = true;
+        try {
+            return dfs(n, 0);
+        } finally {
+            attackPly = false;
             inOutlet = false;
             lim.passTurn = pass;
             lim.nodes = nodes;
@@ -2448,6 +2481,10 @@ final class ForcedWinEngine {
             passPly = false; // sdcc-loops-1111: first ply only
             moves.removeIf(m -> !m.pass || m.toEnd);
         }
+        if (attackPly) {
+            attackPly = false; // sdcc-integ2-1111: first ply only
+            moves.removeIf(m -> m.kind != AbilKind.ATTACK);
+        }
         if (TRACE) {
             ForcedWinSolver.receipt("FW_ENGINE node depth=" + depth + " path=" + node.path + " moves=" + moves);
         }
@@ -2983,6 +3020,10 @@ final class ForcedWinEngine {
         if (passPly) {
             passPly = false; // first ply only
             moves.removeIf(m -> !m.pass || m.toEnd);
+        }
+        if (attackPly) {
+            attackPly = false; // first ply only
+            moves.removeIf(m -> m.kind != AbilKind.ATTACK);
         }
         final int left = focusLeft(node);
         node.focusLeft = left;
