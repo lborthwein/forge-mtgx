@@ -291,10 +291,10 @@ final class ForcedWinEngine {
          * sdcc-loops-1111 (engineLoopCredit; false = off, nothing changes; needs cycles and longLoops): unbounded resource
          * loops. (1) A round back to an ancestor's position that only adds mana to our pool is a loop (the credit); a loop
          * that moves no kill counter is fast-forwarded to the count at which the pool covers what our cards could spend
-         * (an X cost: twice the opponents' life), or our tokens their life and blockers, at most {@link #creditCap}; the
-         * search then goes on from that position before any hoist, and a loop that moves a kill counter is fast-forwarded
-         * inside an outlet search too. (2) An X cost is offered at the largest X our mana pays; a move whose X can only be
-         * zero goes last. (3) A land just played is tapped for mana first when a sacrifice cost of ours could take it. (4)
+         * (an X cost: twice the opponents' life), or our tokens their life and blockers, at most {@link #creditCap}, with
+         * no outlet search at the doublings; then a sink search (first ply: X above zero) or, for tokens, the pass and
+         * attack, before the hoists (a hoisted loop of this kind does the same); a loop that moves a kill counter is
+         * fast-forwarded in an outlet search too. (2) An X cost is offered at the largest X our mana pays; zero X goes last. (3) A land just played is tapped for mana first when a sacrifice cost of ours could take it. (4)
          * Trigger answers: an optional trigger of ours that Forge AI declines is tried with "yes", and after a forced
          * trigger target the next targeting trigger's targets branch too (two chained targets). Loop bodies are located
          * by name (fungible copies).
@@ -2867,7 +2867,6 @@ final class ForcedWinEngine {
                     body = byName(body); // sdcc-loops-1111
                 }
                 final Forward fw = fastForward(a.child, body, played);
-                boolean searched = false;
                 if (fw.win == null && lim.loopCredit && fw.node != null && !inOutlet && fw.node.pv[4] > a.child.pv[4]) {
                     final List<Step> r = passSwing(fw.node); // sdcc-loops-1111: the loop made tokens: pass and attack
                     forge.util.IdScope.install(cloneScope(node.ids));
@@ -2875,25 +2874,14 @@ final class ForcedWinEngine {
                         return r;
                     }
                 }
-                if (fw.win == null && lim.loopCredit && fw.node != null && fw.node.pv[MANA] > a.child.pv[MANA]) {
-                    // sdcc-loops-1111: the loop left more mana in our pool: spend it from here first (the outlet is the
-                    // whole search below), before the loop is tried from earlier nodes
-                    searched = true;
-                    if (!seenDominated(fw.node)) {
-                        final long held = fw.node.g != a.child.g ? a.child.cards : 0;
-                        pathCards += held;
-                        final List<Step> r;
-                        try {
-                            final List<Step> sink = inOutlet ? null : sinkSearch(fw.node);
-                            r = sink != null ? sink : dfs(fw.node, depth + 1);
-                        } finally {
-                            pathCards -= held;
-                        }
-                        if (r != null) {
-                            return r;
-                        }
-                    } else {
-                        st.pruned++;
+                if (fw.win == null && lim.loopCredit && fw.node != null && !inOutlet
+                        && fw.node.pv[MANA] > a.child.pv[MANA]) {
+                    // sdcc-loops-1111: the loop left more mana in our pool: its sinks (an X above zero) first; then, as
+                    // before, the loop from earlier nodes and the search from here
+                    final List<Step> r = sinkSearch(fw.node);
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                    if (r != null) {
+                        return r;
                     }
                 }
                 if (fw.win != null) {
@@ -2907,9 +2895,6 @@ final class ForcedWinEngine {
                     if (hw != null) {
                         return hw;
                     }
-                }
-                if (searched) {
-                    return null;
                 }
                 if (fw.node != null && !seenDominated(fw.node)) {
                     // review #11: while the REPEAT node is searched, its parent link keeps the DFS child's copy too
