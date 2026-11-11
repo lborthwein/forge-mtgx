@@ -953,6 +953,19 @@ public final class RlActorBench {
             out.guardError = "seeding is a TRAIN curriculum: not allowed in eval mode";
             return out;
         }
+        // sdcc-curric-1111: a position start, a TRAIN curriculum; null (off, the default) without a GAME "start_state"
+        // object, and then nothing below changes (game type, mulligans, start hook, tape)
+        final RlStartState startState;
+        try {
+            startState = RlStartState.of(g, seed);
+        } catch (RuntimeException e) {
+            out.guardError = "start_state: " + e.getMessage();
+            return out;
+        }
+        if (startState != null && ("eval".equals(mode) || seeding != null)) {
+            out.guardError = "start_state is a TRAIN curriculum: not allowed in eval mode or with seeding";
+            return out;
+        }
         // r3-distill-1010 (R3-CM label games): the look-ahead for ONE seat (an RL seat), or -1 (absent: every RL seat)
         final int searchSeat;
         if (g.has("search_seat") && !g.get("search_seat").isJsonNull()) {
@@ -1047,7 +1060,8 @@ public final class RlActorBench {
         if (anyBridged) {
             session.setLocalAnswerer(seat);
         }
-        final GameRules rules = new GameRules(GameType.Constructed);
+        // sdcc-curric-1111: a position start is a Puzzle-type game (the engine asks no mulligan; the hook deals the zones)
+        final GameRules rules = new GameRules(startState != null ? GameType.Puzzle : GameType.Constructed);
         rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
         rules.setSimTimeout(cfg.gameTimeoutSec);
         forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "RlActorBench"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
@@ -1185,7 +1199,7 @@ public final class RlActorBench {
                     }
                 });
             }
-            match.startGame(game, null);
+            match.startGame(game, startState != null ? startState.hook(game) : null);
         } catch (Throwable e) {
             crash = e.toString();
             // void-causes-1104: the whole stack (every frame, causes, suppressed) to stderr in one write and to the
@@ -1363,6 +1377,9 @@ public final class RlActorBench {
         if (seeding != null) {
             end.add("seeded", seeding.seeded()); // G3: per seat, what was placed (or why not)
         }
+        if (startState != null) {
+            end.add("started", startState.started()); // sdcc-curric-1111: the position installed (or why not)
+        }
         if (game != null) {
             final JsonArray generators = new JsonArray();
             boolean anyGenerator = false;
@@ -1447,6 +1464,10 @@ public final class RlActorBench {
         if (seeding != null) {
             t.add("seeding", seeding.spec()); // G3: the spec as played (a replay re-applies it) and its outcome
             t.add("seeded", end.get("seeded"));
+        }
+        if (startState != null) {
+            t.add("start_state", startState.spec()); // sdcc-curric-1111: the spec as played (a replay re-applies it)
+            t.add("started", end.get("started"));
         }
         if (fairNaming) {
             t.addProperty("fair_naming", true); // bvw-plr-1023: replays re-apply it; no key when off
@@ -2293,6 +2314,9 @@ public final class RlActorBench {
                 }
                 if (t.has("seeding")) {
                     g.add("seeding", t.get("seeding")); // cm-curriculum-1009: the seeding it played, re-applied
+                }
+                if (t.has("start_state")) {
+                    g.add("start_state", t.get("start_state")); // sdcc-curric-1111: the position start, re-applied
                 }
                 // r4-design-1015: the loop guard it played (absent = off), whatever the replay actor's own loopGuard
                 g.addProperty("loop_guard", t.has("loop_guard") ? t.get("loop_guard").getAsInt() : 0);
