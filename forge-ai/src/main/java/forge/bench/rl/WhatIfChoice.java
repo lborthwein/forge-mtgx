@@ -110,7 +110,7 @@ public final class WhatIfChoice {
     private static final String DUMP = System.getProperty("forge.ai.whatIf.dump");
 
     private static ChoiceApply.Frames frames(final RlKnowledge live, final int seat, final boolean searchedTop,
-            final boolean pregame, final long seed, final WhatIf.Snapshot[] out) {
+            final boolean pregame, final boolean search, final long seed, final WhatIf.Snapshot[] out) {
         return new ChoiceApply.Frames() {
             @Override
             public Object onCopy(final Game copy, final Player me) {
@@ -121,7 +121,10 @@ public final class WhatIfChoice {
                 k.attach();
                 // before anything resolves on the copy: the part of our library the seat does not know, in a seeded
                 // order (the real order is not read by what the resolution draws or looks at)
-                WhatIf.reorder(me, knownTop(k, me), LookaheadSearch.mix(seed, 0x0DDE7));
+                // (a seat searching its library, the menu's cards being there, knows every card in it but not their order:
+                // nothing stays in place then)
+                final int kt = knownTop(k, me);
+                WhatIf.reorder(me, search && kt >= me.getCardsIn(ZoneType.Library).size() ? 0 : kt, LookaheadSearch.mix(seed, 0x0DDE7));
                 return k;
             }
 
@@ -170,6 +173,11 @@ public final class WhatIfChoice {
             final long real0 = System.nanoTime();
             final int seat = g.getRegisteredPlayers().indexOf(me);
             final boolean pregame = m.family == RlSchema.F_MULLIGAN_BOTTOM;
+            boolean search = false;
+            for (int i = 0; i < m.C() && !search; i++) {
+                final Card h = m.cands.get(i).host;
+                search = h != null && h.isInZone(ZoneType.Library) && h.getOwner() == me;
+            }
             final List<WhatIf.Snapshot> snaps = new ArrayList<>();
             final List<String> labels = new ArrayList<>();
             for (ChoiceScorer.Option o : s.options) {
@@ -179,7 +187,7 @@ public final class WhatIfChoice {
                 if ((o.fail == null && !Double.isNaN(o.value) || "budget".equals(o.fail))
                         && (wc.realMs <= 0 || System.nanoTime() - real0 < wc.realMs * 1_000_000L)) {
                     final WhatIf.Snapshot[] out = new WhatIf.Snapshot[1];
-                    final ChoiceApply.Frames fr = frames(know, seat, sc.searchedTop, pregame, seed, out);
+                    final ChoiceApply.Frames fr = frames(know, seat, sc.searchedTop, pregame, search, seed, out);
                     final ChoiceApply.Result r;
                     if (pregame) {
                         final List<Integer> idx = new ArrayList<>();
