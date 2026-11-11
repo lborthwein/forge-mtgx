@@ -304,6 +304,8 @@ final class ForcedWinEngine {
         int creditCap = 96;
         /** sdcc-loops-1111: nodes of the sink search after a mana loop. */
         int sinkNodes = 24;
+        /** sdcc-loops-1111: the most second targets tried after one forced trigger target (our tapped engines first). */
+        int chainVariants = 2;
         // M3 engine-reach-1107: frontier
         /**
          * engine-reach-1107 (0 = off): the share of the time, in percent, the depth-first search keeps; the rest goes to a frontier
@@ -1609,8 +1611,14 @@ final class ForcedWinEngine {
         }
         Node lowNode = cur;
         int lowReps = 0, reps = 0, chunk = 1;
-        while (reps < lim.repeatCap && !out()) {
-            final int want = Math.min(chunk, lim.repeatCap - reps);
+        // sdcc-loops-1111 (loopCredit; off: the cap is repeatCap and manaOnly stays false): a loop that only adds mana or
+        // tokens runs to creditCap's count with no outlet search at the doublings; its outlet is tried once, after
+        int cap = lim.repeatCap;
+        boolean manaOnly = false;
+        final long[] start = cur.pv;
+        try {
+        while (reps < cap && !out()) {
+            final int want = Math.min(chunk, cap - reps);
             Node next = cur;
             long[] before = cur.pv;
             int done = 0;
@@ -1664,6 +1672,20 @@ final class ForcedWinEngine {
             cur = next;
             reps += done;
             chunk *= 2;
+            if (lim.loopCredit && reps == done) {
+                manaOnly = !killRate(cur.pv, start) && cur.pv[5] <= start[5]
+                        && (cur.pv[4] > start[4] || cur.pv[MANA] > start[MANA]);
+                if (manaOnly) {
+                    final long[] rate = new long[cur.pv.length];
+                    for (int i = 0; i < rate.length; i++) {
+                        rate[i] = cur.pv[i] - (cur.pv[i] - start[i]) / done; // the position one repetition earlier
+                    }
+                    cap = creditCap(a, cur.pv, rate, reps);
+                }
+            }
+            if (manaOnly) {
+                continue;
+            }
             List<Step> win = outletSearch(cur, a, prefix, body, reps);
             if (win != null) {
                 if (lim.loopBisect) {
@@ -1674,7 +1696,36 @@ final class ForcedWinEngine {
             lowNode = cur;
             lowReps = reps;
         }
+        if (manaOnly && reps > 0 && cur != a && !out()) {
+            final Node n = loopNode(cur, a, prefix, body, reps);
+            List<Step> win = cur.pv[4] > start[4] ? passSwing(n) : null;
+            if (win == null && cur.pv[MANA] > start[MANA] && !out()) {
+                win = sinkSearch(n);
+            }
+            return win;
+        }
         return null;
+        } finally {
+            if (lim.loopCredit) {
+                forge.util.IdScope.install(cloneScope(a.ids));
+            }
+        }
+    }
+
+    /** sdcc-loops-1111: the node after {@code reps} repetitions of a loop from {@code from} (the game of {@code cur}). */
+    private static Node loopNode(Node cur, Node from, List<Step> prefix, List<Step> body, int reps) {
+        final Node n = new Node();
+        n.g = cur.g;
+        n.cards = cur.cards;
+        n.me = cur.me;
+        n.ids = cur.ids;
+        n.turn = cur.turn;
+        n.passed = cur.passed;
+        n.parent = from;
+        n.pv = cur.pv;
+        n.path.addAll(prefix);
+        n.path.add(Step.repeat(body, reps));
+        return n;
     }
 
     /** engine-reach-1107: the moves a {@link #outletSearch} leaves out at its first ply (null = none). */
@@ -2506,7 +2557,7 @@ final class ForcedWinEngine {
                 : List.<String>of();
         int k = 0;
         for (String ref : next) {
-            if (k++ >= lim.triggerVariants) {
+            if (k++ >= (n == 1 ? lim.chainVariants : lim.triggerVariants)) {
                 break;
             }
             refs.add(mv.triggerRef + ">" + ref);
@@ -3856,7 +3907,7 @@ final class ForcedWinEngine {
                             continue;
                         }
                     } else if (deep && lv == chain.size() && nextCandidates.isEmpty()) {
-                        nextCandidates = wide ? wideCandidates(g, me, sa, slot) : List.of();
+                        nextCandidates = wide ? wideCandidates(g, me, sa, slot, true) : List.of();
                         if (TRACE) {
                             ForcedWinSolver.receipt("FW_ENGINE   trigger#" + lv + " " + sa.getHostCard().getName() + " candidates "
                                     + nextCandidates);
@@ -3923,6 +3974,15 @@ final class ForcedWinEngine {
          * trigger's effect kind, tapped state, mana costs): no card is named.
          */
         List<String> wideCandidates(Game g, Player me, SpellAbility sa, SpellAbility slot) {
+            return wideCandidates(g, me, sa, slot, false);
+        }
+
+        /**
+         * sdcc-loops-1111: {@code ownOnly} (the chained trigger's candidates): only the classes that re-enable something of
+         * ours (a tapped permanent with a tap ability, a mana source to float or untap); the opponent's permanents and
+         * our others stay Forge AI's choice.
+         */
+        List<String> wideCandidates(Game g, Player me, SpellAbility sa, SpellAbility slot, boolean ownOnly) {
             final boolean untap = untaps(sa);
             int needed = 0;
             for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command}) {
@@ -3975,8 +4035,10 @@ final class ForcedWinEngine {
             final List<String> all = new ArrayList<>(engine);
             all.addAll(floatUntapped);
             all.addAll(tappedMana);
-            all.addAll(theirs);
-            all.addAll(others);
+            if (!ownOnly) {
+                all.addAll(theirs);
+                all.addAll(others);
+            }
             return all.size() > cap ? new ArrayList<>(all.subList(0, cap)) : all;
         }
 
