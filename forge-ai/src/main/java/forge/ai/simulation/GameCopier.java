@@ -452,6 +452,9 @@ public class GameCopier {
             }
             // decisionpoint-1102 (census attribution only; a no-op without an observer): this game is a copy
             forge.ai.dp.DecisionPoints.markCopy(copy, origGame);
+            if (LeakTrace.ON) {
+                LeakTrace.copied(origGame, copy); // sdcc-leak-1111 (diagnostics; off: nothing)
+            }
             return copy;
         } finally {
             forge.game.IndependentCopies.exit();
