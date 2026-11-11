@@ -486,6 +486,15 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             // choice-search-1105: the solver line's own answerer (Forge AI) decides, as in the copies that verified it
             counters.instrument("lineChoices.forge." + kind);
             pendingEcho = null;
+            // sdcc-imit2-1111 (nothing unless the answerer records a line): the ask is a row of its own, observed here
+            // (before Forge AI answers, inside the observer isolation) and sent; the handler's echo names the answer
+            final BenchSession.LocalAnswerer la = session.getLocalAnswerer();
+            if (la != null && la.wantsHook(getGame(), getPlayer())) {
+                final Object[] sh = choiceShadow(la, method, kind, () -> body, menuObjects, true);
+                if (sh != null) {
+                    pendingEcho = new Echo(-1, kind, method, sh);
+                }
+            }
             return null;
         }
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
@@ -549,10 +558,16 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         final int id;
         final String kind;
         final String method;
+        /** sdcc-imit2-1111: {answerer, token} of a line's choice ask Forge AI answers (null on every other echo). */
+        final Object[] shadow;
         Echo(final int id, final String kind, final String method) {
+            this(id, kind, method, null);
+        }
+        Echo(final int id, final String kind, final String method, final Object[] shadow) {
             this.id = id;
             this.kind = kind;
             this.method = method;
+            this.shadow = shadow;
         }
     }
 
@@ -584,6 +599,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      */
     private void echo(final Echo e, final JsonObject answer, final Object decision) {
         if (e == null || answer == null) {
+            return;
+        }
+        if (e.shadow != null) {
+            choiceShadowAnswered(e.shadow, () -> answer, decision); // sdcc-imit2-1111: never on the wire
             return;
         }
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
@@ -667,6 +686,14 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             }
         }
         return -1;
+    }
+
+    /** sdcc-imit2-1111: {@code {top, <rest>}}, the scry / surveil answer shape, of a plan hook's look. */
+    private static JsonObject echoLook(final ImmutablePair<CardCollection, CardCollection> h, final String rest) {
+        final JsonObject a = new JsonObject();
+        a.add("top", fidArray(h.getLeft()));
+        a.add(rest, fidArray(h.getRight()));
+        return a;
     }
 
     private static JsonObject echoBool(final String key, final boolean v) {
@@ -997,7 +1024,140 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             final List<SpellAbility> p) {
         try {
             isolated(getGame(), () -> {
-                la.hookAnswered(getGame(), getPlayer(), tok, echoPriority(menu, p));
+                la.hookAnswered(getGame(), getPlayer(), tok, echoHookPriority(menu, p), p);
+                return null;
+            });
+        } catch (RuntimeException e) {
+            counters.instrument("hookShadow.failed");
+        }
+    }
+
+    /**
+     * sdcc-imit2-1111: the plan hook's priority answer as an echo. A line's step is an ability the line prepared itself
+     * (a copy with its targets, its X, its optional or alternative costs), so where {@link #echoPriority} finds neither
+     * the object nor its structural key in the menu, the one menu entry of the same card, kind and effect names it
+     * (first with the same cost, then alone of its kind). What stays unmatched says why ({@code why}): {@code mana} (a
+     * mana ability: never on a priority menu), {@code offMenu} (no entry of that card and kind), {@code ambiguous}.
+     * {@code xUnset}: the ability has an X the line leaves to the payment (no X to name yet).
+     */
+    private static JsonObject echoHookPriority(final List<SpellAbility> menu, final List<SpellAbility> p) {
+        final JsonObject o = echoPriority(menu, p);
+        final SpellAbility sa = p == null || p.isEmpty() ? null : p.get(0);
+        if (sa == null) {
+            return o;
+        }
+        try {
+            if ("none".equals(o.get("match").getAsString())) {
+                if (sa.isManaAbility()) {
+                    o.addProperty("why", "mana");
+                    return o;
+                }
+                final List<Integer> kin = new ArrayList<>();
+                for (int i = 0; i < menu.size(); i++) {
+                    final SpellAbility m = menu.get(i);
+                    if (m.getHostCard() != null && sa.getHostCard() != null
+                            && m.getHostCard().getId() == sa.getHostCard().getId() && m.getApi() == sa.getApi()
+                            && m.isSpell() == sa.isSpell() && m.isLandAbility() == sa.isLandAbility()
+                            && m.isActivatedAbility() == sa.isActivatedAbility()) {
+                        kin.add(i);
+                    }
+                }
+                int at = -1;
+                String match = null;
+                if (kin.size() == 1) {
+                    at = kin.get(0);
+                    match = "kind";
+                } else if (kin.size() > 1) {
+                    final String cost = String.valueOf(sa.getPayCosts());
+                    int n = 0;
+                    for (int i : kin) {
+                        if (cost.equals(String.valueOf(menu.get(i).getPayCosts()))) {
+                            at = i;
+                            n++;
+                        }
+                    }
+                    if (n == 1) {
+                        match = "cost";
+                    } else {
+                        at = -1;
+                    }
+                }
+                if (at >= 0) {
+                    o.addProperty("choice", at + 1);
+                    o.addProperty("match", match);
+                } else {
+                    o.addProperty("why", kin.isEmpty() ? "offMenu" : "ambiguous");
+                    return o;
+                }
+            }
+            if (!o.has("x") && sa.costHasManaX() && sa.getXManaCostPaid() == null) {
+                o.addProperty("xUnset", true);
+            }
+        } catch (RuntimeException e) {
+            // the echo as it stands
+        }
+        return o;
+    }
+
+    /**
+     * sdcc-imit2-1111: the answerer that records the choice asks of the line the plan hook follows, or null (the
+     * default, and then no caller below does anything new).
+     */
+    private BenchSession.LocalAnswerer hookRows() {
+        if (planHook == null) {
+            return null;
+        }
+        final BenchSession.LocalAnswerer la = session.getLocalAnswerer();
+        return la != null && la.wantsHook(getGame(), getPlayer()) && planHook.lineActive() ? la : null;
+    }
+
+    /**
+     * sdcc-imit2-1111: a choice ask of a followed line that the seat is not asked (the plan hook or Forge AI answers
+     * it), built for the answerer as the seat's own ask would be, BEFORE the answer, inside the observer isolation (a
+     * scratch random stream; id counters, AI caches and memory put back), so the live game is not moved. {@code send}:
+     * the frame is sent at once (Forge AI's answer may raise asks of its own). Returns {answerer, token}, or null.
+     */
+    private Object[] choiceShadow(final BenchSession.LocalAnswerer la, final String method, final String kind,
+            final java.util.function.Supplier<JsonObject> body, final Object objs, final boolean send) {
+        if (la == null) {
+            return null;
+        }
+        try {
+            return isolated(getGame(), () -> {
+                final Object tok = la.hookPrepare(getGame(), getPlayer(), method, kind, body.get(), objs);
+                if (tok == null) {
+                    return null;
+                }
+                if (send) {
+                    la.hookSend(getGame(), getPlayer(), tok);
+                }
+                return new Object[] {la, tok};
+            });
+        } catch (RuntimeException e) {
+            counters.instrument("hookShadow.failed");
+            return null;
+        }
+    }
+
+    /** sdcc-imit2-1111: an ask body built inside the observer isolation (null when building it failed). */
+    private JsonObject isolatedBody(final java.util.function.Supplier<JsonObject> mk) {
+        try {
+            return isolated(getGame(), mk);
+        } catch (RuntimeException e) {
+            counters.instrument("hookShadow.failed");
+            return null;
+        }
+    }
+
+    /** sdcc-imit2-1111: the answer played to {@link #choiceShadow}'s ask, in the ask's own answer shape. */
+    private void choiceShadowAnswered(final Object[] sh, final java.util.function.Supplier<JsonObject> answer,
+            final Object decision) {
+        if (sh == null) {
+            return;
+        }
+        try {
+            isolated(getGame(), () -> {
+                ((BenchSession.LocalAnswerer) sh[0]).hookAnswered(getGame(), getPlayer(), sh[1], answer.get(), decision);
                 return null;
             });
         } catch (RuntimeException e) {
@@ -1012,13 +1172,21 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
         if (planHook != null) {
             // search-bones-1015: the plan follower first (its answer is played, never asked)
+            final boolean rec = hookRows() != null; // sdcc-imit2-1111: the answerer records this line (census below)
             final Object[] shadow = hookShadow(); // sdcc-imit-1111: null unless the answerer records a line's priorities
             final List<SpellAbility> p = planHook.priority(this);
             if (p != NO_OPINION) {
                 if (shadow != null) {
                     hookShadowAnswered((BenchSession.LocalAnswerer) shadow[0], (List<SpellAbility>) shadow[1], shadow[2], p);
+                } else if (rec) {
+                    // no row (a pass-only, unposable or capped menu): what the hook did there
+                    final SpellAbility a = p == null || p.isEmpty() ? null : p.get(0);
+                    note(a == null ? "imit.prio.noRow.pass" : a.isManaAbility() ? "imit.prio.noRow.mana" : "imit.prio.noRow.action");
                 }
                 return p;
+            }
+            if (shadow != null) {
+                note("imit.prio.noOpinion"); // sdcc-imit2-1111: the seat is asked this priority itself
             }
         }
         final int[] diag = new int[DIAG_LEN];
@@ -1793,8 +1961,31 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             super.declareAttackers(attacker, combat);
             return;
         }
-        if (planHook != null && planHook.attack(attacker, combat)) {
-            return; // search-bones-1015: the plan's attack
+        if (planHook != null) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks (the ask is built before the
+            // hook declares: the declaration moves the combat)
+            final BenchSession.LocalAnswerer la = hookRows();
+            Object[] sh = null;
+            if (la != null) {
+                final Object[][] objs = new Object[1][];
+                final java.util.function.Supplier<JsonObject> mk = () -> {
+                    final CardCollection poss = new CardCollection();
+                    for (Card c : attacker.getCreaturesInPlay()) {
+                        if (CombatUtil.canAttack(c)) {
+                            poss.add(c);
+                        }
+                    }
+                    final List<GameEntity> defs = new ArrayList<>(combat.getDefenders());
+                    objs[0] = new Object[] {poss, defs, combat};
+                    return attackersBody(combat, poss, defs);
+                };
+                final JsonObject b = isolatedBody(mk);
+                sh = b == null ? null : choiceShadow(la, "declareAttackers", "attackers", () -> b, objs[0], false);
+            }
+            if (planHook.attack(attacker, combat)) {
+                choiceShadowAnswered(sh, () -> echoAttackers(combat), null);
+                return; // search-bones-1015: the plan's attack
+            }
         }
         final CardCollection possible = new CardCollection();
         for (Card c : attacker.getCreaturesInPlay()) {
@@ -1804,6 +1995,22 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
         final List<GameEntity> defenders = new ArrayList<>(combat.getDefenders());
 
+        final JsonObject body = attackersBody(combat, possible, defenders);
+
+        final JsonObject ans = ask("declareAttackers", "attackers", body,
+                new Object[] {possible, defenders, combat});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            super.declareAttackers(attacker, combat);
+            // The declaration is the return value here; `combat` IS the answer.
+            echo(e, echoAttackers(combat));
+            return;
+        }
+        declareAttackersAnswered(attacker, combat, possible, defenders, ans);
+    }
+
+    /** The {@code attackers} ask's body (the seat's ask and, sdcc-imit2-1111, a line's recorded one). */
+    private JsonObject attackersBody(final Combat combat, final CardCollection possible, final List<GameEntity> defenders) {
         final JsonObject body = envelope(true);
         body.add("legalAttackers", StateEncoder.encodeCards(possible));
         body.add("legalDefenders", StateEncoder.encodeEntities(defenders));
@@ -1832,16 +2039,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
         body.add("legalPairsTyped", legalPairsTyped);
         addAttackRequirements(body, combat, possible, defenders);
+        return body;
+    }
 
-        final JsonObject ans = ask("declareAttackers", "attackers", body,
-                new Object[] {possible, defenders, combat});
-        if (ans == null) {
-            final Echo e = takeEcho();
-            super.declareAttackers(attacker, combat);
-            // The declaration is the return value here; `combat` IS the answer.
-            echo(e, echoAttackers(combat));
-            return;
-        }
+    private void declareAttackersAnswered(final Player attacker, final Combat combat, final CardCollection possible,
+            final List<GameEntity> defenders, final JsonObject ans) {
         if (!ans.has("pairs") || !ans.get("pairs").isJsonArray()) {
             refuse("declareAttackers", "missing/!array 'pairs'");
             super.declareAttackers(attacker, combat);
@@ -2819,21 +3021,28 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged()) {
             return super.confirmAction(sa, mode0, message, options, cardToShow, params);
         }
+        final java.util.function.Supplier<JsonObject> mk = () -> {
+            final JsonObject body = envelope(true);
+            body.addProperty("mode", String.valueOf(mode0));
+            body.addProperty("message", String.valueOf(message));
+            if (sa != null) {
+                body.add("ability", StateEncoder.encodeSpellAbility(sa));
+            }
+            if (cardToShow != null) {
+                body.add("card", StateEncoder.encodeCardUnchecked(cardToShow));
+            }
+            return body;
+        };
         if (planHook != null) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks
+            final Object[] sh = choiceShadow(hookRows(), "confirmAction", "confirm", mk, new Object[] {sa, cardToShow}, false);
             final Boolean h = planHook.confirm(sa, message);
             if (h != null) {
+                choiceShadowAnswered(sh, () -> echoBool("yes", h), null);
                 return h; // search-bones-1015
             }
         }
-        final JsonObject body = envelope(true);
-        body.addProperty("mode", String.valueOf(mode0));
-        body.addProperty("message", String.valueOf(message));
-        if (sa != null) {
-            body.add("ability", StateEncoder.encodeSpellAbility(sa));
-        }
-        if (cardToShow != null) {
-            body.add("card", StateEncoder.encodeCardUnchecked(cardToShow));
-        }
+        final JsonObject body = mk.get();
         final JsonObject ans = ask("confirmAction", "confirm", body, new Object[] {sa, cardToShow});
         if (ans == null) {
             final Echo e = takeEcho();
@@ -2856,18 +3065,25 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged()) {
             return super.chooseBinary(sa, question, kindOfChoice, defaultChoice);
         }
+        final java.util.function.Supplier<JsonObject> mk = () -> {
+            final JsonObject body = envelope(true);
+            body.addProperty("message", String.valueOf(question));
+            body.addProperty("binaryKind", String.valueOf(kindOfChoice));
+            if (sa != null) {
+                body.add("ability", StateEncoder.encodeSpellAbility(sa));
+            }
+            return body;
+        };
         if (planHook != null) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks
+            final Object[] sh = choiceShadow(hookRows(), "chooseBinary", "confirm", mk, new Object[] {sa, null}, false);
             final Boolean h = planHook.binary(kindOfChoice, defaultChoice);
             if (h != null) {
+                choiceShadowAnswered(sh, () -> echoBool("yes", h), null);
                 return h; // search-bones-1015
             }
         }
-        final JsonObject body = envelope(true);
-        body.addProperty("message", String.valueOf(question));
-        body.addProperty("binaryKind", String.valueOf(kindOfChoice));
-        if (sa != null) {
-            body.add("ability", StateEncoder.encodeSpellAbility(sa));
-        }
+        final JsonObject body = mk.get();
         final JsonObject ans = ask("chooseBinary", "confirm", body, new Object[] {sa, null});
         if (ans == null) {
             final Echo e = takeEcho();
@@ -2908,14 +3124,21 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged() || topN == null || topN.isEmpty()) {
             return super.arrangeForScry(topN);
         }
+        final java.util.function.Supplier<JsonObject> mk = () -> {
+            final JsonObject body = envelope(true);
+            body.add("menu", StateEncoder.encodeCards(topN));
+            return body;
+        };
         if (planHook != null) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks
+            final Object[] sh = choiceShadow(hookRows(), "arrangeForScry", "scry", mk, topN, false);
             final ImmutablePair<CardCollection, CardCollection> h = planHook.look(topN);
             if (h != null) {
+                choiceShadowAnswered(sh, () -> echoLook(h, "bottom"), null);
                 return h; // search-bones-1015
             }
         }
-        final JsonObject body = envelope(true);
-        body.add("menu", StateEncoder.encodeCards(topN));
+        final JsonObject body = mk.get();
         final JsonObject ans = ask("arrangeForScry", "scry", body, topN);
         if (ans == null) {
             final Echo e = takeEcho();
@@ -3161,8 +3384,17 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public boolean confirmTrigger(WrappedAbility sa) {
         count("confirmTrigger");
-        if (planHook != null && bridged() && planHook.confirmTrigger(sa)) {
-            return true; // search-bones-1015: the trigger whose target the plan forced
+        if (planHook != null && bridged()) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks
+            final Object[] sh = sa == null ? null : choiceShadow(hookRows(), "confirmTrigger", "optionalTrigger", () -> {
+                final JsonObject body = envelope(true);
+                body.addProperty("mandatory", sa.isMandatory());
+                return body;
+            }, new Object[] {sa, sa.isMandatory()}, false);
+            if (planHook.confirmTrigger(sa)) {
+                choiceShadowAnswered(sh, () -> echoBool("yes", true), null);
+                return true; // search-bones-1015: the trigger whose target the plan forced
+            }
         }
         return bridgedConfirmTrigger(sa);
     }
@@ -3203,8 +3435,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         count("arrangeForSurveil");
         observeLook(topN, ZoneType.Library);
         if (planHook != null && bridged()) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks
+            final Object[] sh = topN == null || topN.isEmpty() ? null
+                    : choiceShadow(hookRows(), "arrangeForSurveil", "surveil", () -> envelope(true), topN, false);
             final ImmutablePair<CardCollection, CardCollection> h = planHook.look(topN);
             if (h != null) {
+                choiceShadowAnswered(sh, () -> echoLook(h, "graveyard"), null);
                 return h; // search-bones-1015
             }
         }
@@ -3235,8 +3471,17 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         count("orderMoveToZoneList");
         observeLook(cards, destinationZone);
         if (planHook != null && bridged()) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks
+            final BenchSession.LocalAnswerer la = cards == null || cards.size() < 2 ? null : hookRows();
+            Object[] sh = null;
+            if (la != null) {
+                final JsonObject b = isolatedBody(() -> orderZoneBody(cards, destinationZone, source));
+                sh = b == null ? null : choiceShadow(la, "orderMoveToZoneList", "orderZone", () -> b,
+                        new Object[] {cards, destinationZone, b.get("topFirst").getAsBoolean(), source}, false);
+            }
             final CardCollectionView h = planHook.order(cards, destinationZone, source);
             if (h != null) {
+                choiceShadowAnswered(sh, () -> echoCards(h), null);
                 return h; // search-bones-1015
             }
         }
@@ -3264,8 +3509,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     private CardCollection chooseCardsToDiscardFromBridged(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
         count("chooseCardsToDiscardFrom");
         if (planHook != null && bridged()) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks
+            final Object[] sh = validCards == null || validCards.isEmpty() ? null
+                    : choiceShadow(hookRows(), "chooseCardsToDiscardFrom", "discardFrom",
+                            () -> discardFromBody(playerDiscard, min, max), new Object[] {validCards, sa, playerDiscard}, false);
             final CardCollection h = planHook.discard(playerDiscard, sa, validCards, min, max, visibleToChooser);
             if (h != null) {
+                choiceShadowAnswered(sh, () -> echoCards(h), null);
                 return h; // search-bones-1015
             }
         }
@@ -3437,8 +3687,16 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                     selectPrompt, isOptional, decider);
         }
         if (planHook != null) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks (the ask's progress counter is
+            // read, not advanced: the hook's picks never advanced it)
+            final Object[] sh = choiceShadow(hookRows(), "chooseSingleCardForZoneChange", "zoneChange", () -> {
+                final int n = zoneChangeNum(sa);
+                return zoneChangeBody(destination, origin, sa, fetchList, isOptional ? 0 : 1, 1, selectPrompt, n,
+                        sa != zoneChangeRun || zoneChangeChosen >= n ? 0 : zoneChangeChosen, true);
+            }, fetchList, false);
             final Card h = planHook.pick(destination, origin, sa, fetchList, decider);
             if (h != null) {
+                choiceShadowAnswered(sh, () -> echoCards(Collections.singletonList(h)), null);
                 // search-bones-1015: the plan's pick (the reveal is honoured as on the asked path)
                 if (delayedReveal != null) {
                     reveal(delayedReveal);
@@ -3552,6 +3810,19 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             final List<ZoneType> origin, final SpellAbility sa, final CardCollection fetchList,
             final int min, final int max, final String title, final int changeNum, final int chosen,
             final boolean single) {
+        final JsonObject body = zoneChangeBody(destination, origin, sa, fetchList, min, max, title, changeNum, chosen,
+                single);
+        final JsonObject ans = ask(method, "zoneChange", body, fetchList);
+        if (ans == null) {
+            return null;
+        }
+        return zoneChangePicked(method, ans, fetchList, min, max);
+    }
+
+    /** The {@code zoneChange} ask's body (the seat's ask and, sdcc-imit2-1111, a line's recorded one). */
+    private JsonObject zoneChangeBody(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
+            final CardCollection fetchList, final int min, final int max, final String title, final int changeNum,
+            final int chosen, final boolean single) {
         final JsonObject body = envelope(true);
         body.addProperty("title", String.valueOf(title));
         body.addProperty("min", min);
@@ -3574,10 +3845,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask(method, "zoneChange", body, fetchList);
-        if (ans == null) {
-            return null;
-        }
+        return body;
+    }
+
+    private CardCollection zoneChangePicked(final String method, final JsonObject ans, final CardCollection fetchList,
+            final int min, final int max) {
         final List<Integer> ids = optIntList(ans, "choices");
         if (ids == null) {
             refuse(method, "missing/!array 'choices'");
@@ -3640,11 +3912,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * `super`, byte-identically to the pre-2.18 behaviour. So is a null answer,
      * an unbridged session, a list of one, and a decider that is not our seat.
      */
-    private CardCollectionView bridgedOrderMoveToZoneList(final CardCollectionView cards,
-            final ZoneType destinationZone, final SpellAbility source) {
-        if (!bridged() || cards == null || cards.size() < 2) {
-            return super.orderMoveToZoneList(cards, destinationZone, source);
-        }
+    /** The {@code orderZone} ask's body (one place: the seat's ask and, sdcc-imit2-1111, a line's recorded one). */
+    private JsonObject orderZoneBody(final CardCollectionView cards, final ZoneType destinationZone,
+            final SpellAbility source) {
         final JsonObject body = envelope(true);
         body.addProperty("destination", destinationZone == null ? "" : destinationZone.name());
         body.addProperty("count", cards.size());
@@ -3660,6 +3930,15 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (source != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(source));
         }
+        return body;
+    }
+
+    private CardCollectionView bridgedOrderMoveToZoneList(final CardCollectionView cards,
+            final ZoneType destinationZone, final SpellAbility source) {
+        if (!bridged() || cards == null || cards.size() < 2) {
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+        final JsonObject body = orderZoneBody(cards, destinationZone, source);
         final JsonObject ans = ask("orderMoveToZoneList", "orderZone", body,
                 new Object[] {cards, destinationZone, body.get("topFirst").getAsBoolean(), source});
         if (ans == null) {
@@ -3813,15 +4092,21 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     }
 
     // ---- 16 DISCARD_FROM
+    /** The {@code discardFrom} ask's body (the seat's ask and, sdcc-imit2-1111, a line's recorded one). */
+    private JsonObject discardFromBody(final Player playerDiscard, final int min, final int max) {
+        final JsonObject body = envelope(true);
+        body.addProperty("min", min);
+        body.addProperty("max", max);
+        body.addProperty("ownHand", playerDiscard == getPlayer());
+        return body;
+    }
+
     private CardCollection bridgedDiscardFrom(final Player playerDiscard, final SpellAbility sa,
             final CardCollection validCards, final int min, final int max, final CardCollectionView visibleToChooser) {
         if (!localAnswers() || validCards == null || validCards.isEmpty()) {
             return super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser);
         }
-        final JsonObject body = envelope(true);
-        body.addProperty("min", min);
-        body.addProperty("max", max);
-        body.addProperty("ownHand", playerDiscard == getPlayer());
+        final JsonObject body = discardFromBody(playerDiscard, min, max);
         final JsonObject ans = ask("chooseCardsToDiscardFrom", "discardFrom", body,
                 new Object[] {validCards, sa, playerDiscard});
         if (ans == null) {
@@ -3842,15 +4127,26 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     private CardCollectionView askCostCards(final CardCollectionView pool, final SpellAbility sa,
             final CostPartWithList cpl, final int amount, final boolean optional, final String prompt,
             final java.util.function.Supplier<CardCollectionView> forge) {
-        if (!localAnswers() || pool == null || pool.isEmpty() || amount <= 0
-                || planHook != null && planHook.forgeCosts()) {
+        if (!localAnswers() || pool == null || pool.isEmpty() || amount <= 0) {
             return forge.get();
         }
         final int min = optional ? 0 : amount;
-        final JsonObject body = envelope(true);
-        body.addProperty("min", min);
-        body.addProperty("max", amount);
-        body.addProperty("cost", cpl == null ? "" : cpl.getClass().getSimpleName());
+        final java.util.function.Supplier<JsonObject> mk = () -> {
+            final JsonObject body = envelope(true);
+            body.addProperty("min", min);
+            body.addProperty("max", amount);
+            body.addProperty("cost", cpl == null ? "" : cpl.getClass().getSimpleName());
+            return body;
+        };
+        if (planHook != null && planHook.forgeCosts()) {
+            // sdcc-imit2-1111: null unless the answerer records a line's choice asks (Forge AI pays as before)
+            final Object[] sh = choiceShadow(hookRows(), "chooseCardsForCost", "costCards", mk, new Object[] {pool, sa, cpl},
+                    true);
+            final CardCollectionView out = forge.get();
+            choiceShadowAnswered(sh, () -> echoCards(out), null);
+            return out;
+        }
+        final JsonObject body = mk.get();
         final JsonObject ans = ask("chooseCardsForCost", "costCards", body, new Object[] {pool, sa, cpl});
         if (ans == null) {
             final Echo e = takeEcho();

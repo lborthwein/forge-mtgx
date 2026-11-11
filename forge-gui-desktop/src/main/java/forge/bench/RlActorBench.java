@@ -1349,6 +1349,7 @@ public final class RlActorBench {
                 // chose, [[dec_idx, reason, [steps played]], ...]; line priorities sent as rows; unmatched hook answers
                 end.add("imit", seat.imitJson());
                 end.addProperty("imit_hook_rows", seat.imitHookRows);
+                end.addProperty("imit_choice_rows", seat.imitChoiceRows); // sdcc-imit2-1111: a line's choice asks as rows
                 end.addProperty("imit_map_failed", seat.imitMapFailed);
             }
             if (searchAlt != null) {
@@ -1430,6 +1431,7 @@ public final class RlActorBench {
             if (end.has("imit")) {
                 t.add("imit", end.get("imit")); // sdcc-imit-1111
                 t.addProperty("imit_hook_rows", seat.imitHookRows);
+                t.addProperty("imit_choice_rows", seat.imitChoiceRows);
                 t.addProperty("imit_map_failed", seat.imitMapFailed);
             }
             if (end.has("search_alt")) {

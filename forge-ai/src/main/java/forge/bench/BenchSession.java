@@ -112,6 +112,23 @@ public final class BenchSession {
         }
 
         /**
+         * sdcc-imit2-1111: {@link #hookPrepare}'s frame is sent now, before the answer exists (a line's choice ask that
+         * Forge AI is about to answer: asks nested inside it then keep the order they were raised in). The later
+         * {@link #hookAnswered} only names the answer played. Default: nothing.
+         */
+        default void hookSend(forge.game.Game game, forge.game.player.Player player, Object prepared) {
+        }
+
+        /**
+         * sdcc-imit2-1111: {@link #hookAnswered} with the raw decision where the bridge has one (priority: the hook's
+         * {@code List<SpellAbility>}, whose targets the line has already set). Default: the answer alone.
+         */
+        default void hookAnswered(forge.game.Game game, forge.game.player.Player player, Object prepared,
+                com.google.gson.JsonObject hookAnswer, Object decision) {
+            hookAnswered(game, player, prepared, hookAnswer);
+        }
+
+        /**
          * Called where the bridge publishes a delegated echo (this answerer delegated, Forge decided), before the
          * closed-channel return: Forge's answer in the ask's own answer shape, plus the raw decision where the
          * bridge has one (priority: the returned {@code List<SpellAbility>}, whose targets Forge's AI has already
