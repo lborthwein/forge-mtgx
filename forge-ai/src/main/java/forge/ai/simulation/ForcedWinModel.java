@@ -698,6 +698,28 @@ public final class ForcedWinModel {
 
     // ------------------------------------------------------------------ positions
 
+    /**
+     * sdcc-etb-1110 (solverCfg landEntersProbe; no reader of a position is given one unless the key is on): how a land
+     * of ours enters when a plan from the position plays it as the land drop. A card's template is learned once per name
+     * per game, at its first sight, and {@link ACard#entersTapped} / {@link ACard#landLife} with it. A land that enters
+     * tapped under a condition (unless we control two or fewer other lands, unless we control a land of some type,
+     * unless we pay life or reveal a card) keeps that moment's answer for the rest of the game: later the planner tapped
+     * it for mana on the turn it entered tapped, and its line cap filled with variants of that illegal prefix. Asked
+     * here, the answer is the engine's: the land is played in a sandbox copy of the position.
+     */
+    interface LandEntry {
+        /**
+         * {1 = it is tapped once it has entered, our life change (0 or less), 1 = the same on every battlefield a plan
+         * builds}; null = not known for this card on any battlefield (a card that is not in the game, a sandbox that could
+         * not play it): its template's answer stands. {@code battlefield}: the card ids of our permanents as the plan has
+         * them when the land is played, and {@code hand} those of our hand then (a permanent that left our battlefield
+         * went there, or is gone); null = as the position has them. The sandbox's battlefield is made the plan's before
+         * the land is played, so a condition on the board is the engine's on the board the line has built (a land played
+         * after another land drop and the pass; after a cost returned lands to our hand).
+         */
+        int[] enters(ACard land, int[] battlefield, int[] hand);
+    }
+
     /** The starting position of a search. */
     static final class Position {
         /** blockers-1109: cannot block at the opponent's next declare-blockers step (not a creature, or prevented). */
@@ -757,6 +779,8 @@ public final class ForcedWinModel {
         boolean canDraw = true;
         /** Defense: the card of the spell on the stack whose resolution is asked about (cast and paid: free), or -1. */
         int pendingId = -1;
+        /** sdcc-etb-1110 (landEntersProbe; null = off): this position's land entries, asked when a plan plays a land. */
+        LandEntry landEntry;
 
         String describe() {
             return "life=" + life + " opp=" + oppLife + " oppLib=" + oppLibrary + " landDrop=" + landDrop + " storm="
@@ -982,6 +1006,226 @@ public final class ForcedWinModel {
         }
 
         volatile LoopProbe loopProbe;
+
+        /** sdcc-etb-1110 (landEntersProbe): the positions whose land entries are kept (the least recently asked goes first). */
+        static final int LAND_POSITIONS = 32;
+        /**
+         * sdcc-etb-1110: the most sandboxes one position spends on battlefields its plans have changed (each land's entry
+         * on the position's own battlefield is always probed). Past it a changed battlefield gets the position's answer.
+         */
+        static final int LAND_CONTEXTS = 12;
+        /** sdcc-etb-1110: a sandbox that could not play the land (kept, so the same position does not probe it again). */
+        private static final int[] LAND_UNKNOWN = new int[0];
+
+        /** sdcc-etb-1110: one position's land entries: by land and battlefield change, and the changed battlefields probed. */
+        private static final class LandEntries {
+            final Map<String, int[]> byKey = new HashMap<>();
+            int contexts;
+        }
+
+        /**
+         * sdcc-etb-1110 (landEntersProbe; empty unless a solver with the key on asked): the land entries probed so far, by
+         * position ({@link #landSignature}), then by land (its name; apart for one that is on our battlefield, which is
+         * played again only after it has left it) and by what the plan changed on our battlefield before it. One decision
+         * reads its position many times (the offense, each screen of a reach or a goldfish): they share the sandboxes.
+         */
+        private final java.util.LinkedHashMap<String, LandEntries> landEntries = new java.util.LinkedHashMap<>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(final Map.Entry<String, LandEntries> eldest) {
+                return size() > LAND_POSITIONS;
+            }
+        };
+        /**
+         * sdcc-etb-1110 (report only): land-entry sandboxes on the position's own battlefield, and those whose answer was
+         * not the template's; sandboxes on a battlefield the plan changed, and those whose answer was not the position's.
+         */
+        int landProbes, landDiffers, landContexts, landContextDiffers;
+        /** sdcc-etb-1110 (report only): lands answered from their template with no sandbox (plain, and nothing in play watches entries). */
+        int landPlain;
+
+        /**
+         * sdcc-etb-1110: what a land's entry may depend on, as far as a cache key can tell one position from the next: the
+         * turn, whose it is and whether it is our second main phase (the sandbox's phase), the stack, our life, our hand
+         * and battlefield (card by card, tapped or not), the sizes of our other zones, and each opponent's life and
+         * battlefield. Two reads of one position give one key; a position that differs in anything named here is probed
+         * again.
+         */
+        static String landSignature(final Game live, final Player me) {
+            final StringBuilder sb = new StringBuilder(256);
+            final forge.game.phase.PhaseHandler ph = live.getPhaseHandler();
+            sb.append(ph.getTurn()).append(ph.isPlayerTurn(me) ? (ph.is(forge.game.phase.PhaseType.MAIN2) ? "m2" : "m") : "o")
+                    .append(live.getStack().size()).append('|').append(me.getId()).append('|').append(me.getLife()).append('h');
+            for (Card c : me.getCardsIn(ZoneType.Hand)) {
+                sb.append(c.getId()).append(',');
+            }
+            sb.append('b');
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                sb.append(c.getId()).append(c.isTapped() ? 't' : 'u');
+            }
+            sb.append('g').append(me.getCardsIn(ZoneType.Graveyard).size()).append('l')
+                    .append(me.getCardsIn(ZoneType.Library).size()).append('x').append(me.getCardsIn(ZoneType.Exile).size())
+                    .append('c').append(me.getCardsIn(ZoneType.Command).size());
+            for (Player o : me.getOpponents()) {
+                sb.append('|').append(o.getLife()).append('b');
+                for (Card c : o.getCardsIn(ZoneType.Battlefield)) {
+                    sb.append(c.getId()).append(c.isTapped() ? 't' : 'u');
+                }
+                sb.append('c').append(o.getCardsIn(ZoneType.Command).size());
+            }
+            return sb.toString();
+        }
+
+        /**
+         * sdcc-etb-1110 (landEntersProbe): the land entries of the position {@code live} stands at, for the plans made from
+         * it ({@link Position#landEntry}). A land with no replacement effect of its own beyond the plainest kind, in a game
+         * where no card in play replaces another card's entering ({@link ForcedWinProbe#entersUnwatched}), keeps its
+         * template's answer and costs no sandbox. Else nothing is probed until a plan plays the land: then it is played as our
+         * land drop in a sandbox copy of {@code live} ({@link ForcedWinProbe#landEntry}), once per land name and position;
+         * and once more per battlefield the plan has changed by then, for a land with a replacement effect of its own
+         * that is not of the plainest kind (engine metadata, {@link ForcedWinProbe#entersPlainly}: what could make its
+         * entering depend on the board), at most {@link #LAND_CONTEXTS} times per position. The game must stay as it is
+         * while the answers are asked (a solver plans on the game it read, and changes only copies of it).
+         */
+        LandEntry landEntry(final Game live, final Player me) {
+            final String position = landSignature(live, me);
+            final java.util.Set<Integer> root = new java.util.HashSet<>();
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                if (!c.isFaceDown()) {
+                    root.add(c.getId()); // our battlefield as a position reads it
+                }
+            }
+            final Map<Integer, Card> byId = new HashMap<>(); // the game's cards asked about so far (null = not in the game)
+            return (land, battlefield, hand) -> {
+                if (land == null || !land.land) {
+                    return null;
+                }
+                synchronized (Reader.this) {
+                    final Card c = card(live, byId, land.id);
+                    if (c == null || c.getOwner() != me) {
+                        return null; // not a card of this game (a screen's granted copy): its own values stand
+                    }
+                    return landEntry(live, me, position, root, byId, land, c, battlefield, hand);
+                }
+            };
+        }
+
+        private static Card card(final Game live, final Map<Integer, Card> byId, final int id) {
+            if (!byId.containsKey(id)) {
+                byId.put(id, live.findById(id));
+            }
+            return byId.get(id);
+        }
+
+        /** sdcc-etb-1110: {@link LandEntry#enters} for the card {@code c} of {@code live} (the caller holds this reader). */
+        private int[] landEntry(final Game live, final Player me, final String position, final java.util.Set<Integer> root,
+                final Map<Integer, Card> byId, final ACard land, final Card c, final int[] battlefield, final int[] hand) {
+            LandEntries known = landEntries.get(position);
+            if (known == null) {
+                known = new LandEntries();
+                landEntries.put(position, known);
+            }
+            final String key = c.isInPlay() ? "battlefield|" + c.getName() : c.getName();
+            final long seed0 = ForcedWinSolver.mix(seed, 0x4C414E44L * 31 + (position + key).hashCode());
+            int[] here = known.byKey.get(key);
+            if (here == null && ForcedWinProbe.entersPlainly(c) && ForcedWinProbe.entersUnwatched(live, c)) {
+                // nothing of its own and nothing in play can change how it enters: the template's sandbox saw the same
+                // (no sandbox here: a position's probes are paid from the decision's own clock)
+                here = new int[] {land.entersTapped ? 1 : 0, land.landLife, 1};
+                landPlain++;
+                known.byKey.put(key, here);
+            }
+            if (here == null) {
+                here = ForcedWinProbe.landEntry(live, me, c, null, null, null, seed0, probeStats);
+                landProbes++;
+                if (here != null && (here[0] != 0) != land.entersTapped) {
+                    landDiffers++;
+                }
+                if (ForcedWinSolver.RECEIPTS) {
+                    ForcedWinSolver.receipt("FORCED_WIN land-entry " + key + " turn=" + live.getPhaseHandler().getTurn()
+                            + (here == null ? " unknown" : " tapped=" + (here[0] != 0) + " life=" + here[1]
+                                    + (here[2] != 0 ? "" : " board-dependent")) + " template=" + land.entersTapped + "/"
+                            + land.landLife);
+                }
+                if (here == null) {
+                    here = LAND_UNKNOWN;
+                }
+                if (!forge.ai.AiWork.spent()) {
+                    known.byKey.put(key, here); // as a template: an answer found past the decision's Forge AI work cap is not kept
+                }
+            }
+            if (here == LAND_UNKNOWN) {
+                return null;
+            }
+            if (here[2] != 0) {
+                // nothing of its own makes its entering depend on the board (ForcedWinProbe.entersPlainly): one answer
+                return new int[] {here[0], here[1], 1};
+            }
+            final int[] atPosition = {here[0], here[1], 0};
+            if (battlefield == null) {
+                return atPosition;
+            }
+            // what the plan has changed on our battlefield by now: the cards that entered it, went back to our hand, or are gone
+            final List<Card> added = new ArrayList<>(), toHand = new ArrayList<>(), gone = new ArrayList<>();
+            final java.util.Set<Integer> now = new java.util.HashSet<>();
+            for (int id : battlefield) {
+                now.add(id);
+                if (!root.contains(id) && id != land.id) {
+                    final Card x = card(live, byId, id);
+                    if (x != null) {
+                        added.add(x); // (a screen's granted copy is not in the game: left out)
+                    }
+                }
+            }
+            for (int id : root) {
+                if (!now.contains(id) && id != land.id) {
+                    final Card x = card(live, byId, id);
+                    if (x != null) {
+                        boolean back = false;
+                        for (int h : hand == null ? new int[0] : hand) {
+                            back |= h == id;
+                        }
+                        (back ? toHand : gone).add(x);
+                    }
+                }
+            }
+            if (added.isEmpty() && toHand.isEmpty() && gone.isEmpty()) {
+                return atPosition;
+            }
+            final String ctx = key + "@+" + names(added) + "<" + names(toHand) + "-" + names(gone);
+            int[] there = known.byKey.get(ctx);
+            if (there == null) {
+                if (known.contexts >= LAND_CONTEXTS) {
+                    return atPosition;
+                }
+                known.contexts++;
+                there = ForcedWinProbe.landEntry(live, me, c, added, toHand, gone, ForcedWinSolver.mix(seed0, ctx.hashCode()), probeStats);
+                landContexts++;
+                if (there != null && there[0] != here[0]) {
+                    landContextDiffers++;
+                }
+                if (ForcedWinSolver.RECEIPTS) {
+                    ForcedWinSolver.receipt("FORCED_WIN land-entry " + ctx + " turn=" + live.getPhaseHandler().getTurn()
+                            + (there == null ? " unknown" : " tapped=" + (there[0] != 0) + " life=" + there[1]) + " position="
+                            + (here[0] != 0) + "/" + here[1]);
+                }
+                if (there == null) {
+                    there = LAND_UNKNOWN;
+                }
+                if (!forge.ai.AiWork.spent()) {
+                    known.byKey.put(ctx, there);
+                }
+            }
+            return there == LAND_UNKNOWN ? atPosition : new int[] {there[0], there[1], 0};
+        }
+
+        private static String names(final List<Card> cards) {
+            final List<String> out = new ArrayList<>();
+            for (Card c : cards) {
+                out.add(c.getName());
+            }
+            java.util.Collections.sort(out);
+            return out.toString();
+        }
 
         /**
          * Read the seat's position; null when it is outside the model (more than one opponent). The library and

@@ -396,12 +396,31 @@ public final class ForcedWinProbe {
     // ------------------------------------------------------------------ one sandbox run
 
     static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st) {
-        return run(live, liveMe, cardId, setup, act, seed, st, null);
+        return run(live, liveMe, cardId, setup, act, seed, st, null, false);
     }
 
     /** As above; sdcc-tutorcast-1110: {@code tune} (null = none) sets up the sandbox's controller for our seat first. */
     static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st,
             java.util.function.Consumer<ProbeAi> tune) {
+        return run(live, liveMe, cardId, setup, act, seed, st, tune, false);
+    }
+
+    /**
+     * As above. {@code asIs} (sdcc-etb-1110, a position's land-entry probe; false = the sandbox every other probe runs
+     * in): the sandbox is the position itself as far as a copy can be: it keeps the position's turn number and its main
+     * phase (our second main phase stays the second; any other window becomes our first) and gets no floating mana.
+     * What the sandbox's Forge AI then decides (pay life for an untapped land, which it does when it holds a card it
+     * would cast now with the mana it really has) is what the seat's own controller decides at this position. With the
+     * usual twelve mana of each colour afloat, in a first main phase of turn 1, it paid for lands the seat lets enter
+     * tapped, and kept life the seat pays in its second main phase.
+     */
+    static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st, boolean asIs) {
+        return run(live, liveMe, cardId, setup, act, seed, st, null, asIs);
+    }
+
+    /** Both of the above (sdcc-integ-1110). */
+    static Obs run(Game live, Player liveMe, int cardId, Setup setup, Act act, long seed, Stats st,
+            java.util.function.Consumer<ProbeAi> tune, boolean asIs) {
         final Obs o = new Obs();
         o.settle = PROBE_SETTLE.get(); // sdcc-draws-1110 (false = as before)
         final long t0 = System.nanoTime();
@@ -426,7 +445,13 @@ public final class ForcedWinProbe {
                 return o;
             }
             inPlay(g);
-            g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+            if (asIs) {
+                final forge.game.phase.PhaseHandler lph = live.getPhaseHandler();
+                g.getPhaseHandler().devModeSet(lph.isPlayerTurn(liveMe) && lph.is(PhaseType.MAIN2) ? PhaseType.MAIN2
+                        : PhaseType.MAIN1, me, lph.getTurn());
+            } else {
+                g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+            }
             final ProbeAi probeAi = new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace);
             probeAi.planScry = PLAN_SCRY.get();
             probeAi.tutorCast = TUTOR_CAST.get();
@@ -449,7 +474,7 @@ public final class ForcedWinProbe {
             }
             // plenty of floating mana of every colour
             final Card src = card;
-            for (int c = 0; c < 6; c++) {
+            for (int c = 0; c < 6 && !asIs; c++) {
                 for (int k = 0; k < 12; k++) {
                     me.getManaPool().addMana(new Mana(ForcedWinModel.FORGE_COLOR[c], src, null, me));
                 }
@@ -1165,24 +1190,7 @@ public final class ForcedWinProbe {
             play.desc = "land";
             t.fromHand.add(play);
             // solver-gaps-1015: play it as our land drop in a sandbox: does it enter tapped, and what does that cost?
-            final Obs o = run(live, me, id, (g, m, c) -> {
-                if (!c.isInZone(ZoneType.Hand)) {
-                    g.getAction().moveToHand(c, null);
-                }
-                m.setLandsPlayedThisTurn(0);
-            }, (g, m, c) -> {
-                // the card object moved to our hand in setup (a zone change makes a new object): find it again
-                final Card hc = g.findById(c.getId());
-                if (hc == null) {
-                    return false;
-                }
-                for (SpellAbility sa : hc.getAllPossibleAbilities(m, true)) {
-                    if (sa.isLandAbility()) {
-                        return play(g, m, sa);
-                    }
-                }
-                return false;
-            }, ForcedWinSolver.mix(seed, id * 31L + 977), st);
+            final Obs o = playAsLandDrop(live, me, id, null, null, ForcedWinSolver.mix(seed, id * 31L + 977), st, false);
             if (o.played && o.error == null) {
                 t.entersTapped = o.hostTapped;
                 t.landLife = o.lifeDelta;
@@ -1781,6 +1789,162 @@ public final class ForcedWinProbe {
     }
 
     // ------------------------------------------------------------------ solver-gaps-1015 helpers
+
+    /**
+     * solver-gaps-1015: the card played as our land drop in a sandbox copy of the position (moved to our hand first when
+     * it is elsewhere; the turn's land drop is given back): the observation holds whether it is tapped once everything
+     * it caused has resolved ({@link Obs#hostTapped}) and our life change ({@link Obs#lifeDelta}). Every choice the
+     * entering raises (pay life or enter tapped, a card to reveal) is answered by the sandbox's Forge AI. {@code asIs}:
+     * see {@link #run(Game, Player, int, Setup, Act, long, Stats, boolean)} (false = a template's first-sight probe).
+     * {@code board} (sdcc-etb-1110; null = none, as a template's probe): applied to the sandbox first. {@code look}
+     * (sdcc-etb-1110; null = none): shown the sandbox's card in our hand before it is played.
+     */
+    static Obs playAsLandDrop(Game live, Player me, int id, Setup board, java.util.function.Consumer<Card> look, long seed,
+            Stats st, boolean asIs) {
+        return run(live, me, id, (g, m, c) -> {
+            Card hc = c;
+            if (board != null) {
+                board.apply(g, m, c);
+                hc = g.findById(c.getId()); // the board change may have moved it (a zone change makes a new object)
+            }
+            if (hc != null && !hc.isInZone(ZoneType.Hand)) {
+                g.getAction().moveToHand(hc, null);
+            }
+            m.setLandsPlayedThisTurn(0);
+        }, (g, m, c) -> {
+            // the card object moved to our hand in setup (a zone change makes a new object): find it again
+            final Card hc = g.findById(c.getId());
+            if (hc == null) {
+                return false;
+            }
+            if (look != null) {
+                look.accept(hc);
+            }
+            for (SpellAbility sa : hc.getAllPossibleAbilities(m, true)) {
+                if (sa.isLandAbility()) {
+                    return play(g, m, sa);
+                }
+            }
+            return false;
+        }, seed, st, asIs);
+    }
+
+    /**
+     * sdcc-etb-1110 (solverCfg landEntersProbe): how {@code liveCard}, a land of ours in any zone, enters when it is
+     * played as our land drop from this position: {1 = it is tapped afterwards, our life change, 1 = nothing of its own
+     * makes that depend on the board ({@link #entersPlainly})}. The sandbox is the position as it stands ({@link #run}'s
+     * {@code asIs}). Null when the sandbox could not play it (then nothing is known here and the template's first-sight
+     * answer stands).
+     *
+     * <p>{@code added}, {@code toHand}, {@code gone} (cards of {@code live}; null or empty = none): what a plan has
+     * changed on our battlefield before it plays the land. The sandbox's battlefield is made the plan's first: the
+     * cards the line put there enter it, those a cost returned go to our hand, the others it lost to our graveyard.
+     * These moves raise no triggers (the plan has already accounted for what its steps do); replacement effects and
+     * static abilities apply as in any zone change, so the board the land then enters is the engine's own.</p>
+     */
+    static int[] landEntry(Game live, Player liveMe, Card liveCard, List<Card> added, List<Card> toHand, List<Card> gone,
+            long seed, Stats st) {
+        final int[] in = ids(added), back = ids(toHand), out = ids(gone);
+        final Setup board = in.length + back.length + out.length == 0 ? null : (g, m, c) -> {
+            g.getTriggerHandler().setSuppressAllTriggers(true);
+            try {
+                for (int id : back) {
+                    final Card x = g.findById(id);
+                    if (x != null && x.isInPlay()) {
+                        g.getAction().moveToHand(x, null);
+                    }
+                }
+                for (int id : out) {
+                    final Card x = g.findById(id);
+                    if (x != null && x.isInPlay()) {
+                        g.getAction().moveToGraveyard(x, null);
+                    }
+                }
+                for (int id : in) {
+                    final Card x = g.findById(id);
+                    if (x != null && !x.isInPlay()) {
+                        g.getAction().moveToPlay(x, m, null, null);
+                    }
+                }
+            } finally {
+                g.getTriggerHandler().setSuppressAllTriggers(false);
+            }
+        };
+        final boolean[] plain = {false};
+        final Obs o = playAsLandDrop(live, liveMe, liveCard.getId(), board, hc -> plain[0] = entersPlainly(hc), seed, st, true);
+        if (!o.played || o.error != null) {
+            return null;
+        }
+        return new int[] {o.hostTapped ? 1 : 0, o.lifeDelta, plain[0] ? 1 : 0};
+    }
+
+    /** sdcc-etb-1110: the parameters of a replacement effect, and of its one script ability, that hold no condition. */
+    private static final java.util.Set<String> PLAIN_REPLACEMENT = java.util.Set.of("Event", "ValidCard", "Destination",
+            "ReplaceWith", "ReplacementResult", "Description");
+    private static final java.util.Set<String> PLAIN_ABILITY = java.util.Set.of("DB", "Defined", "ETB", "StackDescription",
+            "SpellDescription");
+
+    /**
+     * sdcc-etb-1110, engine metadata (the scripts' generic parameters, read in a sandbox copy; no card is named):
+     * nothing of {@code c}'s own makes how it enters depend on the board. True when it has no replacement effect, or
+     * each one is of the plainest kind: an event, the cards it is valid for, a destination and one script ability with
+     * no condition, no unless-cost, no choice and no further ability ("this land enters tapped"). Anything else (a
+     * condition on what we control or on a script variable, a cost we may pay instead, a parameter this list does not
+     * know) may depend on the board: such a land is asked again on each battlefield a plan builds.
+     */
+    static boolean entersPlainly(Card c) {
+        try {
+            for (ReplacementEffect re : c.getReplacementEffects()) {
+                if (!PLAIN_REPLACEMENT.containsAll(re.getMapParams().keySet())) {
+                    return false;
+                }
+                final SpellAbility sa = re.ensureAbility();
+                if (sa == null || sa.getSubAbility() != null || !PLAIN_ABILITY.containsAll(sa.getMapParams().keySet())) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * sdcc-etb-1110, engine metadata (no card is named): no card on any battlefield or in the command zone, other than
+     * {@code land}, has a replacement effect on a card moving that is valid for more than its own host (lands, or
+     * permanents, of some player enter tapped). With that and {@link #entersPlainly} the land enters as its template's
+     * sandbox saw it enter.
+     */
+    static boolean entersUnwatched(Game g, Card land) {
+        try {
+            for (Player p : g.getPlayers()) {
+                for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Command}) {
+                    for (Card x : p.getCardsIn(z)) {
+                        if (x == land) {
+                            continue;
+                        }
+                        for (ReplacementEffect re : x.getReplacementEffects()) {
+                            if (re.getMode() == forge.game.replacement.ReplacementType.Moved
+                                    && !"Card.Self".equals(re.getParam("ValidCard"))) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private static int[] ids(List<Card> cards) {
+        final int[] out = new int[cards == null ? 0 : cards.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = cards.get(i).getId();
+        }
+        return out;
+    }
 
     /** Engine metadata: the ability carries a state restriction (a count of cards present, an SVar check, threshold). */
     static boolean stateRestricted(SpellAbility sa) {
