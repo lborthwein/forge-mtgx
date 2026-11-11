@@ -84,6 +84,17 @@ public final class ForcedWinSolver {
          * library is not one card short and the next draw is that card.
          */
         public boolean probeSettle = false;
+        /**
+         * planner-fixes-1110 (0 = off, the default, and then nothing changes): where the width search spends its nodes
+         * ({@link ForcedWinPlanner.Limits#order}), a sum of 1 (a card drawn from a pile spell's ordered library choice stays
+         * unchosen until the line plays it, instead of one branch per class of card at every such draw), 2 (a node's
+         * moves that win come first, a win-condition cast that does not win comes last) and 4 (depth-limited passes of 2,
+         * 3, ... moves on a tenth of the nodes before the depth-first search, so a short line is found whatever a deep
+         * subtree before it costs). 7 = all three. The allowance (nodes, planMs, planDepth) is unchanged. Every width
+         * search of this solver reads it (the offense, the screens, the defense's threat check). Tests only: the JVM
+         * property forge.ai.forcedWin.planOrder is the value of a config that does not name the key.
+         */
+        public int planOrder = Integer.getInteger("forge.ai.forcedWin.planOrder", 0);
         public int horizon = 2;
         public long budgetMs = 8000;
         public boolean adversary = true;
@@ -753,6 +764,10 @@ public final class ForcedWinSolver {
             c.nodes = intOr(get.apply("nodes"), c.nodes);
             c.planDepth = intOr(get.apply("planDepth"), c.planDepth);
             c.probeSettle = "true".equals(get.apply("probeSettle")); // sdcc-draws-1110
+            c.planOrder = intOr(get.apply("planOrder"), c.planOrder); // planner-fixes-1110
+            if (c.planOrder < 0 || c.planOrder > 7) {
+                throw new IllegalArgumentException("planOrder is a sum of 1, 2 and 4 (0 = off), not " + c.planOrder);
+            }
             c.horizon = intOr(get.apply("horizon"), c.horizon);
             c.budgetMs = intOr(get.apply("budgetMs"), (int) c.budgetMs);
             c.adversary = !"false".equals(get.apply("adversary"));
@@ -871,7 +886,8 @@ public final class ForcedWinSolver {
                 + (oppBelief > 0 ? " oppBelief=" + oppBelief + " C=" + oppBeliefCands : "") // opp-belief-1104
                 + (oppHoldPoints ? " oppHoldPoints" : "")
                 + (oppResponse ? " oppResponse ms=" + oppResponseMs + " N=" + oppResponseNodes + " D=" + oppResponseDepth : "")
-                + (probeSettle ? " probeSettle" : ""); // sdcc-draws-1110
+                + (probeSettle ? " probeSettle" : "")
+                + (planOrder != 0 ? " planOrder=" + planOrder : "");
         }
     }
 
@@ -3878,10 +3894,11 @@ public final class ForcedWinSolver {
     }
 
     /** ledger-sweep2-1107: planner limits with this solver's expansion cap (planExpandCap; off = as {@code new Limits()}). */
-    private ForcedWinPlanner.Limits limits() {
+    ForcedWinPlanner.Limits limits() {
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.expandCap = cfg.planExpandCap;
         lim.depth = cfg.planDepth; // solver-distill-cc-1109 (18 = the default)
+        lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         return lim;
     }
 

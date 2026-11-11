@@ -368,6 +368,34 @@ public final class ForcedWinPlanner {
          * row 66: 15^5 copies under one Memory Jar activation after Doomsday, then the JVM's heap ran out).
          */
         boolean expandCap;
+        /**
+         * planner-fixes-1110 (solverCfg planOrder; 0 = off, the default, and nothing changes): where the search spends its
+         * nodes. A sum of:
+         * <ul>
+         * <li>{@link #ORDER_LAZY}: a card drawn from an ordered library choice (a LAZY pile position) stays unchosen in
+         * our hand until the line plays it (one move per class it could be and ability of that class we can pay now), is
+         * discarded (as the least useful card left for the pile) or is put back (still unchosen). Off, every such draw
+         * branches at once over each class (classes^k states for k draws, times the discard choices), whether or not the
+         * line ever plays the card. Unchosen cards left in hand at the win are filled in when the line is recorded: up to
+         * two counters (cheapest first: the ranking's own protection cap), then by class order.</li>
+         * <li>{@link #ORDER_WIN_FIRST}: a node's moves that win at once come first; a win-condition cast that does not win
+         * and leaves nothing behind (an entering win whose library condition is not met, a storm drain short of lethal)
+         * goes after the node's other moves, not before them.</li>
+         * <li>{@link #ORDER_SHALLOW}: before the depth-first search, depth-limited passes (2 moves, 3, ...) on at most
+         * {@link #SHALLOW_PCT} percent of the nodes, so a line of a few moves is found whatever a deep subtree ahead of it
+         * costs. The depth-first search then runs with the nodes left.</li>
+         * </ul>
+         * Measured on the owner's 54 Doomsday decisions (planner alone, 30,000 nodes a search): off 18 positions with a
+         * line, 762,584 nodes, 15 searches cut by the allowance; 1: 24, 291,722, 4; 3: 24, 237,863, 2; 7: 24, 311,883, 2.
+         */
+        int order = 0;
+        static final int ORDER_LAZY = 1, ORDER_WIN_FIRST = 2, ORDER_SHALLOW = 4;
+        /**
+         * planOrder (ORDER_SHALLOW): the share of the nodes the depth-limited passes may use, in percent. At 10 the
+         * passes reach 4 moves in every measured position and 5 or 6 in most; at 50 they took the nodes a long line's
+         * depth-first search needed (a 19-step kill was found at 36,270 nodes instead of 15,170).
+         */
+        static final int SHALLOW_PCT = 10;
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -387,11 +415,21 @@ public final class ForcedWinPlanner {
         boolean timedOut;
         /** ledger-sweep2-1107 (report only): the most resolve steps one expansion took; expansions cut by planExpandCap. */
         int maxExpand, expandStops;
+        /**
+         * planner-fixes-1110 (planOrder's ORDER_SHALLOW; report only, 0 when off): the deepest depth-limited pass that ran
+         * to its end, the nodes the passes used, and the pass depth and node count at which the first line was found (0 =
+         * none, or found by the depth-first search).
+         */
+        int shallowDepth, shallowNodes, shallowLineDepth, firstLineAt = -1;
+        boolean ordered;
 
         String summary() {
             return "lines=" + lines.size() + " nodes=" + nodes + (exhausted ? "(budget)" : "") + (stoppedBy.isEmpty() ? "" : " stoppedBy=" + stoppedBy)
                     + (depthStops > 0 ? " depthStops=" + depthStops : "") + " sameTurn=" + sameTurn
-                    + " nextTurn=" + nextTurn + " ms=" + nanos / 1_000_000 + (expandStops > 0 ? " expandStops=" + expandStops : "");
+                    + " nextTurn=" + nextTurn + " ms=" + nanos / 1_000_000 + (expandStops > 0 ? " expandStops=" + expandStops : "")
+                    + (shallowNodes > 0 ? " shallow=d" + shallowDepth + "/" + shallowNodes
+                            + (shallowLineDepth > 0 ? " lineAtD" + shallowLineDepth : "") : "")
+                    + (ordered && firstLineAt >= 0 ? " firstLineAt=" + firstLineAt : "");
         }
     }
 
@@ -410,6 +448,8 @@ public final class ForcedWinPlanner {
 
     private static final int UNKNOWN = Integer.MIN_VALUE;
     private static final int LAZY = -1;
+    /** planOrder (ORDER_LAZY): a put-back of the unchosen card of pile slot k is {@code PUTBACK_LAZY - k} until the line is recorded. */
+    private static final int PUTBACK_LAZY = -1000;
 
     static final class Perm {
         int card;
@@ -530,7 +570,7 @@ public final class ForcedWinPlanner {
     private List<String> names(List<Integer> xs) {
         final List<String> out = new ArrayList<>();
         for (int x : xs) {
-            out.add(cards.get(x).name);
+            out.add(x < 0 ? "*" : cards.get(x).name); // planOrder (ORDER_LAZY): an unchosen pile card in hand
         }
         java.util.Collections.sort(out);
         return out;
@@ -566,6 +606,68 @@ public final class ForcedWinPlanner {
     }
 
     private long deadline = Long.MAX_VALUE;
+
+    /**
+     * planner-fixes-1110 (diagnostics only): -Dforge.ai.forcedWin.planProfile=true prints, per search, where its nodes
+     * went: by depth and turn, by the line's first move and by the move that led to each node, the transposition hits
+     * among them, and how wide the expansions were.
+     */
+    static final boolean PROFILE = Boolean.getBoolean("forge.ai.forcedWin.planProfile");
+    private final int[] profDepth = new int[64], profHitDepth = new int[64], profTurn = new int[8], profFan = new int[7];
+    private final Map<String, int[]> profRoot = new java.util.LinkedHashMap<>(), profLast = new java.util.LinkedHashMap<>();
+    private int profHits;
+
+    private static String profLabel(Step st) {
+        return st.pass ? "PASS" : st.kind + ":" + st.hostName;
+    }
+
+    private void profNode(S s, int depth, boolean hit) {
+        profDepth[Math.min(depth, 63)]++;
+        profTurn[Math.min(s.turnIdx, 7)]++;
+        if (hit) {
+            profHits++;
+            profHitDepth[Math.min(depth, 63)]++;
+        }
+        String root = "(root)";
+        for (Step st : s.steps) {
+            if (st.pass || st.kind != AbilKind.FLOAT) {
+                root = profLabel(st);
+                break;
+            }
+        }
+        final String last = s.steps.isEmpty() ? "(root)" : profLabel(s.steps.get(s.steps.size() - 1));
+        final int[] r = profRoot.computeIfAbsent(root, k -> new int[2]), l = profLast.computeIfAbsent(last, k -> new int[2]);
+        r[0]++;
+        l[0]++;
+        r[1] += hit ? 1 : 0;
+        l[1] += hit ? 1 : 0;
+    }
+
+    private static String profTop(Map<String, int[]> m, int n) {
+        final List<Map.Entry<String, int[]>> es = new ArrayList<>(m.entrySet());
+        es.sort((x, y) -> Integer.compare(y.getValue()[0], x.getValue()[0]));
+        final StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < Math.min(n, es.size()); i++) {
+            sb.append(i == 0 ? "" : "; ").append(es.get(i).getKey()).append('=').append(es.get(i).getValue()[0]).append("(hit")
+                    .append(es.get(i).getValue()[1]).append(')');
+        }
+        return sb.toString();
+    }
+
+    private void profPrint() {
+        int maxD = 0;
+        for (int i = 0; i < 64; i++) {
+            maxD = profDepth[i] > 0 ? i : maxD;
+        }
+        System.err.println("FORCED_WIN planprofile horizon=" + lim.horizon + " order=" + lim.order + " " + result.summary()
+                + " visited=" + result.visited + " hits=" + profHits + " maxExpand=" + result.maxExpand
+                + " fan(1,2-3,4-15,16-63,64-255,256-1023,1024+)=" + Arrays.toString(profFan) + " byDepth="
+                + Arrays.toString(Arrays.copyOf(profDepth, maxD + 1)) + " hitByDepth="
+                + Arrays.toString(Arrays.copyOf(profHitDepth, maxD + 1)) + " byTurn=" + Arrays.toString(Arrays.copyOf(profTurn, 3)));
+        System.err.println("FORCED_WIN planprofile byFirstMove: " + profTop(profRoot, 12));
+        System.err.println("FORCED_WIN planprofile byLastMove: " + profTop(profLast, 30));
+    }
+
     /** blockers-1109: passes whose blocker count differs from the pre-fix count (every creature); diagnostic only. */
     private int blockerDiffs;
 
@@ -611,12 +713,20 @@ public final class ForcedWinPlanner {
         for (int i = pos.knownTop.size(); i < pos.librarySize; i++) {
             s.lib.add(UNKNOWN);
         }
-        dfs(s, 0);
+        nodeCap = lim.nodes;
+        depthCap = lim.depth;
+        result.ordered = lim.order != 0;
+        if ((lim.order & Limits.ORDER_SHALLOW) == 0 || !shallow(s)) {
+            dfs(s, 0);
+        }
         rank();
         result.nodes = nodes;
         result.exhausted |= nodes >= lim.nodes; // kill-line-1106: a stop at the node limit counts as exhausted (report only)
         for (Line l : result.lines) {
             l.knownTop = pos.knownTop.size();
+        }
+        if (PROFILE) {
+            profPrint();
         }
         if (blockerDiffs > 0) {
             // blockers-1109 (ledger row 81): this plan saw a pass where a tapped or can't-block creature no longer blocks
@@ -636,7 +746,12 @@ public final class ForcedWinPlanner {
             record(s);
             return;
         }
-        if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines || (nodes & 63) == 0 && forge.game.WorkClock.nanoTime() > deadline) {
+        if (nodes >= nodeCap || result.lines.size() >= lim.maxLines || (nodes & 63) == 0 && forge.game.WorkClock.nanoTime() > deadline) {
+            if (shallowPass && nodes < lim.nodes && result.lines.size() < lim.maxLines
+                    && forge.game.WorkClock.nanoTime() <= deadline) {
+                passCut = true; // planOrder: the pass's share of the nodes is spent, not the search's allowance
+                return;
+            }
             result.exhausted |= nodes >= lim.nodes || forge.game.WorkClock.nanoTime() > deadline;
             if (result.stoppedBy.isEmpty() && result.exhausted) {
                 result.stoppedBy = nodes >= lim.nodes ? "nodes" : "time"; // unified-search-1106
@@ -647,22 +762,102 @@ public final class ForcedWinPlanner {
             }
             return;
         }
-        if (depth >= lim.depth) {
-            result.depthStops++; // unified-search-1106
+        if (depth >= depthCap) {
+            if (shallowPass) {
+                passCut = true; // planOrder: a deeper pass, or the depth-first search, goes on from here
+            } else {
+                result.depthStops++; // unified-search-1106
+            }
             return;
         }
         nodes++;
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.PLAN_NODE); // work-units-1107 (no clock = no-op)
         result.visited++;
-        if (!seen.add(s.key())) {
+        if (shallowPass ? !seenDeeper(s.key(), depthCap - depth) : !seen.add(s.key())) {
+            if (PROFILE) {
+                profNode(s, depth, true);
+            }
             return;
         }
-        for (S next : successors(s)) {
+        if (PROFILE) {
+            profNode(s, depth, false);
+        }
+        final List<S> succ = successors(s);
+        if (PROFILE) {
+            final int n = succ.size();
+            profFan[n <= 1 ? 0 : n <= 3 ? 1 : n <= 15 ? 2 : n <= 63 ? 3 : n <= 255 ? 4 : n <= 1023 ? 5 : 6]++;
+        }
+        for (S next : succ) {
             dfs(next, depth + 1);
-            if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines) {
+            if (nodes >= nodeCap || result.lines.size() >= lim.maxLines) {
                 return;
             }
         }
+    }
+
+    /**
+     * planner-fixes-1110 (planOrder; lim.nodes and lim.depth when off): the node and depth caps of the search in
+     * progress. A depth-limited pass ({@link #shallow}) runs under its own.
+     */
+    private int nodeCap, depthCap;
+    /** planOrder (ORDER_SHALLOW): a depth-limited pass is running; one of its branches was cut (depth, share or expansion). */
+    private boolean shallowPass, passCut;
+    /** planOrder (ORDER_SHALLOW): per position key, the most moves still allowed when a pass searched it. */
+    private final Map<String, Integer> seenAt = new HashMap<>();
+
+    /** planOrder: the position was not yet searched with at least {@code left} moves to go in this pass (and now is). */
+    private boolean seenDeeper(String key, int left) {
+        final Integer prev = seenAt.get(key);
+        if (prev != null && prev >= left) {
+            return false;
+        }
+        seenAt.put(key, left);
+        return true;
+    }
+
+    /**
+     * planner-fixes-1110 (planOrder's ORDER_SHALLOW): depth-limited passes from the root, 2 moves deep, then 3, ..., while
+     * they stay inside their share of the nodes ({@link Limits#SHALLOW_PCT}). A depth-first search spends its whole
+     * allowance under the first moves it tries when their subtrees are large; a line of a few moves elsewhere is then
+     * never reached. Each pass is the same search with a depth cap (a position is searched again only with more moves
+     * to go than before), so what it finds are the lines of at most that many moves. The passes end at the first one
+     * that finds a line; the depth-first search then runs with the nodes left. True = a pass searched the whole tree
+     * (no branch cut): nothing is left for the depth-first search.
+     */
+    private boolean shallow(S root) {
+        final int share = (int) ((long) lim.nodes * Limits.SHALLOW_PCT / 100);
+        boolean whole = false;
+        for (int d = 2; d < lim.depth && nodes < share; d++) {
+            final int lines0 = result.lines.size();
+            shallowPass = true;
+            passCut = false;
+            depthCap = d;
+            nodeCap = share;
+            seenAt.clear();
+            dfs(root, 0);
+            shallowPass = false;
+            if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines) {
+                break; // the search's own limit (or its time: nodes is then at the limit)
+            }
+            if (!passCut) {
+                result.shallowDepth = d;
+                whole = true;
+                break;
+            }
+            if (nodes >= share) {
+                break; // cut by its share: not searched to its depth
+            }
+            result.shallowDepth = d;
+            if (result.lines.size() > lines0) {
+                result.shallowLineDepth = d;
+                break;
+            }
+        }
+        seenAt.clear();
+        result.shallowNodes = nodes;
+        nodeCap = lim.nodes;
+        depthCap = lim.depth;
+        return whole;
     }
 
     /** ledger-sweep2-1107 (planExpandCap): branches built in the current expansion, and the most it may build. */
@@ -672,10 +867,12 @@ public final class ForcedWinPlanner {
     private List<S> successors(S s) {
         expandCalls = 0;
         expandCut = false;
-        expandLimit = lim.expandCap ? Math.max(1, lim.nodes - nodes) : Integer.MAX_VALUE;
+        expandLimit = lim.expandCap ? Math.max(1, nodeCap - nodes) : Integer.MAX_VALUE;
         final List<S> out0 = successors0(s);
         result.maxExpand = Math.max(result.maxExpand, expandCalls);
-        if (expandCut) {
+        if (expandCut && shallowPass) {
+            passCut = true; // planOrder: cut by the pass's share, not by the search's allowance
+        } else if (expandCut) {
             result.expandStops++;
             result.exhausted = true;
             if (result.stoppedBy.isEmpty()) {
@@ -687,11 +884,21 @@ public final class ForcedWinPlanner {
 
     private List<S> successors0(S s) {
         final List<S> first = new ArrayList<>(), second = new ArrayList<>(), third = new ArrayList<>();
+        // planner-fixes-1110 (planOrder's ORDER_WIN_FIRST; both stay empty when off): the moves that win at once, and the
+        // win-condition casts that neither win nor leave a way to win behind
+        final List<S> wins = new ArrayList<>(), late = new ArrayList<>();
+        final boolean winFirst = (lim.order & Limits.ORDER_WIN_FIRST) != 0;
         final Set<String> tried = new HashSet<>();
         final boolean pending = pos.pendingId >= 0 && s.steps.isEmpty();
         final boolean quiet = !pending && s.turnIdx < lim.quietTurns; // GOLDFISH: lands and the pass only
+        int lazyAt = -1;
         for (int hi = 0; hi < s.hand.size(); hi++) {
             final int h = s.hand.get(hi);
+            if (h < 0) {
+                // planOrder (ORDER_LAZY): an unchosen pile card; its moves follow the hand's own (below)
+                lazyAt = lazyAt < 0 ? hi : lazyAt;
+                continue;
+            }
             final ACard a = cards.get(h);
             if (pending && a.id != pos.pendingId) {
                 continue;
@@ -708,7 +915,7 @@ public final class ForcedWinPlanner {
                             if (!n.dead) {
                                 n.won = true;
                                 n.how = "loop";
-                                first.add(n);
+                                (winFirst ? wins : first).add(n);
                             }
                         }
                     }
@@ -730,7 +937,43 @@ public final class ForcedWinPlanner {
                 }
                 final List<S> into = isWinny(a, ab) || ab.has(EffKind.PILE) ? first
                         : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP) ? second : third;
-                into.addAll(apply(s, hi, -1, a, ab));
+                if (winFirst) {
+                    place(apply(s, hi, -1, a, ab), into, isWinny(a, ab) && !staysAsWin(a, ab), wins, late);
+                } else {
+                    into.addAll(apply(s, hi, -1, a, ab));
+                }
+            }
+        }
+        if (lazyAt >= 0 && !pending) {
+            // planOrder (ORDER_LAZY): an unchosen pile card in hand is played as any class of card still open to the
+            // pile, chosen by the move that plays it. The classes are those a draw branches over when the key is off:
+            // the first lim.classes, and one more per other unchosen card in hand (off, each of those was drawn as a
+            // class of its own first, which let the next draw reach one class further).
+            int lazies = 0;
+            for (int h : s.hand) {
+                lazies += h < 0 ? 1 : 0;
+            }
+            for (int c : classes(s.remaining, lim.classes + lazies - 1)) {
+                final ACard a = cards.get(c);
+                for (Abil ab : a.fromHand) {
+                    if (ab.unplayable || ab.cardTargets && ab.kind != AbilKind.LAND || quiet && ab.kind != AbilKind.LAND) {
+                        continue;
+                    }
+                    final String k = a.name + "|" + ab.kind + "|" + ab.costKey + "|" + ab.desc + "|" + ab.targetVariant;
+                    if (!tried.add(k) || !allowed(s, a, ab) || !affordable(s, ab)) {
+                        continue;
+                    }
+                    final S b = s.copy();
+                    bindHand(b, lazyAt, c);
+                    final List<S> into = isWinny(a, ab) || ab.has(EffKind.PILE) ? first
+                            : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP) ? second : third;
+                    final List<S> res = apply(b, s, lazyAt, -1, a, ab);
+                    if (winFirst) {
+                        place(res, into, isWinny(a, ab) && !staysAsWin(a, ab), wins, late);
+                    } else {
+                        into.addAll(res);
+                    }
+                }
             }
         }
         for (int bi = 0; bi < s.bf.size() && !quiet; bi++) {
@@ -744,7 +987,7 @@ public final class ForcedWinPlanner {
                         n.steps.add(Step.engine(AbilKind.ACTIVATE, a.id, a.name, "loop with " + b.name, "", false));
                         n.won = true;
                         n.how = "loop";
-                        first.add(n);
+                        (winFirst ? wins : first).add(n);
                         break;
                     }
                 }
@@ -757,12 +1000,19 @@ public final class ForcedWinPlanner {
                 if (!tried.add(k) || !allowedBf(s, p, ab)) {
                     continue;
                 }
-                (ab.has(EffKind.DRAW) || ab.has(EffKind.WIN) ? second : third).addAll(apply(s, -1, bi, a, ab));
+                final List<S> into = ab.has(EffKind.DRAW) || ab.has(EffKind.WIN) ? second : third;
+                if (winFirst) {
+                    place(apply(s, -1, bi, a, ab), into, false, wins, late);
+                } else {
+                    into.addAll(apply(s, -1, bi, a, ab));
+                }
             }
         }
-        final List<S> out = new ArrayList<>(first);
+        final List<S> out = new ArrayList<>(wins);
+        out.addAll(first);
         out.addAll(second);
         out.addAll(third);
+        out.addAll(late);
         if (s.preMain && !pending) {
             // line-adoption-1107: from our upkeep or draw step, the turn goes on to its main phase (not to our next turn)
             final S n = s.copy();
@@ -790,6 +1040,77 @@ public final class ForcedWinPlanner {
         return ab.has(EffKind.WIN) || ab.storm && (ab.has(EffKind.DRAIN) || ab.has(EffKind.MILL_OPP))
                 || ab.kind == AbilKind.SPELL && a.permanent && (a.winsOnEntry || a.winIfLibraryAtMost >= 0
                         || a.emptyDrawWin);
+    }
+
+    /**
+     * planOrder (ORDER_WIN_FIRST): a win-condition move that leaves a way to win behind even when it does not win at
+     * once: a permanent that makes a draw from an empty library a win, a pile, or cards milled from the opponent.
+     */
+    private static boolean staysAsWin(ACard a, Abil ab) {
+        return ab.has(EffKind.PILE) || ab.has(EffKind.MILL_OPP) || ab.kind == AbilKind.SPELL && a.permanent && a.emptyDrawWin;
+    }
+
+    /** planOrder (ORDER_WIN_FIRST): one move's results by what they did: won at once, a spent win condition, the rest. */
+    private static void place(List<S> res, List<S> into, boolean spentIfNoWin, List<S> wins, List<S> late) {
+        for (S n : res) {
+            (n.won ? wins : spentIfNoWin ? late : into).add(n);
+        }
+    }
+
+    /**
+     * planOrder (ORDER_LAZY): a necessary condition of {@link #pay}, checked before a move's state is built: the mana in
+     * the pool and in the untapped plain sources covers the cost's mana (Phyrexian pips can be life).
+     */
+    private boolean affordable(S s, Abil ab) {
+        int need = ab.generic + ab.hybrid.size();
+        for (int c = 0; c < 6; c++) {
+            need += ab.pips[c];
+        }
+        for (int i = 0; i < 7 && need > 0; i++) {
+            need -= s.pool[i];
+        }
+        for (int i = 0; i < s.bf.size() && need > 0; i++) {
+            final Perm p = s.bf.get(i);
+            final ACard a = cards.get(p.card);
+            if (!p.tapped && a.sourceColors != 0 && !a.sourceSick) {
+                need -= Math.max(1, a.sourceAmount);
+            }
+        }
+        return need <= 0;
+    }
+
+    /** planOrder (ORDER_LAZY): the unchosen card at {@code hi} of the hand is {@code card} (one of {@code s.remaining}). */
+    private void bindHand(S s, int hi, int card) {
+        assign(s, s.hand.get(hi), card);
+        s.hand.set(hi, card);
+    }
+
+    /** planOrder (ORDER_LAZY): the first unchosen card of the hand, or -1. */
+    private static int lazyIn(List<Integer> hand) {
+        for (int i = 0; i < hand.size(); i++) {
+            if (hand.get(i) < 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * planOrder (ORDER_LAZY): an unchosen card of the hand leaves it for the graveyard (a discard): it is the least
+     * useful card still open to the pile, as a milled pile position is. False = the hand holds none.
+     */
+    private boolean discardLazy(S s) {
+        final int hi = lazyIn(s.hand);
+        if (hi < 0) {
+            return false;
+        }
+        final int f = leftover(s.remaining);
+        if (f >= 0) {
+            assign(s, s.hand.get(hi), f);
+            s.gyPool.add(f);
+        }
+        s.hand.remove(hi);
+        return true;
     }
 
     /** solver-gaps-1015: an observed hand-size condition (Library of Alexandria's "exactly seven cards"). */
@@ -824,8 +1145,12 @@ public final class ForcedWinPlanner {
     }
 
     private List<S> apply(S s0, int handIdx, int bfIdx, ACard a, Abil ab) {
+        return apply(s0.copy(), s0, handIdx, bfIdx, a, ab);
+    }
+
+    /** As above on {@code s}, a copy of the node {@code s0} the caller made (planOrder: with the played card chosen). */
+    private List<S> apply(S s, S s0, int handIdx, int bfIdx, ACard a, Abil ab) {
         final List<S> out = new ArrayList<>();
-        final S s = s0.copy();
         final int host = handIdx >= 0 ? s.hand.get(handIdx) : s.bf.get(bfIdx).card;
         Perm self = bfIdx >= 0 ? s.bf.get(bfIdx) : null;
         final boolean free = pos.pendingId >= 0 && a.id == pos.pendingId && s0.steps.isEmpty();
@@ -1118,6 +1443,13 @@ public final class ForcedWinPlanner {
                     resolve(s, effs, ei, done + 1, ab, out);
                     return;
                 }
+                if ((lim.order & Limits.ORDER_LAZY) != 0) {
+                    // planOrder: the pile position's card is chosen when the line plays it, not when it is drawn
+                    s.lib.remove(0);
+                    s.hand.add(top);
+                    resolve(s, effs, ei, done + 1, ab, out);
+                    return;
+                }
                 for (int c : classes(s.remaining)) {
                     final S n = s.copy();
                     assign(n, top, c);
@@ -1170,7 +1502,8 @@ public final class ForcedWinPlanner {
                         n.lib.add(0, ch.get(i));
                     }
                     for (int c : ch) {
-                        st.putBack.add(cards.get(c).id);
+                        // planOrder (ORDER_LAZY): an unchosen card goes back unchosen; record() names it
+                        st.putBack.add(c < 0 ? PUTBACK_LAZY - (LAZY - c) : cards.get(c).id);
                     }
                     resolve(n, effs, ei + 1, 0, ab, out);
                 }
@@ -1187,6 +1520,11 @@ public final class ForcedWinPlanner {
                 cands.addAll(s.gyPool);
                 cands.sort(Integer::compare);
                 final int k = Math.min(e.n, cands.size());
+                for (int i = 0; i < s.hand.size(); i++) {
+                    if (s.hand.get(i) < 0) {
+                        s.hand.set(i, unknownCard); // planOrder (ORDER_LAZY): an earlier pile's unchosen card: not ours to choose now
+                    }
+                }
                 s.pile = new int[k];
                 Arrays.fill(s.pile, -1);
                 s.remaining = cands;
@@ -1284,6 +1622,16 @@ public final class ForcedWinPlanner {
                         final S n = s.copy();
                         final List<String> names = new ArrayList<>();
                         for (int c : ch) {
+                            if (c < 0) {
+                                // planOrder (ORDER_LAZY): an unchosen card is discarded as the least useful card left
+                                final int f = leftover(n.remaining);
+                                if (f < 0) {
+                                    n.hand.remove(Integer.valueOf(c));
+                                    continue;
+                                }
+                                bindHand(n, n.hand.indexOf(c), f);
+                                c = f;
+                            }
                             n.hand.remove(Integer.valueOf(c));
                             n.gyPool.add(c);
                             names.add(cards.get(c).name);
@@ -1291,6 +1639,28 @@ public final class ForcedWinPlanner {
                         java.util.Collections.sort(names);
                         token(n, ForcedWinChoices.DISC + ":" + String.join(";", names));
                         resolve(n, effs, ei + 1, 0, ab, out);
+                    }
+                    return;
+                }
+                if (lazyIn(s.hand) >= 0) {
+                    // planOrder (ORDER_LAZY): each split of the discard between unchosen cards (each the least useful
+                    // card left for the pile) and the hand's other cards (least useful first), fewest unchosen first
+                    int lazies = 0;
+                    for (int h : s.hand) {
+                        lazies += h < 0 ? 1 : 0;
+                    }
+                    final int n = Math.min(e.n, s.hand.size()), others = s.hand.size() - lazies;
+                    for (int k = Math.max(0, n - others); k <= Math.min(n, lazies); k++) {
+                        final S v = s.copy();
+                        for (int i = 0; i < k; i++) {
+                            discardLazy(v);
+                        }
+                        for (int i = 0; i < n - k; i++) {
+                            final int d = leastUseful(v.hand);
+                            v.hand.remove(Integer.valueOf(d));
+                            v.gyPool.add(d);
+                        }
+                        resolve(v, effs, ei + 1, 0, ab, out);
                     }
                     return;
                 }
@@ -1310,7 +1680,7 @@ public final class ForcedWinPlanner {
             case HAND_TO_LIBRARY: {
                 // solver-gaps-1015: our hand goes into our library (a shuffle follows): known contents, unknown places
                 for (int h : s.hand) {
-                    if (h != unknownCard) {
+                    if (h != unknownCard && h >= 0) { // planOrder (ORDER_LAZY): an unchosen card is not a known content
                         s.libPool.add(h);
                     }
                     s.lib.add(UNKNOWN);
@@ -1361,7 +1731,9 @@ public final class ForcedWinPlanner {
                 for (int i = 0; i < size; i++) {
                     s.lib.add(UNKNOWN);
                 }
-                s.remaining = new ArrayList<>();
+                if (lazyIn(s.hand) < 0) { // planOrder (ORDER_LAZY): the hand's unchosen cards are still ours to choose
+                    s.remaining = new ArrayList<>();
+                }
                 resolve(s, effs, ei + 1, 0, ab, out);
                 return;
             }
@@ -1529,11 +1901,11 @@ public final class ForcedWinPlanner {
     /** labeller-v2 (c): the discard choices of {@code n} cards: distinct classes, least useful first (as put-back's). */
     private List<List<Integer>> discardChoices(S s, int n) {
         final List<Integer> hand = new ArrayList<>(s.hand);
-        hand.sort(Comparator.comparingInt((Integer h) -> -cards.get(h).order()).thenComparingInt(h -> cards.get(h).id));
+        hand.sort(Comparator.comparingInt((Integer h) -> -orderOf(h)).thenComparingInt(this::idOf));
         final List<Integer> distinct = new ArrayList<>();
         final Map<String, Integer> perName = new HashMap<>();
         for (int h : hand) {
-            final int k = perName.merge(cards.get(h).name, 1, Integer::sum);
+            final int k = perName.merge(nameOf(h), 1, Integer::sum);
             if (k <= n) {
                 distinct.add(h);
             }
@@ -1545,7 +1917,7 @@ public final class ForcedWinPlanner {
         for (List<Integer> c : raw) {
             final List<String> names = new ArrayList<>();
             for (int x : c) {
-                names.add(cards.get(x).name);
+                names.add(nameOf(x));
             }
             java.util.Collections.sort(names);
             if (seenNames.add(names.toString()) && out.size() < lim.classes) {
@@ -1562,6 +1934,11 @@ public final class ForcedWinPlanner {
 
     /** One card per distinct name, ordered by observed affordance (wins, draws, mana, lands, protection), plus one other. */
     private List<Integer> classes(List<Integer> from) {
+        return classes(from, lim.classes);
+    }
+
+    /** As above with {@code cap} classes at most (and the one other). */
+    private List<Integer> classes(List<Integer> from, int cap) {
         final List<Integer> useful = new ArrayList<>();
         final Set<String> names = new HashSet<>();
         int other = -1;
@@ -1577,7 +1954,7 @@ public final class ForcedWinPlanner {
             }
         }
         useful.sort(Comparator.comparingInt((Integer c) -> cards.get(c).order()).thenComparingInt(c -> cards.get(c).id));
-        final List<Integer> out = new ArrayList<>(useful.subList(0, Math.min(useful.size(), lim.classes)));
+        final List<Integer> out = new ArrayList<>(useful.subList(0, Math.min(useful.size(), cap)));
         if (other >= 0) {
             out.add(other);
         }
@@ -1599,6 +1976,9 @@ public final class ForcedWinPlanner {
     private int leastUseful(List<Integer> hand) {
         int best = hand.get(0), bestOrder = -1;
         for (int h : hand) {
+            if (h < 0) {
+                continue; // planOrder (ORDER_LAZY): an unchosen card (the caller discards those itself)
+            }
             final int o = cards.get(h).order();
             if (o > bestOrder) {
                 best = h;
@@ -1608,8 +1988,24 @@ public final class ForcedWinPlanner {
         return best;
     }
 
+    /** planOrder (ORDER_LAZY): {@code h}'s class order, name and id for the hand's choice lists (an unchosen card: after the least useful). */
+    private int orderOf(int h) {
+        return h < 0 ? 5 : cards.get(h).order();
+    }
+
+    private String nameOf(int h) {
+        return h < 0 ? "*" : cards.get(h).name;
+    }
+
+    private int idOf(int h) {
+        return h < 0 ? Integer.MAX_VALUE : cards.get(h).id;
+    }
+
     private List<List<Integer>> putBackChoices(S s, int n) {
         final List<Integer> hand = new ArrayList<>(s.hand);
+        if (lazyIn(hand) >= 0) {
+            return putBackChoicesLazy(hand, n);
+        }
         hand.sort(Comparator.comparingInt((Integer h) -> -cards.get(h).order()).thenComparingInt(h -> cards.get(h).id));
         final List<Integer> distinct = new ArrayList<>();
         final Set<String> names = new HashSet<>();
@@ -1623,6 +2019,42 @@ public final class ForcedWinPlanner {
             return out;
         }
         combos(distinct, n, 0, new ArrayList<>(), out, 6);
+        return out;
+    }
+
+    /**
+     * planOrder (ORDER_LAZY): the put-back choices of a hand that holds unchosen pile cards. As above, with the unchosen
+     * cards (up to {@code n} of them; they are alike) after the lands, counters and other cards and before the wins,
+     * draws and mana: a card we do not need goes back first, then cards whose choice is still open, the cards the
+     * line holds on to last. Choices that differ only in which unchosen card goes back are one choice.
+     */
+    private List<List<Integer>> putBackChoicesLazy(List<Integer> hand, int n) {
+        hand.sort(Comparator.comparingInt((Integer h) -> h < 0 ? -5 : -2 * cards.get(h).order()).thenComparingInt(this::idOf));
+        final List<Integer> distinct = new ArrayList<>();
+        final Set<String> names = new HashSet<>();
+        int lazies = 0;
+        for (int h : hand) {
+            if (h < 0 ? lazies++ < n : names.add(cards.get(h).name) || distinct.size() < n) {
+                distinct.add(h);
+            }
+        }
+        final List<List<Integer>> out = new ArrayList<>();
+        if (hand.size() < n) {
+            return out;
+        }
+        final List<List<Integer>> raw = new ArrayList<>();
+        combos(distinct, n, 0, new ArrayList<>(), raw, 24);
+        final Set<String> seenNames = new HashSet<>();
+        for (List<Integer> c : raw) {
+            final List<String> key = new ArrayList<>();
+            for (int x : c) {
+                key.add(x < 0 ? "*" : "#" + x);
+            }
+            java.util.Collections.sort(key);
+            if (seenNames.add(key.toString()) && out.size() < 6) {
+                out.add(c);
+            }
+        }
         return out;
     }
 
@@ -1655,6 +2087,9 @@ public final class ForcedWinPlanner {
             s.life -= ab.life;
         }
         if (ab.discardHand) {
+            while (discardLazy(s)) {
+                // planOrder (ORDER_LAZY): each unchosen card goes as the least useful card left for the pile
+            }
             for (int h : s.hand) {
                 s.gyPool.add(h);
             }
@@ -1865,15 +2300,41 @@ public final class ForcedWinPlanner {
             steps.add(st.copy());
         }
         int[] slotCard = new int[0];
-        if (s.pile != null && s.pileStep >= 0 && s.pileStep < steps.size()) {
+        final int[] pile = s.pile == null ? null : s.pile.clone();
+        if (pile != null && s.pileStep >= 0 && s.pileStep < steps.size()) {
             final List<Integer> left = new ArrayList<>(s.remaining);
+            // planOrder (ORDER_LAZY; the hand holds no unchosen card when off): the cards the line drew from the pile and
+            // never played are chosen now. Counters first, the cheapest first, while the hand holds fewer than two (the
+            // ranking counts at most two); then by class order, as a draw's first branch is when the key is off.
+            int counters = 0;
+            for (int h : s.hand) {
+                counters += h >= 0 && cards.get(h).counter ? 1 : 0;
+            }
+            for (int h : s.hand) {
+                final int slot = LAZY - h;
+                if (h >= 0 || slot >= pile.length || pile[slot] >= 0) {
+                    continue;
+                }
+                int best = -1;
+                for (int r : left) {
+                    if (best < 0 || heldBefore(cards.get(r), cards.get(best), counters < 2)) {
+                        best = r;
+                    }
+                }
+                if (best < 0) {
+                    break;
+                }
+                pile[slot] = best;
+                left.remove(Integer.valueOf(best));
+                counters += cards.get(best).counter ? 1 : 0;
+            }
             left.sort(Comparator.comparingInt((Integer r) -> -cards.get(r).order()).thenComparingInt(r -> cards.get(r).id));
             int li = 0;
             final Step ps = steps.get(s.pileStep);
             ps.pile.clear();
-            slotCard = new int[s.pile.length];
-            for (int i = 0; i < s.pile.length; i++) {
-                int c = s.pile[i];
+            slotCard = new int[pile.length];
+            for (int i = 0; i < pile.length; i++) {
+                int c = pile[i];
                 if (c < 0) {
                     c = li < left.size() ? left.get(li++) : -1;
                 }
@@ -1881,6 +2342,15 @@ public final class ForcedWinPlanner {
                 if (c >= 0) {
                     ps.pile.add(cards.get(c).id);
                     pileNames.add(cards.get(c).name);
+                }
+            }
+        }
+        for (Step st : steps) {
+            for (int i = 0; i < st.putBack.size(); i++) {
+                if (st.putBack.get(i) <= PUTBACK_LAZY) {
+                    // planOrder (ORDER_LAZY): a card put back unchosen is the card its pile slot ended up with
+                    final int slot = PUTBACK_LAZY - st.putBack.get(i);
+                    st.putBack.set(i, slot < slotCard.length && slotCard[slot] >= 0 ? cards.get(slotCard[slot]).id : -1);
                 }
             }
         }
@@ -1902,20 +2372,54 @@ public final class ForcedWinPlanner {
         }
         final List<String> prot = new ArrayList<>();
         for (int h : s.hand) {
-            if (cards.get(h).counter) {
-                prot.add(cards.get(h).name);
+            // planOrder (ORDER_LAZY): an unchosen card (h < 0) is the card its pile slot was given above
+            final int c = h >= 0 ? h : LAZY - h < slotCard.length ? slotCard[LAZY - h] : -1;
+            if (c >= 0 && cards.get(c).counter) {
+                prot.add(cards.get(c).name);
             }
         }
         final Line line = new Line(steps, pileNames, s.turnIdx, s.life, mana, prot.size(), prot, s.how);
         line.offMain = pos.offMain; // line-adoption-1107
         if (lineKeys.add(line.key())) {
             result.lines.add(line);
+            if (result.firstLineAt < 0) {
+                result.firstLineAt = nodes; // planner-fixes-1110 (report only)
+            }
             if (s.turnIdx == 0) {
                 result.sameTurn = true;
             } else {
                 result.nextTurn = true;
             }
         }
+    }
+
+    /**
+     * planOrder (ORDER_LAZY): of two cards open to the pile, {@code a} is the better one to have drawn and kept: a
+     * counter when one is wanted (the one that costs the least mana first), otherwise the earlier class; then the lower id.
+     */
+    private static boolean heldBefore(ACard a, ACard b, boolean wantCounter) {
+        final boolean ca = wantCounter && a.counter, cb = wantCounter && b.counter;
+        if (ca != cb) {
+            return ca;
+        }
+        final int ka = ca ? cheapest(a) : a.order(), kb = cb ? cheapest(b) : b.order();
+        return ka != kb ? ka < kb : a.id < b.id;
+    }
+
+    /** The least mana any of the card's spell costs asks for (an alternative cost without mana: 0). */
+    private static int cheapest(ACard a) {
+        int best = Integer.MAX_VALUE;
+        for (Abil ab : a.fromHand) {
+            if (ab.kind != AbilKind.SPELL) {
+                continue;
+            }
+            int n = ab.generic + ab.hybrid.size();
+            for (int c = 0; c < 6; c++) {
+                n += ab.pips[c] + ab.phyrexian[c];
+            }
+            best = Math.min(best, n);
+        }
+        return best;
     }
 
     private List<Integer> expIds(int[] idx, int[] slotCard) {
