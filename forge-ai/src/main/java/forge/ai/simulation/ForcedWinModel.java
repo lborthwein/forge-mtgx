@@ -594,11 +594,23 @@ public final class ForcedWinModel {
             return n;
         }
 
+        /**
+         * live-leak-1111: this reader's sandboxes hide what the seat cannot know ({@link ForcedWinProbe#HIDE}); set by a
+         * solver with {@code hideOwnLibrary} and without {@code hiddenOrderLegacy}. False: plain copies, as before.
+         */
+        volatile boolean hideLibrary;
+
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         synchronized ACard card(Game live, Player me, Card c) {
             ACard t = templates.get(c.getName());
             if (t == null) {
-                t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
+                final boolean prevHide = ForcedWinProbe.HIDE.get();
+                ForcedWinProbe.HIDE.set(hideLibrary); // live-leak-1111 (every probe of this template)
+                try {
+                    t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
+                } finally {
+                    ForcedWinProbe.HIDE.set(prevHide);
+                }
                 templates.put(c.getName(), t);
             }
             return t.instance(c.getId());

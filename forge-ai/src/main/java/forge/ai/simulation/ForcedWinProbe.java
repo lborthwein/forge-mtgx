@@ -239,6 +239,54 @@ public final class ForcedWinProbe {
         }
     }
 
+    /**
+     * live-leak-1111 (ported from sdcc-leak-1111): set by a reader whose solver hides the seat's own library
+     * ({@code hideOwnLibrary}, unless {@code hiddenOrderLegacy}) around every sandbox it starts. A sandbox is a copy of
+     * the game the solver was asked about, and that game may be the real one: before anything is played in it,
+     * {@link #scrub} puts the seat's library in an order that does not depend on the real one and deals the other
+     * players' hidden hand cards again. False (the default, and every reader of a solver without {@code hideOwnLibrary}):
+     * the sandbox is the plain copy, as before.
+     */
+    static final ThreadLocal<Boolean> HIDE = ThreadLocal.withInitial(() -> false);
+
+    /**
+     * live-leak-1111 ({@link #HIDE} only; otherwise nothing): the sandbox {@code g} of {@code source} forgets what its
+     * seat {@code me} cannot know. Our library: every card in id order, then shuffled by {@code seed} (a function of the
+     * cards' ids and the seed alone, never of the real order; a probe learns what a card does, so it needs no known
+     * top). The other players: the hand cards the seat may not see go back into their library, which is put in id order
+     * and shuffled, and as many are dealt again. Draws no randomness but its own.
+     */
+    static void scrub(final Game source, final Player sourceMe, final Game g, final Player me, final long seed) {
+        if (!HIDE.get() || g == null || me == null) {
+            return;
+        }
+        final Random rng = new Random(ForcedWinSolver.mix(seed, 0x4C45414B31L));
+        ForcedWinSolver.shuffleUnknownOwnLibrary(me, 0, java.util.Collections.emptySet(), rng, true);
+        final forge.game.player.PlayerView view = sourceMe.getView();
+        for (Player o : g.getPlayers()) {
+            if (o == me) {
+                continue;
+            }
+            final List<Card> keep = new ArrayList<>(), pool = new ArrayList<>(o.getCardsIn(ZoneType.Library));
+            final List<Card> hand = new ArrayList<>(o.getCardsIn(ZoneType.Hand));
+            for (Card c : hand) {
+                final Card lc = source.findById(c.getId());
+                if (lc != null && lc.getView().canBeShownTo(view)) {
+                    keep.add(c);
+                } else {
+                    pool.add(c);
+                }
+            }
+            pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+            java.util.Collections.shuffle(pool, rng);
+            final int need = hand.size() - keep.size();
+            final List<Card> newHand = new ArrayList<>(keep);
+            newHand.addAll(pool.subList(0, need));
+            o.getZone(ZoneType.Hand).setCards(newHand);
+            o.getZone(ZoneType.Library).setCards(new ArrayList<>(pool.subList(need, pool.size())));
+        }
+    }
+
     interface Setup {
         void apply(Game g, Player me, Card card);
     }
@@ -267,6 +315,7 @@ public final class ForcedWinProbe {
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
+                scrub(live, liveMe, g, me, seed); // live-leak-1111 (HIDE only)
             }
             if (!g.getStack().isEmpty()) {
                 o.error = "stack";

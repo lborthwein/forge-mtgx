@@ -446,6 +446,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         this.threat = spec.opp ? new forge.ai.simulation.ThreatCheck(spec.oppConfig()) : null;
         if (spec.defend) {
             this.defender = new ForcedWinSolver(me, spec.defendConfig());
+            if (sc.hideHidden()) {
+                this.defender.hideProbes(); // live-leak-1111: the defence's probes of their cards copy the game they are given too
+            }
             final ForcedWinSolver.Redraw prior = spec.defendCfg.has("prior") && !"none".equals(spec.defendCfg.get("prior").getAsString())
                     ? rs.ls().opponentRedrawPrior(loadSyn(spec.defendCfg.get("prior").getAsString()),
                             spec.defendCfg.has("priorGain") ? Double.parseDouble(spec.defendCfg.get("priorGain").getAsString()) : 20.0,

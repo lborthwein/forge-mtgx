@@ -94,7 +94,7 @@ public final class RlLiveSeat {
         /** sb-live-1018: the {@code plans.solverCfg.<key>} keys live accepts (the solver's sizes, its wall, cycles, the leak fix). */
         public static final java.util.Set<String> LIVE_SOLVER_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "budgetMs", "engineMs", "evalReserveMs", "wallGraceMs", "planMs", "nodes", "engineNodes", "worlds", "top",
-                "horizon", "cycles", "hideOwnLibrary"));
+                "horizon", "cycles", "hideOwnLibrary", "hiddenOrderLegacy"));
 
         /**
          * strong-opp-1020: the {@code plans.defendCfg.<key>} keys live accepts and their value pattern; {@code prior} names
@@ -157,7 +157,7 @@ public final class RlLiveSeat {
                     throw new IllegalArgumentException("policySearch: " + k + " is not supported live (plans.solverCfg keys "
                             + String.join("|", LIVE_SOLVER_KEYS) + ")");
                 }
-                if (("cycles".equals(sk) || "hideOwnLibrary".equals(sk)) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
+                if (("cycles".equals(sk) || "hideOwnLibrary".equals(sk) || "hiddenOrderLegacy".equals(sk)) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
                     throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want a number, or true|false)");
                 }
                 if (!c.plans.has("solverCfg")) {

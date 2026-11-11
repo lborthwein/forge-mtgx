@@ -166,6 +166,27 @@ public final class ForcedWinSolver {
          * information (a line that needs the top card was found on the real order and taken when the worlds agreed).
          */
         public boolean hideOwnLibrary = false;
+        /**
+         * live-leak-1111 (ported from sdcc-leak-1111; a correctness fix, so ON whenever {@link #hideOwnLibrary} is; this
+         * key, "true", brings the old behaviour back for identity checks). With {@code hideOwnLibrary} the seat must not
+         * learn anything from the real order of its library or from the opponent's hidden hand. Two places did:
+         * <ul>
+         * <li>the width model's sandbox probes (a card's template) copied the game they were asked about, the real one at
+         * the seat's plan point, and played in it: a probe that draws, digs or reveals read the real top cards, and one
+         * that looks at the opponent's hand read the real hand. Now the sandbox is scrubbed first
+         * ({@link ForcedWinProbe#scrub});</li>
+         * <li>the engine root and the play-out worlds shuffled the unknown cards starting from their real order, so the
+         * worlds a seed gives (and with them the answer) changed with an order the seat cannot see, although no card was
+         * read. Now the unknown cards are put in id order before the shuffle (as {@code infoState} already did in the
+         * play-out worlds).</li>
+         * </ul>
+         */
+        public boolean hiddenOrderLegacy = false;
+
+        /** live-leak-1111: the hidden zones are kept out of the probes and of the worlds' seeds. */
+        public boolean hideHidden() {
+            return hideOwnLibrary && !hiddenOrderLegacy;
+        }
         /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
         public long planMs = 1500;
         /**
@@ -237,6 +258,7 @@ public final class ForcedWinSolver {
             c.lineUncapped = boolOrLive(get.apply("lineUncapped")); // unified-search-1106; live-fixes-1107: default forge.liveFixes
             c.planExpandCap = boolOrLive(get.apply("planExpandCap")); // ledger-sweep2-1107; live-fixes-1107: default forge.liveFixes
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
+            c.hiddenOrderLegacy = "true".equals(get.apply("hiddenOrderLegacy")); // live-leak-1111
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
             c.threatExtraTurns = intOr(get.apply("threatExtraTurns"), c.threatExtraTurns);
@@ -346,6 +368,15 @@ public final class ForcedWinSolver {
         this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
         this.oppReader = cfg.sharedReader ? sharedOppReader() : new ForcedWinModel.Reader();
+        if (cfg.hideHidden()) {
+            hideProbes(); // live-leak-1111
+        }
+    }
+
+    /** live-leak-1111: this solver's readers scrub their sandboxes ({@link ForcedWinProbe#HIDE}); never switched back. */
+    public void hideProbes() {
+        this.reader.hideLibrary = true;
+        this.oppReader.hideLibrary = true;
     }
 
     public Config config() {
@@ -1410,6 +1441,7 @@ public final class ForcedWinSolver {
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
             el.ownKnownTop = kt == null ? 0 : kt.size();
+            el.ownCanonical = cfg.hideHidden(); // live-leak-1111
         }
         el.wall = decisionWall;
         final long t1 = System.nanoTime();
@@ -1560,10 +1592,11 @@ public final class ForcedWinSolver {
                     redraw.apply(live, me, g, cm, rng); // honest-belief-1020
                 }
                 for (Player o : cm.getOpponents()) {
-                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng, redraw); // house p14
+                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng, redraw, cfg.hideHidden()); // house p14
                 }
-                if (cfg.infoState) {
+                if (cfg.infoState || cfg.hideHidden()) {
                     // order-memory-1102: the known cards below the top stay at their index; canonical unknown order
+                    // (live-leak-1111: canonical with hideOwnLibrary too)
                     shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, pinnedIn(cm), rng, true);
                 } else {
                     shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, rng);
@@ -1818,10 +1851,10 @@ public final class ForcedWinSolver {
                     }
                     for (Player o : cm.getOpponents()) {
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
-                        hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw);
+                        hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw, cfg.hideHidden());
                     }
-                    if (cfg.infoState) {
-                        shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng, true); // order-memory-1102
+                    if (cfg.infoState || cfg.hideHidden()) {
+                        shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng, true); // order-memory-1102, live-leak-1111
                     } else {
                         shuffleUnknownOwnLibrary(cm, line, rng);
                     }
@@ -1900,6 +1933,15 @@ public final class ForcedWinSolver {
     }
 
     static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng, Redraw knowledge) {
+        hideOrSample(live, liveMe, liveOpp, opp, hide, rng, knowledge, false);
+    }
+
+    /**
+     * live-leak-1111: {@code canonical} puts their hidden cards in id order before the shuffle, so the world a seed
+     * gives does not change with the real order of cards the seat cannot see (false = as before).
+     */
+    static void hideOrSample(Game live, Player liveMe, Player liveOpp, Player opp, boolean hide, Random rng, Redraw knowledge,
+            boolean canonical) {
         final forge.game.player.PlayerView myView = liveMe.getView();
         final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
         final List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
@@ -1913,6 +1955,9 @@ public final class ForcedWinSolver {
             } else {
                 pool.add(c);
             }
+        }
+        if (canonical) {
+            pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
         }
         Collections.shuffle(pool, rng);
         final List<Card> newHand = new ArrayList<>(keep);

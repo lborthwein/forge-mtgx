@@ -204,6 +204,8 @@ final class ForcedWinEngine {
          * default) keeps the real order.
          */
         int ownKnownTop = -1;
+        /** live-leak-1111: the root's unknown cards are put in id order before the shuffle (false = as before). */
+        boolean ownCanonical = false;
         /** honest-belief-1020: the solver's re-draw of the opponents' hidden cards at the root (null = off). */
         ForcedWinSolver.Redraw redraw;
     }
@@ -529,9 +531,13 @@ final class ForcedWinEngine {
                     lim.redraw.apply(live, liveMe, root.g, root.me, rng); // honest-belief-1020
                 }
                 for (Player o : root.me.getOpponents()) {
-                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng, lim.redraw);
+                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng, lim.redraw,
+                            lim.ownCanonical);
                 }
-                if (lim.ownKnownTop >= 0) {
+                if (lim.ownKnownTop >= 0 && lim.ownCanonical) {
+                    // live-leak-1111: from id order, so the root a seed gives does not change with the real order
+                    ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, java.util.Collections.emptySet(), rng, true);
+                } else if (lim.ownKnownTop >= 0) {
                     ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, rng);
                 }
             }
