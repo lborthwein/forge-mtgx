@@ -254,6 +254,14 @@ public final class ForcedWinModel {
         int returnN;
         String returnType;
         boolean tapSelf, sacSelf, discardHand;
+        /**
+         * sdcc-tutorcast-1110 (set only by a sourceLeaves reader; 0 otherwise, and then nothing changes): where the
+         * engine left this activated ability's own source once it had resolved, when that is no longer the battlefield
+         * and leaving was not its cost: {@link #SELF_TOP} the top of our library, {@link #SELF_HAND} our hand,
+         * {@link #SELF_EXILE} exile, {@link #SELF_GRAVEYARD} our graveyard. Observed in the sandbox.
+         */
+        int selfTo;
+        static final int SELF_TOP = 1, SELF_HAND = 2, SELF_EXILE = 3, SELF_GRAVEYARD = 4;
         boolean loyalty;
         int loyaltyDelta;
         /** Playable at instant speed (an instant, flash, cycling, a non-sorcery-speed activation). */
@@ -370,6 +378,7 @@ public final class ForcedWinModel {
         @Override
         public String toString() {
             return kind + (targetVariant != null ? "@" + targetVariant : "") + "[" + costString() + " -> " + effects
+                    + (selfTo == 0 ? "" : " selfTo" + selfTo)
                     + (storm ? " storm" : "") + (unplayable ? " UNPLAYABLE " + probeNote : "") + "]";
         }
     }
@@ -895,17 +904,21 @@ public final class ForcedWinModel {
         synchronized ACard card(Game live, Player me, Card c) {
             // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
-            final String key = (tutorCast ? "tc|" : "") + (planScry ? "scry|" + c.getName() : c.getName());
+            // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
+            final String key = (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" + c.getName() : c.getName());
             ACard t = templates.get(key);
             if (t == null) {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevTc = ForcedWinProbe.TUTOR_CAST.get();
+                final boolean prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.TUTOR_CAST.set(tutorCast);
+                ForcedWinProbe.SOURCE_LEAVES.set(sourceLeaves);
                 try {
                     t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
                 } finally {
                     ForcedWinProbe.PLAN_SCRY.set(prev);
                     ForcedWinProbe.TUTOR_CAST.set(prevTc);
+                    ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
@@ -932,6 +945,13 @@ public final class ForcedWinModel {
          * as their payment, and a search that puts the card into our hand by way of exile (a TUTOR).
          */
         boolean tutorCast;
+
+        /**
+         * sdcc-tutorcast-1110 (solver key sourceLeaves; false = off, and then nothing changes): the probes also note
+         * where an activated ability leaves its own source ({@link Abil#selfTo}): an ability that puts its source on top
+         * of our library, or returns it to our hand, no longer leaves it on the battlefield in the plan.
+         */
+        boolean sourceLeaves;
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
         interface LoopProbe {

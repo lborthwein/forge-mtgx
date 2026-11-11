@@ -150,6 +150,42 @@ public class TutorCastTest extends AITest {
         }
     }
 
+    /**
+     * Solver key {@code sourceLeaves}: an activated ability that puts its own source on top of our library (it draws a
+     * card first) is learned with where the source ends; without the key the template is as before.
+     */
+    @Test
+    public void theProbeNotesWhereAnAbilityLeavesItsOwnSource() {
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("Beseech the Mirror",
+                "Swamp;Swamp;Swamp;Swamp;Sensei's Divining Top;Mind Stone", 20, "Island;Island;Island;Island;Island;Island;Island"));
+        final Player me = g.getPlayers().get(0);
+        final Card top = ForcedWinSolverTest.inZone(me, ZoneType.Battlefield, "Sensei's Divining Top");
+        final ACard off = new ForcedWinModel.Reader().card(g, me, top);
+        for (Abil a : off.onBattlefield) {
+            Assert.assertEquals(a.selfTo, 0, off.onBattlefield.toString());
+        }
+        final ForcedWinModel.Reader r = new ForcedWinModel.Reader();
+        r.sourceLeaves = true;
+        final ACard on = r.card(g, me, top);
+        Assert.assertEquals(on.onBattlefield.size(), off.onBattlefield.size(), on.onBattlefield.toString());
+        int leaves = 0;
+        for (Abil a : on.onBattlefield) {
+            if (a.selfTo != 0) {
+                leaves++;
+                Assert.assertEquals(a.selfTo, Abil.SELF_TOP, on.onBattlefield.toString());
+                Assert.assertNotNull(eff(a, EffKind.DRAW), on.onBattlefield.toString());
+                Assert.assertFalse(a.sacSelf);
+            }
+        }
+        Assert.assertEquals(leaves, 1, on.onBattlefield.toString());
+        // a sacrifice that is the ability's cost is not "leaving": the cost model already has it
+        final ACard stone = r.card(g, me, ForcedWinSolverTest.inZone(me, ZoneType.Battlefield, "Mind Stone"));
+        for (Abil a : stone.onBattlefield) {
+            Assert.assertEquals(a.selfTo, 0, stone.onBattlefield.toString());
+        }
+        Assert.assertTrue(top.isInZone(ZoneType.Battlefield), "the sandbox never touches the live game");
+    }
+
     private static ForcedWinSolver.Proposal best(final List<ForcedWinSolver.Proposal> props) {
         ForcedWinSolver.Proposal best = null;
         for (ForcedWinSolver.Proposal p : props) {

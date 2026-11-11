@@ -71,6 +71,11 @@ public final class ForcedWinProbe {
         /** solver-gaps-1015: our life when the probed thing was played; the host's state after resolution. */
         int lifeBefore;
         boolean hostTapped;
+        /**
+         * sdcc-tutorcast-1110: where the host was once everything had resolved, as an {@link Abil#selfTo} code (0 = on
+         * the battlefield or not found, -1 = somewhere the plan has no place for). Read only by a sourceLeaves probe.
+         */
+        int hostEnd;
         /** Our library ended empty: a win then came from drawing an empty library, not from the probed ability. */
         boolean libraryEmptied;
         /** solver-gaps-1015: other cards moved in ways no effect kind expresses (onto the battlefield from a hand). */
@@ -93,6 +98,8 @@ public final class ForcedWinProbe {
 
     /** sdcc-tutorcast-1110: set by a tutorCast reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> TUTOR_CAST = ThreadLocal.withInitial(() -> false);
+    /** sdcc-tutorcast-1110: set by a sourceLeaves reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> SOURCE_LEAVES = ThreadLocal.withInitial(() -> false);
     /** sdcc-tutorcast-1110: the most cards a search-and-cast spell is observed with (one sandbox each), and of those tried first. */
     static final int CAST_SWEEP = 48, CAST_DISCOVER = 4;
 
@@ -435,6 +442,13 @@ public final class ForcedWinProbe {
             o.entered = card.getGame() == g && me.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c -> c.getId() == cardId);
             final Card after = g.findById(cardId);
             o.hostTapped = after != null && after.isInPlay() && after.isTapped();
+            if (after != null && !after.isInPlay() && after.getOwner() == me) {
+                final List<Card> libNow = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+                o.hostEnd = after.isInZone(ZoneType.Library) ? (!libNow.isEmpty() && libNow.get(0) == after ? Abil.SELF_TOP : -1)
+                        : after.isInZone(ZoneType.Hand) ? Abil.SELF_HAND
+                        : after.isInZone(ZoneType.Exile) ? Abil.SELF_EXILE
+                        : after.isInZone(ZoneType.Graveyard) ? Abil.SELF_GRAVEYARD : -1;
+            }
             int dev = me.getDevotionMod();
             for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
                 dev += ForcedWinModel.bluePips(c);
@@ -1186,6 +1200,14 @@ public final class ForcedWinProbe {
                     final Abil ab = withEffects(base, o, id, sa0, v);
                     ab.cardTargets = v == null && targetsAnything(sa0);
                     ab.handMask = handMask;
+                    if (SOURCE_LEAVES.get() && !ab.unplayable && !ab.sacSelf && o.hostEnd != 0) {
+                        // sdcc-tutorcast-1110: the ability took its own source off the battlefield (not as its cost)
+                        if (o.hostEnd > 0) {
+                            ab.selfTo = o.hostEnd;
+                        } else {
+                            t.unmodeled = true; // somewhere the plan has no place for
+                        }
+                    }
                     if (!ab.unplayable && o.unmapped > 0) {
                         // solver-gaps-1015: an activation the width model cannot express (Sneak Attack)
                         t.unmodeled = true;

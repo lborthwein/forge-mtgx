@@ -295,6 +295,13 @@ public final class ForcedWinSolver {
          */
         public boolean tutorCast = false;
         /**
+         * sdcc-tutorcast-1110 (false = off: the reader, its templates and every plan are unchanged). The probes also
+         * note where an activated ability leaves its own source once it has resolved (the top of our library, our
+         * hand, exile, our graveyard; not as its cost), and the planner moves it there instead of leaving it on the
+         * battlefield: without it a plan could use such a permanent again, or sacrifice it, after it had left.
+         */
+        public boolean sourceLeaves = false;
+        /**
          * ledger-sweep2-1107 (off by default): battlefield mana sources' colors and amounts are read from the position at every
          * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
          */
@@ -802,6 +809,7 @@ public final class ForcedWinSolver {
             c.planExpandCap = "true".equals(get.apply("planExpandCap")); // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
+            c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
@@ -872,7 +880,8 @@ public final class ForcedWinSolver {
                 + (oppBelief > 0 ? " oppBelief=" + oppBelief + " C=" + oppBeliefCands : "") // opp-belief-1104
                 + (oppHoldPoints ? " oppHoldPoints" : "")
                 + (oppResponse ? " oppResponse ms=" + oppResponseMs + " N=" + oppResponseNodes + " D=" + oppResponseDepth : "")
-                + (tutorCast ? " tutorCast" : ""); // sdcc-tutorcast-1110
+                + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (sourceLeaves ? " sourceLeaves" : "");
         }
     }
 
@@ -1354,6 +1363,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.tutorCast) {
             this.reader.tutorCast = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
+        }
+        if (cfg.sourceLeaves) {
+            this.reader.sourceLeaves = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
         }
     }
 

@@ -1043,6 +1043,8 @@ public final class ForcedWinPlanner {
                 sacked = self;
             }
         }
+        // sdcc-tutorcast-1110 (a sourceLeaves reader's template only): the ability takes its own source off the battlefield
+        final Perm left = self != null && sacked == null && ab.selfTo != 0 ? self : null;
         if (ab.kind == AbilKind.CYCLE) {
             s.gyPool.add(host);
         }
@@ -1083,8 +1085,24 @@ public final class ForcedWinPlanner {
             s.bf.remove(sacked);
             s.gyPool.add(sacked.card);
         }
+        if (left != null) {
+            s.bf.remove(left);
+        }
         final int before = out.size();
         resolve(s, effs, 0, 0, ab, out);
+        if (left != null) {
+            // where the engine left it once the ability had resolved (observed): the top of our library, our hand, ...
+            for (int i = before; i < out.size(); i++) {
+                final S x = out.get(i);
+                if (ab.selfTo == ForcedWinModel.Abil.SELF_TOP) {
+                    x.lib.add(0, left.card);
+                } else if (ab.selfTo == ForcedWinModel.Abil.SELF_HAND) {
+                    x.hand.add(left.card);
+                } else if (ab.selfTo == ForcedWinModel.Abil.SELF_GRAVEYARD) {
+                    x.gyPool.add(left.card);
+                }
+            }
+        }
         if (toGraveyard) {
             for (int i = before; i < out.size(); i++) {
                 out.get(i).gyPool.add(host);
