@@ -1128,6 +1128,9 @@ public final class ForcedWinProbe {
                                 run(live, me, id, inHand, castIt, runSeed, st), card.getName());
                 final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
                 objAttach(t, ab, objs, objRun);
+                if (sacCost != null) {
+                    t.unmodeled = true; // as before the key (its cost was outside the model): the engine search may use it
+                }
                 ab.cardTargets = v == null && targetsAnything(sa0);
                 ab.handMask = handMask;
                 if (!ab.unplayable && (o.unmapped > 0 || ab.effects.isEmpty() && !t.permanent)) {
@@ -1301,6 +1304,9 @@ public final class ForcedWinProbe {
                                     run(live, me, id, onBattlefield, activate, runSeed, st), card.getName());
                     final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
                     objAttach(t, ab, objs, objRun);
+                    if (sacCost != null) {
+                        t.unmodeled = true; // as before the key (its cost was outside the model)
+                    }
                     ab.cardTargets = v == null && targetsAnything(sa0);
                     ab.handMask = handMask;
                     // sdcc-integ-1110: with probeSettle on as well, a source that went to our library is already an effect
