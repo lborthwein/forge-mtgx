@@ -2288,6 +2288,7 @@ public final class ForcedWinProbe {
         ab.cardTargets = !sac;
         r.seen.abil = ab;
         r.seen.unmapped = o.unmapped > 0;
+        r.seen.again = x.battlefield && x.cost.tapSelf && o.hostEnd == 0 && !o.hostTapped && !opp; // sdcc-bridge-1111
         return r;
     }
 

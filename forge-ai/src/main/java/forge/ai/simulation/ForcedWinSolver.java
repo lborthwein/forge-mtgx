@@ -332,6 +332,23 @@ public final class ForcedWinSolver {
          */
         public boolean probeObjects = false;
         /**
+         * sdcc-bridge-1111 (false = off, the default, and then nothing changes): the bridge from the width search to the
+         * engine search. The width search also notes its setup lines ({@link ForcedWinPlanner.Setup}): modeled steps
+         * (a land, mana, a tutor, casting a piece) after which we can pay for an ability whose outcome the model cannot
+         * express (a token copy enters, an Aura grants an ability, a library card is put onto the battlefield, an extra
+         * turn). When the width search has no line, the solver replays the best setup lines' steps in a copy of the game
+         * (at most planBridgeMax of them, inside planBridgeMs and a share of the time the engine search has left: two
+         * thirds when a sandbox saw the best one's ability playable again after itself, half when it put a permanent
+         * onto the battlefield, a third otherwise),
+         * runs the engine search from there with that ability as its first move, and verifies the joined line (the
+         * setup's steps, then the engine's) as it verifies any other; nothing is taken unverified. A setup line that
+         * passes the turn (horizon 2) is continued on our next turn; one that does not may pass in the engine's part.
+         * The ordinary engine search of the position runs afterwards as before, with the time left.
+         */
+        public boolean planBridge = false;
+        public int planBridgeMax = 3;
+        public long planBridgeMs = 3000;
+        /**
          * ledger-sweep2-1107 (off by default): battlefield mana sources' colors and amounts are read from the position at every
          * read, not from the template learned at first sight (ForcedWinModel.Reader#readSourceColors; ledger row 15).
          */
@@ -862,6 +879,9 @@ public final class ForcedWinSolver {
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.probeObjects = "true".equals(get.apply("probeObjects")); // sdcc-probeobj-1111
+            c.planBridge = "true".equals(get.apply("planBridge")); // sdcc-bridge-1111
+            c.planBridgeMax = intOr(get.apply("planBridgeMax"), c.planBridgeMax);
+            c.planBridgeMs = intOr(get.apply("planBridgeMs"), (int) c.planBridgeMs);
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
             c.landEntersProbe = "true".equals(get.apply("landEntersProbe")); // sdcc-etb-1110
             c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
@@ -937,7 +957,8 @@ public final class ForcedWinSolver {
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
                 + (sourceLeaves ? " sourceLeaves" : "")
-                + (probeObjects ? " probeObjects" : ""); // sdcc-probeobj-1111
+                + (probeObjects ? " probeObjects" : "") // sdcc-probeobj-1111
+                + (planBridge ? " planBridge max=" + planBridgeMax + " ms=" + planBridgeMs : ""); // sdcc-bridge-1111
         }
     }
 
@@ -2431,12 +2452,20 @@ public final class ForcedWinSolver {
         // before it reaches one); lines that pass the turn only when this turn has none
         lim.horizon = 1;
         ForcedWinPlanner.Result res = cfg.forced ? planCapped(pos, lim) : new ForcedWinPlanner.Result();
+        // sdcc-bridge-1111 (planBridge; empty when off): this turn's setup lines, then those that pass the turn
+        final List<ForcedWinPlanner.Setup> setups = new ArrayList<>(res.setups);
         if (res.lines.isEmpty() && cfg.horizon >= 2 && cfg.forced) {
             final int first = res.nodes;
             lim.horizon = cfg.horizon;
             res = planCapped(pos, lim);
             res.nodes += first;
+            for (ForcedWinPlanner.Setup su : res.setups) {
+                if (su.turnIdx > 0) {
+                    setups.add(su);
+                }
+            }
         }
+        lim.bridge = false; // the payment search and a re-plan add none
         if (res.lines.isEmpty() && cfg.forced && cfg.paySearch) {
             // solver-gaps-1015 payment search: only where the greedy payment found no line, search the payment orders
             // (this turn, then by our next turn), within the planner's own node and time caps
@@ -2471,6 +2500,23 @@ public final class ForcedWinSolver {
         engineUnverified = false;
         if (res.lines.isEmpty()) {
             lastOutcome = "gate";
+            if (cfg.planBridge && !setups.isEmpty()) {
+                if (cfg.followPay) {
+                    for (ForcedWinPlanner.Setup su : setups) {
+                        for (Step st : su.prefix.steps) {
+                            st.forceLife = st.phyrexianLife;
+                        }
+                    }
+                }
+                setups.sort(java.util.Comparator.comparingInt((ForcedWinPlanner.Setup x) -> x.cls)
+                        .thenComparingInt(x -> x.turnIdx).thenComparingInt(x -> x.modeled)); // stable: the planner's order
+                final Line bridged = bridge(live, pos, index, t0, setups);
+                if (bridged != null) {
+                    lastOutcome = "bridge-take";
+                    return bridged;
+                }
+                lastOutcome = "gate";
+            }
             final Line engine = engineFallback(live, pos, index, t0);
             if (engine != null) {
                 if (!"likely-take".equals(lastOutcome)) {
@@ -3423,6 +3469,296 @@ public final class ForcedWinSolver {
         return out;
     }
 
+    // ------------------------------------------------------------------ sdcc-bridge-1111 (planBridge)
+
+    /** planBridge: a copy of the game in which a setup line's steps were played (an engine search root). */
+    private static final class BridgeRoot {
+        Game g;
+        Player me;
+        Object ids;
+        String why = "";
+    }
+
+    /** planBridge: set while {@link #prefixCopy}'s play-out runs (the play-out then ends where the line's steps do). */
+    private BridgeRoot bridgeRest;
+    /**
+     * planBridge (report only): plan points with a setup line, setup lines tried, those behind which the engine found a
+     * kill, those taken (verified), those whose steps did not replay, and the bridge's wall time.
+     */
+    public int bridgePoints, bridgeTries, bridgeFound, bridgeTakes, bridgeBroken;
+    public long bridgeNanos;
+
+    /**
+     * planBridge: {@code prefix} played in a copy of the live game as a verification's unopposed world plays it (the
+     * opponent's hidden hand removed, our unknown library shuffled), stopped at our priority once its last step has
+     * resolved. Null = the steps did not replay there.
+     */
+    private BridgeRoot prefixCopy(final Game live, final Line prefix, final long seed, final long wall) {
+        final BridgeRoot r = new BridgeRoot();
+        bridgeRest = r;
+        try {
+            playout(live, prefix, seed, 0, -1, wall);
+        } finally {
+            bridgeRest = null;
+        }
+        if (r.g == null) {
+            receipt("FORCED_WIN bridge prefix" + tag() + " failed " + r.why + " steps=" + prefix.steps);
+            return null;
+        }
+        return r;
+    }
+
+    /** planBridge: a setup line's steps, then the engine's. */
+    private Line joined(final Line prefix, final List<Step> path) {
+        final List<Step> steps = new ArrayList<>();
+        boolean pass = false;
+        for (Step st : prefix.steps) {
+            steps.add(st.copy());
+            pass |= st.pass;
+        }
+        for (Step st : path) {
+            steps.add(st);
+            pass |= st.pass;
+        }
+        final Line l = new Line(steps, prefix.pileNames, pass ? 1 : 0, me.getLife(), 0, 0, List.of(), "bridge");
+        l.knownTop = prefix.knownTop;
+        l.offMain = prefix.offMain;
+        return l;
+    }
+
+    /**
+     * planBridge ({@link Config#planBridge}): the width search's setup lines, most promising first, each handed to the
+     * engine search: its steps are replayed in a copy, the engine searches from there with the setup's opaque ability
+     * as its only first move, and the joined line is verified from the live position like any engine line. At most
+     * planBridgeMax opaque steps, inside planBridgeMs and a share of what the engine search has left of the decision
+     * (by the best setup's evidence); each gets half of what is left of that, the last all of it. Our main phase with an empty stack, wall budgets only
+     * (budget=counter has no clock to share). Null = none verified (the ordinary engine search follows).
+     */
+    private Line bridge(final Game live, final Position pos, final int index, final long t0,
+            final List<ForcedWinPlanner.Setup> setups) {
+        final PhaseHandler ph = live.getPhaseHandler();
+        if (!cfg.planBridge || !cfg.engine || !cfg.forced || cfg.counter || setups.isEmpty() || !live.getStack().isEmpty()
+                || !ph.isPlayerTurn(me) || !(ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))) {
+            return null;
+        }
+        final long start = forge.game.WorkClock.nanoTime();
+        long engineEnd = t0 + (budgetMs() - cfg.evalReserveMs) * 1_000_000L;
+        if (hardDeadline != 0) {
+            engineEnd = Math.min(engineEnd, hardDeadline - cfg.evalReserveMs * 1_000_000L);
+        }
+        if (cfg.capMs > 0) {
+            engineEnd = Math.min(engineEnd, t0 + cfg.capMs * 1_000_000L);
+        }
+        // the same opaque step this turn and after a pass are one group: the pass variant is tried only when this
+        // turn's could not start (its steps did not replay, or the ability was not playable there: summoning sickness)
+        final List<List<ForcedWinPlanner.Setup>> groups = new ArrayList<>();
+        final Map<String, List<ForcedWinPlanner.Setup>> byStep = new HashMap<>();
+        for (ForcedWinPlanner.Setup su : setups) {
+            final String k = su.hostId + "|" + su.desc + "|" + su.objName;
+            List<ForcedWinPlanner.Setup> grp = byStep.get(k);
+            if (grp == null) {
+                if (groups.size() >= cfg.planBridgeMax) {
+                    continue;
+                }
+                grp = new ArrayList<>();
+                byStep.put(k, grp);
+                groups.add(grp);
+            }
+            if (grp.size() < 2) {
+                grp.add(su);
+            }
+        }
+        // its share of the engine search's time, by the evidence behind the best setup line
+        final int cls = groups.get(0).get(0).cls;
+        final long window = engineEnd - start;
+        final long slice = Math.min(forge.ai.WallClock.budgetMs(cfg.planBridgeMs) * 1_000_000L,
+                cls == 0 ? window * 2 / 3 : cls == 1 ? window / 2 : window / 3);
+        if (slice < 100_000_000L) {
+            return null;
+        }
+        final long sliceEnd = start + slice;
+        bridgePoints++;
+        try {
+            int k = -1;
+            for (int gi = 0; gi < groups.size(); gi++) {
+                final long gnow = forge.game.WorkClock.nanoTime();
+                if (gnow > sliceEnd - 50_000_000L) {
+                    break;
+                }
+                // the most promising first and with the most time: half of what is left, the last all of it
+                final long groupEnd = gi == groups.size() - 1 ? sliceEnd : gnow + (sliceEnd - gnow) / 2;
+                for (ForcedWinPlanner.Setup su : groups.get(gi)) {
+                    k++;
+                    final long now = forge.game.WorkClock.nanoTime();
+                    if (now > groupEnd - 50_000_000L) {
+                        break;
+                    }
+                    final long candEnd = groupEnd;
+                    bridgeTries++;
+                    BridgeRoot root = null;
+                    if (!su.prefix.steps.isEmpty()) {
+                        root = prefixCopy(live, su.prefix, mix(cfg.seed, 7_300_000L + 64L * index + k), candEnd);
+                        if (root == null) {
+                            bridgeBroken++;
+                            continue;
+                        }
+                    }
+                    boolean passed = false;
+                    for (Step st : su.prefix.steps) {
+                        passed |= st.pass;
+                    }
+                    final ForcedWinEngine.Limits el = engineLimits(live, index, false, su.prefix);
+                    el.rootHosts = Set.of(su.hostId);
+                    el.perSearchNodes = true;
+                    el.passTurn = !passed; // one pass a line: a setup that passed the turn wins on the turn it arrives in
+                    el.anyWindow = false;
+                    el.everyWindow = false;
+                    el.passToEnd = false;
+                    el.altLines = 0;
+                    el.wall = Math.min(el.wall, candEnd + 500_000_000L);
+                    if (root != null) {
+                        el.rootIds = root.ids;
+                        el.redraw = null; // the copy is a dealt world already
+                        el.ownKnownTop = -1;
+                    }
+                    final int en0 = engineStats.nodes, em0 = engineStats.moves;
+                    final long es0 = engineStats.steps;
+                    final long te = forge.game.WorkClock.nanoTime();
+                    final Line eng = ForcedWinEngine.search(root == null ? live : root.g, root == null ? me : root.me, el,
+                            engineStats, candEnd, mix(cfg.seed, 7_400_000L + 64L * index + k));
+                    final int nodes = engineStats.nodes - en0;
+                    meter.engineRuns++;
+                    meter.engineNodes += nodes;
+                    meter.engineSteps += engineStats.steps - es0;
+                    meter.engineNanos += forge.game.WorkClock.nanoTime() - te;
+                    receipt("FORCED_WIN bridge" + tag() + " turn=" + pos.turn + " #" + (k + 1) + " of " + setups.size() + " "
+                            + su + " found=" + (eng != null) + " nodes=" + nodes + " ms="
+                            + (forge.game.WorkClock.nanoTime() - now) / 1_000_000 + (eng == null ? "" : " " + eng));
+                    if (eng == null) {
+                        if (engineStats.moves > em0) {
+                            break; // the ability was played and the search behind it found nothing: no pass variant
+                        }
+                        continue;
+                    }
+                    bridgeFound++;
+                    evaluated++;
+                    final Line line = joined(su.prefix, eng.steps);
+                    long evalDeadline = Math.max(t0 + budgetMs() * 1_000_000L,
+                            forge.game.WorkClock.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2);
+                    if (hardDeadline != 0) {
+                        evalDeadline = Math.min(evalDeadline, hardDeadline);
+                    }
+                    final Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 900 + k), evalDeadline);
+                    receipt("FORCED_WIN eval bridge" + tag() + " turn=" + pos.turn + " " + e);
+                    if (e.pUnopposed >= 1.0) {
+                        respond(live, e); // opp-response-1108 (no-op when off)
+                    }
+                    if (evalSink != null) {
+                        evalSink.add(e);
+                    }
+                    if (e.pUnopposed >= 1.0 && e.pBelief >= cfg.threshold
+                            && !(cfg.honestProbes && e.worldsRun < cfg.worlds)) {
+                        bridgeTakes++;
+                        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms="
+                                + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000 + " bridge");
+                        return e.line;
+                    }
+                    break; // found but not verified: the pass variant is the same kill a turn later
+                }
+            }
+            return null;
+        } finally {
+            bridgeNanos += forge.game.WorkClock.nanoTime() - start;
+        }
+    }
+
+    /**
+     * The engine search's limits for this decision (as {@link #engineFallback} always built them). {@code prefix}
+     * (sdcc-bridge-1111; null = none): the search's root is a copy in which this line's steps were played, so a line it
+     * finds is verified with those steps before it.
+     */
+    private ForcedWinEngine.Limits engineLimits(final Game live, final int index, final boolean stackWindow, final Line prefix) {
+        final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
+        el.nodes = cfg.engineNodes;
+        el.perSearchNodes = cfg.engineNodesPerSearch;
+        el.staleStatics = cfg.staleStatics; // unified-search-1106
+        el.loopMacro = cfg.loopMacro; // R2-3
+        el.loopMacro3 = cfg.loopMacro3; // review #154 S2
+        el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
+        el.everyWindow = cfg.engineAnyWindow && cfg.engineEveryWindow; // endstep-rows-1103
+        el.passBudget = cfg.enginePassBudget; // endstep-rows-1103
+        el.passFirst = cfg.enginePassFirst; // solver-gaps-1104
+        el.passToEnd = cfg.enginePassToEnd && cfg.engineAnyWindow; // solver-gaps-1104
+        el.triggerTargets = cfg.engineTriggerTargets; // solver-gaps-1104
+        el.triggerVariants = cfg.triggerVariants;
+        el.passScale = cfg.enginePassScale;
+        el.altLines = "off".equals(cfg.engineOrder) ? cfg.engineAltLines : 0; // the ordered DFS returns its first line
+        el.longLoops = cfg.engineLongLoops; // unified-search-1106
+        el.turnLimits = cfg.turnLimits; // engine-reach-1107
+        if (cfg.engineMoves) {
+            el.oppTargets = true; // engine-reach-1107
+            el.floatMana = true;
+            el.floatFirst = true;
+            el.libraryTop = true;
+        }
+        if (cfg.engineLoopReach) {
+            el.loopOutlets = true; // engine-reach-1107
+            el.looseCycles = true;
+            el.outletNodes = cfg.engineOutletNodes;
+            el.loopHoist = cfg.engineLoopHoist; // loop-exec-1107
+            el.loopBisect = cfg.engineLoopBisect; // loop-exec-1107
+        }
+        el.frontierAfterPct = cfg.engineFrontierPct; // engine-reach-1107
+        if (cfg.engineVerify) {
+            final int[] tries = {0};
+            el.verify = path -> {
+                final Line l = prefix == null
+                        ? new Line(path, List.of(), path.contains(Step.PASS) ? 1 : 0, me.getLife(), 0, 0, List.of(), "engine")
+                        : joined(prefix, path); // sdcc-bridge-1111
+                // evaluate's own unopposed world first: a line that fails it would be dropped after the search had stopped
+                return playout(live, l, mix(mix(cfg.seed, index * 1000L + 999), 0), 0, -1, decisionWall).won
+                        && playout(live, l, mix(cfg.seed, 7_100_000L + 64L * index + tries[0]++), 0, -1, decisionWall).won;
+            };
+        }
+        el.stalePlayerStatics = cfg.stalePlayerStatics; // house p7
+        el.offBattlefieldLimits = cfg.offBattlefieldLimits; // house p12
+        el.historyLki = cfg.historyLki; // house p13
+        el.copyBackFace = cfg.copyBackFace; // house p15
+        el.stackAbilityCopies = cfg.stackAbilityCopies; // house p16
+        el.stackHistory = cfg.stackHistory; // house p17
+        el.cycles = cfg.cycles;
+        if (cfg.hideOwnLibrary) {
+            final List<Integer> kt = knownTop(live);
+            el.ownKnownTop = kt == null ? 0 : kt.size();
+            el.ownPinned = pinnedIn(me); // known-lib-1102 (empty unless noted)
+        }
+        el.wall = decisionWall;
+        // bvw-step1-build-1024: budget=counter: the engine's move steps per search are capped (0 = none), no deadline,
+        // and each seat's calls in a move are capped (the wall's stand-in)
+        el.totalSteps = cfg.counter ? cfg.engineSteps : 0;
+        el.totalCards = cfg.counter ? cfg.engineCards : 0;
+        el.pathCards = cfg.counter ? cfg.enginePathCards : 0;
+        el.callLimit = cfg.counter ? 2L * el.maxSteps : 0L;
+        // labeller-v2 (a), (e): choice and payment variants of the engine's moves (off = v1)
+        el.cac = cfg.cacPicks;
+        el.cacVariants = cfg.cacVariants;
+        el.cacCap = cfg.cacCap;
+        el.pay = cfg.payRecord || cfg.enginePay; // ledger-sweep-1107 (row 60): enginePay on wall budgets
+        el.payVariants = cfg.payVariants;
+        // solver-cap12 round 3 (all off by default)
+        el.order = "static".equals(cfg.engineOrder) ? StaticValuer.INSTANCE
+                : "service".equals(cfg.engineOrder) ? engineValuer : null;
+        if ("service".equals(cfg.engineOrder) && engineValuer == null) {
+            receipt("FORCED_WIN engine-order service: no valuer attached, Forge's order"); // review #154-7
+        }
+        el.orderCap = cfg.orderCap;
+        el.xChoice = cfg.engineX;
+        el.xVariants = cfg.xVariants;
+        el.stack = stackWindow;
+        el.costChoice = cfg.engineCostChoice;
+        return el;
+    }
+
     private Line engineFallback(Game live, Position pos, int index, long t0, boolean planFailed) {
         final PhaseHandler eph = live.getPhaseHandler();
         final boolean main1 = eph.is(PhaseType.MAIN1) && eph.isPlayerTurn(me);
@@ -3495,82 +3831,7 @@ public final class ForcedWinSolver {
         engineTurn = pos.turn;
         engineRuns++;
         lastOutcome = "gate+engine";
-        final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
-        el.nodes = cfg.engineNodes;
-        el.perSearchNodes = cfg.engineNodesPerSearch;
-        el.staleStatics = cfg.staleStatics; // unified-search-1106
-        el.loopMacro = cfg.loopMacro; // R2-3
-        el.loopMacro3 = cfg.loopMacro3; // review #154 S2
-        el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
-        el.everyWindow = cfg.engineAnyWindow && cfg.engineEveryWindow; // endstep-rows-1103
-        el.passBudget = cfg.enginePassBudget; // endstep-rows-1103
-        el.passFirst = cfg.enginePassFirst; // solver-gaps-1104
-        el.passToEnd = cfg.enginePassToEnd && cfg.engineAnyWindow; // solver-gaps-1104
-        el.triggerTargets = cfg.engineTriggerTargets; // solver-gaps-1104
-        el.triggerVariants = cfg.triggerVariants;
-        el.passScale = cfg.enginePassScale;
-        el.altLines = "off".equals(cfg.engineOrder) ? cfg.engineAltLines : 0; // the ordered DFS returns its first line
-        el.longLoops = cfg.engineLongLoops; // unified-search-1106
-        el.turnLimits = cfg.turnLimits; // engine-reach-1107
-        if (cfg.engineMoves) {
-            el.oppTargets = true; // engine-reach-1107
-            el.floatMana = true;
-            el.floatFirst = true;
-            el.libraryTop = true;
-        }
-        if (cfg.engineLoopReach) {
-            el.loopOutlets = true; // engine-reach-1107
-            el.looseCycles = true;
-            el.outletNodes = cfg.engineOutletNodes;
-            el.loopHoist = cfg.engineLoopHoist; // loop-exec-1107
-            el.loopBisect = cfg.engineLoopBisect; // loop-exec-1107
-        }
-        el.frontierAfterPct = cfg.engineFrontierPct; // engine-reach-1107
-        if (cfg.engineVerify) {
-            final int[] tries = {0};
-            el.verify = path -> {
-                final Line l = new Line(path, List.of(), path.contains(Step.PASS) ? 1 : 0, me.getLife(), 0, 0, List.of(), "engine");
-                // evaluate's own unopposed world first: a line that fails it would be dropped after the search had stopped
-                return playout(live, l, mix(mix(cfg.seed, index * 1000L + 999), 0), 0, -1, decisionWall).won
-                        && playout(live, l, mix(cfg.seed, 7_100_000L + 64L * index + tries[0]++), 0, -1, decisionWall).won;
-            };
-        }
-        el.stalePlayerStatics = cfg.stalePlayerStatics; // house p7
-        el.offBattlefieldLimits = cfg.offBattlefieldLimits; // house p12
-        el.historyLki = cfg.historyLki; // house p13
-        el.copyBackFace = cfg.copyBackFace; // house p15
-        el.stackAbilityCopies = cfg.stackAbilityCopies; // house p16
-        el.stackHistory = cfg.stackHistory; // house p17
-        el.cycles = cfg.cycles;
-        if (cfg.hideOwnLibrary) {
-            final List<Integer> kt = knownTop(live);
-            el.ownKnownTop = kt == null ? 0 : kt.size();
-            el.ownPinned = pinnedIn(me); // known-lib-1102 (empty unless noted)
-        }
-        el.wall = decisionWall;
-        // bvw-step1-build-1024: budget=counter: the engine's move steps per search are capped (0 = none), no deadline,
-        // and each seat's calls in a move are capped (the wall's stand-in)
-        el.totalSteps = cfg.counter ? cfg.engineSteps : 0;
-        el.totalCards = cfg.counter ? cfg.engineCards : 0;
-        el.pathCards = cfg.counter ? cfg.enginePathCards : 0;
-        el.callLimit = cfg.counter ? 2L * el.maxSteps : 0L;
-        // labeller-v2 (a), (e): choice and payment variants of the engine's moves (off = v1)
-        el.cac = cfg.cacPicks;
-        el.cacVariants = cfg.cacVariants;
-        el.cacCap = cfg.cacCap;
-        el.pay = cfg.payRecord || cfg.enginePay; // ledger-sweep-1107 (row 60): enginePay on wall budgets
-        el.payVariants = cfg.payVariants;
-        // solver-cap12 round 3 (all off by default)
-        el.order = "static".equals(cfg.engineOrder) ? StaticValuer.INSTANCE
-                : "service".equals(cfg.engineOrder) ? engineValuer : null;
-        if ("service".equals(cfg.engineOrder) && engineValuer == null) {
-            receipt("FORCED_WIN engine-order service: no valuer attached, Forge's order"); // review #154-7
-        }
-        el.orderCap = cfg.orderCap;
-        el.xChoice = cfg.engineX;
-        el.xVariants = cfg.xVariants;
-        el.stack = stackWindow;
-        el.costChoice = cfg.engineCostChoice;
+        final ForcedWinEngine.Limits el = engineLimits(live, index, stackWindow, null);
         final long t1 = forge.game.WorkClock.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
         long engineDeadline = deadlineAt(Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs),
@@ -3962,6 +4223,7 @@ public final class ForcedWinSolver {
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
+        lim.bridge = cfg.planBridge; // sdcc-bridge-1111
         return lim;
     }
 
@@ -5892,7 +6154,9 @@ public final class ForcedWinSolver {
             final long callLimit = cfg.counter ? 2L * cfg.maxSteps : 0L;
             lineAi.bounded(wall).callLimited(callLimit);
             lineAi.uncapped = cfg.lineUncapped; // unified-search-1106
-            if (cfg.verifyReplan && line.winTurn > 0) {
+            final BridgeRoot rest = bridgeRest; // sdcc-bridge-1111 (null except in prefixCopy)
+            lineAi.stopWhenDone = rest != null;
+            if (cfg.verifyReplan && line.winTurn > 0 && rest == null) {
                 lineAi.startTurn = g.getPhaseHandler().getTurn();
                 lineAi.replanner = old -> replanIn(g, cm, old); // kill-line-1106
             }
@@ -5931,11 +6195,23 @@ public final class ForcedWinSolver {
             g.subscribeToEvents(watch);
             int steps = 0;
             meter.playouts++;
-            while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+            while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps && !lineAi.rested) {
                 ForcedWinEngine.checkWall(wall, "play-out step");
                 ph.mainLoopStep();
                 steps++;
                 meter.playoutSteps++;
+            }
+            if (rest != null) {
+                // sdcc-bridge-1111: the copy as it stands once the line's steps are played (our main phase, empty stack)
+                if (lineAi.rested && !g.isGameOver() && !f.broken) {
+                    rest.g = g;
+                    rest.me = cm;
+                    rest.ids = ForcedWinEngine.cloneScope(forge.util.IdScope.capture());
+                } else {
+                    rest.why = f.broken ? "broken@" + f.cursor + ":" + f.why : g.isGameOver() ? "over"
+                            : "not-done@" + f.cursor;
+                }
+                return out;
             }
             if (steps >= cfg.maxSteps && !g.isGameOver() && !watch.reached) {
                 libCut = true; // review #161 S2-2
@@ -7150,6 +7426,11 @@ public final class ForcedWinSolver {
         boolean continueAfter;
         /** unified-search-1106 ({@link Config#lineUncapped}). */
         boolean uncapped;
+        /**
+         * sdcc-bridge-1111 (false = off): the play-out ends at our first priority with an empty stack once the line's
+         * steps are played ({@link #rested}), as an engine move rests: the copy is then a search root.
+         */
+        boolean stopWhenDone, rested;
 
         List<SpellAbility> lineAction(SpellAbility sa) {
             return uncapped || f.uncapped ? List.of(sa) : capped(List.of(sa));
@@ -7230,6 +7511,10 @@ public final class ForcedWinSolver {
                 if (n.broken && replanner == null) {
                     return null;
                 }
+            }
+            if (stopWhenDone && f.done && g.getStack().isEmpty()) {
+                rested = true; // sdcc-bridge-1111
+                return null;
             }
             if (f.broken && replanner != null) {
                 // kill-line-1106 (verifyReplan): wait for our next main phase, then once per world a fresh line
@@ -7720,7 +8005,12 @@ public final class ForcedWinSolver {
                                 + " landContextDiffers=" + reader.landContextDiffers) + " landPlain=" + reader.landPlain)
                 + (engineReruns == 0 ? "" : " engineReruns=" + engineReruns) // choice-search-1105 (only when used)
                 + (loopMarginals + loopVariantCuts == 0 ? "" : " loopMarginals=" + loopMarginals + " loopVariants="
-                        + loopVariants + " loopVariantCuts=" + loopVariantCuts); // choice-search-1105 (only when used)
+                        + loopVariants + " loopVariantCuts=" + loopVariantCuts) // choice-search-1105 (only when used)
+                // sdcc-bridge-1111 (only with planBridge): plan points with a setup line, setup lines tried, those the
+                // engine found a kill behind, those taken (verified), prefixes that did not replay, and the time spent
+                + (!cfg.planBridge ? "" : " bridgePoints=" + bridgePoints + " bridgeTries=" + bridgeTries + " bridgeFound="
+                        + bridgeFound + " bridgeTakes=" + bridgeTakes + " bridgeBroken=" + bridgeBroken + " bridgeMs="
+                        + bridgeNanos / 1_000_000);
     }
 
     /** Effects of a line's steps (for reports). */

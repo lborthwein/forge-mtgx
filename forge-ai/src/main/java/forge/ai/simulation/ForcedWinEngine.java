@@ -234,6 +234,14 @@ final class ForcedWinEngine {
 
     static final class Limits {
         int nodes = 250;
+        /**
+         * sdcc-bridge-1111 (solverCfg planBridge; null = off, the default, and then nothing changes): the root's moves are
+         * only those of these host cards (the opaque step a width-search setup line ends with), and the search's id scope
+         * continues the one the root game was played in (the root is a copy the solver played a line's prefix in, not
+         * the live game).
+         */
+        Set<Integer> rootHosts;
+        Object rootIds;
         /** unified-search-1106 (false = off): node copies skip static effects naming cards a belief world swapped out. */
         boolean staleStatics = false;
         /**
@@ -1704,7 +1712,11 @@ final class ForcedWinEngine {
         final Object prevCache = AiCache.captureScope();
         MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(seed));
         AiCache.openScope();
-        forge.util.IdScope.open();
+        if (lim.rootIds != null) {
+            forge.util.IdScope.install(cloneScope(lim.rootIds)); // sdcc-bridge-1111
+        } else {
+            forge.util.IdScope.open();
+        }
         // review #149 S2-2: the caller's limits are restored in finally (an engine error must not leave pass state)
         final int nodeCap0 = lim.nodes;
         final boolean passTurn0 = lim.passTurn;
@@ -2838,6 +2850,9 @@ final class ForcedWinEngine {
                 wide.removeIf(m -> bodyKeys.contains(m.kind + "|" + m.hostName + "|" + m.desc + "|" + m.floatColor));
             }
             out.addAll(wide);
+        }
+        if (lim.rootHosts != null && node.path.isEmpty()) {
+            out.removeIf(m -> !lim.rootHosts.contains(m.hostId)); // sdcc-bridge-1111
         }
         return out;
     }

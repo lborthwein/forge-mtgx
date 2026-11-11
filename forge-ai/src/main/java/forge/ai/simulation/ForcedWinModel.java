@@ -96,7 +96,7 @@ public final class ForcedWinModel {
     }
 
     private static final java.util.Set<String> SIG_SKIP = java.util.Set.of("id", "name", "note", "desc", "costKey",
-            "probeNote");
+            "probeNote", "again"); // sdcc-bridge-1111: again orders setup lines only, never a card's class
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, java.lang.reflect.Field[]> SIG_FIELDS =
             new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -259,6 +259,12 @@ public final class ForcedWinModel {
         int to;
         /** Other cards moved in ways no effect kind expresses (a token or a library card entered the battlefield). */
         boolean unmapped;
+        /**
+         * sdcc-bridge-1111 (read only by a planBridge plan, to order its setup lines): the ability taps its source for its
+         * cost and the sandbox left that source untapped in play once everything had resolved (what the run put onto the
+         * battlefield untapped it), so the same ability was playable again after itself.
+         */
+        boolean again;
 
         /**
          * The width search can play the ability on this object: everything it did is in the model, and it did something
@@ -280,7 +286,7 @@ public final class ForcedWinModel {
         public String toString() {
             return (abil == null ? "?" : abil.effects.toString()) + (to == 0 ? "" : to == Abil.SELF_HAND ? ">hand"
                     : to == Abil.SELF_GRAVEYARD ? ">graveyard" : to == Abil.SELF_EXILE ? ">exile" : ">?")
-                    + (unmapped ? " unmapped" : "");
+                    + (unmapped ? " unmapped" : "") + (again ? " again" : "");
         }
     }
 
