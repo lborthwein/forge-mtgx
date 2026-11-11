@@ -42,6 +42,14 @@ public class LibraryLeakTest extends forge.ai.AITest {
         return s.substring(0, Math.min(n, s.length()));
     }
 
+    /** A learned template in full (what the probes observed), without the card's id. */
+    private static String describe(final ForcedWinModel.ACard a) {
+        return a.name + "|" + a.land + a.entersTapped + a.landLife + "|" + a.winsOnEntry + a.winIfLibraryAtMost + "," + a.winDevotion
+                + a.emptyDrawWin + "|" + a.dies + a.counter + "|" + a.fromHand + "|" + a.onBattlefield + "|" + a.sourceColors + ","
+                + a.sourceAmount + a.sourceSac + a.sourceSick + "|" + a.unmodeled + "|" + a.note + "|" + a.loopWith + a.loopHaste
+                + a.loopFromHand;
+    }
+
     @Test
     public void orderArms() throws Exception {
         final String path = System.getProperty("leak.positions");
@@ -161,6 +169,27 @@ public class LibraryLeakTest extends forge.ai.AITest {
             for (String l : LeakTrace.report(head + " TRACE", true)) {
                 System.out.println(l);
             }
+            if (Boolean.getBoolean("leak.templates")) {
+                // the width model's learned card templates (what the sandbox probes saw), one hash per card name
+                final StringBuilder sb = new StringBuilder();
+                synchronized (s.reader) {
+                    for (java.util.Map.Entry<String, ForcedWinModel.ACard> t : new java.util.TreeMap<>(s.reader.templates).entrySet()) {
+                        sb.append(t.getKey().replace(';', ',')).append('=')
+                                .append(Integer.toHexString(describe(t.getValue()).hashCode())).append(';');
+                    }
+                }
+                System.out.println(head + " TPL " + sb);
+                final String full = System.getProperty("leak.templatesFull", "");
+                if (!full.isEmpty()) {
+                    synchronized (s.reader) {
+                        for (java.util.Map.Entry<String, ForcedWinModel.ACard> t : new java.util.TreeMap<>(s.reader.templates).entrySet()) {
+                            if (t.getKey().endsWith(full)) {
+                                System.out.println(head + " TPLFULL " + describe(t.getValue()).replaceAll("\\s+", " "));
+                            }
+                        }
+                    }
+                }
+            }
             if (setup) {
                 final ForcedWinSolver.GoldfishOpts go = new ForcedWinSolver.GoldfishOpts();
                 go.horizon = 3;
@@ -172,6 +201,32 @@ public class LibraryLeakTest extends forge.ai.AITest {
                 System.out.println(head + " SETUP" + (p == null ? " none" : " gf=" + p.gf + " turn+" + p.winTurn + " steps=" + p.steps
                         + " | " + cut(p.text != null ? p.text : p.line, 400)));
                 for (String l : LeakTrace.report(head + " TRACE-SETUP", true)) {
+                    System.out.println(l);
+                }
+                // the reach over our next unknown draw and the goldfish, as the live spec's leaves and card menus ask
+                // them (node budgets, no clock: an answer that changes with the order is not the clock's doing)
+                final ForcedWinSolver.ReachOpts ro = new ForcedWinSolver.ReachOpts();
+                ro.nodes = 2000;
+                ro.ms = -1L;
+                ro.maxNames = 40;
+                ro.nameNodes = 1000;
+                ro.nameOnePass = true;
+                ro.skipCapped = true;
+                ro.sig = true;
+                ro.gamma = 0.9;
+                final ForcedWinSolver.Reach r = s.reach(g, s.knownTop(g), ro);
+                System.out.println(head + " REACH p=" + r.p + " pd=" + r.pd + " direct=" + r.direct + " failed=" + r.failed
+                        + " names=" + r.names + " screens=" + r.screens + " unknown=" + r.unknown);
+                final ForcedWinSolver.GoldfishOpts gf = new ForcedWinSolver.GoldfishOpts();
+                gf.horizon = 5;
+                gf.active = 3;
+                gf.nodes = 1500;
+                gf.maxNodes = 60000;
+                gf.ms = -1L;
+                final ForcedWinSolver.Goldfish gg = s.goldfish(g, s.knownTop(g), gf);
+                System.out.println(head + " GOLDFISH g=" + gg.g + " p=" + gg.p + " direct=" + gg.direct + " cut=" + gg.cut
+                        + " failed=" + gg.failed + " bestTurn=" + gg.bestTurn + " screens=" + gg.screens + " | " + cut(gg.best, 300));
+                for (String l : LeakTrace.report(head + " TRACE-REACH", true)) {
                     System.out.println(l);
                 }
             }
