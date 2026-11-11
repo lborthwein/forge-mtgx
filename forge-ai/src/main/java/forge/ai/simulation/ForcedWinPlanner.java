@@ -2941,6 +2941,10 @@ public final class ForcedWinPlanner {
                         || seen != null && seen.usable() && lim.probeObjects) {
                     continue; // not an object of it, or one the width search plays it with itself
                 }
+                if (seen != null && !gy && seen.to == Abil.SELF_GRAVEYARD
+                        && ForcedWinModel.ObjNeed.TARGET.equals(ab.obj.role)) {
+                    continue; // the sandbox saw it destroy the permanent of ours it targeted: removal, not a setup
+                }
                 final int cls = a.loopWith.contains(name) || seen != null && seen.again ? 0
                         : seen != null && seen.unmapped ? 1 : 2;
                 // no evidence: only a permanent cast onto the object (an Aura: what it grants is not in the model)
@@ -2950,7 +2954,7 @@ public final class ForcedWinPlanner {
                 objs.add(name);
                 clss.add(cls);
             }
-        } else if (a.unmodeled && ab.effects.isEmpty() && !ab.cardTargets && (bi >= 0 || !a.permanent)) {
+        } else if (a.unmodeled && ab.effects.isEmpty() && !ab.cardTargets && !ab.loyalty && (bi >= 0 || !a.permanent)) {
             // the probes saw it do something the model has no effect for (an extra turn, a card put onto the battlefield)
             boolean loop = false;
             for (Perm q : s.bf) {

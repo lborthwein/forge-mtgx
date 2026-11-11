@@ -3492,6 +3492,14 @@ public final class ForcedWinSolver {
         String why = "";
     }
 
+    /**
+     * planBridge: the opaque steps searched this turn (host, ability, object) and how often: a step whose search ran to
+     * its end, or found a line, is not searched again that turn; one the deadline stopped, once more.
+     */
+    private final Map<String, Integer> bridgeTried = new HashMap<>();
+    private int bridgeTurn = -1;
+    static final int BRIDGE_RETRIES = 2;
+
     /** planBridge: set while {@link #prefixCopy}'s play-out runs (the play-out then ends where the line's steps do). */
     private BridgeRoot bridgeRest;
     /**
@@ -3574,9 +3582,16 @@ public final class ForcedWinSolver {
         // turn's could not start (its steps did not replay, or the ability was not playable there: summoning sickness)
         final List<List<ForcedWinPlanner.Setup>> groups = new ArrayList<>();
         final Map<String, List<ForcedWinPlanner.Setup>> byStep = new HashMap<>();
+        if (bridgeTurn != pos.turn) {
+            bridgeTurn = pos.turn;
+            bridgeTried.clear();
+        }
         for (ForcedWinPlanner.Setup su : setups) {
             final String k = su.hostId + "|" + su.desc + "|" + su.objName;
             List<ForcedWinPlanner.Setup> grp = byStep.get(k);
+            if (grp == null && bridgeTried.getOrDefault(k, 0) >= BRIDGE_RETRIES) {
+                continue; // searched this turn already (to its end, or twice to its deadline)
+            }
             if (grp == null) {
                 if (groups.size() >= cfg.planBridgeMax) {
                     continue;
@@ -3588,6 +3603,9 @@ public final class ForcedWinSolver {
             if (grp.size() < 2) {
                 grp.add(su);
             }
+        }
+        if (groups.isEmpty()) {
+            return null;
         }
         // its share of the engine search's time, by the evidence behind the best setup line
         final int cls = groups.get(0).get(0).cls;
@@ -3647,7 +3665,7 @@ public final class ForcedWinSolver {
                         el.redraw = null; // the copy is a dealt world already
                         el.ownKnownTop = -1;
                     }
-                    final int en0 = engineStats.nodes, em0 = engineStats.moves;
+                    final int en0 = engineStats.nodes, em0 = engineStats.moves, ed0 = engineStats.deadlineStops;
                     final long es0 = engineStats.steps;
                     final long te = forge.game.WorkClock.nanoTime();
                     final Line eng = ForcedWinEngine.search(root == null ? live : root.g, root == null ? me : root.me, el,
@@ -3660,6 +3678,11 @@ public final class ForcedWinSolver {
                     receipt("FORCED_WIN bridge" + tag() + " turn=" + pos.turn + " #" + (k + 1) + " of " + setups.size() + " "
                             + su + " found=" + (eng != null) + " nodes=" + nodes + " ms="
                             + (forge.game.WorkClock.nanoTime() - now) / 1_000_000 + (eng == null ? "" : " " + eng));
+                    if (engineStats.moves > em0) {
+                        // played and searched: once more this turn only when the deadline stopped it and no line came
+                        bridgeTried.merge(su.hostId + "|" + su.desc + "|" + su.objName,
+                                eng == null && engineStats.deadlineStops > ed0 ? 1 : BRIDGE_RETRIES, Integer::sum);
+                    }
                     if (eng == null) {
                         if (engineStats.moves > em0) {
                             break; // the ability was played and the search behind it found nothing: no pass variant
