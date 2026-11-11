@@ -2379,6 +2379,15 @@ public final class ForcedWinSolver {
         return false;
     }
 
+    /** sdcc-bridge-1111: the bridged line is the decision's. */
+    private Line bridgeTake(final Position pos, final Eval e, final long t0) {
+        bridgeTakes++;
+        lastOutcome = "bridge-take";
+        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms="
+                + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000 + " bridge");
+        return e.line;
+    }
+
     private String lastOutcome = "?";
     /** unified-search-1106 (unknownWorlds): the engine's line this decision had no verified world. */
     private boolean engineUnverified;
@@ -2451,6 +2460,7 @@ public final class ForcedWinSolver {
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
         // before it reaches one); lines that pass the turn only when this turn has none
         lim.horizon = 1;
+        lim.bridge = cfg.planBridge; // sdcc-bridge-1111: the offense's own two searches only (no screen, no re-plan)
         ForcedWinPlanner.Result res = cfg.forced ? planCapped(pos, lim) : new ForcedWinPlanner.Result();
         // sdcc-bridge-1111 (planBridge; empty when off): this turn's setup lines, then those that pass the turn
         final List<ForcedWinPlanner.Setup> setups = new ArrayList<>(res.setups);
@@ -2500,6 +2510,7 @@ public final class ForcedWinSolver {
         engineUnverified = false;
         if (res.lines.isEmpty()) {
             lastOutcome = "gate";
+            Eval bridged = null;
             if (cfg.planBridge && !setups.isEmpty()) {
                 if (cfg.followPay) {
                     for (ForcedWinPlanner.Setup su : setups) {
@@ -2510,10 +2521,9 @@ public final class ForcedWinSolver {
                 }
                 setups.sort(java.util.Comparator.comparingInt((ForcedWinPlanner.Setup x) -> x.cls)
                         .thenComparingInt(x -> x.turnIdx).thenComparingInt(x -> x.modeled)); // stable: the planner's order
-                final Line bridged = bridge(live, pos, index, t0, setups);
-                if (bridged != null) {
-                    lastOutcome = "bridge-take";
-                    return bridged;
+                bridged = bridge(live, pos, index, t0, setups);
+                if (bridged != null && bridgeSure(bridged)) {
+                    return bridgeTake(pos, bridged, t0);
                 }
                 lastOutcome = "gate";
             }
@@ -2523,6 +2533,9 @@ public final class ForcedWinSolver {
                     lastOutcome = "engine-take";
                 }
                 return engine;
+            }
+            if (bridged != null) {
+                return bridgeTake(pos, bridged, t0); // a likely or next-turn bridged line, the position's only one
             }
             gated++;
             if (cachesGated(cfg, engineUnverified)) {
@@ -3526,15 +3539,23 @@ public final class ForcedWinSolver {
         return l;
     }
 
+    /** planBridge: a bridged line that needs no second opinion: it wins this turn in every world that was run. */
+    private static boolean bridgeSure(final Eval e) {
+        return e.pBelief >= 1.0 && e.line.winTurn == 0 && e.worldsRun > 0;
+    }
+
     /**
      * planBridge ({@link Config#planBridge}): the width search's setup lines, most promising first, each handed to the
      * engine search: its steps are replayed in a copy, the engine searches from there with the setup's opaque ability
      * as its only first move, and the joined line is verified from the live position like any engine line. At most
      * planBridgeMax opaque steps, inside planBridgeMs and a share of what the engine search has left of the decision
-     * (by the best setup's evidence); each gets half of what is left of that, the last all of it. Our main phase with an empty stack, wall budgets only
-     * (budget=counter has no clock to share). Null = none verified (the ordinary engine search follows).
+     * (by the best setup's evidence); each gets half of what is left of that, the last all of it. When a sandbox saw
+     * the best one's ability playable again after itself, only steps with that evidence are tried. Our main phase with an empty stack, wall budgets only
+     * (budget=counter has no clock to share). Returns the best verified line's evaluation: the first that wins this
+     * turn in every world, else the likeliest (which the caller takes only when the ordinary engine search, run after
+     * it, has no line); null = none.
      */
-    private Line bridge(final Game live, final Position pos, final int index, final long t0,
+    private Eval bridge(final Game live, final Position pos, final int index, final long t0,
             final List<ForcedWinPlanner.Setup> setups) {
         final PhaseHandler ph = live.getPhaseHandler();
         if (!cfg.planBridge || !cfg.engine || !cfg.forced || cfg.counter || setups.isEmpty() || !live.getStack().isEmpty()
@@ -3570,6 +3591,10 @@ public final class ForcedWinSolver {
         }
         // its share of the engine search's time, by the evidence behind the best setup line
         final int cls = groups.get(0).get(0).cls;
+        if (cls == 0) {
+            // a loop was seen behind the best: the whole share goes to the steps with that evidence
+            groups.removeIf(grp -> grp.get(0).cls > 0);
+        }
         final long window = engineEnd - start;
         final long slice = Math.min(forge.ai.WallClock.budgetMs(cfg.planBridgeMs) * 1_000_000L,
                 cls == 0 ? window * 2 / 3 : cls == 1 ? window / 2 : window / 3);
@@ -3578,6 +3603,7 @@ public final class ForcedWinSolver {
         }
         final long sliceEnd = start + slice;
         bridgePoints++;
+        Eval held = null;
         try {
             int k = -1;
             for (int gi = 0; gi < groups.size(); gi++) {
@@ -3658,15 +3684,18 @@ public final class ForcedWinSolver {
                     }
                     if (e.pUnopposed >= 1.0 && e.pBelief >= cfg.threshold
                             && !(cfg.honestProbes && e.worldsRun < cfg.worlds)) {
-                        bridgeTakes++;
-                        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms="
-                                + (forge.game.WorkClock.nanoTime() - t0) / 1_000_000 + " bridge");
-                        return e.line;
+                        if (held == null || e.pBelief > held.pBelief
+                                || e.pBelief == held.pBelief && e.line.winTurn < held.line.winTurn) {
+                            held = e;
+                        }
+                        if (bridgeSure(e)) {
+                            return e;
+                        }
                     }
-                    break; // found but not verified: the pass variant is the same kill a turn later
+                    break; // found: the pass variant is the same kill a turn later
                 }
             }
-            return null;
+            return held;
         } finally {
             bridgeNanos += forge.game.WorkClock.nanoTime() - start;
         }
@@ -4223,7 +4252,6 @@ public final class ForcedWinSolver {
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
-        lim.bridge = cfg.planBridge; // sdcc-bridge-1111
         return lim;
     }
 

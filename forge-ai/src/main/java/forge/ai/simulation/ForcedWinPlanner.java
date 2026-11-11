@@ -2880,11 +2880,15 @@ public final class ForcedWinPlanner {
      * planBridge: the opaque steps we can pay for at {@code s}, each noted as a setup line with the steps of {@code s}
      * as its prefix (kept when it has fewer modeled steps than the one known for the same step). An ability on the
      * battlefield that is open with no step before it is never noted, there or later in the plan: its pieces are all
-     * in play, which is the engine search's own ground.
+     * in play, which is the engine search's own ground. A position after a pass with nothing played before it notes
+     * none either.
      */
     private void bridgeMoves(S s) {
         int modeled = 0;
         for (Step st : s.steps) {
+            if (st.pass && modeled == 0) {
+                return; // nothing played before the pass: next turn's plan, made again then on what that turn holds
+            }
             modeled += st.kind == AbilKind.FLOAT ? 0 : 1;
         }
         final Set<String> done = new HashSet<>();
