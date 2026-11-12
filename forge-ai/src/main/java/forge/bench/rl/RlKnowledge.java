@@ -138,13 +138,86 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     private final Set<Integer> arranged = new HashSet<>();
     public Log log;
 
+    /**
+     * knowledge-searched-top-1105, ported to live by choice-scorer-1106 (-Dforge.bench.rl.knowledgeSearchedTop=true, or
+     * per seat through {@link #setSearchedTopSeats}; default off = every path unchanged): a card the seat searched for
+     * and put at a set place in a library ("search your library for a card, then shuffle and put that card on top")
+     * stays known to it, and to every seat it was revealed to during that resolution. Off, Forge's order (shuffle, then
+     * the move within the library) forgets it: the shuffle clears the library and the move counts as one in a random
+     * order. The searcher is read from the resolving ability (the rule holds the same in live play, forced replays and
+     * copies, where no controller call is made): a hidden-origin ChangeZone from the activator's own library to a
+     * library position, with no Defined, Chooser, DefinedPlayer, targets or random order. Read at construction; tests
+     * set {@link #SEARCHED_TOP}.
+     */
+    public static volatile boolean SEARCHED_TOP = "true".equals(System.getProperty("forge.bench.rl.knowledgeSearchedTop"));
+    /** Bit s = seat s keeps searched-to-a-place cards (a paired run's control seat stays exactly as before). */
+    private int searchedTopSeats;
+    private boolean searchedTop;
+    /** knowledge-searched-top-1105: per card id, the seats it was revealed to during the current resolution. */
+    private final Map<Integer, Set<Integer>> revealedInResolution = new HashMap<>();
+
+    /**
+     * knowledge-settle-1104 (research; -Dforge.bench.rl.knowledgeSettle=fixed, default off = every path unchanged): the
+     * settle schedule of the pending sightings. Off, a query ({@link #knows}, {@link #seenOpponentIds}, ...) settles them
+     * against the card's visibility at that moment, so what a frame shows depends on when earlier frames were taken
+     * (lane outcome-arm-1104). Fixed: queries never settle; the tracker settles at fixed game points only, every spell
+     * resolution (as before) and every priority decision of either seat (a {@link forge.game.PriorityDecisionListener}
+     * added by {@link #attach}, ahead of any listener added after it). Then the state at any moment is a function of the
+     * game alone, whoever queries it and whenever. Read at construction; tests set {@link #FIXED_SETTLE}.
+     */
+    public static volatile boolean FIXED_SETTLE = "fixed".equals(System.getProperty("forge.bench.rl.knowledgeSettle"));
+    private final boolean fixedSettle;
+
     public RlKnowledge(final Game game) {
         this.game = game;
+        this.fixedSettle = FIXED_SETTLE;
+        this.searchedTopSeats = SEARCHED_TOP ? 3 : 0;
+        this.searchedTop = searchedTopSeats != 0;
+    }
+
+    /** knowledge-searched-top-1105: whether this tracker keeps searched-to-a-place cards (see {@link #SEARCHED_TOP}). */
+    public boolean searchedTop() {
+        return searchedTop;
+    }
+
+    public int searchedTopSeats() {
+        return searchedTopSeats;
+    }
+
+    /** choice-scorer-1106: which seats keep searched-to-a-place cards (bit s = seat s; 0 = none). */
+    public void setSearchedTopSeats(final int mask) {
+        searchedTopSeats = mask;
+        searchedTop = mask != 0;
+    }
+
+    /** knowledge-settle-1104: whether this tracker settles on the fixed schedule (see {@link #FIXED_SETTLE}). */
+    public boolean fixedSettle() {
+        return fixedSettle;
     }
 
     /** Subscribe to the game's events (call once, after the game is created). */
     public void attach() {
         game.subscribeToEvents(this);
+        if (fixedSettle) {
+            // knowledge-settle-1104: settle at every priority decision, before anyone observes it
+            game.addPriorityDecisionListener(new forge.game.PriorityDecisionListener() {
+                @Override
+                public void beforeDecision(final Player p) {
+                    settle();
+                }
+
+                @Override
+                public void afterDecision(final Player p, final List<forge.game.spellability.SpellAbility> chosen) {
+                }
+            });
+        }
+    }
+
+    /** A query's settle: the old schedule (settle now) unless this tracker settles on the fixed one. */
+    private void querySettle() {
+        if (!fixedSettle) {
+            settle();
+        }
     }
 
     /**
@@ -158,13 +231,39 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         final RlKnowledge k = new RlKnowledge(copy);
         k.v2 = v2;
         k.clock = clock;
+        k.searchedTopSeats = searchedTopSeats;
+        k.searchedTop = searchedTop;
         for (int s = 0; s < 2; s++) {
             k.known[s].putAll(known[s]);
             k.seenIds[s].putAll(seenIds[s]);
             k.seenOpp[s].addAll(seenOpp[s]);
         }
-        k.tail.addAll(tail);
+        if (copy.stackHistory) {
+            final Map<Integer, Integer> ids = copy.getCopiedStackIds();
+            for (StackEvent event : tail) {
+                final StackEvent mapped = new StackEvent(event.name, event.fullName, event.faceDown,
+                        event.ability, event.controllerSeat);
+                mapped.facts = event.facts.clone();
+                final List<int[]> targets = new ArrayList<>();
+                for (int[] target : event.targets) {
+                    final int[] ref = target.clone();
+                    if (ref[0] == RlStackFacts.T_STACK) {
+                        // A target no longer on the copied stack stays unresolved. Do not let a
+                        // recycled/scoped numeric ID bind it to a different future stack entry.
+                        ref[1] = ids.getOrDefault(ref[1], -1);
+                    }
+                    targets.add(ref);
+                }
+                mapped.targets = Collections.unmodifiableList(targets);
+                k.tail.addLast(mapped);
+            }
+        } else {
+            k.tail.addAll(tail);
+        }
         k.arranged.addAll(arranged);
+        for (Map.Entry<Integer, Set<Integer>> e : revealedInResolution.entrySet()) {
+            k.revealedInResolution.put(e.getKey(), new HashSet<>(e.getValue()));
+        }
         for (Pending p : pending) {
             Player owner = null;
             if (p.handOwner != null) {
@@ -181,6 +280,160 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     public Game game() {
         return game;
     }
+
+    /**
+     * frame-score-1105 (read-only; used only by {@link RlFrameObs}): this tracker's whole state as JSON
+     * ({@code mtgx-rl-knowledge/1}), card ids written through {@code refOf} (a frame-independent card reference). Reads
+     * the fields only (no settle). A stack-item target ref is written as the raw stack id (a frame has no stack ids).
+     */
+    public com.google.gson.JsonObject snapshot(final java.util.function.IntFunction<String> refOf) {
+        final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+        o.addProperty("schema", "mtgx-rl-knowledge/1");
+        o.addProperty("v2", v2);
+        o.addProperty("clock", clock);
+        o.addProperty("fixed_settle", fixedSettle);
+        final com.google.gson.JsonArray kn = new com.google.gson.JsonArray(), si = new com.google.gson.JsonArray(),
+                so = new com.google.gson.JsonArray();
+        for (int s = 0; s < 2; s++) {
+            final com.google.gson.JsonArray a = new com.google.gson.JsonArray();
+            for (Map.Entry<Integer, Long> e : new java.util.TreeMap<>(known[s]).entrySet()) {
+                final com.google.gson.JsonArray x = new com.google.gson.JsonArray();
+                x.add(refOf.apply(e.getKey()));
+                x.add(e.getValue());
+                a.add(x);
+            }
+            kn.add(a);
+            final com.google.gson.JsonArray b = new com.google.gson.JsonArray();
+            for (Map.Entry<Integer, String[]> e : seenIds[s].entrySet()) {
+                final com.google.gson.JsonArray x = new com.google.gson.JsonArray();
+                x.add(refOf.apply(e.getKey()));
+                x.add(e.getValue()[0]);
+                x.add(e.getValue()[1]);
+                b.add(x);
+            }
+            si.add(b);
+            final com.google.gson.JsonArray c = new com.google.gson.JsonArray();
+            for (String n : seenOpp[s]) {
+                c.add(n);
+            }
+            so.add(c);
+        }
+        o.add("known", kn);
+        o.add("seen_ids", si);
+        o.add("seen_opp", so);
+        final com.google.gson.JsonArray tl = new com.google.gson.JsonArray();
+        for (StackEvent e : tail) {
+            final com.google.gson.JsonObject x = new com.google.gson.JsonObject();
+            x.addProperty("name", e.name);
+            x.addProperty("full", e.fullName);
+            x.addProperty("fd", e.faceDown);
+            x.addProperty("ab", e.ability);
+            x.addProperty("seat", e.controllerSeat);
+            final com.google.gson.JsonArray f = new com.google.gson.JsonArray();
+            for (int v : e.facts) {
+                f.add(v);
+            }
+            x.add("facts", f);
+            final com.google.gson.JsonArray tg = new com.google.gson.JsonArray();
+            for (int[] t : e.targets) {
+                final com.google.gson.JsonArray y = new com.google.gson.JsonArray();
+                y.add(t[0]);
+                if (t[0] == RlStackFacts.T_CARD) {
+                    y.add(refOf.apply(t[1]));
+                } else {
+                    y.add(t[1]);
+                }
+                y.add(t[2]);
+                y.add(t[3]);
+                tg.add(y);
+            }
+            x.add("targets", tg);
+            tl.add(x);
+        }
+        o.add("tail", tl);
+        final com.google.gson.JsonArray ar = new com.google.gson.JsonArray();
+        for (Integer id : new java.util.TreeSet<>(arranged)) {
+            ar.add(refOf.apply(id));
+        }
+        o.add("arranged", ar);
+        final com.google.gson.JsonArray pe = new com.google.gson.JsonArray();
+        for (Pending p : pending) {
+            final com.google.gson.JsonObject x = new com.google.gson.JsonObject();
+            x.addProperty("seat", p.seat);
+            x.addProperty("card", refOf.apply(p.cardId));
+            x.addProperty("name", p.name);
+            x.addProperty("hand_owner", p.handOwner == null ? -1 : seatOf(p.handOwner));
+            x.addProperty("at", p.at);
+            x.addProperty("id_added", p.idAdded);
+            pe.add(x);
+        }
+        o.add("pending", pe);
+        return o;
+    }
+
+    /**
+     * frame-score-1105: a tracker of {@code g} holding a {@link #snapshot}'s state, card refs resolved by {@code idOf}
+     * (a ref the frame cannot place gets an id no card of {@code g} has). NOT attached: call {@link #attach} to follow
+     * the game from here. Its settle schedule is this JVM's ({@link #FIXED_SETTLE}).
+     */
+    public static RlKnowledge restore(final Game g, final com.google.gson.JsonObject o,
+            final java.util.function.ToIntFunction<String> idOf) {
+        if (!"mtgx-rl-knowledge/1".equals(o.get("schema").getAsString())) {
+            throw new IllegalArgumentException("knowledge snapshot schema " + o.get("schema"));
+        }
+        final RlKnowledge k = new RlKnowledge(g);
+        k.v2 = o.get("v2").getAsBoolean();
+        k.clock = o.get("clock").getAsLong();
+        for (int s = 0; s < 2; s++) {
+            for (com.google.gson.JsonElement e : o.getAsJsonArray("known").get(s).getAsJsonArray()) {
+                final com.google.gson.JsonArray x = e.getAsJsonArray();
+                k.known[s].put(idOf.applyAsInt(x.get(0).getAsString()), x.get(1).getAsLong());
+            }
+            for (com.google.gson.JsonElement e : o.getAsJsonArray("seen_ids").get(s).getAsJsonArray()) {
+                final com.google.gson.JsonArray x = e.getAsJsonArray();
+                k.seenIds[s].put(idOf.applyAsInt(x.get(0).getAsString()), new String[] {str(x.get(1)), str(x.get(2))});
+            }
+            for (com.google.gson.JsonElement e : o.getAsJsonArray("seen_opp").get(s).getAsJsonArray()) {
+                k.seenOpp[s].add(e.getAsString());
+            }
+        }
+        for (com.google.gson.JsonElement e : o.getAsJsonArray("tail")) {
+            final com.google.gson.JsonObject x = e.getAsJsonObject();
+            final StackEvent ev = new StackEvent(str(x.get("name")), str(x.get("full")), x.get("fd").getAsBoolean(),
+                    x.get("ab").getAsBoolean(), x.get("seat").getAsInt());
+            final com.google.gson.JsonArray f = x.getAsJsonArray("facts");
+            ev.facts = new int[f.size()];
+            for (int i = 0; i < f.size(); i++) {
+                ev.facts[i] = f.get(i).getAsInt();
+            }
+            final List<int[]> tg = new ArrayList<>();
+            for (com.google.gson.JsonElement t : x.getAsJsonArray("targets")) {
+                final com.google.gson.JsonArray y = t.getAsJsonArray();
+                final int kind = y.get(0).getAsInt();
+                final int ref = kind == RlStackFacts.T_CARD ? idOf.applyAsInt(y.get(1).getAsString()) : y.get(1).getAsInt();
+                tg.add(new int[] {kind, ref, y.get(2).getAsInt(), y.get(3).getAsInt()});
+            }
+            ev.targets = tg.isEmpty() ? Collections.emptyList() : tg;
+            k.tail.addLast(ev);
+        }
+        for (com.google.gson.JsonElement e : o.getAsJsonArray("arranged")) {
+            k.arranged.add(idOf.applyAsInt(e.getAsString()));
+        }
+        for (com.google.gson.JsonElement e : o.getAsJsonArray("pending")) {
+            final com.google.gson.JsonObject x = e.getAsJsonObject();
+            final int ho = x.get("hand_owner").getAsInt();
+            final Pending p = new Pending(x.get("seat").getAsInt(), idOf.applyAsInt(x.get("card").getAsString()),
+                    str(x.get("name")), ho < 0 ? null : k.seatPlayer(ho), x.get("at").getAsLong());
+            p.idAdded = x.get("id_added").getAsBoolean();
+            k.pending.add(p);
+        }
+        return k;
+    }
+
+    private static String str(final com.google.gson.JsonElement e) {
+        return e == null || e.isJsonNull() ? null : e.getAsString();
+    }
+
 
     int seatOf(final Player p) {
         return p == null ? -1 : game.getRegisteredPlayers().indexOf(p);
@@ -293,13 +546,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
 
     /** Does seat {@code s} know this hidden card's identity (zone 16 / 17 / 18)? */
     public boolean knows(final int s, final Card c) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 && c != null && known[s].containsKey(c.getId());
     }
 
     /** The opponent cards seat {@code s} has seen this game, by name, first seen first. */
     public List<String> seenOpponentNames(final int s) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 ? Collections.unmodifiableList(new ArrayList<>(seenOpp[s])) : Collections.emptyList();
     }
 
@@ -313,20 +566,20 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
      * {name, full name} as seen. The o_seen zone holds those not shown in the frame by other tokens.
      */
     public Map<Integer, String[]> seenOpponentIds(final int s) {
-        settle();
+        querySettle();
         return s >= 0 && s <= 1 ? Collections.unmodifiableMap(new java.util.LinkedHashMap<>(seenIds[s]))
                 : Collections.emptyMap();
     }
 
     /** The last {@link #TAIL} stack events, newest first. */
     public List<StackEvent> tail() {
-        settle();
+        querySettle();
         return new ArrayList<>(tail);
     }
 
     /** Number of known hidden cards (diagnostics). */
     public int knownCount(final int s) {
-        settle();
+        querySettle();
         return known[s].size();
     }
 
@@ -343,6 +596,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             learn(s, c, "reveal:" + zone);
             see(s, c);
             seeId(s, c);
+            if (searchedTop && s >= 0 && s <= 1 && c != null && game.getStack().isResolving()) {
+                revealedInResolution.computeIfAbsent(c.getId(), x -> new HashSet<>()).add(s);
+            }
         }
     }
 
@@ -389,6 +645,17 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         final Player tp = to == null ? null : playerOf(to.player());
         final boolean withinLibrary = fz == ZoneType.Library && tz == ZoneType.Library && fp == tp;
         final boolean arrangedMove = withinLibrary && arranged.remove(c.getId());
+        if (searchedTop && CENSUS_FILE != null && withinLibrary) {
+            // knowledge-searched-top-1105 census: what the rule does with this move (arranged moves are known anyway)
+            if (arrangedMove) {
+                census("arranged");
+            } else {
+                searcherSeat(c, fp);
+                final String w = CENSUS_WHY.get();
+                final boolean rev = !revealedInResolution.getOrDefault(c.getId(), Collections.emptySet()).isEmpty();
+                census("learn".equals(w) ? "learn" : rev ? "learn_revealed_only:" + w : w);
+            }
+        }
         clock++;
         for (int s = 0; s < 2; s++) {
             final Player me = seatPlayer(s);
@@ -417,6 +684,12 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             }
             final boolean fromSeen = (fz != null && isPublic(fz)) || (fz == ZoneType.Hand && fp == me);
             if (withinLibrary) {
+                if (!arrangedMove && (searchedTopSeats >> s & 1) != 0 && (s == searcherSeat(c, fp)
+                        || revealedInResolution.getOrDefault(c.getId(), Collections.emptySet()).contains(s))) {
+                    // knowledge-searched-top-1105: searched for (or shown) and put at a set place by the effect
+                    learn(s, c, "searched or revealed, put at a set library place");
+                    continue;
+                }
                 if (!arrangedMove) {
                     // put back in an order nobody chose or saw (Forge's "in a random order"): the card is still among
                     // those cards, but its position is unknown; obs-v1 has no segment, so it is forgotten
@@ -436,6 +709,114 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         }
     }
 
+    /**
+     * knowledge-searched-top-1105: the seat that searched its own library for {@code c} and is putting it at a set place
+     * (the resolving ability's one hidden-origin library-to-library ChangeZone with a LibraryPosition, of the activator's
+     * own library, no Defined / ChooseFromDefined / Chooser / DefinedPlayer / targets / RandomOrder), or -1.
+     */
+    private int searcherSeat(final Card c, final Player libraryOwner) {
+        final String[] why = new String[1];
+        final int s = searcherSeat(c, libraryOwner, why);
+        CENSUS_WHY.set(why[0]);
+        return s;
+    }
+
+    /** As above; {@code why[0]}: "learn", "not_resolving", "random" (no searched placement) or "unmatched:&lt;shape&gt;". */
+    private int searcherSeat(final Card c, final Player libraryOwner, final String[] why) {
+        if (!game.getStack().isResolving()) {
+            why[0] = "not_resolving";
+            return -1;
+        }
+        forge.game.spellability.SpellAbility root;
+        try {
+            root = game.getStack().peekAbility();
+        } catch (RuntimeException e) {
+            why[0] = "not_resolving";
+            return -1;
+        }
+        if (root instanceof forge.game.trigger.WrappedAbility) {
+            root = ((forge.game.trigger.WrappedAbility) root).getWrappedAbility();
+        }
+        forge.game.spellability.SpellAbility hit = null;
+        int hits = 0;
+        final java.util.TreeSet<String> shape = new java.util.TreeSet<>();
+        for (forge.game.spellability.SpellAbility x = root; x != null; x = x.getSubAbility()) {
+            if (x.getApi() == forge.game.ability.ApiType.ChangeZone && x.hasParam("Origin")
+                    && x.getParam("Origin").contains("Library") && "Library".equals(x.getParam("Destination"))) {
+                shape.addAll(x.getMapParams().keySet());
+                if (x.isHidden() && x.hasParam("LibraryPosition")) {
+                    hit = x;
+                    hits++;
+                }
+            }
+        }
+        shape.removeAll(java.util.Arrays.asList("SpellDescription", "StackDescription", "AILogic", "SubAbility",
+                "PrecostDesc", "CostDesc", "AITgts", "AIPreference"));
+        if (hit == null) {
+            if (shape.isEmpty()) {
+                final java.util.TreeSet<String> apis = new java.util.TreeSet<>();
+                for (forge.game.spellability.SpellAbility x = root; x != null; x = x.getSubAbility()) {
+                    apis.add(String.valueOf(x.getApi()));
+                }
+                why[0] = "other_api:" + String.join(",", apis); // no library-to-library ChangeZone: Dig, Shuffle, ...
+            } else {
+                why[0] = "unmatched:" + String.join(",", shape);
+            }
+            return -1;
+        }
+        String reject = null;
+        if (hits > 1) {
+            reject = "two_searches";
+        } else if (hit.hasParam("RandomOrder")) {
+            why[0] = "random";
+            return -1;
+        } else if (hit.hasParam("Defined") || hit.hasParam("ChooseFromDefined") || hit.hasParam("Chooser")
+                || hit.hasParam("DefinedPlayer") || hit.usesTargeting()) {
+            reject = "param";
+        }
+        final Player act = hit.getActivatingPlayer();
+        if (reject == null && (act == null || act != libraryOwner || c.getOwner() != act)) {
+            reject = "not_own_library";
+        }
+        if (reject != null) {
+            why[0] = "unmatched:" + reject + ":" + String.join(",", shape);
+            return -1;
+        }
+        why[0] = "learn";
+        return seatOf(act);
+    }
+
+    /**
+     * knowledge-searched-top-1105 coverage census (diagnostics; only with -Dforge.bench.rl.searchedTopCensus=FILE and the
+     * key on): every within-library move of a card, by what the rule did with it (per seat-independent move). Written
+     * as JSON at JVM exit.
+     */
+    static final String CENSUS_FILE = System.getProperty("forge.bench.rl.searchedTopCensus");
+    static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> CENSUS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final ThreadLocal<String> CENSUS_WHY = new ThreadLocal<>();
+    static {
+        if (CENSUS_FILE != null) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+                for (Map.Entry<String, java.util.concurrent.atomic.AtomicLong> e : new java.util.TreeMap<>(CENSUS)
+                        .entrySet()) {
+                    o.addProperty(e.getKey(), e.getValue().get());
+                }
+                try {
+                    java.nio.file.Files.write(java.nio.file.Paths.get(CENSUS_FILE + "-" + ProcessHandle.current().pid()
+                            + ".json"), o.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } catch (java.io.IOException ex) {
+                    System.err.println("[searched-top census] " + ex);
+                }
+            }));
+        }
+    }
+
+    private static void census(final String k) {
+        CENSUS.computeIfAbsent(k, x -> new java.util.concurrent.atomic.AtomicLong()).incrementAndGet();
+    }
+
     /** Zones where Forge may turn a card face down right after moving it there (foretell, "exile it face down"). */
     private static boolean mayTurnFaceDown(final ZoneType z) {
         return z == ZoneType.Exile || z == ZoneType.Battlefield || z == ZoneType.Stack || z == ZoneType.Command;
@@ -444,6 +825,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     @Subscribe
     public void resolved(final GameEventSpellResolved ev) {
         arranged.clear();
+        revealedInResolution.clear();
         settle();
     }
 

@@ -90,11 +90,63 @@ public final class RlLiveSeat {
 
         /** sb-live-1018: the {@code plans.<key>} keys live accepts (numbers, or true/false for {@code solver}). */
         public static final java.util.Set<String> LIVE_PLAN_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
-                "samples", "temperature", "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs"));
+                "samples", "temperature", "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs",
+                "unified", "lineKeep", "planX", "replanOnEntry", "lineChoices"));
+        /** shipA-on-leakfix-1112: the plan keys above whose value is true or false. */
+        private static final java.util.Set<String> LIVE_PLAN_FLAGS = new java.util.TreeSet<>(java.util.Arrays.asList(
+                "solver", "unified", "lineKeep", "planX", "replanOnEntry"));
         /** sb-live-1018: the {@code plans.solverCfg.<key>} keys live accepts (the solver's sizes, its wall, cycles, the leak fix). */
         public static final java.util.Set<String> LIVE_SOLVER_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "budgetMs", "engineMs", "evalReserveMs", "wallGraceMs", "planMs", "nodes", "engineNodes", "worlds", "top",
-                "horizon", "cycles", "hideOwnLibrary", "hiddenOrderLegacy"));
+                "horizon", "planOrder", "cycles", "hideOwnLibrary", "hiddenOrderLegacy", "staleStatics", "engineOpen", "engineVerify",
+                "followPay", "paySearch", "engineAfterPlanFail", "sourceOutput", "planDiscard", "engineTriggerTargets", "verifyReplan",
+                "breakOnCounter", "copyBackFace", "engineLongLoops", "engineLoopBisect", "engineLoopHoist", "engineLoopReach",
+                "engineMoves", "engineNodesPerSearch", "engineRerun", "historyLki", "landEntersProbe", "lineUncapped", "loopMarginal",
+                "offBattlefieldLimits", "planDiscardWall", "planExpandCap", "probeSettle", "readerPerGame", "sourceColorsLive",
+                "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds"));
+
+        /**
+         * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
+         * set; live-leak-1111: hiddenOrderLegacy; shipA-on-leakfix-1112: every solver key of the ship candidate's spec,
+         * and the live fixes' solver keys, whose default is forge.liveFixes).
+         */
+        private static final java.util.Set<String> LIVE_SOLVER_FLAGS = new java.util.TreeSet<>(java.util.Arrays.asList(
+                "cycles", "hideOwnLibrary", "hiddenOrderLegacy", "staleStatics", "engineOpen", "engineVerify", "followPay", "paySearch",
+                "engineAfterPlanFail", "sourceOutput", "planDiscard", "engineTriggerTargets", "verifyReplan",
+                "breakOnCounter", "copyBackFace", "engineLongLoops", "engineLoopBisect", "engineLoopHoist", "engineLoopReach",
+                "engineMoves", "engineNodesPerSearch", "engineRerun", "historyLki", "landEntersProbe", "lineUncapped", "loopMarginal",
+                "offBattlefieldLimits", "planDiscardWall", "planExpandCap", "probeSettle", "readerPerGame", "sourceColorsLive",
+                "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds"));
+
+        /**
+         * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
+         * the bench spec's JSON is (true|false, a whole number, a decimal, else a string). The object is checked by its own
+         * parser, so an unknown key or a bad value fails here.
+         */
+        private static JsonObject objKey(final JsonObject into, final String k, final String sub, final String v) {
+            final JsonObject o = into == null ? new JsonObject() : into;
+            if (sub.isEmpty() || o.has(sub)) {
+                throw new IllegalArgumentException("policySearch: " + k + (sub.isEmpty() ? " (no key)" : " twice"));
+            }
+            if (v.matches("true|false")) {
+                o.addProperty(sub, Boolean.parseBoolean(v));
+            } else if (v.matches("-?\\d{1,18}")) {
+                o.addProperty(sub, Long.parseLong(v));
+            } else if (v.matches("-?\\d+\\.\\d+")) {
+                o.addProperty(sub, Double.parseDouble(v));
+            } else {
+                o.addProperty(sub, v);
+            }
+            return o;
+        }
+
+        /** shipA-on-leakfix-1112: a true|false (or on|off) key, or an error. */
+        private static boolean flagKey(final String k, final String v) {
+            if (!v.matches("true|false|on|off")) {
+                throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want true|false, or on|off)");
+            }
+            return "true".equals(v) || "on".equals(v);
+        }
 
         /**
          * strong-opp-1020: the {@code plans.defendCfg.<key>} keys live accepts and their value pattern; {@code prior} names
@@ -107,6 +159,7 @@ public final class RlLiveSeat {
                 java.util.Map.entry("tieBreakTurns", "[0-2]"),
                 java.util.Map.entry("defendMs", "[5-9]\\d\\d|[1-5]\\d{3}|6000"),
                 java.util.Map.entry("sharedReader", "true|false"), java.util.Map.entry("priorFillBasics", "true|false"),
+                java.util.Map.entry("readerPerGame", "true|false"),
                 java.util.Map.entry("defenseWorlds", "[1-9]|1[0-6]"),
                 java.util.Map.entry("counterDelta", "0(\\.\\d+)?|1(\\.0+)?"),
                 java.util.Map.entry("threatExtraTurns", "[0-2]"), java.util.Map.entry("planMs", "\\d{1,5}"),
@@ -157,7 +210,7 @@ public final class RlLiveSeat {
                     throw new IllegalArgumentException("policySearch: " + k + " is not supported live (plans.solverCfg keys "
                             + String.join("|", LIVE_SOLVER_KEYS) + ")");
                 }
-                if (("cycles".equals(sk) || "hideOwnLibrary".equals(sk) || "hiddenOrderLegacy".equals(sk)) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
+                if (LIVE_SOLVER_FLAGS.contains(sk) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
                     throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want a number, or true|false)");
                 }
                 if (!c.plans.has("solverCfg")) {
@@ -177,11 +230,13 @@ public final class RlLiveSeat {
             if (c.plans.has(sub)) {
                 throw new IllegalArgumentException("policySearch: " + k + " twice");
             }
-            if ("solver".equals(sub)) {
+            if (LIVE_PLAN_FLAGS.contains(sub)) {
                 if (!v.matches("true|false")) {
                     throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want true|false)");
                 }
                 c.plans.addProperty(sub, Boolean.parseBoolean(v));
+            } else if ("lineChoices".equals(sub)) {
+                c.plans.addProperty(sub, v); // checked by PlanSearch.Spec.parse (c.check())
             } else if ("temperature".equals(sub)) {
                 c.plans.addProperty(sub, Double.parseDouble(v));
             } else {
@@ -243,6 +298,7 @@ public final class RlLiveSeat {
                     case "maxSteps": c.maxSteps = Integer.parseInt(v); break;
                     case "leafExtraSteps": c.leafExtraSteps = Integer.parseInt(v); break;
                     case "departZ": c.departZ = Double.parseDouble(v); break;
+                    case "anytime": c.anytime = Boolean.parseBoolean(v); break;
                     case "margin": c.margin = Double.parseDouble(v); break;
                     case "leaf": c.leaf = v; break;
                     case "playout": c.playout = v; break;
@@ -272,11 +328,44 @@ public final class RlLiveSeat {
                     case "beliefPlayerStatics": c.beliefPlayerStatics = LookaheadSearch.Config.infoStateKey(k, v); break;
                     case "copyTurnLimits": c.copyTurnLimits = LookaheadSearch.Config.infoStateKey(k, v); break;
                     case "offBattlefieldLimits": c.offBattlefieldLimits = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    case "historyLki": c.historyLki = LookaheadSearch.Config.infoStateKey(k, v); break;
                     case "stackAbilityCopies": c.stackAbilityCopies = LookaheadSearch.Config.infoStateKey(k, v); break; // house p16
                     case "copyBackFace": c.copyBackFace = LookaheadSearch.Config.infoStateKey(k, v); break; // house p15
+                    // shipA-on-leakfix-1112: the rest of the ship candidate's look-ahead keys (absent = as before)
+                    case "beliefRememberedHand": c.beliefRememberedHand = flagKey(k, v); break;
+                    case "stackHistory": c.stackHistory = flagKey(k, v); break;
+                    case "stack": c.stack = flagKey(k, v); break;
+                    case "blockSampleSeed": c.blockSampleSeed = flagKey(k, v); break;
+                    case "infoAttach": c.infoAttach = flagKey(k, v); break;
                     default:
+                        if (k.startsWith("choiceScorer.")) {
+                            c.choiceScorer = objKey(c.choiceScorer, k, k.substring("choiceScorer.".length()), v);
+                            ChoiceScorer.Config.parse(c.choiceScorer);
+                            break;
+                        }
+                        if (k.startsWith("reach.")) {
+                            c.reach = objKey(c.reach, k, k.substring("reach.".length()), v);
+                            RlSearch.ReachCfg.parse(c.reach);
+                            break;
+                        }
                         if (k.startsWith("plans.")) {
                             planKey(c, k, v); // sb-live-1018: S-b, flat keys
+                            break;
+                        }
+                        if (k.startsWith("cac.")) {
+                            // r2-choose-a-card-1029: choose-a-card, flat keys (cac.mode=shadow, cac.cap=32, ...)
+                            if (c.cac == null) {
+                                c.cac = new JsonObject();
+                            }
+                            final String ck = k.substring(4);
+                            if ("mode".equals(ck) || "kinds".equals(ck)) {
+                                c.cac.addProperty(ck, v);
+                            } else if ("margin".equals(ck)) {
+                                c.cac.addProperty(ck, Double.parseDouble(v));
+                            } else {
+                                c.cac.addProperty(ck, Long.parseLong(v));
+                            }
+                            forge.ai.simulation.ChooseACard.Config.fromJson(c.cac);
                             break;
                         }
                         throw new IllegalArgumentException("policySearch: unknown key " + k);
@@ -536,6 +625,7 @@ public final class RlLiveSeat {
             s.onSearched = this::searched;
         }
         rs.search = s;
+        RlSearch.attachInfoStates(spec.search, g); // #173: attached at bind whenever a consumer key is on (with or without plans)
         if (spec.search.plans != null) {
             // sb-live-1018: S-b's plan hook on this seat's bridged controller (RlSearch.attach, as the bench's RL seat)
             final boolean[] rl = new boolean[ctl.length];

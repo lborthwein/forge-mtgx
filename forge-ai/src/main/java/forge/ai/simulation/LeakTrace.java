@@ -39,6 +39,8 @@ public final class LeakTrace {
     private static final class Armed {
         final int seatId;
         volatile Set<Integer> known = Collections.emptySet();
+        /** Opposing hand cards (of the real game) the seat knows although Forge does not show them; null = none. */
+        volatile java.util.function.Predicate<Card> oppKnown;
 
         Armed(final int seatId) {
             this.seatId = seatId;
@@ -49,10 +51,20 @@ public final class LeakTrace {
     private static final Map<Game, Game> ROOT_OF = Collections.synchronizedMap(new WeakHashMap<>());
     /** Per tag: copies, library reads, real-order reads, reads too small to tell, opp-hand reads, real-hand reads. */
     private static final Map<String, long[]> COUNTS = new ConcurrentHashMap<>();
-    static final int COPIES = 0, LIB = 1, LIB_REAL = 2, LIB_SMALL = 3, OPP = 4, OPP_REAL = 5, LIB_TOP = 6, N = 7;
+    static final int COPIES = 0, LIB = 1, LIB_REAL = 2, LIB_SMALL = 3, OPP = 4, OPP_REAL = 5, LIB_TOP = 6, OPP_KNOWN = 7, N = 8;
 
     /** Watch {@code seat}'s hidden zones in every copy of {@code live}; {@code known} = library ids the seat knows. */
     public static void arm(final Game live, final Player seat, final Set<Integer> known) {
+        arm(live, seat, known, null);
+    }
+
+    /**
+     * As above; {@code oppKnown} says which opposing hand cards the seat knows by its own memory (a card it saw
+     * revealed or returned to hand). A copy that keeps a hand made only of such cards holds nothing hidden: it is
+     * counted as oppKnown, not as oppReal.
+     */
+    public static void arm(final Game live, final Player seat, final Set<Integer> known,
+            final java.util.function.Predicate<Card> oppKnown) {
         if (!ON || live == null || seat == null || ROOT_OF.containsKey(live)) {
             return; // off, or a copy (a solver inside a play-out world): only real games are armed
         }
@@ -63,6 +75,7 @@ public final class LeakTrace {
             ROOTS.put(live, a);
         }
         a.known = known == null ? Collections.emptySet() : new HashSet<>(known);
+        a.oppKnown = oppKnown;
     }
 
     private static String tag() {
@@ -216,10 +229,21 @@ public final class LeakTrace {
             }
             final Set<Integer> liveHand = new HashSet<>();
             int hidden = 0;
+            int unshown = 0;
+            final java.util.function.Predicate<Card> ok = a.oppKnown;
             for (Card x : liveOpp.getCardsIn(ZoneType.Hand)) {
                 liveHand.add(x.getId());
                 if (!x.getView().canBeShownTo(liveSeat.getView())) {
-                    hidden++;
+                    unshown++;
+                    boolean remembered = false;
+                    try {
+                        remembered = ok != null && ok.test(x);
+                    } catch (RuntimeException ex) {
+                        remembered = false;
+                    }
+                    if (!remembered) {
+                        hidden++;
+                    }
                 }
             }
             final Set<Integer> hand = new HashSet<>();
@@ -232,6 +256,8 @@ public final class LeakTrace {
                 c[OPP]++;
                 if (hidden >= 1 && liveHand.size() >= 2 && hand.equals(liveHand)) {
                     c[OPP_REAL]++;
+                } else if (unshown >= 1 && liveHand.size() >= 2 && hand.equals(liveHand)) {
+                    c[OPP_KNOWN]++; // the real hand, every card of it known to the seat
                 }
             }
         }
@@ -274,7 +300,7 @@ public final class LeakTrace {
             final long[] c = e.getValue();
             synchronized (c) {
                 out.add(prefix + " copies=" + c[COPIES] + " libReads=" + c[LIB] + " libReal=" + c[LIB_REAL] + " libRealTop=" + c[LIB_TOP]
-                        + " libSmall=" + c[LIB_SMALL] + " oppReads=" + c[OPP] + " oppReal=" + c[OPP_REAL] + " | " + e.getKey());
+                        + " libSmall=" + c[LIB_SMALL] + " oppReads=" + c[OPP] + " oppReal=" + c[OPP_REAL] + " oppKnown=" + c[OPP_KNOWN] + " | " + e.getKey());
             }
         }
         if (reset) {

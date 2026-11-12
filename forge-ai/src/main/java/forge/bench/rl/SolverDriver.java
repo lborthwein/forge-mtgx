@@ -64,6 +64,7 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
         this.me = me;
         this.scoped = scoped;
         this.solver = new ForcedWinSolver(me, cfg);
+        this.solver.liveSeat = scoped; // breakOnCounter: the live seat's driver (a play-out copy's driver is not scoped)
         final AtomicInteger[] counters = new AtomicInteger[IdScope.Kind.values().length];
         final int base = PROBE_ID_BASE + PROBE_ID_STRIDE * Math.floorMod(me.getId(), 2);
         for (int i = 0; i < counters.length; i++) {
@@ -144,6 +145,46 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
     public boolean forgeCosts() {
         final forge.game.phase.PhaseHandler ph = me.getGame().getPhaseHandler();
         return ph.getTurn() == actTurn && ph.getPhase() == actPhase;
+    }
+
+    /** choice-search-1105: line-consistent choices (plans.lineChoices=forge); false = the seat's (the default). */
+    boolean lineChoices = false;
+    /** kill-line-1106: plans.lineKeep. */
+    boolean lineKeep = false;
+
+    /** kill-line-1106: a followed line's discard keeps its reserved cards (key off or no line: unchanged). */
+    @Override
+    public CardCollection lineKeep(final CardCollection ordinary, final CardCollection valid) {
+        return lineKeep ? solver.keepReserved(ordinary, valid) : ordinary;
+    }
+
+    /** Live safety: line-consistent answers per turn at most; past it the seat answers (its loop guard sees them). */
+    static final int LINE_CHOICES_PER_TURN = 400;
+    private int lcTurn = -1, lcCount;
+    int lineChoiceAnswers, lineChoiceCapHits;
+
+    /** sdcc-imit-1111: a solver line is being followed. */
+    @Override
+    public boolean lineActive() {
+        return !solver.lineDone();
+    }
+
+    @Override
+    public boolean forgeChoices() {
+        if (!lineChoices || !solver.lineActive()) {
+            return false;
+        }
+        final int t = me.getGame().getPhaseHandler().getTurn();
+        if (t != lcTurn) {
+            lcTurn = t;
+            lcCount = 0;
+        }
+        if (++lcCount > LINE_CHOICES_PER_TURN) {
+            lineChoiceCapHits++;
+            return false;
+        }
+        lineChoiceAnswers++;
+        return true;
     }
 
     @Override
@@ -243,6 +284,10 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
         o.addProperty("defense_counters", solver.counters);
         o.addProperty("defense_holds", solver.holds);
         o.addProperty("discard_choices", solver.discardChoices);
+        if (lineChoices) {
+            o.addProperty("line_choices", lineChoiceAnswers); // choice-search-1105 (only when on)
+            o.addProperty("line_choice_cap_hits", lineChoiceCapHits);
+        }
         final JsonObject a = new JsonObject();
         answers.forEach(a::addProperty);
         o.add("answers", a);

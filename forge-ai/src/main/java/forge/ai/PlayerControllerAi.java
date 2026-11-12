@@ -46,6 +46,11 @@ import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
 import java.util.function.Consumer;
+
+import forge.ai.dp.DecisionAnswerer;
+import forge.ai.dp.DecisionPoint;
+import forge.ai.dp.DecisionPoints;
+import forge.ai.dp.Kind;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -86,8 +91,209 @@ public class PlayerControllerAi extends PlayerController {
 
     private KnowledgeHook knowledgeHook = null;
 
+    /**
+     * r2-choose-a-card-1029 (research; null = off, the default, and then every answer below is Forge AI's own, byte for
+     * byte): the choose-a-card hook ({@link CacHook}). Forge AI answers first, exactly as without it; the hook sees that
+     * answer and may replace it. Set only on a live seat's controller; a game copy's controllers never have one.
+     */
+    private CacHook cacHook = null;
+    /**
+     * r2-choose-a-card-1029: a subclass that answers an ask itself (the RL bridge) and applies the hook once to its own
+     * final answer sets this while it computes that answer, so a fallback through these methods is not hooked twice.
+     */
+    protected boolean cacSuppressed = false;
+
+    // ------------------------------------------------------------------ decisionpoint-1102 (layer 2, PR-B)
+    /** The two answers of a yes/no point. */
+    static final List<Boolean> DP_BOOLS = List.of(Boolean.TRUE, Boolean.FALSE);
+    /** An answerer for this seat's decision points (null = none, the default). */
+    private DecisionAnswerer dpAnswerer = null;
+    /** Decision points this controller is computing an answer to right now (> 0: the next one is nested). */
+    private int dpDepth = 0;
+
+    public void setDecisionAnswerer(final DecisionAnswerer a) {
+        this.dpAnswerer = a;
+    }
+
+    public DecisionAnswerer getDecisionAnswerer() {
+        return dpAnswerer;
+    }
+
+    /**
+     * decisionpoint-1102 (CENSUS.md §5.4): one decision of this seat. {@code forge} computes Forge AI's own answer,
+     * exactly as the method did before; then the choose-a-card hook (through {@link CacAdapter}, under the same
+     * condition as before: a hook is set and not suppressed), an installed answerer and the census observer
+     * ({@link DecisionPoints#resolve}). With no hook, answerer or observer it returns Forge's answer and builds nothing.
+     */
+    @SuppressWarnings("unchecked")
+    protected final <A> A dp(final Kind kind, final String ctx, final SpellAbility sa, final Collection<?> options,
+            final int min, final int max, final java.util.function.Supplier<A> forge, final Object... args) {
+        final forge.ai.dp.DecisionAnswerer ans = answerer(); // PR-E: the seat's, else a copy answerer
+        final boolean inst = ans != null || DecisionPoints.observer() != null || DecisionPoints.meter();
+        final A def;
+        final boolean nested = dpDepth > 0;
+        if (inst) {
+            dpDepth++;
+            try {
+                def = forge.get();
+            } finally {
+                dpDepth--;
+            }
+        } else {
+            def = forge.get();
+        }
+        final boolean cac = cacHook != null && !cacSuppressed && CacAdapter.handles(ctx);
+        if (!inst && !cac) {
+            return def;
+        }
+        final DecisionPoint p = nested
+                ? DecisionPoints.nestedPoint(kind, ctx, player, sa, options, min, max, def, args)
+                : DecisionPoints.point(kind, ctx, player, sa, options, min, max, def, args);
+        return (A) DecisionPoints.resolve(p, cac ? new CacAdapter(this, cacHook) : null, ans);
+    }
+
+    /** PR-E: this seat's answerer: its own, else the installed copy answerer when its game is a copy; else null. */
+    private forge.ai.dp.DecisionAnswerer answerer() {
+        if (dpAnswerer != null) {
+            return dpAnswerer;
+        }
+        return DecisionPoints.copyAnswerers() == null ? null : DecisionPoints.copyAnswerer(player);
+    }
+
+    /** Whether anything (answerer or census observer) looks at this seat's decision points. */
+    public final boolean dpInstrumented() {
+        return answerer() != null || DecisionPoints.observer() != null || DecisionPoints.meter();
+    }
+
+    /**
+     * decisionpoint-1102 PR-C: one decision made inside Forge AI's execution code (a seam: a mana source per symbol, a
+     * cost part's cards, the targets / X fixed before payment), for {@code p}'s seat. {@code forge} is Forge AI's answer
+     * exactly as the seam computed it; {@code cacAnswer} (null = none) is the choose-a-card hook's answer where the
+     * seam already had one (the cost review), counted as {@code by=cac}; {@code valid} (null = the option list's)
+     * checks an answerer's departure. Without an answerer or observer: {@code forge}'s value, nothing else.
+     */
+    @SuppressWarnings("unchecked")
+    public static <A> A seam(final Player p, final Kind kind, final String ctx, final SpellAbility sa,
+            final Collection<?> options, final int min, final int max, final java.util.function.Predicate<Object> valid,
+            final java.util.function.Supplier<A> forge, final java.util.function.UnaryOperator<A> cacAnswer,
+            final Object... args) {
+        final PlayerControllerAi pc = cacOf(p);
+        if (pc == null || !pc.dpInstrumented()) {
+            final A def = forge.get();
+            return cacAnswer == null ? def : cacAnswer.apply(def);
+        }
+        final boolean nested = pc.dpDepth > 0; // review #175 S6: a seam asked inside another answer is nested
+        final A def = forge.get();
+        final DecisionPoint pt = (nested ? DecisionPoints.nestedPoint(kind, ctx, p, sa, options, min, max, def, args)
+                : DecisionPoints.point(kind, ctx, p, sa, options, min, max, def, args)).withValidator(valid);
+        final forge.ai.dp.DecisionAnswerer cac = cacAnswer == null ? null : (d, cur) -> cacAnswer.apply((A) cur);
+        return (A) DecisionPoints.resolve(pt, cac, pc.answerer());
+    }
+
+    /** A decision answered by mutating its argument (combat declarations): observed only; no answerer in PR-B. */
+    protected final void dpVoid(final Kind kind, final String ctx, final SpellAbility sa, final Runnable forge,
+            final Object... args) {
+        dp(kind, ctx, sa, null, -1, -1, () -> {
+            forge.run();
+            return null;
+        }, args);
+    }
+
+    /**
+     * A subclass (the RL bridge) that computed its own answer with the hook suppressed applies the choose-a-card hook
+     * once to it, through the same adapter. The bridge's own answer was already observed through {@link #dp}, so a
+     * departure here is noted as {@code cac-override}, not counted twice.
+     */
+    @SuppressWarnings("unchecked")
+    protected final <A> A cacOnce(final Kind kind, final String ctx, final SpellAbility sa,
+            final Collection<?> options, final int min, final int max, final A def, final Object... args) {
+        if (cacHook == null || !CacAdapter.handles(ctx)) {
+            return def;
+        }
+        final DecisionPoint p = DecisionPoints.point(kind, ctx, player, sa, options, min, max, def, args);
+        final A out = (A) new CacAdapter(this, cacHook).answer(p, def);
+        if (out != def && !java.util.Objects.equals(out, def)) {
+            DecisionPoints.note(player, kind, ctx, p.optionCount(), "cac-override");
+        }
+        return out;
+    }
+
+    public void setCacHook(final CacHook hook) {
+        this.cacHook = hook;
+    }
+
+    /**
+     * sdcc-tutorcast-1110 (null = none, the default, and then every answer is as before): the line this seat follows
+     * answers an effect's offer to cast a card, a play effect's card choice and a cost part's cards ({@link LineAnswers}).
+     */
+    private LineAnswers lineAnswers = null;
+
+    public void setLineAnswers(final LineAnswers answers) {
+        this.lineAnswers = answers;
+    }
+
+    public LineAnswers getLineAnswers() {
+        return lineAnswers;
+    }
+
+    /** sdcc-tutorcast-1110: the followed line's card for a play effect's "which card", or null (no line, or not its ask). */
+    protected final <T extends GameEntity> T linePlayChoice(final FCollectionView<T> optionList, final SpellAbility sa) {
+        if (lineAnswers == null || sa == null || optionList == null || sa.getApi() != ApiType.Play) {
+            return null;
+        }
+        final Card c = lineAnswers.playChoice(sa, optionList);
+        if (c != null) {
+            for (T t : optionList) {
+                if (t == c) {
+                    return t;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * sdcc-tutorcast-1110: the followed line's answer to an effect's offer to cast {@code tgtSA}: cast (true when it was
+     * put on the stack) or declined (false); null = no line, or not its card.
+     */
+    protected final Boolean lineCastFromEffect(final SpellAbility tgtSA) {
+        if (lineAnswers == null || tgtSA == null) {
+            return null;
+        }
+        final Boolean b = lineAnswers.castFromEffect(tgtSA);
+        if (b == null) {
+            return null;
+        }
+        return b && ComputerUtil.playStack(tgtSA, player, getGame());
+    }
+
+    public CacHook getCacHook() {
+        return cacHook;
+    }
+
+    /**
+     * Review #147 S2: the controller holding a player's choose-a-card hook. A taped seat's controller is the
+     * {@link AiTapeController} wrapper, and the hook is installed on the controller it wraps.
+     */
+    public static PlayerControllerAi cacOf(final Player p) {
+        final forge.game.player.PlayerController c = p == null ? null : p.getController();
+        if (c instanceof AiTapeController t) return t.inner();
+        return c instanceof PlayerControllerAi pc ? pc : null;
+    }
+
     public void setKnowledgeHook(final KnowledgeHook hook) {
         this.knowledgeHook = hook;
+    }
+
+    /**
+     * Lane bvw-decision-log-1027: what this seat's observers see when it looks at {@code cards} to arrange them (scry,
+     * surveil, an ordered move), as its own arranging methods report it first, without deciding anything. The AI tape's
+     * forced replay calls it where the record's decision was (the decision is the record's).
+     */
+    public void witnessLook(final List<Card> cards, final ZoneType destination) {
+        if (knowledgeHook != null && cards != null) {
+            knowledgeHook.onLook(cards, destination);
+        }
     }
 
     /** fairNaming memory ({@link FairNaming#observe}); filled only when this player's option is not off. */
@@ -101,6 +307,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public SpellAbility getAbilityToPlay(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) {
+        return dp(Kind.SELECT, "getAbilityToPlay", null, abilities, 1, 1, () -> getAbilityToPlayAi(hostCard, abilities, triggerEvent), hostCard, abilities, triggerEvent);
+    }
+
+    private SpellAbility getAbilityToPlayAi(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) {
         if (abilities.isEmpty()) {
             return null;
         }
@@ -243,17 +453,29 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public Map<Card, Integer> assignCombatDamage(Card attacker, CardCollectionView blockers, CardCollectionView remaining, int damageDealt, GameEntity defender, boolean overrideOrder) {
+        return dp(Kind.NUMBER, "assignCombatDamage", null, blockers, -1, -1, () -> assignCombatDamageAi(attacker, blockers, remaining, damageDealt, defender, overrideOrder), attacker, blockers, remaining, damageDealt, defender, overrideOrder);
+    }
+
+    private Map<Card, Integer> assignCombatDamageAi(Card attacker, CardCollectionView blockers, CardCollectionView remaining, int damageDealt, GameEntity defender, boolean overrideOrder) {
         return ComputerUtilCombat.distributeAIDamage(player, attacker, blockers, remaining, damageDealt, defender, overrideOrder);
     }
 
     @Override
     public Map<GameEntity, Integer> divideShield(Card effectSource, Map<GameEntity, Integer> affected, int shieldAmount) {
+        return dp(Kind.NUMBER, "divideShield", null, affected == null ? null : affected.keySet(), -1, -1, () -> divideShieldAi(effectSource, affected, shieldAmount), effectSource, affected, shieldAmount);
+    }
+
+    private Map<GameEntity, Integer> divideShieldAi(Card effectSource, Map<GameEntity, Integer> affected, int shieldAmount) {
         // TODO: AI currently can't use this so this is not implemented.
         return new HashMap<>();
     }
 
     @Override
     public Map<Byte, Integer> specifyManaCombo(SpellAbility sa, ColorSet colorSet, int manaAmount, boolean different) {
+        return dp(Kind.CHOICE, "specifyManaCombo", sa, null, -1, -1, () -> specifyManaComboAi(sa, colorSet, manaAmount, different), sa, colorSet, manaAmount, different);
+    }
+
+    private Map<Byte, Integer> specifyManaComboAi(SpellAbility sa, ColorSet colorSet, int manaAmount, boolean different) {
         Map<Byte, Integer> result = new HashMap<>();
         for (int i = 0; i < manaAmount; ++i) {
             Byte chosen = chooseColor("", sa, colorSet);
@@ -267,6 +489,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public Integer announceRequirements(SpellAbility ability, int min, int max, String announce) {
+        return dp(Kind.NUMBER, "announceRequirements", ability, null, min, max, () -> announceRequirementsAi(ability, min, max, announce), ability, min, max, announce);
+    }
+
+    private Integer announceRequirementsAi(SpellAbility ability, int min, int max, String announce) {
         // For now, these "announcements" are made within the AI classes of the appropriate SA effects
         if (ability.getApi() != null) {
             switch (ability.getApi()) {
@@ -299,21 +525,36 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView choosePermanentsToSacrifice(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
-        return ComputerUtil.choosePermanentsToSacrifice(player, validTargets, max, sa, false, min == 0);
+        // r3-inline-choices-1030: the choose-a-card hook may replace the sacrificed permanents (no hook: Forge AI's)
+        return dp(Kind.SELECT, "choosePermanentsToSacrifice", sa, validTargets, min, max,
+                () -> ComputerUtil.choosePermanentsToSacrifice(player, validTargets, max, sa, false, min == 0),
+                min, max, validTargets);
     }
 
     @Override
     public CardCollectionView choosePermanentsToDestroy(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
+        return dp(Kind.SELECT, "choosePermanentsToDestroy", sa, validTargets, min, max, () -> choosePermanentsToDestroyAi(sa, min, max, validTargets, message), sa, min, max, validTargets, message);
+    }
+
+    private CardCollectionView choosePermanentsToDestroyAi(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
         return ComputerUtil.choosePermanentsToSacrifice(player, validTargets, max, sa, true, min == 0);
     }
 
     @Override
     public CardCollectionView chooseCardsForEffect(CardCollectionView sourceList, SpellAbility sa, String title, int min, int max, boolean isOptional, Map<String, Object> params) {
+        return dp(Kind.SELECT, "chooseCardsForEffect", sa, sourceList, min, max, () -> chooseCardsForEffectAi(sourceList, sa, title, min, max, isOptional, params), sourceList, sa, title, min, max, isOptional, params);
+    }
+
+    private CardCollectionView chooseCardsForEffectAi(CardCollectionView sourceList, SpellAbility sa, String title, int min, int max, boolean isOptional, Map<String, Object> params) {
         return brains.chooseCardsForEffect(sourceList, sa, min, max, isOptional, params);
     }
 
     @Override
     public List<Card> chooseContraptionsToCrank(List<Card> contraptions) {
+        return dp(Kind.SELECT, "chooseContraptionsToCrank", null, contraptions, 0, contraptions == null ? -1 : contraptions.size(), () -> chooseContraptionsToCrankAi(contraptions), contraptions);
+    }
+
+    private List<Card> chooseContraptionsToCrankAi(List<Card> contraptions) {
         return CardLists.filter(contraptions, c -> {
             Trigger crankTrigger = IterableUtil.find(c.getTriggers(), t -> t.getMode() == TriggerType.CrankContraption);
             return confirmTrigger(new WrappedAbility(crankTrigger, crankTrigger.getOverridingAbility(), player));
@@ -322,6 +563,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean helpPayForAssistSpell(ManaCostBeingPaid cost, SpellAbility sa, int max, int requested) {
+        return dp(Kind.CHOICE, "helpPayForAssistSpell", sa, DP_BOOLS, 1, 1, () -> helpPayForAssistSpellAi(cost, sa, max, requested), cost, sa, max, requested);
+    }
+
+    private boolean helpPayForAssistSpellAi(ManaCostBeingPaid cost, SpellAbility sa, int max, int requested) {
         int toPay = getAi().attemptToAssist(sa, max, requested);
 
         if (toPay == 0) {
@@ -340,6 +585,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public Player choosePlayerToAssistPayment(FCollectionView<Player> optionList, SpellAbility sa, String title, int max) {
+        return dp(Kind.SELECT, "choosePlayerToAssistPayment", sa, optionList, 0, 1, () -> choosePlayerToAssistPaymentAi(optionList, sa, title, max), optionList, sa, title, max);
+    }
+
+    private Player choosePlayerToAssistPaymentAi(FCollectionView<Player> optionList, SpellAbility sa, String title, int max) {
         //        if (optionList.size() == 1) {
         //            return null;
         //        }
@@ -363,11 +612,47 @@ public class PlayerControllerAi extends PlayerController {
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
-        return SpellApiToAi.Converter.get(sa).chooseSingleEntity(player, sa, optionList, isOptional, targetedPlayer, params);
+        final T lineCard = linePlayChoice(optionList, sa); // sdcc-tutorcast-1110 (no line: null)
+        if (lineCard != null) {
+            return lineCard;
+        }
+        // r3-inline-choices-1030: the legend rule's keep goes to the choose-a-card hook (no hook: Forge AI's)
+        return dp(Kind.SELECT, "chooseSingleEntityForEffect", sa, optionList, isOptional ? 0 : 1, 1,
+                () -> SpellApiToAi.Converter.get(sa).chooseSingleEntity(player, sa, optionList, isOptional, targetedPlayer, params),
+                optionList);
     }
 
     @Override
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(
+            FCollectionView<T> optionList, int min, int max, DelayedReveal delayedReveal, SpellAbility sa, String title,
+            Player targetedPlayer, Map<String, Object> params) {
+        return dp(Kind.SELECT, "chooseEntitiesForEffect", sa, optionList, min, max,
+                () -> chooseEntitiesForEffectAi(optionList, min, max, delayedReveal, sa, title, targetedPlayer, params),
+                optionList, min, max);
+    }
+
+    /** r2-choose-a-card-1029: a Dig ability's pick among our own cards goes to the hook; anything else is {@code def}. */
+    @SuppressWarnings("unchecked")
+    protected static <T extends GameEntity> List<T> cacDig(final PlayerControllerAi c, final CacHook h,
+            final FCollectionView<T> optionList, final int min, final int max, final SpellAbility sa, final List<T> def) {
+        if (sa == null || sa.getApi() != forge.game.ability.ApiType.Dig || optionList == null || def == null) {
+            return def;
+        }
+        final List<Card> opts = new ArrayList<>();
+        for (T t : optionList) {
+            if (!(t instanceof Card)) {
+                return def;
+            }
+            opts.add((Card) t);
+        }
+        final List<Card> d = new ArrayList<>();
+        for (T t : def) {
+            d.add((Card) t);
+        }
+        return (List<T>) h.dig(c, opts, min, max, sa, d);
+    }
+
+    private <T extends GameEntity> List<T> chooseEntitiesForEffectAi(
             FCollectionView<T> optionList, int min, int max, DelayedReveal delayedReveal, SpellAbility sa, String title,
             Player targetedPlayer, Map<String, Object> params) {
         if (delayedReveal != null) {
@@ -389,6 +674,11 @@ public class PlayerControllerAi extends PlayerController {
     @Override
     public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa, String title,
             int num, Map<String, Object> params) {
+        return dp(Kind.SELECT, "chooseSpellAbilitiesForEffect", sa, spells, 0, num, () -> chooseSpellAbilitiesForEffectAi(spells, sa, title, num, params), spells, sa, title, num, params);
+    }
+
+    private List<SpellAbility> chooseSpellAbilitiesForEffectAi(List<SpellAbility> spells, SpellAbility sa, String title,
+            int num, Map<String, Object> params) {
         List<SpellAbility> remaining = Lists.newArrayList(spells);
         List<SpellAbility> selecteds = Lists.newArrayList();
         SpellAbility selected;
@@ -405,22 +695,41 @@ public class PlayerControllerAi extends PlayerController {
     @Override
     public SpellAbility chooseSingleSpellForEffect(List<SpellAbility> spells, SpellAbility sa, String title,
             Map<String, Object> params) {
+        return dp(Kind.SELECT, "chooseSingleSpellForEffect", sa, spells, 1, 1, () -> chooseSingleSpellForEffectAi(spells, sa, title, params), spells, sa, title, params);
+    }
+
+    private SpellAbility chooseSingleSpellForEffectAi(List<SpellAbility> spells, SpellAbility sa, String title,
+            Map<String, Object> params) {
         return SpellApiToAi.Converter.get(sa).chooseSingleSpellAbility(player, sa, spells, params);
     }
 
     @Override
     public boolean confirmAction(SpellAbility sa, PlayerActionConfirmMode mode, String message, List<String> options, Card cardToShow, Map<String, Object> params) {
+        return dp(Kind.CHOICE, "confirmAction", sa, DP_BOOLS, 1, 1,
+                () -> confirmActionAi(sa, mode, message, options, cardToShow, params), mode, message);
+    }
+
+    private boolean confirmActionAi(SpellAbility sa, PlayerActionConfirmMode mode, String message, List<String> options, Card cardToShow, Map<String, Object> params) {
         return getAi().confirmAction(sa, mode, message, params);
     }
 
     @Override
     public boolean confirmBidAction(SpellAbility sa, PlayerActionConfirmMode mode, String string,
             int bid, Player winner) {
+        return dp(Kind.CHOICE, "confirmBidAction", sa, DP_BOOLS, 1, 1, () -> confirmBidActionAi(sa, mode, string, bid, winner), sa, mode, string, bid, winner);
+    }
+
+    private boolean confirmBidActionAi(SpellAbility sa, PlayerActionConfirmMode mode, String string,
+            int bid, Player winner) {
         return getAi().confirmBidAction(sa, mode, string, bid, winner);
     }
 
     @Override
     public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) {
+        return dp(Kind.CHOICE, "confirmStaticApplication", null, DP_BOOLS, 1, 1, () -> confirmStaticApplicationAi(hostCard, mode, message, logic), hostCard, mode, message, logic);
+    }
+
+    private boolean confirmStaticApplicationAi(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) {
         return getAi().confirmStaticApplication(hostCard, logic);
     }
 
@@ -431,6 +740,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean confirmTrigger(WrappedAbility wrapper) {
+        return dp(Kind.CHOICE, "confirmTrigger", wrapper, DP_BOOLS, 1, 1, () -> confirmTriggerAi(wrapper), wrapper);
+    }
+
+    private boolean confirmTriggerAi(WrappedAbility wrapper) {
         final SpellAbility sa = wrapper.getWrappedAbility();
         //final Trigger regtrig = wrapper.getTrigger();
         if (wrapper.isMandatory()) {
@@ -471,11 +784,19 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean confirmPayment(CostPart costPart, String prompt, SpellAbility sa) {
+        return dp(Kind.CHOICE, "confirmPayment", sa, DP_BOOLS, 1, 1, () -> confirmPaymentAi(costPart, prompt, sa), costPart, prompt, sa);
+    }
+
+    private boolean confirmPaymentAi(CostPart costPart, String prompt, SpellAbility sa) {
         return brains.confirmPayment(costPart); // AI is expected to know what it is paying for at the moment (otherwise add another parameter to this method)
     }
 
     @Override
     public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA, GameEntity affected, String question) {
+        return dp(Kind.CHOICE, "confirmReplacementEffect", effectSA, DP_BOOLS, 1, 1, () -> confirmReplacementEffectAi(replacementEffect, effectSA, affected, question), replacementEffect, effectSA, affected, question);
+    }
+
+    private boolean confirmReplacementEffectAi(ReplacementEffect replacementEffect, SpellAbility effectSA, GameEntity affected, String question) {
         Card host = replacementEffect.getHostCard();
         if (host.hasAlternateState()) {
             host = host.getGame().getCardState(host);
@@ -488,11 +809,19 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<Card> exertAttackers(List<Card> attackers) {
+        return dp(Kind.SELECT, "exertAttackers", null, attackers, 0, attackers == null ? -1 : attackers.size(), () -> exertAttackersAi(attackers), attackers);
+    }
+
+    private List<Card> exertAttackersAi(List<Card> attackers) {
         return AiAttackController.exertAttackers(attackers, brains.getAttackAggression());
     }
  
     @Override
     public List<Card> enlistAttackers(List<Card> attackers) {
+        return dp(Kind.SELECT, "enlistAttackers", null, attackers, 0, attackers == null ? -1 : attackers.size(), () -> enlistAttackersAi(attackers), attackers);
+    }
+
+    private List<Card> enlistAttackersAi(List<Card> attackers) {
         CardCollection cards = CostEnlist.getCardsForEnlisting(brains.getPlayer());
         cards = CardLists.filter(cards, CardPredicates.hasGreaterPowerThan(0));
         CardCollection chosenAttackers = new CardCollection(attackers);
@@ -508,16 +837,28 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollection orderBlockers(Card attacker, CardCollection blockers) {
+        return dp(Kind.ARRANGE, "orderBlockers", null, blockers, -1, -1, () -> orderBlockersAi(attacker, blockers), attacker, blockers);
+    }
+
+    private CardCollection orderBlockersAi(Card attacker, CardCollection blockers) {
         return AiBlockController.orderBlockers(attacker, blockers);
     }
 
     @Override
     public CardCollection orderBlocker(Card attacker, Card blocker, CardCollection oldBlockers) {
+        return dp(Kind.ARRANGE, "orderBlocker", null, null, -1, -1, () -> orderBlockerAi(attacker, blocker, oldBlockers), attacker, blocker, oldBlockers);
+    }
+
+    private CardCollection orderBlockerAi(Card attacker, Card blocker, CardCollection oldBlockers) {
     	return AiBlockController.orderBlocker(attacker, blocker, oldBlockers);
     }
 
     @Override
     public CardCollection orderAttackers(Card blocker, CardCollection attackers) {
+        return dp(Kind.ARRANGE, "orderAttackers", null, attackers, -1, -1, () -> orderAttackersAi(blocker, attackers), blocker, attackers);
+    }
+
+    private CardCollection orderAttackersAi(Card blocker, CardCollection attackers) {
         return AiBlockController.orderAttackers(blocker, attackers);
     }
 
@@ -564,6 +905,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+        return dp(Kind.ARRANGE, "arrangeForScry", null, topN, -1, -1, () -> arrangeForScryAi(topN), topN);
+    }
+
+    private ImmutablePair<CardCollection, CardCollection> arrangeForScryAi(CardCollection topN) {
         if (knowledgeHook != null && topN != null) {
             knowledgeHook.onLook(Lists.newArrayList(topN), ZoneType.Library);
         }
@@ -588,6 +933,10 @@ public class PlayerControllerAi extends PlayerController {
      */
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+        return dp(Kind.ARRANGE, "arrangeForSurveil", null, topN, -1, -1, () -> arrangeForSurveilAi(topN), topN);
+    }
+
+    private ImmutablePair<CardCollection, CardCollection> arrangeForSurveilAi(CardCollection topN) {
         if (knowledgeHook != null && topN != null) {
             knowledgeHook.onLook(Lists.newArrayList(topN), ZoneType.Library);
         }
@@ -614,6 +963,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean willPutCardOnTop(Card c) {
+        return dp(Kind.CHOICE, "willPutCardOnTop", null, DP_BOOLS, 1, 1, () -> willPutCardOnTopAi(c), c);
+    }
+
+    private boolean willPutCardOnTopAi(Card c) {
         // This is used for Clash. Currently uses Scry logic to determine whether the card should be put on top.
         // Note that the AI does not know what will happen next (another clash or that would become his topdeck)
 
@@ -622,6 +975,14 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
+        if (cacHook != null && !cacSuppressed) {
+            cacHook.beforeAsk(this);
+        }
+        return dp(Kind.ARRANGE, "orderMoveToZoneList", source, cards, -1, -1,
+                () -> orderMoveToZoneListAi(cards, destinationZone, source), cards, destinationZone);
+    }
+
+    private CardCollectionView orderMoveToZoneListAi(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
         if (knowledgeHook != null && cards != null) {
             knowledgeHook.onLook(Lists.newArrayList(cards), destinationZone);
         }
@@ -727,6 +1088,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
+        return dp(Kind.SELECT, "chooseCardsToDiscardFrom", sa, validCards, min, max,
+                () -> chooseCardsToDiscardFromAi(p, sa, validCards, min, max, visibleToChooser), p, validCards, min, max);
+    }
+
+    private CardCollection chooseCardsToDiscardFromAi(Player p, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
         if (p == player) {
             return brains.getCardsToDiscard(min, max, validCards, sa);
         }
@@ -747,11 +1113,17 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsToDelve(int genericAmount, CardCollection grave) {
-        return getAi().chooseCardsToDelve(genericAmount, grave);
+        // r3-inline-choices-1030: delve's exiled cards go to the choose-a-card hook (amount = the most it may exile)
+        return dp(Kind.SELECT, "chooseCardsToDelve", null, grave, 0, genericAmount,
+                () -> getAi().chooseCardsToDelve(genericAmount, grave), genericAmount, grave);
     }
 
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int num, CardCollectionView hand, String[] uTypes, SpellAbility sa) {
+        return dp(Kind.SELECT, "chooseCardsToDiscardUnlessType", sa, hand, num, num, () -> chooseCardsToDiscardUnlessTypeAi(num, hand, uTypes, sa), num, hand, uTypes, sa);
+    }
+
+    private CardCollectionView chooseCardsToDiscardUnlessTypeAi(int num, CardCollectionView hand, String[] uTypes, SpellAbility sa) {
         Iterable<Card> cardsOfType = IterableUtil.filter(hand, CardPredicates.restriction(uTypes, sa.getActivatingPlayer(), sa.getHostCard(), sa));
         if (!Iterables.isEmpty(cardsOfType)) {
             Card toDiscard = Aggregates.itemWithMin(cardsOfType, Card::getCMC);
@@ -762,11 +1134,19 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public Mana chooseManaFromPool(List<Mana> manaChoices) {
+        return dp(Kind.SELECT, "chooseManaFromPool", null, manaChoices, 1, 1, () -> chooseManaFromPoolAi(manaChoices), manaChoices);
+    }
+
+    private Mana chooseManaFromPoolAi(List<Mana> manaChoices) {
         return manaChoices.get(0); // no brains used
     }
 
     @Override
     public String chooseSomeType(String kindOfType, SpellAbility sa, Collection<String> validTypes, boolean isOptional) {
+        return dp(Kind.CHOICE, "chooseSomeType", sa, validTypes, isOptional ? 0 : 1, 1, () -> chooseSomeTypeAi(kindOfType, sa, validTypes, isOptional), kindOfType, sa, validTypes, isOptional);
+    }
+
+    private String chooseSomeTypeAi(String kindOfType, SpellAbility sa, Collection<String> validTypes, boolean isOptional) {
         String chosen = ComputerUtil.chooseSomeType(player, kindOfType, sa, validTypes);
         if (StringUtils.isBlank(chosen) && !validTypes.isEmpty()) {
             chosen = validTypes.iterator().next();
@@ -777,16 +1157,28 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) {
+        return dp(Kind.CHOICE, "vote", sa, options, optional ? 0 : 1, 1, () -> voteAi(sa, prompt, options, votes, forPlayer, optional), sa, prompt, options, votes, forPlayer, optional);
+    }
+
+    private Object voteAi(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) {
         return ComputerUtil.vote(player, options, sa, votes, forPlayer);
     }
 
     @Override
     public String chooseSector(Card assignee, String ai, List<String> sectors) {
+        return dp(Kind.CHOICE, "chooseSector", null, sectors, 1, 1, () -> chooseSectorAi(assignee, ai, sectors), assignee, ai, sectors);
+    }
+
+    private String chooseSectorAi(Card assignee, String ai, List<String> sectors) {
         return Aggregates.random(sectors);
     }
 
     @Override
     public int chooseSprocket(Card assignee, List<Integer> sprockets) {
+        return dp(Kind.CHOICE, "chooseSprocket", null, sprockets, 1, 1, () -> chooseSprocketAi(assignee, sprockets), assignee, sprockets);
+    }
+
+    private int chooseSprocketAi(Card assignee, List<Integer> sprockets) {
         int nextSprocket = (player.getCrankCounter() % 3) + 1;
         if(sprockets.contains(nextSprocket))
             return nextSprocket;
@@ -797,47 +1189,80 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public PlanarDice choosePDRollToIgnore(List<PlanarDice> rolls) {
+        return dp(Kind.CHOICE, "choosePDRollToIgnore", null, rolls, 1, 1, () -> choosePDRollToIgnoreAi(rolls), rolls);
+    }
+
+    private PlanarDice choosePDRollToIgnoreAi(List<PlanarDice> rolls) {
         //TODO create AI logic for this
         return Aggregates.random(rolls);
     }
 
     @Override
     public Integer chooseRollToIgnore(List<Integer> rolls) {
+        return dp(Kind.CHOICE, "chooseRollToIgnore", null, rolls, 1, 1, () -> chooseRollToIgnoreAi(rolls), rolls);
+    }
+
+    private Integer chooseRollToIgnoreAi(List<Integer> rolls) {
         //TODO create AI logic for this
         return Aggregates.random(rolls);
     }
 
     @Override
     public List<Integer> chooseDiceToReroll(List<Integer> rolls) {
+        return dp(Kind.SELECT, "chooseDiceToReroll", null, rolls, 0, rolls == null ? -1 : rolls.size(), () -> chooseDiceToRerollAi(rolls), rolls);
+    }
+
+    private List<Integer> chooseDiceToRerollAi(List<Integer> rolls) {
         //TODO create AI logic for this
         return new ArrayList<>();
     }
 
     @Override
     public Integer chooseRollToModify(List<Integer> rolls) {
+        return dp(Kind.CHOICE, "chooseRollToModify", null, rolls, 1, 1, () -> chooseRollToModifyAi(rolls), rolls);
+    }
+
+    private Integer chooseRollToModifyAi(List<Integer> rolls) {
         //TODO create AI logic for this
         return Aggregates.random(rolls);
     }
 
     @Override
     public RollDiceEffect.DieRollResult chooseRollToSwap(List<RollDiceEffect.DieRollResult> rolls) {
+        return dp(Kind.CHOICE, "chooseRollToSwap", null, rolls, 1, 1, () -> chooseRollToSwapAi(rolls), rolls);
+    }
+
+    private RollDiceEffect.DieRollResult chooseRollToSwapAi(List<RollDiceEffect.DieRollResult> rolls) {
         //TODO create AI logic for this
         return Aggregates.random(rolls);
     }
 
     @Override
     public String chooseRollSwapValue(List<String> swapChoices, Integer currentResult, int power, int toughness) {
+        return dp(Kind.CHOICE, "chooseRollSwapValue", null, swapChoices, 1, 1, () -> chooseRollSwapValueAi(swapChoices, currentResult, power, toughness), swapChoices, currentResult, power, toughness);
+    }
+
+    private String chooseRollSwapValueAi(List<String> swapChoices, Integer currentResult, int power, int toughness) {
         //TODO create AI logic for this
         return Aggregates.random(swapChoices);
     }
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn)  {
+        return dp(Kind.CHOICE, "mulliganKeepHand", null, DP_BOOLS, 1, 1, () -> mulliganKeepHandAi(firstPlayer, cardsToReturn), firstPlayer, cardsToReturn);
+    }
+
+    private boolean mulliganKeepHandAi(Player firstPlayer, int cardsToReturn)  {
         return !ComputerUtil.wantMulligan(player, cardsToReturn);
     }
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) {
+        return dp(Kind.SELECT, "tuckCardsViaMulligan", null, hand, cardsToReturn, cardsToReturn,
+                () -> tuckCardsViaMulliganAi(hand, cardsToReturn), hand, cardsToReturn);
+    }
+
+    private CardCollectionView tuckCardsViaMulliganAi(CardCollectionView hand, int cardsToReturn) {
         // TODO This is better than it was before, but still suboptimal (but fast).
         // Maybe score a bunch of hands based on projected hand size and return the "duds"
         int numLandsDesired = (player.getStartingHandSize() - cardsToReturn) / 2;
@@ -882,16 +1307,28 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public void declareAttackers(Player attacker, Combat combat) {
+        dpVoid(Kind.ARRANGE, "declareAttackers", null, () -> declareAttackersAi(attacker, combat), attacker, combat);
+    }
+
+    private void declareAttackersAi(Player attacker, Combat combat) {
         brains.declareAttackers(attacker, combat);
     }
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
+        dpVoid(Kind.ARRANGE, "declareBlockers", null, () -> declareBlockersAi(defender, combat), defender, combat);
+    }
+
+    private void declareBlockersAi(Player defender, Combat combat) {
         brains.declareBlockersFor(defender, combat);
     }
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        return dp(Kind.PRIORITY, "chooseSpellAbilityToPlay", null, null, -1, -1, this::chooseSpellAbilityToPlayAi);
+    }
+
+    private List<SpellAbility> chooseSpellAbilityToPlayAi() {
         FairNaming.observe(player);
         return brains.chooseSpellAbilityToPlay();
     }
@@ -940,22 +1377,38 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsToDiscardToMaximumHandSize(int numDiscard) {
+        return dp(Kind.SELECT, "chooseCardsToDiscardToMaximumHandSize", null, null, numDiscard, numDiscard, () -> chooseCardsToDiscardToMaximumHandSizeAi(numDiscard), numDiscard);
+    }
+
+    private CardCollectionView chooseCardsToDiscardToMaximumHandSizeAi(int numDiscard) {
         return brains.getCardsToDiscard(numDiscard, null, null);
     }
 
     @Override
     public CardCollectionView chooseCardsToRevealFromHand(int min, int max, CardCollectionView valid) {
+        return dp(Kind.SELECT, "chooseCardsToRevealFromHand", null, valid, min, max, () -> chooseCardsToRevealFromHandAi(min, max, valid), min, max, valid);
+    }
+
+    private CardCollectionView chooseCardsToRevealFromHandAi(int min, int max, CardCollectionView valid) {
         int numCardsToReveal = Math.min(max, valid.size());
         return numCardsToReveal == 0 ? CardCollection.EMPTY : (CardCollection)valid.subList(0, numCardsToReveal);
     }
 
     @Override
     public Player chooseStartingPlayer(boolean isFirstGame) {
+        return dp(Kind.CHOICE, "chooseStartingPlayer", null, null, 1, 1, () -> chooseStartingPlayerAi(isFirstGame), isFirstGame);
+    }
+
+    private Player chooseStartingPlayerAi(boolean isFirstGame) {
         return this.player; // AI is brave :)
     }
 
     @Override
     public PlayerZone chooseStartingHand(List<PlayerZone> zones) {
+        return dp(Kind.CHOICE, "chooseStartingHand", null, zones, 1, 1, () -> chooseStartingHandAi(zones), zones);
+    }
+
+    private PlayerZone chooseStartingHandAi(List<PlayerZone> zones) {
         // Rate all the hands using the AI's hand evaluation function
         int bestScore = Integer.MIN_VALUE;
         PlayerZone bestZone = null;
@@ -972,21 +1425,37 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<SpellAbility> chooseSaToActivateFromOpeningHand(List<SpellAbility> usableFromOpeningHand) {
+        return dp(Kind.SELECT, "chooseSaToActivateFromOpeningHand", null, usableFromOpeningHand, 0, usableFromOpeningHand == null ? -1 : usableFromOpeningHand.size(), () -> chooseSaToActivateFromOpeningHandAi(usableFromOpeningHand), usableFromOpeningHand);
+    }
+
+    private List<SpellAbility> chooseSaToActivateFromOpeningHandAi(List<SpellAbility> usableFromOpeningHand) {
         return brains.chooseSaToActivateFromOpeningHand(usableFromOpeningHand);
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, int min, int max) {
+        return dp(Kind.NUMBER, "chooseNumber", sa, null, min, max, () -> chooseNumberAi(sa, title, min, max), sa, title, min, max);
+    }
+
+    private int chooseNumberAi(SpellAbility sa, String title, int min, int max) {
         return brains.chooseNumber(sa, title, min, max);
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String string, int min, int max, Map<String, Object> params) {
+        return dp(Kind.NUMBER, "chooseNumber", sa, null, min, max, () -> chooseNumberAi(sa, string, min, max, params), sa, string, min, max, params);
+    }
+
+    private int chooseNumberAi(SpellAbility sa, String string, int min, int max, Map<String, Object> params) {
         return SpellApiToAi.Converter.get(sa).chooseNumber(player, sa, min, max, params);
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, List<Integer> options, Player relatedPlayer) {
+        return dp(Kind.NUMBER, "chooseNumber", sa, options, -1, -1, () -> chooseNumberAi(sa, title, options, relatedPlayer), sa, title, options, relatedPlayer);
+    }
+
+    private int chooseNumberAi(SpellAbility sa, String title, List<Integer> options, Player relatedPlayer) {
         return brains.chooseNumber(sa, title, options, relatedPlayer);
     }
 
@@ -995,6 +1464,10 @@ public class PlayerControllerAi extends PlayerController {
      */
     @Override
     public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean call) {
+        return dp(Kind.CHOICE, "chooseFlipResult", sa, DP_BOOLS, 1, 1, () -> chooseFlipResultAi(sa, flipper, call), sa, flipper, call);
+    }
+
+    private boolean chooseFlipResultAi(SpellAbility sa, Player flipper, boolean call) {
         if (call) {
             // Win if possible
             return true;
@@ -1005,6 +1478,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(SpellAbility saSrc, List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) {
+        return dp(Kind.SELECT, "chooseTarget", saSrc, allTargets, 1, 1, () -> chooseTargetAi(saSrc, allTargets), saSrc, allTargets);
+    }
+
+    private Pair<SpellAbilityStackInstance, GameObject> chooseTargetAi(SpellAbility saSrc, List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) {
         // TODO Teach AI how to determine the most damaging subability when retargeting a spell
         // with multiple targets (Arc Lightning, Cone of Flame, etc.) with Spellskite
         // (currently simply always returns the first valid target ability)
@@ -1018,6 +1495,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kindOfChoice, Boolean defaultVal) {
+        return dp(Kind.CHOICE, "chooseBinary", sa, DP_BOOLS, 1, 1, () -> chooseBinaryAi(sa, question, kindOfChoice, defaultVal), sa, question, kindOfChoice, defaultVal);
+    }
+
+    private boolean chooseBinaryAi(SpellAbility sa, String question, BinaryChoiceType kindOfChoice, Boolean defaultVal) {
         switch (kindOfChoice) {
             case TapOrUntap: return true;
             case UntapOrLeaveTapped:
@@ -1088,11 +1569,19 @@ public class PlayerControllerAi extends PlayerController {
      */
     @Override
     public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kindOfChoice, Map<String, Object> params) {
+        return dp(Kind.CHOICE, "chooseBinary", sa, DP_BOOLS, 1, 1, () -> chooseBinaryAi(sa, question, kindOfChoice, params), sa, question, kindOfChoice, params);
+    }
+
+    private boolean chooseBinaryAi(SpellAbility sa, String question, BinaryChoiceType kindOfChoice, Map<String, Object> params) {
         return SpellApiToAi.Converter.get(sa).chooseBinary(kindOfChoice, sa, params);
     }
 
     @Override
     public List<AbilitySub> chooseModeForAbility(SpellAbility sa, List<AbilitySub> possible, int min, int num, boolean allowRepeat) {
+        return dp(Kind.SELECT, "chooseModeForAbility", sa, possible, min, num, () -> chooseModeForAbilityAi(sa, possible, min, num, allowRepeat), sa, possible, min, num, allowRepeat);
+    }
+
+    private List<AbilitySub> chooseModeForAbilityAi(SpellAbility sa, List<AbilitySub> possible, int min, int num, boolean allowRepeat) {
         List<AbilitySub> result = brains.chooseModeForAbility(sa, possible, min, num, allowRepeat);
         if (result != null) {
             return result;
@@ -1113,6 +1602,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public byte chooseColorAllowColorless(String message, Card card, ColorSet colors) {
+        return dp(Kind.CHOICE, "chooseColorAllowColorless", null, null, 1, 1, () -> chooseColorAllowColorlessAi(message, card, colors), message, card, colors);
+    }
+
+    private byte chooseColorAllowColorlessAi(String message, Card card, ColorSet colors) {
         final String c = ComputerUtilCard.getMostProminentColor(player.getCardsIn(ZoneType.Hand));
         byte chosenColorMask = MagicColor.fromName(c);
         if ((colors.getColor() & chosenColorMask) != 0) {
@@ -1123,6 +1616,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
+        // r3-inline-choices-1030: the choose-a-card hook may pick another of the offered colours (no hook: Forge AI's)
+        return dp(Kind.CHOICE, "chooseColor", sa, null, 1, 1, () -> chooseColorAi(message, sa, colors), colors);
+    }
+
+    private byte chooseColorAi(String message, SpellAbility sa, ColorSet colors) {
         if (colors.countColors() < 2) {
             return Iterables.getFirst(colors, MagicColor.Color.WHITE).getColorMask();
         }
@@ -1142,6 +1640,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public ColorSet chooseColors(String message, SpellAbility sa, int min, int max, ColorSet options) {
+        return dp(Kind.CHOICE, "chooseColors", sa, null, min, max, () -> chooseColorsAi(message, sa, min, max, options), message, sa, min, max, options);
+    }
+
+    private ColorSet chooseColorsAi(String message, SpellAbility sa, int min, int max, ColorSet options) {
         return ColorSet.fromNames(ComputerUtilCard.chooseColor(sa, min, max, options.stream().map(MagicColor.Color::getName).collect(Collectors.toList())));
     }
 
@@ -1154,6 +1656,11 @@ public class PlayerControllerAi extends PlayerController {
     @Override
     public CounterType chooseCounterType(List<CounterType> options, SpellAbility sa, String prompt,
             Map<String, Object> params) {
+        return dp(Kind.CHOICE, "chooseCounterType", sa, options, 1, 1, () -> chooseCounterTypeAi(options, sa, prompt, params), options, sa, prompt, params);
+    }
+
+    private CounterType chooseCounterTypeAi(List<CounterType> options, SpellAbility sa, String prompt,
+            Map<String, Object> params) {
         // short cut if there is no options to choose
         if (options.size() <= 1) {
             return Iterables.getFirst(options, null);
@@ -1163,6 +1670,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public String chooseKeywordForPump(final List<String> options, final SpellAbility sa, final String prompt, final Card tgtCard) {
+        return dp(Kind.CHOICE, "chooseKeywordForPump", sa, options, 1, 1, () -> chooseKeywordForPumpAi(options, sa, prompt, tgtCard), options, sa, prompt, tgtCard);
+    }
+
+    private String chooseKeywordForPumpAi(final List<String> options, final SpellAbility sa, final String prompt, final Card tgtCard) {
         if (options.size() <= 1) {
             return Iterables.getFirst(options, null);
         }
@@ -1228,17 +1739,29 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public ReplacementEffect chooseSingleReplacementEffect(List<ReplacementEffect> possibleReplacers) {
+        return dp(Kind.CHOICE, "chooseSingleReplacementEffect", null, possibleReplacers, 1, 1, () -> chooseSingleReplacementEffectAi(possibleReplacers), possibleReplacers);
+    }
+
+    private ReplacementEffect chooseSingleReplacementEffectAi(List<ReplacementEffect> possibleReplacers) {
         return brains.chooseSingleReplacementEffect(possibleReplacers);
     }
 
     @Override
     public StaticAbility chooseSingleStaticAbility(List<StaticAbility> possibleStatics) {
+        return dp(Kind.CHOICE, "chooseSingleStaticAbility", null, possibleStatics, 1, 1, () -> chooseSingleStaticAbilityAi(possibleStatics), possibleStatics);
+    }
+
+    private StaticAbility chooseSingleStaticAbilityAi(List<StaticAbility> possibleStatics) {
         // only matters in corner cases
         return Iterables.getFirst(possibleStatics, null);
     }
 
     @Override
     public String chooseProtectionType(SpellAbility sa, List<String> choices) {
+        return dp(Kind.CHOICE, "chooseProtectionType", sa, choices, 1, 1, () -> chooseProtectionTypeAi(sa, choices), sa, choices);
+    }
+
+    private String chooseProtectionTypeAi(SpellAbility sa, List<String> choices) {
         String choice = choices.get(0);
         SpellAbility hostsa = null;     //for Protect sub-ability
         if (getGame().stack.size() > 1) {
@@ -1308,6 +1831,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean payCombatCost(Card c, Cost cost, SpellAbility sa, String prompt) {
+        return dp(Kind.CHOICE, "payCombatCost", sa, DP_BOOLS, 1, 1, () -> payCombatCostAi(c, cost, sa, prompt), c, cost, sa, prompt);
+    }
+
+    private boolean payCombatCostAi(Card c, Cost cost, SpellAbility sa, String prompt) {
         if (ComputerUtil.playNoStack(c.getController(), sa, getGame(), true)) {
             return true;
         }
@@ -1316,6 +1843,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsForCost(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) {
+        return dp(Kind.SELECT, "chooseCardsForCost", sa, optionList, amount, amount, () -> chooseCardsForCostAi(optionList, sa, cpl, amount, isOptional, prompt), optionList, sa, cpl, amount, isOptional, prompt);
+    }
+
+    private CardCollectionView chooseCardsForCostAi(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) {
         assert(false);
         //Untested placeholder. The AI does not currently pay like this.
         return cpl.accept(new AiCostDecision(player, sa, true)).cards;
@@ -1335,37 +1866,84 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {
-        if (SpellApiToAi.Converter.get(sa).willPayUnlessCost(player, sa, cost, alreadyPaid, allPayers)) {
-            if (!ComputerUtilCost.canPayCost(cost, sa, player, true)) {
+        boolean will = SpellApiToAi.Converter.get(sa).willPayUnlessCost(player, sa, cost, alreadyPaid, allPayers);
+        if (cacHook == null || cacSuppressed) {
+            final boolean forgeWill = will;
+            will = dp(Kind.CHOICE, "payCostToPreventEffect", sa, DP_BOOLS, 1, 1, () -> forgeWill, cost, null);
+            if (!will) {
                 return false;
             }
-
+        } else {
+            // r3-inline-choices-1030: pay or not goes to the choose-a-card hook (no hook: exactly the branch above)
+            final boolean canPay = ComputerUtilCost.canPayCost(cost, sa, player, true);
+            final boolean forgeWill = will && canPay;
+            will = dp(Kind.CHOICE, "payCostToPreventEffect", sa, DP_BOOLS, 1, 1, () -> forgeWill, cost, canPay);
+            if (!will || !canPay) {
+                return false;
+            }
             final CostPayment pay = new CostPayment(cost, sa);
             return pay.payComputerCosts(AiCostDecision.forPayment(player, sa, true));
         }
-        return false;
+        if (!ComputerUtilCost.canPayCost(cost, sa, player, true)) {
+            return false;
+        }
+        final CostPayment pay = new CostPayment(cost, sa);
+        return pay.payComputerCosts(AiCostDecision.forPayment(player, sa, true));
     }
 
     public boolean payCostDuringRoll(final Cost cost, final SpellAbility sa) {
+        return dp(Kind.CHOICE, "payCostDuringRoll", sa, DP_BOOLS, 1, 1, () -> payCostDuringRollAi(cost, sa), cost, sa);
+    }
+
+    private boolean payCostDuringRollAi(final Cost cost, final SpellAbility sa) {
         // TODO logic for AI to pay rerolls and modification costs
         return false;
     }
 
     @Override
     public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        // r3-inline-choices-1030: Forge's orderPlaySa REMOVES entries from the list it is given (filterList), so the
+        // hook gets a copy taken before Forge orders (Forge itself still gets the original list, as before)
+        final List<SpellAbility> asked = cacHook == null || cacSuppressed || activePlayerSAs == null ? activePlayerSAs
+                : new ArrayList<>(activePlayerSAs);
         // lane replay-record-1021: the AI tape records the order (a forced replay plays the record's)
         final AiTape tape = AiTape.covering(player);
         if (tape != null && activePlayerSAs != null && activePlayerSAs.size() > 1) { // one ability: no order to choose
-            return tape.order(activePlayerSAs, () -> getAi().orderPlaySa(activePlayerSAs));
+            // the tape records the order actually played (the hook's, when it departs); a forced replay returns the
+            // record without asking either
+            return tape.order(activePlayerSAs, () -> dpOrder(asked, activePlayerSAs));
         }
-        return getAi().orderPlaySa(activePlayerSAs);
+        return dpOrder(asked, activePlayerSAs);
+    }
+
+    /** decisionpoint-1102: the order Forge AI plays simultaneous abilities in, as a decision point (CacAdapter: cacOrder). */
+    private List<SpellAbility> dpOrder(final List<SpellAbility> asked, final List<SpellAbility> offered) {
+        // Forge's orderPlaySa removes entries from the list it orders: the point keeps a copy of what was offered
+        final List<SpellAbility> opts = asked != null && asked == offered && DecisionPoints.observer() != null
+                ? new ArrayList<>(asked) : asked;
+        return dp(Kind.ARRANGE, "orderSimultaneousSa", null, opts, -1, -1, () -> getAi().orderPlaySa(offered), asked);
+    }
+
+    /** r3-inline-choices-1030: 2+ simultaneous abilities' order goes to the choose-a-card hook (no hook: {@code def}). */
+    List<SpellAbility> cacOrder(final List<SpellAbility> sas, final List<SpellAbility> def) { // package: CacAdapter
+        if (cacHook == null || cacSuppressed || sas == null || sas.size() < 2 || def == null || def.size() != sas.size()) {
+            return def;
+        }
+        final List<SpellAbility> out = cacHook.orderTriggers(this, sas, def);
+        return out != null && out.size() == def.size() && out.containsAll(def) ? out : def;
     }
 
     @Override
     public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        final boolean lone = activePlayerSAs != null && activePlayerSAs.size() == 1;
         for (final SpellAbility sa : orderSimultaneousSa(activePlayerSAs)) {
             if (sa.isTrigger() && !sa.isCopied()) {
                 if (prepareSingleSa(sa.getHostCard(), sa, true)) {
+                    // r3-target-choices-1030: a lone trigger's targets, as Forge AI set them, go to the choose-a-card
+                    // hook, which may replace them in place (no hook: unchanged)
+                    if (lone && cacHook != null && !cacSuppressed && sa.usesTargeting()) {
+                        cacHook.triggerTargets(this, sa);
+                    }
                     ComputerUtil.playStack(sa, player, getGame());
                 }
             } else {
@@ -1458,6 +2036,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean playSaFromPlayEffect(SpellAbility tgtSA) {
+        final Boolean lineCast = lineCastFromEffect(tgtSA); // sdcc-tutorcast-1110 (no line: null)
+        if (lineCast != null) {
+            return lineCast;
+        }
         boolean optional = !tgtSA.getPayCosts().isMandatory();
         boolean noManaCost = tgtSA.hasParam("WithoutManaCost");
         if (tgtSA instanceof Spell spell) { // Isn't it ALWAYS a spell?
@@ -1472,17 +2054,29 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean chooseTargetsFor(SpellAbility currentAbility) {
+        return dp(Kind.SELECT, "chooseTargetsFor", currentAbility, null, -1, -1, () -> chooseTargetsForAi(currentAbility), currentAbility);
+    }
+
+    private boolean chooseTargetsForAi(SpellAbility currentAbility) {
         return brains.doTrigger(currentAbility, true);
     }
 
     @Override
     public TargetChoices chooseNewTargetsFor(SpellAbility ability, Predicate<GameObject> filter, boolean optional) {
+        return dp(Kind.SELECT, "chooseNewTargetsFor", ability, null, -1, -1, () -> chooseNewTargetsForAi(ability, filter, optional), ability, filter, optional);
+    }
+
+    private TargetChoices chooseNewTargetsForAi(SpellAbility ability, Predicate<GameObject> filter, boolean optional) {
         // AI currently can't do this. But when it can it will need to be based on Ability API
         return null;
     }
 
     @Override
     public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) {
+        return dp(Kind.CHOICE, "chooseCardsPile", sa, DP_BOOLS, 1, 1, () -> chooseCardsPileAi(sa, pile1, pile2, faceUp), sa, pile1, pile2, faceUp);
+    }
+
+    private boolean chooseCardsPileAi(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) {
         if (faceUp.equals("True")) {
             // AI will choose the first pile if it is larger or the same
             // TODO Improve this to be slightly more random to not be so predictable
@@ -1527,6 +2121,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView cheatShuffle(CardCollectionView list) {
+        return dp(Kind.ARRANGE, "cheatShuffle", null, list, -1, -1, () -> cheatShuffleAi(list), list);
+    }
+
+    private CardCollectionView cheatShuffleAi(CardCollectionView list) {
         return brains.cheatShuffle(list);
     }
 
@@ -1538,6 +2136,13 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public Map<Card, ManaCostShard> chooseCardsForConvokeOrImprovise(SpellAbility sa, ManaCost manaCost, CardCollectionView untappedCards, boolean artifacts, boolean creatures, Integer maxReduction) {
+        // r3-inline-choices-1030: convoke / improvise tappers go to the choose-a-card hook (no hook: Forge AI's)
+        return dp(Kind.SELECT, "chooseCardsForConvokeOrImprovise", sa, untappedCards, -1, -1,
+                () -> chooseCardsForConvokeOrImproviseAi(sa, manaCost, untappedCards, artifacts, creatures, maxReduction),
+                manaCost, untappedCards, artifacts, creatures);
+    }
+
+    private Map<Card, ManaCostShard> chooseCardsForConvokeOrImproviseAi(SpellAbility sa, ManaCost manaCost, CardCollectionView untappedCards, boolean artifacts, boolean creatures, Integer maxReduction) {
         final Player ai = sa.getActivatingPlayer();
         final PhaseHandler ph = ai.getGame().getPhaseHandler();
         // Filter out mana sources that will interfere with payManaCost()
@@ -1576,11 +2181,19 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public String chooseCardName(SpellAbility sa, List<ICardFace> faces, String message) {
+        return dp(Kind.CHOICE, "chooseCardName", sa, faces, 1, 1, () -> chooseCardNameAi(sa, faces, message), sa, faces, message);
+    }
+
+    private String chooseCardNameAi(SpellAbility sa, List<ICardFace> faces, String message) {
         return SpellApiToAi.Converter.get(sa).chooseCardName(player, sa, faces);
     }
 
     @Override
     public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) {
+        return dp(Kind.CHOICE, "chooseCardName", sa, null, 1, 1, () -> chooseCardNameAi(sa, cpp, valid, message), sa, cpp, valid, message);
+    }
+
+    private String chooseCardNameAi(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) {
         if (sa.hasParam("AILogic")) {
             CardCollectionView aiLibrary = player.getCardsIn(ZoneType.Library);
             CardCollectionView oppLibrary = player.getStrongestOpponent().getCardsIn(ZoneType.Library);
@@ -1663,6 +2276,16 @@ public class PlayerControllerAi extends PlayerController {
     public Card chooseSingleCardForZoneChange(ZoneType destination,
             List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, DelayedReveal delayedReveal,
             String selectPrompt, boolean isOptional, Player decider) {
+        if (cacHook != null && !cacSuppressed) {
+            cacHook.beforeAsk(this);
+        }
+        return dp(Kind.SELECT, "chooseSingleCardForZoneChange", sa, fetchList, isOptional ? 0 : 1, 1,
+                () -> chooseSingleCardForZoneChangeAi(destination, origin, sa, fetchList, delayedReveal, selectPrompt,
+                        isOptional, decider), destination, origin, fetchList, isOptional, decider);
+    }
+
+    private Card chooseSingleCardForZoneChangeAi(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+            CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) {
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
@@ -1671,6 +2294,12 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<Card> chooseCardsForZoneChange(
+	    ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, int min, int max,
+            DelayedReveal delayedReveal, String selectPrompt, Player decider) {
+        return dp(Kind.SELECT, "chooseCardsForZoneChange", sa, fetchList, min, max, () -> chooseCardsForZoneChangeAi(destination, origin, sa, fetchList, min, max, delayedReveal, selectPrompt, decider), destination, origin, sa, fetchList, min, max, delayedReveal, selectPrompt, decider);
+    }
+
+    private List<Card> chooseCardsForZoneChangeAi(
 	    ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, int min, int max,
             DelayedReveal delayedReveal, String selectPrompt, Player decider) {
         // this isn't used
@@ -1699,21 +2328,37 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public ICardFace chooseSingleCardFace(SpellAbility sa, List<ICardFace> faces, String message) {
+        return dp(Kind.CHOICE, "chooseSingleCardFace", sa, faces, 1, 1, () -> chooseSingleCardFaceAi(sa, faces, message), sa, faces, message);
+    }
+
+    private ICardFace chooseSingleCardFaceAi(SpellAbility sa, List<ICardFace> faces, String message) {
         return SpellApiToAi.Converter.get(sa).chooseCardFace(player, sa, faces);
     }
 
     @Override
     public ICardFace chooseSingleCardFace(SpellAbility sa, String message, Predicate<ICardFace> cpp, String name) {
+        return dp(Kind.CHOICE, "chooseSingleCardFace", sa, null, 1, 1, () -> chooseSingleCardFaceAi(sa, message, cpp, name), sa, message, cpp, name);
+    }
+
+    private ICardFace chooseSingleCardFaceAi(SpellAbility sa, String message, Predicate<ICardFace> cpp, String name) {
         throw new UnsupportedOperationException("Should not be called for AI"); // or implement it if you know how
     }
 
     @Override
     public CardState chooseSingleCardState(SpellAbility sa, List<CardState> states, String message, Map<String, Object> params) {
+        return dp(Kind.CHOICE, "chooseSingleCardState", sa, states, 1, 1, () -> chooseSingleCardStateAi(sa, states, message, params), sa, states, message, params);
+    }
+
+    private CardState chooseSingleCardStateAi(SpellAbility sa, List<CardState> states, String message, Map<String, Object> params) {
         return SpellApiToAi.Converter.get(sa).chooseCardState(player, sa, states, params);
     }
 
     @Override
     public List<Card> chooseCardsForSplice(SpellAbility sa, List<Card> cards) {
+        return dp(Kind.SELECT, "chooseCardsForSplice", sa, cards, 0, cards == null ? -1 : cards.size(), () -> chooseCardsForSpliceAi(sa, cards), sa, cards);
+    }
+
+    private List<Card> chooseCardsForSpliceAi(SpellAbility sa, List<Card> cards) {
         // sort from best to worst
         CardLists.sortByCmcDesc(cards);
 
@@ -1735,11 +2380,19 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<OptionalCostValue> chooseOptionalCosts(SpellAbility chosen, List<OptionalCostValue> optionalCostValues) {
+        return dp(Kind.SELECT, "chooseOptionalCosts", chosen, optionalCostValues, 0, optionalCostValues == null ? -1 : optionalCostValues.size(), () -> chooseOptionalCostsAi(chosen, optionalCostValues), chosen, optionalCostValues);
+    }
+
+    private List<OptionalCostValue> chooseOptionalCostsAi(SpellAbility chosen, List<OptionalCostValue> optionalCostValues) {
         return SpellApiToAi.Converter.get(chosen).chooseOptionalCosts(player, chosen, optionalCostValues);
     }
 
     @Override
     public int chooseNumberForKeywordCost(SpellAbility sa, Cost cost, KeywordInterface keyword, String prompt, int max) {
+        return dp(Kind.NUMBER, "chooseNumberForKeywordCost", sa, null, 0, max, () -> chooseNumberForKeywordCostAi(sa, cost, keyword, prompt, max), sa, cost, keyword, prompt, max);
+    }
+
+    private int chooseNumberForKeywordCostAi(SpellAbility sa, Cost cost, KeywordInterface keyword, String prompt, int max) {
         if (sa.hasOptionalKeywordAmount(keyword)) {
             return Math.min(sa.getOptionalKeywordAmount(keyword), max);
         }
@@ -1769,16 +2422,28 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public int chooseNumberForCostReduction(final SpellAbility sa, final int min, final int max) {
+        return dp(Kind.NUMBER, "chooseNumberForCostReduction", sa, null, min, max, () -> chooseNumberForCostReductionAi(sa, min, max), sa, min, max);
+    }
+
+    private int chooseNumberForCostReductionAi(final SpellAbility sa, final int min, final int max) {
         return max;
     }
 
     @Override
     public List<CostPart> orderCosts(List<CostPart> costs) {
+        return dp(Kind.ARRANGE, "orderCosts", null, costs, -1, -1, () -> orderCostsAi(costs), costs);
+    }
+
+    private List<CostPart> orderCostsAi(List<CostPart> costs) {
         return costs;
     }
 
     @Override
     public CardCollection chooseCardsForEffectMultiple(Map<String, CardCollection> validMap, SpellAbility sa, String title, boolean isOptional) {
+        return dp(Kind.SELECT, "chooseCardsForEffectMultiple", sa, null, -1, -1, () -> chooseCardsForEffectMultipleAi(validMap, sa, title, isOptional), validMap, sa, title, isOptional);
+    }
+
+    private CardCollection chooseCardsForEffectMultipleAi(Map<String, CardCollection> validMap, SpellAbility sa, String title, boolean isOptional) {
         CardCollection choices = new CardCollection();
 
         for (String mapKey: validMap.keySet()) {

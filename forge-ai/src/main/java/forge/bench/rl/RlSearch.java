@@ -97,6 +97,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int maxSteps = 5000;
         public int leafExtraSteps = 400;
         public double departZ = 1.645;
+        /** unified-search-1106 (off by default): {@link LookaheadSearch.Config#anytime}. */
+        public boolean anytime = false;
         public double margin = 0.0;
         /** static | value */
         public String leaf = "static";
@@ -133,6 +135,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * {@link LookaheadSearch#WALL_GRACE_MS} at the latest (lane sc-wallguard-1009).
          */
         public long budgetMs = 0L;
+        /**
+         * work-units-1107 (ARCH-APPENDIX-1104 A3; false = off, the default, unrecorded, and then nothing changes): every
+         * search budget of this seat (look-ahead, plans, solver, defense, choice scorer) binds on engine work
+         * ({@link forge.game.WorkClock}) instead of the host's clock. workScale: the budgets bind at this times their
+         * reference work. workWallMs (0 = budgetMs): the real-time safety wall per decision; past it every budget stops
+         * as on a wall cut, and the decision row says {@code wall_cap}.
+         */
+        public boolean workUnits = false;
+        /**
+         * work-units-1107 (false = off, the default, unrecorded): block search's sampled declarations are seeded from the
+         * game's seed instead of the per-run game uid (the service seeds a sample by uid, seat and dec_idx).
+         */
+        public boolean blockSampleSeed = false;
+        public double workScale = 1.0;
+        public long workWallMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
         public int connectTimeoutMs = 10_000;
         /**
@@ -190,6 +207,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          */
         public JsonObject plans = null;
         /**
+         * r2-choose-a-card-1029 (null = off, the default, and then nothing changes, the spec's JSON included): choose-a-card
+         * on the search seat's bridged controller ({@link forge.ai.simulation.ChooseACard.Config#fromJson}); its value is
+         * this search's leaf ({@code LEAVES}), its re-draw the search's belief.
+         */
+        public JsonObject cac = null;
+        /**
          * Lane block-search-1019 (0 = off, the default, and then nothing changes): 1 = the look-ahead also searches the seat's
          * declare-blockers asks ({@link #decideBlocks}): the policy's own declaration (the default), its next most sampled
          * ones, no blocks and Forge AI's declaration, played out as the priority candidates are. Policy play-outs only.
@@ -212,25 +235,175 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * InfoStates ({@link LookaheadSearch.Config#infoState}). Live: only the policy spec's {@code infoState=on}.
          */
         public boolean infoState = false;
+        /**
+         * unified-search-1106 (off by default): a bench seat wired as live is. Without it, infoState on a bench seat reads no
+         * InfoStates (only RlLiveSeat.bind attaches one): every look-ahead world shuffles the seat's whole library. With it,
+         * {@link #attach} attaches one at game creation and the plan solver and the defender are armed as RlLiveSeat arms them.
+         * Attaching is per game: a second seat of that game with infoState on reads it too.
+         */
+        public boolean infoAttach = false;
+        /** house p4 (explicit draw; off by default): an explicit draw reason is reported as a draw, read by the actor from this spec. */
+        public boolean honorDrawReason = false;
         /** honest-belief-1020: the cube list file ({@code mtgx-belief-cube/1}; {@code classpath:} = a jar resource) and its pin. */
         public String beliefCube;
         public String beliefCubeSha256;
         /** honest-belief-1020: copies of each basic in the pool. */
         public int beliefBasics = 8;
         /** Default off: preserve the published copier protection in resampled look-ahead worlds. */
-        public boolean beliefStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_STATICS; // house p8; live-fixes-1107 default
-        public boolean beliefRememberedHand = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_REMEMBERED_HAND; // house; live-fixes-1107 default
-        public boolean stackAbilityCopies = forge.ai.simulation.LookaheadSearch.LIVE_STACK_ABILITY_COPIES; // house; live-fixes-1107 default
-        public boolean copyBackFace = forge.ai.simulation.LookaheadSearch.LIVE_COPY_BACK_FACE; // house; live-fixes-1107 default
-        public boolean offBattlefieldLimits = forge.ai.simulation.LookaheadSearch.LIVE_OFF_BATTLEFIELD_LIMITS; // house; live-fixes-1107 default
-        public boolean copyTurnLimits = forge.ai.simulation.LookaheadSearch.LIVE_COPY_TURN_LIMITS; // house; live-fixes-1107 default
-        public boolean beliefPlayerStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_PLAYER_STATICS; // house; live-fixes-1107 default
+        public boolean beliefStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_STATICS; // live-fixes-1107 default
+        /** Default off: carry player-only stale-static repair into resampled look-ahead copies. */
+        public boolean beliefPlayerStatics = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_PLAYER_STATICS; // live-fixes-1107 default
+        /** Default off: belief worlds retain hand identities already present in the seat's observation. */
+        public boolean beliefRememberedHand = forge.ai.simulation.LookaheadSearch.LIVE_BELIEF_REMEMBERED_HAND; // live-fixes-1107 default
+        /** Default off: preserve turn-use limits in look-ahead copies. */
+        public boolean copyTurnLimits = forge.ai.simulation.LookaheadSearch.LIVE_COPY_TURN_LIMITS; // live-fixes-1107 default
+        public boolean offBattlefieldLimits = forge.ai.simulation.LookaheadSearch.LIVE_OFF_BATTLEFIELD_LIMITS; // live-fixes-1107 default
+        public boolean historyLki = false;
+        public boolean copyBackFace = forge.ai.simulation.LookaheadSearch.LIVE_COPY_BACK_FACE; // live-fixes-1107 default
+        public boolean stackAbilityCopies = forge.ai.simulation.LookaheadSearch.LIVE_STACK_ABILITY_COPIES; // live-fixes-1107 default
+        public boolean stackHistory = false;
         /** honest-belief-1020: the pool is a singleton cube (our deck and the cards we saw leave it). */
         public boolean beliefSingleton = true;
+        /**
+         * deck-belief-1105 (off by default and then absent from the JSON): the search's worlds deal the opponent's hidden
+         * cards from {@link forge.ai.simulation.DeckBelief} ({@link LookaheadSearch.Config#beliefDeck}); needs a belief.
+         */
+        public boolean beliefDeck = false;
+        /** choice-scorer-1106 (null = off, the default, and then absent from the JSON): {@link ChoiceScorer.Config}. */
+        public JsonObject choiceScorer = null;
+        /** solver-distill-cc-1109 (REACH; null = off, the default, and then nothing changes): {@link ReachCfg}. */
+        public JsonObject reach = null;
+        /**
+         * solver-distill-cc-1109 (null = off): per searched decision a lean {@code mtgx-rl-labelsink/1} record of kind
+         * {@code vroot} (the root frame, each searched candidate's mean value, the best mean), appended per game. Set by the
+         * harness, never part of the teacher's spec; it only records. Works with plans (the label sink does not).
+         */
+        public String valueSink = null;
+        /**
+         * mull-off (owner 2026-11-06; off by default and then absent from the JSON): this search's seat keeps every opening
+         * hand, whatever the policy answers. Generic: no card or deck logic. The policy's answer is logged.
+         */
+        public boolean alwaysKeep = false;
+        /**
+         * solver-distill-cc-1109 (off by default and then absent from the JSON): an opening hand the policy would mulligan is
+         * kept when the planner sees a kill within reach from it ({@link forge.ai.simulation.ForcedWinSolver#potential}: a
+         * line within five turns from the hand's own lands, as it stands or with one library card next). A seat whose cards
+         * cannot end the game in the planner's model is never asked: its mulligans are the policy's, as before. alwaysKeep
+         * read on R4 (11-07) helped Doomsday holdings and harmed fair play; this is that key gated by the planner. Needs
+         * {@code reach}.
+         */
+        public boolean keepGate = false;
+        /**
+         * solver-distill-cc-1109 (mullValue; null = off): a mulligan the policy asks for is turned into a keep when the
+         * leaf value of this hand at our first main phase is at least the mean value of {@code samples} hands of one card
+         * fewer drawn from our own shuffled library, less {@code margin}. Never turns a keep into a mulligan. No card
+         * knowledge: the same value the search reads at its leaves. Keys: samples (6), margin (0).
+         */
+        public JsonObject mullValue;
+        /**
+         * solver-distill-cc-1109 (mullKeep; null = off): a mulligan the policy asks for is turned into a keep unless the
+         * engine's stock mulligan rule ({@link forge.ai.ComputerUtil#wantMulligan}: fewer than two lands or free mana
+         * permanents, only lands, six lands of seven) asks for it too. Generic: land counts, no card or deck logic; never
+         * turns a keep into a mulligan. Keys: shadow (false; true = the verdict is logged and nothing changes),
+         * stopUnfired (false; true = a game in which the rule has not fired for this seat ends as a draw at the seat's
+         * first priority decision, so a paired read of the rule against its shadow plays out only the games it touches),
+         * ender (false; true = the rule applies only to a seat one of whose cards can end the game in the planner's
+         * model, {@link forge.ai.simulation.ForcedWinSolver#hasEnder}; needs {@code reach}; every other seat's mulligans
+         * are the policy's). With {@code reach} on, the planner's verdict is logged in every row either way.
+         * force0 / force1 ("keep" | "mull"; data generation only): the seat with that index answers its FIRST keep
+         * decision (a full hand) as forced, whatever the policy and the rule say; later decisions are the policy's. Two
+         * games of one deal that differ only in a seat's forced answer are an outcome pair for that hand.
+         */
+        public JsonObject mullKeep;
+        /**
+         * solver-distill-cc-1109 (false = off, the default, and then absent from the JSON): every priority decision of the
+         * seat is the policy's own, except that a solver line proven at a plan point is taken at once (as always). No
+         * look-ahead, no sampled plans, no response search: the cheapest pilot that still finishes, for training-game
+         * generation. With the value sink, one plain row (kind {@code vplain}: the decision's frame) per decision with a
+         * choice. Needs plans with the solver; generic, no card or deck logic.
+         */
+        public boolean provenOnly = false;
+        /**
+         * solver-distill-cc-1109 (0 = off, the default, and then absent from the JSON; with provenOnly): a solver line
+         * that wins unopposed and in at least this share of the solver's belief worlds (the opponent's hidden cards
+         * drawn from the search's belief) is taken at once, as a proven line is. Generic: no card or deck logic.
+         */
+        public double lineGo = 0.0;
+        /**
+         * solver-distill-cc-1109 (false = off, the default, and then absent from the JSON; with provenOnly): the solver
+         * runs at every empty-stack priority of our main phases, not once a phase. Generic: no card or deck logic.
+         */
+        public boolean planEvery = false;
+        /**
+         * solver-distill-cc-1109 (null = off, the default, and then absent from the JSON): exploration, for training-game
+         * generation only. {"eps": 0.1, "families": "CARDS,TARGETS,...", "priorityEps": 0.0}. At an ask of a listed family
+         * whose menu is a single pick or a subset, with probability eps the seat answers a uniformly drawn NEIGHBOUR of
+         * the policy's answer instead (another candidate for a single pick; for a subset one candidate swapped, added or
+         * dropped; always a valid answer of the menu). With priorityEps and provenOnly, a priority decision is with that
+         * probability another candidate drawn in proportion to the policy's own probabilities. Every draw is seeded from
+         * the game seed and the decision; each deviation and the count of eligible asks are in the game's summary. Generic:
+         * no card or deck logic. Never part of a pilot that is read or deployed.
+         */
+        public JsonObject explore;
+        /**
+         * sdcc-imit-1111 (false = off, the default, and then absent from the JSON and nothing changes): imitation labels
+         * for a learner. Each decision whose answer this search changed is reported with the kind of component that chose
+         * it and the steps played (GAME_END and the tape: {@code imit}, see {@link RlSeat#IMIT_LINE}); and each priority
+         * the plan hook plays while it follows a line is sent as a DECIDE of its own (an overridden decision labelled
+         * with the hook's answer), so the line's steps are rows a learner can imitate. The answers played are unchanged.
+         * Generic: no card or deck logic.
+         */
+        public boolean imit = false;
+        /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
+        public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
         public List<String> beliefSeen;
+        // ---- bvw-step2-fork-1027 (S2T, the symmetric teacher; every key off by default, and then nothing changes)
+        /**
+         * S2T: "forge" (the default) = every play-out's opponent is Forge AI; "policy" = the same policy seat as ours
+         * (bridged, this service, its own observation only). Policy play-outs only.
+         */
+        public String opponent = "forge";
+        /** S2T: the value leaf is (v_s + 1 - v_o) / 2 at the same state, both seats' own frames (leaf "value" only). */
+        public boolean leafSym = false;
+        /**
+         * S2T, belief "codraft": the co-draft table file ({@code {"syn": {a: {b: score}}}}; {@code classpath:} = a jar
+         * resource), its sha256 pin and the prior's gain. Every world (and the plans' solver worlds) draws the opponent's
+         * hidden cards from the belief pool with weights {@code 1 + gain * max_s syn[s][card]^2} over the cards they showed
+         * in this game.
+         */
+        public String beliefPrior;
+        public String beliefPriorSha256;
+        public double beliefPriorGain = 20.0;
+        /**
+         * belief-n11-1030 (N11), belief "deck": the learned opponent-deck model export
+         * ({@code mtgx-deckbelief-export/1}; {@code classpath:} = a jar resource) and its sha256 pin. Every world (and the
+         * plans', step searches' and choose-a-card's solver worlds) draws the opponent's hidden hand and library from it,
+         * given the cards they showed in this game. Off (null) by default, and then nothing changes.
+         */
+        public String beliefDeckModel;
+        public String beliefDeckSha256;
+        // ---- step3-playout-fixes-1028 (BVW step 3; every key off by default, and then nothing changes)
+        /**
+         * The "Cancel Search?" loop guard ({@link RlLoopGuard}) on every search play-out seat (ours and, with opponent
+         * "policy", the opponent's): K no-answers in a row to the same one-at-a-time zone-change card ask and its confirm,
+         * then the guard answers the confirm yes. 0 = off (the seats keep no guard, as before).
+         */
+        public int playoutLoopGuard = 0;
+        /**
+         * The backstop: each search play-out seat (ours and the opponent's) ends its copy after this many sent decisions
+         * instead of the seat default 3,000 (the play-out fails, {@code max_decisions}, as before); OPR roll-outs keep
+         * the default. Also puts the decision's budget stop on the opponent seat's service requests. 0 = off.
+         */
+        public int playoutMaxDecisions = 0;
+        /**
+         * The T and fresh re-plays ({@link LookaheadSearch#replayCandidate}, {@link LookaheadSearch#reevaluate}) locate a
+         * may-play candidate by its base description too ({@link LookaheadSearch#sameMayPlay}), as the main search's
+         * level-2 pass does; only after the exact and prefix matches failed. false = off.
+         */
+        public boolean replayMayPlayLoose = false;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -238,7 +411,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefStatics", "beliefRememberedHand", "stackAbilityCopies", "copyBackFace", "offBattlefieldLimits", "copyTurnLimits", "beliefPlayerStatics", "beliefSingleton", "infoState"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
+                "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
+                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
+                "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
+                "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
+                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
+
+        /** explore.families as trimmed names (empty when absent). */
+        static List<String> exploreFamilyNames(final JsonObject ex) {
+            final List<String> out = new ArrayList<>();
+            if (ex != null && ex.has("families")) {
+                for (String f : ex.get("families").getAsString().split(",")) {
+                    if (!f.trim().isEmpty()) {
+                        out.add(f.trim());
+                    }
+                }
+            }
+            return out;
+        }
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -254,6 +445,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("maxSteps")) c.maxSteps = o.get("maxSteps").getAsInt();
             if (o.has("leafExtraSteps")) c.leafExtraSteps = o.get("leafExtraSteps").getAsInt();
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
+            if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
+            if (o.has("provenOnly")) c.provenOnly = o.get("provenOnly").getAsBoolean();
+            if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
+            if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
+            if (o.has("imit")) c.imit = o.get("imit").getAsBoolean();
+            if (o.has("explore") && !o.get("explore").isJsonNull()) {
+                c.explore = o.getAsJsonObject("explore");
+                for (String k : c.explore.keySet()) {
+                    if (!java.util.Arrays.asList("eps", "families", "priorityEps").contains(k)) {
+                        throw new IllegalArgumentException("explore: unknown key " + k);
+                    }
+                }
+                for (String f : exploreFamilyNames(c.explore)) {
+                    final int i = RlSchema.FAMILIES.indexOf(f);
+                    if (i <= 0 || i == RlSchema.F_PRIORITY || i == RlSchema.F_BLOCK) {
+                        throw new IllegalArgumentException("explore: family not supported: " + f);
+                    }
+                }
+            }
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
             if (o.has("leaf")) c.leaf = o.get("leaf").getAsString();
             if (o.has("playout")) c.playout = o.get("playout").getAsString();
@@ -271,6 +481,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("decisionLog") && !o.get("decisionLog").isJsonNull()) c.decisionLog = o.get("decisionLog").getAsString();
             if (o.has("policySha") && !o.get("policySha").isJsonNull()) c.policySha = o.get("policySha").getAsString();
             if (o.has("budgetMs")) c.budgetMs = o.get("budgetMs").getAsLong();
+            if (o.has("workUnits")) c.workUnits = o.get("workUnits").getAsBoolean(); // work-units-1107
+            if (o.has("blockSampleSeed")) c.blockSampleSeed = o.get("blockSampleSeed").getAsBoolean();
+            if (o.has("workScale")) c.workScale = o.get("workScale").getAsDouble();
+            if (o.has("workWallMs")) c.workWallMs = o.get("workWallMs").getAsLong();
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
             if (o.has("choices")) c.choices = o.get("choices").getAsInt();
             if (o.has("choiceAlts")) c.choiceAlts = o.get("choiceAlts").getAsInt();
@@ -284,11 +498,59 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
             if (o.has("forcedWin") && !o.get("forcedWin").isJsonNull()) c.forcedWin = o.getAsJsonObject("forcedWin");
             if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
+            if (o.has("basicsByType") && o.get("basicsByType").getAsBoolean()) {
+                c.basicsByType = true;
+                forge.ai.simulation.BeliefSampler.BASICS_BY_TYPE = true; // bugfix-basics: process-wide, same names on a real DB
+            }
+            if (o.has("valueSink") && !o.get("valueSink").isJsonNull()) c.valueSink = o.get("valueSink").getAsString();
+            if (o.has("reach") && !o.get("reach").isJsonNull()) {
+                c.reach = o.getAsJsonObject("reach");
+                ReachCfg.parse(c.reach); // a bad key fails at parse
+            }
+            if (o.has("choiceScorer") && !o.get("choiceScorer").isJsonNull()) {
+                c.choiceScorer = o.getAsJsonObject("choiceScorer");
+                ChoiceScorer.Config.parse(c.choiceScorer); // a bad key fails at parse, not at the first ask
+            }
+            if (o.has("alwaysKeep")) c.alwaysKeep = o.get("alwaysKeep").getAsBoolean();
+            if (o.has("keepGate")) c.keepGate = o.get("keepGate").getAsBoolean();
+            if (o.has("mullValue") && !o.get("mullValue").isJsonNull()) {
+                c.mullValue = o.getAsJsonObject("mullValue");
+                for (String k : c.mullValue.keySet()) {
+                    if (!k.equals("samples") && !k.equals("margin")) {
+                        throw new IllegalArgumentException("mullValue: unknown key " + k);
+                    }
+                }
+            }
+            if (o.has("mullKeep") && !o.get("mullKeep").isJsonNull()) {
+                c.mullKeep = o.getAsJsonObject("mullKeep");
+                for (String k : c.mullKeep.keySet()) {
+                    if (!k.equals("shadow") && !k.equals("stopUnfired") && !k.equals("ender") && !k.equals("force0")
+                            && !k.equals("force1")) {
+                        throw new IllegalArgumentException("mullKeep: unknown key " + k);
+                    }
+                    if (k.startsWith("force") && !"keep".equals(c.mullKeep.get(k).getAsString())
+                            && !"mull".equals(c.mullKeep.get(k).getAsString())) {
+                        throw new IllegalArgumentException("mullKeep." + k + ": keep | mull");
+                    }
+                }
+            }
+            if (o.has("chooseACard") && !o.get("chooseACard").isJsonNull()) {
+                c.cac = o.getAsJsonObject("chooseACard");
+                // review #143 S3: every refusal at parse time (never at the first priority of a game)
+                final forge.ai.simulation.ChooseACard.Config cc = forge.ai.simulation.ChooseACard.Config.fromJson(c.cac);
+                if (cc.mode == forge.ai.simulation.ChooseACard.Config.Mode.ON && (cc.label == null || cc.topM < 1)) {
+                    throw new IllegalArgumentException("search.chooseACard: mode on needs a label spec (the solver check) "
+                            + "and topM >= 1");
+                }
+            }
             if (o.has("blocks")) c.blocks = o.get("blocks").getAsInt();
             if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
             if (o.has("belief")) c.belief = o.get("belief").getAsString();
             if (o.has("infoState")) c.infoState = o.get("infoState").getAsBoolean();
+            if (o.has("infoAttach")) c.infoAttach = o.get("infoAttach").getAsBoolean();
+            if (o.has("honorDrawReason")) c.honorDrawReason = o.get("honorDrawReason").getAsBoolean();
+            armInfoState(c);
             if (o.has("beliefCube") && !o.get("beliefCube").isJsonNull()) c.beliefCube = o.get("beliefCube").getAsString();
             if (o.has("beliefCubeSha256") && !o.get("beliefCubeSha256").isJsonNull()) {
                 c.beliefCubeSha256 = o.get("beliefCubeSha256").getAsString();
@@ -299,9 +561,33 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("beliefRememberedHand")) c.beliefRememberedHand = o.get("beliefRememberedHand").getAsBoolean();
             if (o.has("copyTurnLimits")) c.copyTurnLimits = o.get("copyTurnLimits").getAsBoolean();
             if (o.has("offBattlefieldLimits")) c.offBattlefieldLimits = o.get("offBattlefieldLimits").getAsBoolean();
-            if (o.has("stackAbilityCopies")) c.stackAbilityCopies = o.get("stackAbilityCopies").getAsBoolean(); // house p16
-            if (o.has("copyBackFace")) c.copyBackFace = o.get("copyBackFace").getAsBoolean(); // house p15
+            if (o.has("historyLki")) c.historyLki = o.get("historyLki").getAsBoolean();
+            if (o.has("copyBackFace")) c.copyBackFace = o.get("copyBackFace").getAsBoolean();
+            if (o.has("stackAbilityCopies")) c.stackAbilityCopies = o.get("stackAbilityCopies").getAsBoolean();
+            if (o.has("stackHistory")) c.stackHistory = o.get("stackHistory").getAsBoolean();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
+            if (o.has("beliefDeck") && !o.get("beliefDeck").isJsonNull()) {
+                // unified-jar-1106: boolean = live's deck-belief-1105; string = research's model export path (belief-n11-1030)
+                final com.google.gson.JsonPrimitive bd = o.getAsJsonPrimitive("beliefDeck");
+                if (bd.isBoolean()) {
+                    c.beliefDeck = bd.getAsBoolean();
+                } else {
+                    c.beliefDeckModel = bd.getAsString();
+                }
+            }
+            if (o.has("opponent")) c.opponent = o.get("opponent").getAsString();
+            if (o.has("leafSym")) c.leafSym = o.get("leafSym").getAsBoolean();
+            if (o.has("beliefPrior") && !o.get("beliefPrior").isJsonNull()) c.beliefPrior = o.get("beliefPrior").getAsString();
+            if (o.has("beliefPriorSha256") && !o.get("beliefPriorSha256").isJsonNull()) {
+                c.beliefPriorSha256 = o.get("beliefPriorSha256").getAsString();
+            }
+            if (o.has("beliefPriorGain")) c.beliefPriorGain = o.get("beliefPriorGain").getAsDouble();
+            if (o.has("beliefDeckSha256") && !o.get("beliefDeckSha256").isJsonNull()) {
+                c.beliefDeckSha256 = o.get("beliefDeckSha256").getAsString();
+            }
+            if (o.has("playoutLoopGuard")) c.playoutLoopGuard = o.get("playoutLoopGuard").getAsInt();
+            if (o.has("playoutMaxDecisions")) c.playoutMaxDecisions = o.get("playoutMaxDecisions").getAsInt();
+            if (o.has("replayMayPlayLoose")) c.replayMayPlayLoose = o.get("replayMayPlayLoose").getAsBoolean();
             c.check();
             return c;
         }
@@ -318,6 +604,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (budgetMs < 0 || connectTimeoutMs < 1 || readTimeoutMs < 1) {
                 throw new IllegalArgumentException("search: budgetMs >= 0, connectTimeoutMs >= 1, readTimeoutMs >= 1");
+            }
+            if (!(workScale > 0) || workWallMs < 0 || (!workUnits && (workScale != 1.0 || workWallMs != 0))) {
+                throw new IllegalArgumentException("search: workScale > 0, workWallMs >= 0, both only with workUnits");
             }
             if (server == null) {
                 throw new IllegalArgumentException("search.server (host:port of the search service) is required");
@@ -358,14 +647,51 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (blockSamples < 0 || blockSamples > 64 || blockTop < 1 || blockTop > 8) {
                 throw new IllegalArgumentException("search: 0 <= blockSamples <= 64, 1 <= blockTop <= 8");
             }
-            if (!"off".equals(belief) && !"uniform".equals(belief)) {
-                throw new IllegalArgumentException("search.belief must be off or uniform, not " + belief);
+            if (!"off".equals(belief) && !"uniform".equals(belief) && !"codraft".equals(belief) && !"deck".equals(belief)) {
+                throw new IllegalArgumentException("search.belief must be off, uniform, codraft or deck, not " + belief);
             }
-            if ("uniform".equals(belief) && beliefCube == null && beliefPool == null) {
-                throw new IllegalArgumentException("search.belief=uniform needs beliefCube (or the event's pool)");
+            if (("uniform".equals(belief) || "codraft".equals(belief) || "deck".equals(belief)) && beliefCube == null
+                    && beliefPool == null) {
+                throw new IllegalArgumentException("search.belief=" + belief + " needs beliefCube (or the event's pool)");
+            }
+            // bvw-step2-fork-1027 (S2T)
+            if ("codraft".equals(belief) && (beliefPrior == null || beliefPriorSha256 == null || !(beliefPriorGain >= 0))) {
+                throw new IllegalArgumentException("search.belief=codraft needs beliefPrior, its beliefPriorSha256 pin and "
+                        + "beliefPriorGain >= 0");
+            }
+            if (!"codraft".equals(belief) && (beliefPrior != null || beliefPriorSha256 != null)) {
+                throw new IllegalArgumentException("search.beliefPrior is for belief=codraft only");
+            }
+            // belief-n11-1030 (N11)
+            if ("deck".equals(belief) && (beliefDeckModel == null || beliefDeckSha256 == null)) {
+                throw new IllegalArgumentException("search.belief=deck needs beliefDeck and its beliefDeckSha256 pin");
+            }
+            if (!"deck".equals(belief) && (beliefDeckModel != null || beliefDeckSha256 != null)) {
+                throw new IllegalArgumentException("search.beliefDeck is for belief=deck only");
+            }
+            if (!"forge".equals(opponent) && !"policy".equals(opponent)) {
+                throw new IllegalArgumentException("search.opponent must be forge or policy, not " + opponent);
+            }
+            if ("policy".equals(opponent) && !"policy".equals(playout)) {
+                throw new IllegalArgumentException("search.opponent=policy needs playout=policy");
+            }
+            if (leafSym && !"value".equals(leaf)) {
+                throw new IllegalArgumentException("search.leafSym needs leaf=value");
             }
             if (beliefBasics < 0 || beliefBasics > 64) {
                 throw new IllegalArgumentException("search.beliefBasics must be 0..64, not " + beliefBasics);
+            }
+            // step3-playout-fixes-1028
+            if (playoutLoopGuard < 0 || playoutLoopGuard > 16) {
+                throw new IllegalArgumentException("search.playoutLoopGuard must be 0 (off) .. 16, not " + playoutLoopGuard);
+            }
+            if (playoutMaxDecisions != 0 && (playoutMaxDecisions < 100 || playoutMaxDecisions > 3000)) {
+                throw new IllegalArgumentException("search.playoutMaxDecisions must be 0 (off) or 100..3000, not "
+                        + playoutMaxDecisions);
+            }
+            if ((playoutLoopGuard > 0 || playoutMaxDecisions > 0 || replayMayPlayLoose) && !"policy".equals(playout)) {
+                throw new IllegalArgumentException("search.playoutLoopGuard / playoutMaxDecisions / replayMayPlayLoose "
+                        + "need playout=policy");
             }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
@@ -402,6 +728,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 // live-sc-1009: only when set, so a bench spec's JSON is unchanged
                 o.addProperty("budgetMs", budgetMs);
             }
+            if (blockSampleSeed) {
+                o.addProperty("blockSampleSeed", true); // work-units-1107: only when on
+            }
+            if (workUnits) {
+                // work-units-1107: only when on, so every other spec's JSON is unchanged
+                o.addProperty("workUnits", true);
+                o.addProperty("workScale", workScale);
+                o.addProperty("workWallMs", workWallMs);
+            }
             if (sameDepartures != 2) {
                 // cm-choice-search-1009: only when changed, so an S1 spec's JSON is unchanged
                 o.addProperty("sameDepartures", sameDepartures);
@@ -421,6 +756,52 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (plans != null) {
                 o.add("plans", plans);
             }
+            if (choiceScorer != null) {
+                o.add("choiceScorer", choiceScorer); // choice-scorer-1106: only when on
+            }
+            if (reach != null) {
+                o.add("reach", reach); // solver-distill-cc-1109: only when on
+            }
+            if (keepGate) {
+                o.addProperty("keepGate", true); // solver-distill-cc-1109: only when on
+            }
+            if (mullValue != null) {
+                o.add("mullValue", mullValue); // solver-distill-cc-1109: only when on
+            }
+            if (mullKeep != null) {
+                o.add("mullKeep", mullKeep); // solver-distill-cc-1109: only when on
+            }
+            if (provenOnly) {
+                o.addProperty("provenOnly", true); // solver-distill-cc-1109: only when on
+            }
+            if (lineGo > 0) {
+                o.addProperty("lineGo", lineGo); // solver-distill-cc-1109: only when on
+            }
+            if (planEvery) {
+                o.addProperty("planEvery", true); // solver-distill-cc-1109: only when on
+            }
+            if (explore != null) {
+                o.add("explore", explore); // solver-distill-cc-1109: only when on
+            }
+            if (imit) {
+                o.addProperty("imit", true); // sdcc-imit-1111: only when on
+            }
+            if (alwaysKeep) {
+                o.addProperty("alwaysKeep", true); // mull-off: only when on
+            }
+            if (cac != null) {
+                o.add("chooseACard", cac); // r2-choose-a-card-1029: only when on
+            }
+            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
+            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
+            if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
+            if (historyLki) o.addProperty("historyLki", true);
+            if (copyBackFace) o.addProperty("copyBackFace", true);
+            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
+            if (stackHistory) o.addProperty("stackHistory", true);
+            if (basicsByType) {
+                o.addProperty("basicsByType", true); // bugfix-basics: only when on
+            }
             if (blocks > 0) {
                 // block-search-1019: only when on, so every other spec's JSON is unchanged
                 o.addProperty("blocks", blocks);
@@ -430,12 +811,6 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (infoState) {
                 o.addProperty("infoState", true); // order-memory-1102: only when on
             }
-            // house p11-p16 (live-fixes-1107): only when on, independent of the belief, as the house releases emit them
-            if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
-            if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
-            if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
-            if (copyBackFace) o.addProperty("copyBackFace", true);
-            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
             if (!"off".equals(belief)) {
                 // honest-belief-1020: only when on, so every other spec's JSON is unchanged
                 o.addProperty("belief", belief);
@@ -448,6 +823,36 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (beliefStatics) o.addProperty("beliefStatics", true);
                 if (beliefPlayerStatics) o.addProperty("beliefPlayerStatics", true);
                 o.addProperty("beliefSingleton", beliefSingleton);
+                if (beliefDeck) {
+                    o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
+                if ("codraft".equals(belief)) {
+                    // bvw-step2-fork-1027: only with codraft
+                    o.addProperty("beliefPrior", beliefPrior);
+                    o.addProperty("beliefPriorSha256", beliefPriorSha256);
+                    o.addProperty("beliefPriorGain", beliefPriorGain);
+                }
+                if ("deck".equals(belief)) {
+                    // belief-n11-1030: only with deck
+                    o.addProperty("beliefDeck", beliefDeckModel);
+                    o.addProperty("beliefDeckSha256", beliefDeckSha256);
+                }
+            }
+            if (!"forge".equals(opponent)) {
+                o.addProperty("opponent", opponent); // bvw-step2-fork-1027: only when on
+            }
+            if (leafSym) {
+                o.addProperty("leafSym", true); // bvw-step2-fork-1027: only when on
+            }
+            // step3-playout-fixes-1028: only when on, so every other spec's JSON is unchanged
+            if (playoutLoopGuard > 0) {
+                o.addProperty("playoutLoopGuard", playoutLoopGuard);
+            }
+            if (playoutMaxDecisions > 0) {
+                o.addProperty("playoutMaxDecisions", playoutMaxDecisions);
+            }
+            if (replayMayPlayLoose) {
+                o.addProperty("replayMayPlayLoose", true);
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -493,13 +898,73 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** S-b: the turn-plan search of each RL seat, by player id. */
     private final Map<Integer, PlanSearch> planSearches = new TreeMap<>();
 
+    /** unified-search-1106: {@link Config#infoAttach}. */
+    public static void attachInfoState(final Game g, final Config c) {
+        if (c.infoAttach && c.infoState) {
+            forge.ai.simulation.InfoStates.attach(g);
+        }
+    }
+
+    /** unified-search-1106: {@link Config#infoAttach}: the solver keys RlLiveSeat.Spec.parse sets. */
+    static void armInfoState(final Config c) {
+        if (!c.infoAttach || !c.infoState || c.plans == null) {
+            return;
+        }
+        for (String sub : new String[] {"solverCfg", "defendCfg"}) {
+            if (sub.equals("solverCfg") || c.plans.has("defend") && c.plans.get("defend").getAsBoolean()) {
+                if (!c.plans.has(sub)) {
+                    c.plans.add(sub, new JsonObject());
+                }
+                c.plans.getAsJsonObject(sub).addProperty("infoState", "true");
+            }
+        }
+    }
+
     /**
      * Lane search-bones-1015: install the plan hooks on the RL seats' bridged controllers (the search seat, or every RL
      * seat): the forced-win solver in front ({@code forcedWin}) and S-b ({@code plans}). A no-op unless one of the two
      * keys is set, so every other spec's game is unchanged.
      */
+    /**
+     * #173 question: does this search's config turn any InfoStates consumer on (the look-ahead's key, or the solver's
+     * {@code infoState} through plans.solverCfg or forcedWin)? Then the game's InfoStates must be attached at setup, or
+     * the key would silently behave as off (consumers only find it).
+     */
+    public static boolean wantsInfoStates(final Config c) {
+        if (c == null) {
+            return false;
+        }
+        if (c.infoState) {
+            return true;
+        }
+        if (c.forcedWin != null && c.forcedWin.has("infoState")
+                && "true".equals(c.forcedWin.get("infoState").getAsString())) {
+            return true;
+        }
+        if (c.plans != null) {
+            final com.google.gson.JsonObject p = c.plans;
+            for (String k : new String[] {"solverCfg", "defendCfg"}) {
+                if (p.has(k) && p.get(k).isJsonObject() && p.getAsJsonObject(k).has("infoState")
+                        && "true".equals(p.getAsJsonObject(k).get("infoState").getAsString())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Attach {@code g}'s InfoStates when {@link #wantsInfoStates}; returns it (or null). Call on the game's thread. */
+    public static forge.ai.simulation.InfoStates attachInfoStates(final Config c, final Game g) {
+        // unified-jar-1106: research attaches here; a live-line bench seat doesn't (ledger row 26), so it's keyed
+        return g != null && forge.game.EngineFixes.researchClient() && wantsInfoStates(c) ? forge.ai.simulation.InfoStates.attach(g) : null;
+    }
+
     public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
-        if (cfg.forcedWin == null && cfg.plans == null) {
+        // review #172 S2: the game's InfoStates is attached here, at the seat's setup on the game's own thread (a
+        // consumer only finds it)
+        attachInfoStates(cfg, g);
+        attachInfoState(g, cfg); // unified-search-1106 (infoAttach)
+        if (cfg.forcedWin == null && cfg.plans == null && cfg.cac == null) {
             return;
         }
         final List<Player> ps = g.getRegisteredPlayers();
@@ -515,17 +980,43 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             SolverDriver d = null;
             if (cfg.forcedWin != null) {
                 d = new SolverDriver(p, SolverDriver.config(cfg.forcedWin));
-                d.solver().redraw = ls.opponentRedraw(); // honest-belief-1020 (null when belief is off)
+                d.solver().redraw = ls.solverRedraw(d.solver().config()); // honest-belief-1020; deck-belief-1105 deckBelief
                 solverDrivers.put(p.getId(), d);
                 b.planHook = d;
             }
             if (cfg.plans != null) {
                 final PlanSearch ps1 = new PlanSearch(PlanSearch.Spec.parse(cfg.plans), this, p, seat, d);
+                ps1.provenOnly = cfg.provenOnly;
+                ps1.lineGo = cfg.provenOnly ? cfg.lineGo : 0.0;
+                ps1.planEvery = cfg.provenOnly && cfg.planEvery;
                 planSearches.put(p.getId(), ps1);
                 b.planHook = ps1;
             }
+            if (cfg.cac != null) {
+                // r2-choose-a-card-1029: the seat's assembly choices, valued by this search's leaf in one LEAVES batch
+                final forge.ai.simulation.ChooseACard c = new forge.ai.simulation.ChooseACard(
+                        forge.ai.simulation.ChooseACard.Config.fromJson(cfg.cac), forge.ai.simulation.ChooseACard.of(this), null);
+                c.setRedraw(ls.solverRedraw());
+                final int seatIdx = s;
+                // review S2-2: every decision entry is a row of this game's decision log
+                c.setSink(e -> {
+                    final JsonObject row = new JsonObject();
+                    row.addProperty("kind", "chooseACard");
+                    row.addProperty("game_uid", uid);
+                    row.addProperty("seat", seatIdx);
+                    row.add("cac", e);
+                    synchronized (rows) {
+                        addRow(row);
+                    }
+                });
+                c.install(b);
+                chooseACards.put(p.getId(), c);
+            }
         }
     }
+
+    /** r2-choose-a-card-1029: the seats' choose-a-card engines (their logs), by player id; empty unless the key is set. */
+    public final Map<Integer, forge.ai.simulation.ChooseACard> chooseACards = new TreeMap<>();
 
     // ---- S-t (lane cm-choice-search-1009; untouched while cfg.choices == 0)
     /** One macro candidate's forced answers, and the counts of its schedule across its play-outs. */
@@ -579,6 +1070,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private volatile String servedPolicySha;
     /** This game's label records (encoded), written at game end. */
     private final List<byte[]> labelRecs = new ArrayList<>();
+    /** solver-distill-cc-1109: this game's value-sink records (cfg.valueSink). */
+    private final List<byte[]> valueRecs = new ArrayList<>();
     /** The live macro departure whose schedule the seat answers (set by decide, read by scheduledAsk). */
     private LiveMacro liveMacro = null;
     private int labelRoots = 0, labelChoices = 0, labelFailures = 0;
@@ -637,6 +1130,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.seed = splitmix(gameSeed ^ splitmix(cfg.seedSalt));
         lc.threads = cfg.threads;
         lc.departZ = cfg.departZ;
+        lc.anytime = cfg.anytime;
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
@@ -652,18 +1146,41 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.beliefRememberedHand = cfg.beliefRememberedHand;
         lc.copyTurnLimits = cfg.copyTurnLimits;
         lc.offBattlefieldLimits = cfg.offBattlefieldLimits;
-        lc.stackAbilityCopies = cfg.stackAbilityCopies; // house p16
-        lc.copyBackFace = cfg.copyBackFace; // house p15
+        lc.historyLki = cfg.historyLki;
+        lc.copyBackFace = cfg.copyBackFace;
+        lc.stackAbilityCopies = cfg.stackAbilityCopies;
+        lc.stackHistory = cfg.stackHistory;
         if (!"off".equals(cfg.belief)) {
             // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
             lc.belief = cfg.belief;
+        if (cfg.cac != null && forge.ai.simulation.ChooseACard.Config.fromJson(cfg.cac).mode
+                != forge.ai.simulation.ChooseACard.Config.Mode.OFF && "off".equals(cfg.belief)) {
+            // review #143 S3: refused when the search is built (before the game), not at the first ask
+            throw new IllegalArgumentException("search.chooseACard needs a belief (the copies re-draw the opponent's "
+                    + "hidden cards)");
+        }
             lc.beliefCube = cfg.beliefCube;
             lc.beliefCubeSha256 = cfg.beliefCubeSha256;
             lc.beliefBasics = cfg.beliefBasics;
             lc.beliefSingleton = cfg.beliefSingleton;
             lc.beliefPool = cfg.beliefPool;
             lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
+            lc.beliefDeck = cfg.beliefDeck; // deck-belief-1105 (off by default)
+            if ("codraft".equals(cfg.belief)) {
+                // bvw-step2-fork-1027 (S2T): the co-draft deck prior, its table pinned by sha256
+                lc.beliefPriorTable = PlanSearch.loadSynPinned(cfg.beliefPrior, cfg.beliefPriorSha256);
+                lc.beliefPriorGain = cfg.beliefPriorGain;
+            }
+            if ("deck".equals(cfg.belief)) {
+                // belief-n11-1030 (N11): the learned deck model, its export pinned by sha256
+                lc.beliefDeckModel = forge.ai.simulation.DeckBeliefModel.loadPinned(cfg.beliefDeckModel, cfg.beliefDeckSha256);
+            }
         }
+        // bvw-step2-fork-1027 (S2T): the opponent's play-out seat and the symmetric leaf
+        lc.opponentPolicy = "policy".equals(cfg.opponent);
+        lc.leafSym = cfg.leafSym;
+        lc.leafOpp = cfg.leafSym;
+        lc.replayMayPlayLoose = cfg.replayMayPlayLoose; // step3-playout-fixes-1028
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
             lc.stack = true;
@@ -682,6 +1199,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the S-b solver's follower config (copies follow lines with it). */
+    /** kill-line-1106: plans.lineKeep. */
+    boolean lineKeepOn() {
+        return cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).lineKeep;
+    }
+
+    /** choice-search-1105: plans.lineChoices=forge (line-consistent choice answers). */
+    boolean lineChoicesForge() {
+        for (PlanSearch ps1 : planSearches.values()) {
+            return ps1.lineChoicesForge();
+        }
+        return cfg.plans != null && "forge".equals(PlanSearch.Spec.parse(cfg.plans).lineChoices);
+    }
+
     forge.ai.simulation.ForcedWinSolver.Config followConfig() {
         for (PlanSearch ps1 : planSearches.values()) {
             return ps1.followCfg;
@@ -690,8 +1220,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: the decision budget, ms (0 = none). */
+    double departZ() {
+        return cfg.departZ; // unified-search-1106
+    }
+
     long budgetMs() {
         return cfg.budgetMs;
+    }
+
+    /** line-adoption-1107: the search's horizon in turns. */
+    int horizonTurns() {
+        return cfg.horizon;
     }
 
     static long splitmix(long z) {
@@ -725,6 +1264,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (c.ack != null && c.ack.has("policy_sha") && !c.ack.get("policy_sha").isJsonNull()) {
                 servedPolicySha = c.ack.get("policy_sha").getAsString();
+            }
+            if (c.ack != null) {
+                servedAck = c.ack.deepCopy(); // bvw-step1-build-1024: the service's identity (value backend) for label rows
             }
             if (cfg.policySha != null) {
                 final String got = c.ack.has("policy_sha") ? c.ack.get("policy_sha").getAsString() : null;
@@ -796,6 +1338,71 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     // ------------------------------------------------------------------------------------------------ the decision
 
     /** S1: one action's identity across identical copies (card name, zone, land flag, ability text); pass = "pass". */
+    /** Diagnostics (-Dsdcc.logActs=true; off = nothing below is called): names in the decision log. */
+    static final boolean LOG_ACTS = Boolean.getBoolean("sdcc.logActs");
+
+    static String actLabel(final SpellAbility sa) {
+        if (sa == null) {
+            return "pass";
+        }
+        final forge.game.card.Card h = sa.getHostCard();
+        final String name = h == null ? "?" : h.getName();
+        if (sa.isLandAbility()) {
+            return "land " + name;
+        }
+        if (sa.isSpell()) {
+            return "cast " + name;
+        }
+        String d = sa.getDescription() == null ? "" : sa.getDescription().replaceAll("\\s+", " ").trim();
+        if (d.length() > 48) {
+            d = d.substring(0, 48);
+        }
+        return "act " + name + (d.isEmpty() ? "" : ": " + d);
+    }
+
+    private static JsonArray names(final Iterable<forge.game.card.Card> cs, final boolean lands) {
+        final JsonArray a = new JsonArray();
+        for (forge.game.card.Card c : cs) {
+            if (c.isLand() == lands) {
+                a.add(c.getName() + (c.isTapped() ? "(T)" : ""));
+            }
+        }
+        return a;
+    }
+
+    static JsonObject stateNote(final Game g, final Player me) {
+        final JsonObject o = new JsonObject();
+        try {
+            Player opp = null;
+            for (Player p : g.getPlayers()) {
+                if (p != me) {
+                    opp = p;
+                }
+            }
+            o.addProperty("life", me.getLife());
+            o.addProperty("lib", me.getCardsIn(forge.game.zone.ZoneType.Library).size());
+            o.add("hand", names(me.getCardsIn(forge.game.zone.ZoneType.Hand), false));
+            o.add("hand_lands", names(me.getCardsIn(forge.game.zone.ZoneType.Hand), true));
+            o.add("bf", names(me.getCardsIn(forge.game.zone.ZoneType.Battlefield), false));
+            o.add("lands", names(me.getCardsIn(forge.game.zone.ZoneType.Battlefield), true));
+            o.add("gy", names(me.getCardsIn(forge.game.zone.ZoneType.Graveyard), false));
+            if (opp != null) {
+                o.addProperty("opp_life", opp.getLife());
+                o.addProperty("opp_hand", opp.getCardsIn(forge.game.zone.ZoneType.Hand).size());
+                o.add("opp_bf", names(opp.getCardsIn(forge.game.zone.ZoneType.Battlefield), false));
+                o.addProperty("opp_lands", names(opp.getCardsIn(forge.game.zone.ZoneType.Battlefield), true).size());
+            }
+            final JsonArray stk = new JsonArray();
+            for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+                stk.add(String.valueOf(si.getSourceCard()));
+            }
+            o.add("stack", stk);
+        } catch (RuntimeException e) {
+            o.addProperty("error", String.valueOf(e));
+        }
+        return o;
+    }
+
     static String actionKey(final SpellAbility sa) {
         if (sa == null) {
             return "pass";
@@ -848,36 +1455,167 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         ls.forcePlayed = null;
     }
 
+    // ------------------------------------------------------------------------------------------------ work-units-1107
+
+    /** work-units-1107: the decision in progress (null = none, or workUnits off). */
+    private forge.game.WorkClock.Span workSpan;
+    private long workDecisions, workWallHits;
+    /** This seat's work clock: installed on the deciding thread only inside its decisions (another seat never sees it). */
+    private forge.game.WorkClock.Clock workClock;
+    private forge.game.WorkClock.Clock workPrev;
+    /** The outer decision's game CPU (ms) at its begin (calibration: work_ms against cpu_ms). */
+    private double workCpu0;
+
+    /** The real-time safety wall per decision (ms). */
+    long workWallMs() {
+        return cfg.workWallMs > 0 ? cfg.workWallMs : cfg.budgetMs;
+    }
+
+    /**
+     * work-units-1107: begin a decision of this seat on its game thread's work clock (installed on first use); null
+     * when workUnits is off, and then nothing happens.
+     */
+    forge.game.WorkClock.Span workBegin() {
+        if (!cfg.workUnits) {
+            return null;
+        }
+        final forge.game.WorkClock.Span outer = workSpan;
+        if (outer == null) {
+            if (workClock == null) {
+                workClock = forge.game.WorkClock.newClock(cfg.workScale);
+            }
+            workPrev = forge.game.WorkClock.install(workClock);
+        }
+        final forge.game.WorkClock.Span sp = forge.game.WorkClock.begin(workWallMs());
+        if (outer == null) {
+            workSpan = sp;
+            workCpu0 = gameCpuMs();
+        }
+        return sp;
+    }
+
+    void workEnd(final forge.game.WorkClock.Span sp) {
+        if (sp == null) {
+            return;
+        }
+        final boolean outer = sp == workSpan;
+        if (outer) {
+            workDecisions++;
+            if (sp.wallHit()) {
+                workWallHits++;
+            }
+            workSpan = null;
+        }
+        forge.game.WorkClock.end(sp);
+        if (outer) {
+            forge.game.WorkClock.install(workPrev);
+            workPrev = null;
+        }
+    }
+
+    /** The decision's start on the budget clock: the work clock's time with workUnits, else {@code t0}. */
+    long budgetStart(final long t0) {
+        return cfg.workUnits && forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
+    }
+
+    /** A search row, with the decision's work when workUnits is on (unchanged otherwise). */
+    private void addRow(final JsonObject row) {
+        final forge.game.WorkClock.Span sp = workSpan;
+        if (sp != null) {
+            row.addProperty("work_ms", Math.round(sp.workMs() * 10) / 10.0);
+            final JsonArray wc = new JsonArray();
+            for (long x : sp.counts()) {
+                wc.add(x);
+            }
+            row.add("work_counts", wc);
+            final JsonArray wp = new JsonArray();
+            for (long x : sp.pathCounts()) {
+                wp.add(x);
+            }
+            row.add("work_path_counts", wp);
+            row.addProperty("wall_cap", sp.wallHit());
+            row.addProperty("work_span_ms", Math.round(sp.spanMs() * 10) / 10.0);
+            row.addProperty("work_cpu_ms", Math.round((gameCpuMs() - workCpu0) * 10) / 10.0);
+        }
+        rows.add(row);
+    }
+
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
         if (forge.ai.simulation.LeakTrace.ON) {
-            forge.ai.simulation.LeakTrace.arm(g, me, null); // live-leak-1111 (diagnostics; off: nothing)
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
+        final forge.game.WorkClock.Span ws = workBegin();
+        lastReason = RlSeat.IMIT_SEARCH;
+        try {
+            return decide0(g, me, m, frame, greedy, menuObjs);
+        } finally {
+            workEnd(ws);
+        }
+    }
+
+    /** sdcc-imit-1111: the kind of component behind the last answer (an RlSeat.IMIT_* code; 0 = a rule or fallback). */
+    private int lastReason;
+
+    @Override
+    public boolean imit() {
+        return cfg.imit;
+    }
+
+    @Override
+    public int reason() {
+        return lastReason;
+    }
+
+    private int decide0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
+            final List<SpellAbility> menuObjs) {
         pendingWindow = null;
         liveMacro = null;
         lastForced = false;
         lastForcedMiss = false;
         priorityAsks++;
+        sinkDecIdx = frame.decIdx;
+        sinkSeat = frame.seat;
+        sinkTurn = g.getPhaseHandler().getTurn();
+        if (cfg.reach != null) {
+            try {
+                reachGate(g, me);
+            } catch (RuntimeException e) {
+                reachOn = true;
+            }
+        }
+        if (cfg.mullKeep != null && mullKeepFires == 0 && mullKeepFlag("stopUnfired")) {
+            // solver-distill-cc-1109: the rule changes nothing for this seat in this game; a paired read skips it
+            mullKeepStopped = true;
+            return STOP;
+        }
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
+            tap("cpu_cap", null, null, 0, VOID);
             return VOID;
         }
         final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
+        if (cfg.provenOnly) {
+            return provenOnlyDecide(g, me, m, frame, greedy, menuObjs, sb);
+        }
         // search-bones-1015 (d): S-b searches a respond point (their spell on top, a counter in our menu)
         final boolean respond = sb != null && !g.getStack().isEmpty() && sb.respondPoint(g, menuObjs);
         if (!cfg.stack && !g.getStack().isEmpty() && !respond) {
             searchStackSkipped++;
+            tap("stack", null, null, 0, -1);
             return -1;
         }
         if (sb != null) {
             // search-bones-1015 (S-b): the live policy plan's next step, no search
             final int f = sb.follow(g, me, m, menuObjs);
             if (f >= 0) {
+                tap("follow", null, null, 0, f);
                 return f;
             }
         }
         final long t0 = System.nanoTime();
+        final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
         try {
@@ -886,6 +1624,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             drop();
             scoreFailures++;
             System.err.println("[rlsearch] SCORE failed, keeping the policy's choice: " + e);
+            tap("score_failed", null, null, 0, -1);
             return -1;
         }
         scoreCalls++;
@@ -893,6 +1632,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final int c = m.C();
         if (sc.status != RlWire.ST_OK || sc.probs.length != c) {
             scoreFailures++;
+            tap("score_status", null, null, 0, -1);
             return -1;
         }
         // Pool the candidates into entries: X variants of one menu entry, and menu entries that are the same action
@@ -925,6 +1665,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final Integer defEntry = entryOf.get(actionKey(def0 == 0 ? null : menuObjs.get(def0 - 1)));
         if (defEntry == null || !by.containsKey(defEntry)) {
+            tap("no_default", null, null, 0, -1);
             return -1;
         }
         if (defEntry != def0) {
@@ -969,9 +1710,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final LookaheadSearch.GivenResult r;
         PlanSearch.Stage stage = null;
-        if (sb != null && sb.planPoint(g)) {
+        if (sb != null && sb.planPoint(g, menuObjs)) {
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
-            stage = sb.propose(g, me, m, menuObjs, t0);
+            stage = sb.propose(g, me, m, menuObjs, t0, bt0);
             if (stage.hook) {
                 // J1: a proven line taken at once; live must have taken one here too
                 final forge.ai.simulation.AiReplay.Mark mk = mark();
@@ -980,10 +1721,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 planRow(g, frame, stage, null, order, -1, t0);
                 planDecided(g, stage, null, t0);
+                tap("proven_line", stage, null, order.size(), RlSeat.PrioritySearch.HOOK);
                 return RlSeat.PrioritySearch.HOOK;
             }
         }
         armForce(mark());
+        if (cfg.anytime && "value".equals(cfg.leaf)) {
+            ls.setRootP((1 + sc.valueObs) / 2); // unified-search-1106
+        }
         if (sb != null) {
             // S-b: every searched decision has the proof flags; a plan point also has its plans (and its budget counts
             // from the decision's start, the proposals included)
@@ -1002,7 +1747,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 expandLimit = order.size();
                 ex = this;
             }
-            r = stage != null ? ls.decideGivenPlans(g, me, given, cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat, ex)
+            if (stage != null && stage.horizonTurn > 0) {
+                ls.setPlanHorizonTurn(stage.horizonTurn); // line-adoption-1107 (plans.lineHorizon); cleared by the decision
+            }
+            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth), stage.plans, stage.labels, kt, bt0, sb.threat, ex)
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
@@ -1026,11 +1774,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             searchCpuMs += r.cpuMs;
         }
         if (stage != null) {
-            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6);
+            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6, sc.valueObs);
             planRow(g, frame, stage, r, order, pa, t0);
             if (pa != -2) {
                 departures++;
                 planDecided(g, stage, r, t0);
+                tap("plan", stage, r, order.size(), pa);
                 return pa;
             }
         }
@@ -1078,6 +1827,72 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 System.err.println("[rlsearch] onSearched failed: " + e);
             }
         }
+        if (cfg.valueSink != null && r.givenIndex.length > 0) {
+            try {
+                final JsonObject h = new JsonObject();
+                h.addProperty("kind", "vroot");
+                provenance(h, g, frame, sc.policyVersion);
+                h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+                final JsonArray means = new JsonArray();
+                double best = Double.NaN;
+                for (int j = 0; j < r.values.length; j++) {
+                    double sum = 0;
+                    int n = 0;
+                    for (double v : r.values[j]) {
+                        if (!Double.isNaN(v) && !Double.isInfinite(v)) {
+                            sum += v;
+                            n++;
+                        }
+                    }
+                    final double mu = n == 0 ? Double.NaN : sum / n;
+                    if (Double.isNaN(mu)) {
+                        means.add(com.google.gson.JsonNull.INSTANCE);
+                    } else {
+                        means.add(mu);
+                        best = Double.isNaN(best) ? mu : Math.max(best, mu);
+                    }
+                }
+                h.add("means", means);
+                if (!Double.isNaN(best)) {
+                    h.addProperty("root", best);
+                }
+                h.addProperty("chosen", r.chosen);
+                h.addProperty("outcome", r.outcome);
+                h.addProperty("leaf_fallback", r.leafFallback);
+                if (cfg.reach != null) {
+                    // solver labels of the ROOT position itself, for the seat (its own zones and library multiset; the
+                    // opponent's is not screened here: the live game holds its true hand)
+                    final forge.game.WorkClock.Clock clock = forge.game.WorkClock.install(null); // label work is not the pilot's
+                    try {
+                        final forge.ai.simulation.ForcedWinSolver.Reach rr = reachFull(liveKnow, g, me);
+                        if (!rr.failed && !Double.isNaN(rr.p)) {
+                            h.addProperty("reach", rr.p);
+                        }
+                        final forge.ai.simulation.ForcedWinSolver.Goldfish gf = goldfishFull(liveKnow, g, me);
+                        if (!gf.failed && !Double.isNaN(gf.g)) {
+                            h.addProperty("gf", gf.g);
+                            h.addProperty("gf_turn", gf.bestTurn);
+                            h.addProperty("gf_direct", gf.direct);
+                        }
+                        if (reachCfg().sinkSamples > 0) {
+                            final forge.ai.simulation.ForcedWinSolver.Goldfish gs = goldfishSampled(liveKnow, g, me,
+                                    reachCfg().sinkSamples, -1L);
+                            if (!gs.failed && !Double.isNaN(gs.g)) {
+                                h.addProperty("gfs", gs.g);
+                                h.addProperty("gfs_p", gs.p);
+                            }
+                        }
+                    } catch (RuntimeException e) {
+                        System.err.println("[rlsearch] value root labels failed: " + e);
+                    } finally {
+                        forge.game.WorkClock.install(clock);
+                    }
+                }
+                valueRecs.add(labelRecord(h, payload));
+            } catch (RuntimeException e) {
+                System.err.println("[rlsearch] value root record failed: " + e);
+            }
+        }
         if (cfg.labelSink != null && r.givenIndex.length > 0) {
             try {
                 labelRecs.add(labelRecord(rootHeader(g, m, frame, sc, greedy, menuObjs, entryOf, order, def, r, answer),
@@ -1097,6 +1912,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("C", c);
             row.addProperty("entries", by.size());
             row.addProperty("v_root", sc.valueObs);
+            if (cfg.reach != null && reachCfg().gate) {
+                row.addProperty("reach_on", reachOn);
+            }
             final JsonArray pr = new JsonArray();
             final JsonArray ix = new JsonArray();
             final JsonArray ev = new JsonArray();
@@ -1116,6 +1934,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.add("prior", pr);
             row.add("entry", ix);
             row.add("ev", ev);
+            if (LOG_ACTS) {
+                // diagnostics only (-Dsdcc.logActs=true): the searched candidates by name, and the seat's own view
+                final JsonArray acts = new JsonArray();
+                for (int j = 0; j < r.givenIndex.length; j++) {
+                    if (r.givenIndex[j] >= order.size()) {
+                        acts.add("plan#" + (r.givenIndex[j] - order.size()));
+                    } else {
+                        acts.add(actLabel(given.get(r.givenIndex[j])));
+                    }
+                }
+                row.add("acts", acts);
+                row.add("st", stateNote(g, me));
+            }
             // per-world values (diagnostics: paired differences, sign consistency across worlds)
             final JsonArray vw = new JsonArray();
             final double scale = "value".equals(cfg.leaf) ? 1e4 : 10;
@@ -1199,9 +2030,363 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("ms", Math.round(r.ms * 10) / 10.0);
             row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
             row.addProperty("score_ms", Math.round((System.nanoTime() - t0) / 1e5 - r.ms * 10) / 10.0);
-            rows.add(row);
+            addRow(row);
         }
+        tap(r.givenIndex.length > 0 ? "searched" : String.valueOf(r.outcome), stage, r, order.size(), answer);
         return answer;
+    }
+
+    /**
+     * Lane bvw-step1-build-1024 (null = off, the default, and then nothing changes): told how each priority decision
+     * ended, for the step-1 labeller ({@link StepSearch}): why ({@code searched}, {@code plan}, {@code proven_line}, or
+     * why there was no search), the S-b stage (null without plans or off a plan point), the look-ahead's result (null
+     * when none ran), the given candidates' count and the answer.
+     */
+    public interface Tap {
+        void decided(String why, PlanSearch.Stage stage, LookaheadSearch.GivenResult r, int given, int answer);
+    }
+
+    public Tap tap;
+
+    // ---- solver-distill-cc-1109: exploration (cfg.explore), training-game generation only
+    private java.util.Set<Integer> exploreFams;
+    private final Map<String, int[]> exploreEligible = new TreeMap<>(), exploreDeviated = new TreeMap<>(), exploreEligibleBy = new TreeMap<>();
+    private final JsonArray exploreRows = new JsonArray();
+
+    private boolean exploreFamily(final int family) {
+        if (cfg.explore == null) {
+            return false;
+        }
+        if (exploreFams == null) {
+            final java.util.Set<Integer> fs = new java.util.TreeSet<>();
+            for (String f : Config.exploreFamilyNames(cfg.explore)) {
+                fs.add(RlSchema.FAMILIES.indexOf(f));
+            }
+            exploreFams = fs;
+        }
+        return exploreFams.contains(family);
+    }
+
+    /** The asks the spec answers by itself (the mulligan rules and the choice scorer), whatever exploration does. */
+    private boolean scorerAsk(final int family) {
+        if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.mullKeep != null || cfg.keepGate && cfg.reach != null)
+                && family == RlSchema.F_MULLIGAN) {
+            return true;
+        }
+        return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
+                || family == RlSchema.F_ORDER && scorer().config().pile);
+    }
+
+    private java.util.SplittableRandom exploreRng(final RlWire.Decide frame, final long salt) {
+        return new java.util.SplittableRandom(LookaheadSearch.mix(LookaheadSearch.mix(gameSeed, 0xE8910EL ^ salt),
+                frame.decIdx * 2L + frame.seat));
+    }
+
+    private static String candLabel(final RlCandidates.Menu m, final int i) {
+        if (i < 0 || i >= m.C()) {
+            return "?";
+        }
+        final RlCandidates.Cand c = m.cands.get(i);
+        switch (c.kind) {
+            case RlSchema.K_PASS: return "pass";
+            case RlSchema.K_YES: return "yes";
+            case RlSchema.K_NO: return "no";
+            case RlSchema.K_KEEP: return "keep";
+            case RlSchema.K_MULLIGAN: return "mulligan";
+            case RlSchema.K_PLAY_FIRST: return "play";
+            case RlSchema.K_DRAW_FIRST: return "draw";
+            case RlSchema.K_NONE: return "none";
+            default: break;
+        }
+        String base = c.host != null ? c.host.getName() : c.name != null ? c.name
+                : c.tgt0 instanceof forge.game.card.Card ? ((forge.game.card.Card) c.tgt0).getName()
+                : c.tgt0 instanceof Player ? "player" : null;
+        final String k = c.key;
+        if (k != null && (k.startsWith("top:") || k.startsWith("rest:"))) {
+            base = (base == null ? "" : base + ":") + k.substring(0, k.indexOf(':'));
+        } else if (k != null && (k.startsWith("i:") || k.startsWith("v:"))) {
+            base = (base == null ? "" : base + ":") + k;
+        }
+        return base != null ? base : "kind" + c.kind;
+    }
+
+    private void exploreCount(final Map<String, int[]> into, final int family, final int seat) {
+        final int[] a = into.computeIfAbsent(RlSchema.familyName(family), k -> new int[2]);
+        if (seat >= 0 && seat < 2) {
+            a[seat]++;
+        }
+    }
+
+    /**
+     * With probability eps a uniformly drawn valid neighbour of the policy's answer (null = the policy's answer stands).
+     * An ask is eligible when the policy's answer has at least one valid neighbour.
+     */
+    private short[] exploreAnswer(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final short[] greedy) {
+        if (greedy == null || m.mode != RlSchema.M_SINGLE && m.mode != RlSchema.M_SUBSET || m.validate(greedy) != null) {
+            return null;
+        }
+        final int c = m.C();
+        final List<short[]> nb = new ArrayList<>();
+        final List<String> how = new ArrayList<>();
+        final boolean[] in = new boolean[c];
+        for (short x : greedy) {
+            in[x] = true;
+        }
+        if (m.mode == RlSchema.M_SINGLE) {
+            for (int i = 0; i < c; i++) {
+                final short[] t = {(short) i};
+                if (!in[i] && m.validate(t) == null) {
+                    nb.add(t);
+                    how.add("single");
+                }
+            }
+        } else {
+            for (int j = 0; j < greedy.length; j++) {          // drop one, or swap one
+                final short[] d = new short[greedy.length - 1];
+                for (int k = 0, w = 0; k < greedy.length; k++) {
+                    if (k != j) {
+                        d[w++] = greedy[k];
+                    }
+                }
+                if (m.validate(d) == null) {
+                    nb.add(d);
+                    how.add("drop");
+                }
+                for (int i = 0; i < c; i++) {
+                    if (!in[i]) {
+                        final short[] t = greedy.clone();
+                        t[j] = (short) i;
+                        if (m.validate(t) == null) {
+                            nb.add(t);
+                            how.add("swap");
+                        }
+                    }
+                }
+            }
+            for (int i = 0; i < c; i++) {                       // add one
+                if (!in[i]) {
+                    final short[] t = java.util.Arrays.copyOf(greedy, greedy.length + 1);
+                    t[greedy.length] = (short) i;
+                    if (m.validate(t) == null) {
+                        nb.add(t);
+                        how.add("add");
+                    }
+                }
+            }
+        }
+        if (nb.isEmpty()) {
+            return null;
+        }
+        exploreCount(exploreEligible, m.family, frame.seat);
+        if (m.mode == RlSchema.M_SINGLE && c <= 3 && frame.seat >= 0 && frame.seat < 2) {
+            // small menus (keep / mulligan, play / draw, yes / no): the eligible asks by the policy's own answer
+            exploreEligibleBy.computeIfAbsent(RlSchema.familyName(m.family) + ":" + candLabel(m, greedy[0]), k -> new int[2])[frame.seat]++;
+        }
+        final java.util.SplittableRandom rnd = exploreRng(frame, 0L);
+        final double eps = cfg.explore.has("eps") ? cfg.explore.get("eps").getAsDouble() : 0.0;
+        if (rnd.nextDouble() >= eps) {
+            return null;
+        }
+        final int pick = rnd.nextInt(nb.size());
+        final short[] alt = nb.get(pick);
+        exploreCount(exploreDeviated, m.family, frame.seat);
+        final JsonObject row = new JsonObject();
+        row.addProperty("d", frame.decIdx);
+        row.addProperty("s", frame.seat);
+        row.addProperty("t", g.getPhaseHandler().getTurn());
+        row.addProperty("f", RlSchema.familyName(m.family));
+        row.addProperty("how", how.get(pick));
+        row.addProperty("n", nb.size());
+        final JsonArray from = new JsonArray(), to = new JsonArray();
+        for (short x : greedy) {
+            from.add(candLabel(m, x));
+        }
+        for (short x : alt) {
+            to.add(candLabel(m, x));
+        }
+        row.add("from", from);
+        row.add("to", to);
+        if (m.source != null) {
+            row.addProperty("src", m.source.getName());
+        }
+        exploreRows.add(row);
+        return alt;
+    }
+
+    /**
+     * With probability priorityEps another candidate of a priority menu, drawn in proportion to the policy's own
+     * probabilities (-1 = the policy's choice stands). provenOnly only.
+     */
+    private int explorePriority(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy) {
+        final double eps = cfg.explore != null && cfg.explore.has("priorityEps") ? cfg.explore.get("priorityEps").getAsDouble() : 0.0;
+        final int c = m.C();
+        if (eps <= 0 || c < 2) {
+            return -1;
+        }
+        int others = 0;
+        for (int i = 0; i < c; i++) {
+            if (i != greedy && m.cands.get(i).kind > 0) {
+                others++;
+            }
+        }
+        if (others == 0) {
+            return -1;
+        }
+        exploreCount(exploreEligible, RlSchema.F_PRIORITY, frame.seat);
+        final java.util.SplittableRandom rnd = exploreRng(frame, 0x9A1L);
+        if (rnd.nextDouble() >= eps) {
+            return -1;
+        }
+        double[] pr = null;
+        try {
+            final RlSearchClient.Scores sc = client().score(RlWire.encodeDecide(frame));
+            if (sc.status == RlWire.ST_OK && sc.probs.length == c) {
+                pr = new double[c];
+                for (int i = 0; i < c; i++) {
+                    pr[i] = sc.probs[i];
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            drop();
+        }
+        double sum = 0;
+        final double[] w = new double[c];
+        for (int i = 0; i < c; i++) {
+            w[i] = i != greedy && m.cands.get(i).kind > 0 ? (pr == null ? 1.0 : Math.max(pr[i], 1e-6)) : 0.0;
+            sum += w[i];
+        }
+        double u = rnd.nextDouble() * sum;
+        int pick = -1;
+        for (int i = 0; i < c; i++) {
+            if (w[i] > 0) {
+                pick = i;
+                u -= w[i];
+                if (u <= 0) {
+                    break;
+                }
+            }
+        }
+        if (pick < 0) {
+            return -1;
+        }
+        exploreCount(exploreDeviated, RlSchema.F_PRIORITY, frame.seat);
+        final JsonObject row = new JsonObject();
+        row.addProperty("d", frame.decIdx);
+        row.addProperty("s", frame.seat);
+        row.addProperty("t", g.getPhaseHandler().getTurn());
+        row.addProperty("f", "PRIORITY");
+        row.addProperty("n", others);
+        row.addProperty("from", greedy >= 0 && greedy < c ? candLabel(m, greedy) : "?");
+        row.addProperty("to", candLabel(m, pick));
+        if (pr != null) {
+            row.addProperty("p", Math.round(pr[pick] * 1000) / 1000.0);
+        }
+        exploreRows.add(row);
+        return pick;
+    }
+
+    /** solver-distill-cc-1109 (cfg.provenOnly): this game's decisions left to the policy, and its plain sink rows. */
+    private int provenOnlyPolicy, provenOnlyRows;
+
+    /**
+     * solver-distill-cc-1109 (cfg.provenOnly): the policy's own choice (-1), except a solver line proven at a plan point,
+     * which goes to the hook at once as in the full search. Nothing else is searched.
+     */
+    private int provenOnlyDecide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final int greedy, final List<SpellAbility> menuObjs, final PlanSearch sb) {
+        final long t0 = System.nanoTime();
+        final long bt0 = budgetStart(t0);
+        if (cfg.valueSink != null && m.C() >= 2) {
+            try {
+                final JsonObject h = new JsonObject();
+                h.addProperty("kind", "vplain");
+                provenance(h, g, frame, -1L);
+                h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+                valueRecs.add(labelRecord(h, RlWire.encodeDecide(frame)));
+                provenOnlyRows++;
+            } catch (RuntimeException e) {
+                System.err.println("[rlsearch] vplain row failed: " + e);
+            }
+        }
+        if (sb != null) {
+            final int f = sb.follow(g, me, m, menuObjs);
+            if (f >= 0) {
+                tap("follow", null, null, 0, f);
+                return f;
+            }
+            if (sb.planPoint(g, menuObjs)) {
+                final PlanSearch.Stage stage = sb.propose(g, me, m, menuObjs, t0, bt0);
+                if (stage.hook) {
+                    planRow(g, frame, stage, null, new ArrayList<Integer>(), -1, t0);
+                    planDecided(g, stage, null, t0);
+                    tap("proven_line", stage, null, 0, RlSeat.PrioritySearch.HOOK);
+                    return RlSeat.PrioritySearch.HOOK;
+                }
+            }
+        }
+        if (cfg.explore != null) {
+            final int ex = explorePriority(g, m, frame, greedy);
+            if (ex >= 0) {
+                lastReason = RlSeat.IMIT_EXPLORE;
+                tap("explore", null, null, 0, ex);
+                return ex;
+            }
+        }
+        provenOnlyPolicy++;
+        tap("proven_only", null, null, 0, -1);
+        return -1;
+    }
+
+    private void tap(final String why, final PlanSearch.Stage stage, final LookaheadSearch.GivenResult r, final int given,
+            final int answer) {
+        final Tap t = tap;
+        if (t != null) {
+            t.decided(why, stage, r, given, answer);
+        }
+    }
+
+    /** bvw-step1-build-1024: this seat's S-b plan search (null without plans), for the step-1 labeller. */
+    PlanSearch planSearchOf(final Player p) {
+        return planSearches.get(p.getId());
+    }
+
+    /** bvw-step1-build-1024: the policy's greedy DECISION for a frame, on this thread's search-service connection. */
+    RlWire.Decision policyDecide(final byte[] payload) throws IOException {
+        try {
+            return client().decide(payload, false);
+        } catch (IOException | RuntimeException e) {
+            drop();
+            throw e;
+        }
+    }
+
+    /**
+     * bvw-step1-build-1024 (review #9): open this thread's connection (HELLO; the policySha pin is checked there) and
+     * return the service's HELLO_ACK; throws when there is no service or a pin fails.
+     */
+    JsonObject connectAck() throws IOException {
+        final RlSearchClient c = client();
+        return c.ack == null ? null : c.ack.deepCopy();
+    }
+
+    /**
+     * bvw-step1-build-1024 (ruling 4): the last search's candidate {@code cand} (its index among the searched candidates)
+     * played out again in K fresh worlds seeded by {@code salt}, valued by the same leaves: its per-world values, or null.
+     */
+    double[] reevaluate(final Game g, final Player me, final int cand, final long salt, final int knownTop) {
+        return ls.reevaluate(g, me, cand, salt, knownTop);
+    }
+
+    /** bvw-step1-build-1024: the served checkpoint (HELLO_ACK policy_sha) once a connection is open, or null. */
+    String servedPolicySha() {
+        return servedPolicySha;
+    }
+
+    private volatile JsonObject servedAck;
+
+    /** bvw-step1-build-1024: the service's HELLO_ACK once a connection is open (a copy), or null. */
+    JsonObject servedAck() {
+        return servedAck;
     }
 
     /** search-bones-1015: one JSON row per S-b plan point (decision log / rows, as the S-c rows). */
@@ -1223,7 +2408,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             labels.add(l);
         }
         row.add("plans", labels);
+        if (st.setup >= 0 && st.setupNote != null) {
+            row.addProperty("setup", st.setupNote); // solver-distill-cc-1109 (only with a setup candidate)
+        }
         row.addProperty("known_top", st.knownTop);
+        if (st.horizonTurn > 0) {
+            row.addProperty("horizon_turn", st.horizonTurn); // line-adoption-1107 (only when extended)
+        }
         if (r != null) {
             row.addProperty("outcome", r.outcome);
             row.addProperty("proven", r.proven);
@@ -1254,13 +2445,490 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         row.addProperty("answer", answer);
         row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
-        rows.add(row);
+        addRow(row);
     }
 
     // ------------------------------------------------------------------------------------------------ block search
 
     private int blockAsks = 0, blockSearched = 0, blockDepartures = 0, blockCapped = 0, blockForgeMissing = 0,
             blockSampleFailures = 0;
+
+    /** keepGate (report only): mulligans the policy asked for, and those the planner's potential turned into a keep. */
+    public int keepGateAsks, keepGateKeeps;
+
+    /**
+     * keepGate: the policy's answer stands (null) unless it would mulligan and the planner sees a kill within reach from
+     * this hand; then keep. Logged either way.
+     */
+    private short[] keepGateAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        final boolean would = greedy == null || greedy.length != 1 || greedy[0] != keep;
+        boolean pot = false;
+        String err = null;
+        if (would && keep >= 0) {
+            keepGateAsks++;
+            try {
+                final ReachCfg rc = reachCfg();
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                o.window = false; // before the first turn: plan as from our first main phase
+                o.lands = false;  // only the lands in the hand: a hand that needs land draws is the policy's to judge
+                pot = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader)
+                        .potential(g, new ArrayList<>(), o, rc.maxNames, rc.sig, 12_000L);
+            } catch (RuntimeException e) {
+                err = String.valueOf(e);
+            }
+            if (pot) {
+                keepGateKeeps++;
+            }
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "keepGate");
+            row.addProperty("would_mulligan", would);
+            row.addProperty("potential", pot);
+            if (err != null) {
+                row.addProperty("error", err);
+            }
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            addRow(row);
+        }
+        return would && pot && keep >= 0 ? new short[] {keep} : null;
+    }
+
+    /** mullValue (report only): mulligans the policy asked for, those the value turned into a keep, failed asks. */
+    public int mullValueAsks, mullValueKeeps, mullValueFails;
+
+    /**
+     * mullValue: the policy's answer stands (null) unless it would mulligan and this hand's value at our first main phase
+     * is at least the mean value of sampled hands of one card fewer; then keep. Logged either way.
+     */
+    private short[] mullValueAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        final boolean would = greedy == null || greedy.length != 1 || greedy[0] != keep;
+        final int n = me.getCardsIn(forge.game.zone.ZoneType.Hand).size();
+        final int samples = cfg.mullValue.has("samples") ? cfg.mullValue.get("samples").getAsInt() : 6;
+        final double margin = cfg.mullValue.has("margin") ? cfg.mullValue.get("margin").getAsDouble() : 0.0;
+        double vKeep = Double.NaN, vMull = Double.NaN;
+        double[] vs = null;
+        String err = null;
+        final long t0 = System.nanoTime();
+        if (would && keep >= 0 && n >= 2) {
+            mullValueAsks++;
+            try {
+                final long seed0 = splitmix(uid ^ 0x4D554C4C56414CL ^ (0x9E3779B97F4A7C15L * n));
+                // the mulligan as it is played: seven new cards from our shuffled library, then one more card to the
+                // bottom than this hand gave up (the best card to give up, by the same value, one at a time)
+                final int full = Math.max(n, me.getMaxHandSize());
+                final int tucks = full - n + 1;
+                final Object keepPl = forge.ai.simulation.ForcedWinProbe.handSandbox(g, me, seed0, (c, cm) -> {
+                    final Object ctx = onCopy(c, cm);
+                    forge.ai.simulation.ForcedWinProbe.toFirstMain(c, cm);
+                    return captureLeaf(ctx, c, cm);
+                });
+                if (keepPl == null) {
+                    err = "sandbox keep";
+                }
+                final int[][] tucked = new int[samples][0];
+                final double[] best = new double[samples];
+                for (int round = 0; round < tucks && err == null; round++) {
+                    final List<Object> ps = new ArrayList<>();
+                    final List<int[]> at = new ArrayList<>();
+                    if (round == 0) {
+                        ps.add(keepPl);
+                        at.add(new int[] {-1, -1});
+                    }
+                    for (int k = 0; k < samples && err == null; k++) {
+                        for (int j = 0; j < full && err == null; j++) {
+                            boolean used = false;
+                            for (int x : tucked[k]) {
+                                used |= x == j;
+                            }
+                            if (used) {
+                                continue;
+                            }
+                            final int[] t = java.util.Arrays.copyOf(tucked[k], tucked[k].length + 1);
+                            t[t.length - 1] = j;
+                            final Object pl = forge.ai.simulation.ForcedWinProbe.handSandbox(g, me, splitmix(seed0 + 1 + k), (c, cm) -> {
+                                final Object ctx = onCopy(c, cm);
+                                forge.ai.simulation.ForcedWinProbe.redraw(c, cm, full);
+                                forge.ai.simulation.ForcedWinProbe.tuck(c, cm, t);
+                                forge.ai.simulation.ForcedWinProbe.toFirstMain(c, cm);
+                                return captureLeaf(ctx, c, cm);
+                            });
+                            if (pl == null) {
+                                err = "sandbox " + k + "/" + j;
+                            } else {
+                                ps.add(pl);
+                                at.add(new int[] {k, j});
+                            }
+                        }
+                    }
+                    if (err != null) {
+                        break;
+                    }
+                    final double[] v = leafValues(ps);
+                    if (v == null || v.length != ps.size()) {
+                        err = "values";
+                        break;
+                    }
+                    final int[] pick = new int[samples];
+                    java.util.Arrays.fill(pick, -1);
+                    java.util.Arrays.fill(best, -1.0);
+                    for (int i = 0; i < v.length; i++) {
+                        final int k = at.get(i)[0];
+                        if (k < 0) {
+                            vKeep = v[i];
+                        } else if (v[i] > best[k]) {
+                            best[k] = v[i];
+                            pick[k] = at.get(i)[1];
+                        }
+                    }
+                    for (int k = 0; k < samples; k++) {
+                        if (pick[k] < 0) {
+                            err = "no pick";
+                            break;
+                        }
+                        tucked[k] = java.util.Arrays.copyOf(tucked[k], tucked[k].length + 1);
+                        tucked[k][tucked[k].length - 1] = pick[k];
+                    }
+                }
+                if (err == null) {
+                    double sum = 0;
+                    for (int k = 0; k < samples; k++) {
+                        sum += best[k];
+                    }
+                    vMull = sum / samples;
+                    vs = new double[samples + 1];
+                    vs[0] = vKeep;
+                    System.arraycopy(best, 0, vs, 1, samples);
+                }
+            } catch (RuntimeException e) {
+                err = String.valueOf(e);
+            }
+            if (err != null) {
+                mullValueFails++;
+            }
+        }
+        final boolean keepIt = would && keep >= 0 && err == null && !Double.isNaN(vKeep) && vKeep + margin >= vMull;
+        if (keepIt) {
+            mullValueKeeps++;
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "mullValue");
+            row.addProperty("would_mulligan", would);
+            row.addProperty("kept", keepIt);
+            if (!Double.isNaN(vKeep)) {
+                row.addProperty("v_keep", Math.round(vKeep * 1e4) / 1e4);
+                row.addProperty("v_mull", Math.round(vMull * 1e4) / 1e4);
+                final JsonArray va = new JsonArray();
+                for (int k = 1; k < vs.length; k++) {
+                    va.add(Math.round(vs[k] * 1e4) / 1e4);
+                }
+                row.add("v_samples", va);
+            }
+            if (err != null) {
+                row.addProperty("error", err);
+            }
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
+            addRow(row);
+        }
+        return keepIt ? new short[] {keep} : null;
+    }
+
+    /** mullKeep (report only): mulligans the policy asked for, and those the rule turned (or, in shadow, would turn) into a keep. */
+    public int mullKeepAsks, mullKeepFires;
+    /** mullKeep.stopUnfired: this game was ended at the seat's first priority decision (the rule had not fired). */
+    public boolean mullKeepStopped;
+    /** mullKeep: the planner's deck-level verdict for this seat (null = not asked yet or no reach). */
+    private Boolean mullKeepEnder;
+
+    private boolean mullKeepFlag(final String key) {
+        return cfg.mullKeep != null && cfg.mullKeep.has(key) && cfg.mullKeep.get(key).getAsBoolean();
+    }
+
+    /**
+     * mullKeep: the policy's answer stands (null) unless it would mulligan and the engine's stock rule would keep; then
+     * keep (in shadow: logged only). Logged either way, with the stock rule's verdict on the hands the policy keeps too.
+     */
+    private short[] mullKeepAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        final boolean would = greedy == null || greedy.length != 1 || greedy[0] != keep;
+        final int n = me.getCardsIn(forge.game.zone.ZoneType.Hand).size();
+        // the engine asks its own rule with the count of cards already put back (LondonMulligan tucks at the redraw)
+        final int back = Math.max(0, me.getMaxHandSize() - n);
+        boolean stock = false;
+        String err = null;
+        try {
+            stock = forge.ai.ComputerUtil.wantMulligan(me, back);
+        } catch (RuntimeException e) {
+            err = String.valueOf(e);
+        }
+        // the deck-level verdict of the planner (once per game; null without reach): only read by the ender key
+        if (mullKeepEnder == null && cfg.reach != null) {
+            try {
+                reachCfg();
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                mullKeepEnder = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader).hasEnder(g);
+            } catch (RuntimeException e) {
+                mullKeepEnder = Boolean.FALSE;
+                err = err == null ? "ender: " + e : err;
+            }
+        }
+        final boolean gated = mullKeepFlag("ender") && !Boolean.TRUE.equals(mullKeepEnder);
+        final int seatIdx = g.getRegisteredPlayers().indexOf(me);
+        final String fkey = "force" + seatIdx;
+        final String force = cfg.mullKeep.has(fkey) && back == 0 && keep >= 0 && m.C() == 2 ? cfg.mullKeep.get(fkey).getAsString() : null;
+        if (force != null) {
+            // data generation: this seat's first keep decision is forced; the row says what the policy and the rule held
+            if (cfg.decisionLog != null || rowsWanted) {
+                final JsonObject row = new JsonObject();
+                row.addProperty("game_uid", Long.toUnsignedString(uid));
+                row.addProperty("dec_idx", frame.decIdx);
+                row.addProperty("seat", seatIdx);
+                row.addProperty("kind", "mullKeep");
+                row.addProperty("forced", force);
+                row.addProperty("would_mulligan", would);
+                row.addProperty("stock_mulligan", stock);
+                if (mullKeepEnder != null) {
+                    row.addProperty("has_ender", mullKeepEnder);
+                }
+                final JsonArray hand = new JsonArray();
+                int lands = 0;
+                int free = 0;
+                for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                    hand.add(c.getName());
+                    if (c.isLand()) {
+                        lands++;
+                    } else if (c.isArtifact() && c.getManaCost().getCMC() <= 0) {
+                        free++;
+                    }
+                }
+                row.add("hand", hand);
+                row.addProperty("lands", lands);
+                row.addProperty("free_artifacts", free);
+                row.addProperty("on_play", g.getPhaseHandler().getPlayerTurn() == me || g.getStartingPlayer() == me);
+                addRow(row);
+            }
+            return new short[] {"keep".equals(force) ? keep : (short) (1 - keep)};
+        }
+        final boolean fire = would && keep >= 0 && err == null && !stock && !gated;
+        final boolean shadow = mullKeepFlag("shadow");
+        if (would) {
+            mullKeepAsks++;
+        }
+        if (fire) {
+            mullKeepFires++;
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "mullKeep");
+            row.addProperty("would_mulligan", would);
+            row.addProperty("stock_mulligan", stock);
+            row.addProperty("fired", fire);
+            row.addProperty("kept", fire && !shadow);
+            if (mullKeepEnder != null) {
+                row.addProperty("has_ender", mullKeepEnder);
+            }
+            if (err != null) {
+                row.addProperty("error", err);
+            }
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            int free = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                } else if (c.isArtifact() && c.getManaCost().getCMC() <= 0) {
+                    free++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            row.addProperty("free_artifacts", free);
+            row.addProperty("back", back);
+            addRow(row);
+        }
+        return fire && !shadow ? new short[] {keep} : null;
+    }
+
+    /** mull-off: the keep answer, with the policy's own answer and the hand logged. */
+    private short[] keepAnswer(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final short keep = (short) m.keepIndex();
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("seat", g.getRegisteredPlayers().indexOf(me));
+            row.addProperty("kind", "alwaysKeep");
+            row.addProperty("would_mulligan", greedy == null || greedy.length != 1 || greedy[0] != keep);
+            final JsonArray hand = new JsonArray();
+            int lands = 0;
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+                hand.add(c.getName());
+                if (c.isLand()) {
+                    lands++;
+                }
+            }
+            row.add("hand", hand);
+            row.addProperty("lands", lands);
+            addRow(row);
+        }
+        return keep < 0 ? null : new short[] {keep};
+    }
+
+    private ChoiceScorer scorer;
+
+    private ChoiceScorer scorer() {
+        if (scorer == null) {
+            scorer = new ChoiceScorer(ChoiceScorer.Config.parse(cfg.choiceScorer), index, obsVersion, uid);
+            final ChoiceScorer.Config sc = scorer.config();
+            if (sc.screenNodes > 0 || sc.pile) {
+                sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();
+            }
+        }
+        return scorer;
+    }
+
+    /** choice-scorer-1106: searched-to-top cards stay known for this search's seats, from before the first card moves. */
+    public void bindChoiceScorer(final int seats) {
+        if (cfg.choiceScorer != null && liveKnow != null && scorer().config().searchedTop) {
+            liveKnow.setSearchedTopSeats(liveKnow.searchedTopSeats() | seats);
+        }
+    }
+
+    @Override
+    public boolean choiceAsk(final int family) {
+        if (exploreFamily(family)) {
+            return true;
+        }
+        if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.mullKeep != null || cfg.keepGate && cfg.reach != null)
+                && family == RlSchema.F_MULLIGAN) {
+            return true;
+        }
+        return cfg.choiceScorer != null && liveKnow != null && (scorer().config().families.contains(family)
+                || family == RlSchema.F_ORDER && scorer().config().pile);
+    }
+
+    @Override
+    public short[] decideChoice(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        if (forge.ai.simulation.LeakTrace.ON) {
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
+        }
+        final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
+        try {
+            return decideChoice0(g, me, m, frame, greedy);
+        } finally {
+            workEnd(ws);
+        }
+    }
+
+    private short[] decideChoice0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        lastReason = RlSeat.IMIT_CHOICE;
+        if (exploreFamily(m.family)) {
+            final short[] ex = exploreAnswer(g, m, frame, greedy);
+            if (ex != null) {
+                lastReason = RlSeat.IMIT_EXPLORE;
+                return ex;
+            }
+            if (!scorerAsk(m.family)) {
+                return null; // this family is here for exploration only
+            }
+        }
+        if (cfg.alwaysKeep && m.family == RlSchema.F_MULLIGAN) {
+            lastReason = 0; // a rule, not a preference
+            return keepAnswer(g, me, m, frame, greedy);
+        }
+        if (m.family == RlSchema.F_MULLIGAN) {
+            lastReason = RlSeat.IMIT_MULL;
+            if (cfg.mullKeep != null) {
+                return mullKeepAnswer(g, me, m, frame, greedy);
+            }
+            if (cfg.mullValue != null) {
+                return mullValueAnswer(g, me, m, frame, greedy);
+            }
+            return cfg.keepGate && cfg.reach != null ? keepGateAnswer(g, me, m, frame, greedy) : null;
+        }
+        final long t0 = System.nanoTime();
+        final ChoiceScorer sc = scorer();
+        if (sc.pileActive(g)) {
+            return sc.pileAnswer(g, m);
+        }
+        if (m.family == RlSchema.F_ORDER) {
+            return null;
+        }
+        final long seed = LookaheadSearch.mix(LookaheadSearch.mix(gameSeed, 0xC401CEL), frame.decIdx);
+        final String src = ChoiceScorer.srcOf(g);
+        final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed, null);
+        final List<byte[]> ps = sc.payloads(s);
+        double[] v = null;
+        if (s.unsupported == null) {
+            if (ps.isEmpty()) {
+                v = new double[0];
+            } else {
+                v = leafValues(new ArrayList<Object>(ps));
+            }
+        }
+        short[] alt = v == null ? null : sc.choose(s, v, greedy);
+        final boolean scored = v != null;
+        if (sc.config().shadow) {
+            alt = null;
+        }
+        if (alt != null && s.chosen != null && s.chosen.pileIds != null) {
+            sc.adoptPile(g, s.chosen);
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = sc.row(s, src);
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("turn", g.getPhaseHandler().getTurn());
+            row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+            row.addProperty("kind", "choice");
+            row.addProperty("family", RlSchema.familyName(m.family));
+            row.addProperty("scored", scored);
+            row.addProperty("departed", alt != null);
+            row.addProperty("total_ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
+            addRow(row);
+        }
+        return alt;
+    }
+
 
     /**
      * Lane block-search-1019 (spec key {@code blocks}; off = null at once, nothing else runs): the look-ahead over the
@@ -1276,12 +2944,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     public short[] decideBlocks(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
         if (forge.ai.simulation.LeakTrace.ON) {
-            forge.ai.simulation.LeakTrace.arm(g, me, null); // live-leak-1111 (diagnostics; off: nothing)
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
         if (cfg.blocks <= 0) {
             return null;
         }
+        final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
+        lastReason = RlSeat.IMIT_BLOCK;
+        try {
+            return decideBlocks0(g, me, m, frame, greedy, objs);
+        } finally {
+            workEnd(ws);
+        }
+    }
+
+    private short[] decideBlocks0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
+        if (cfg.blocks <= 0) {
+            return null;
+        }
         final long t0 = System.nanoTime();
+        final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
         blockAsks++;
         lastProposeMs = -1;
         if (m.family != RlSchema.F_BLOCK || greedy == null || greedy.length != m.S() || m.S() == 0
@@ -1304,8 +2987,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final long uid0 = frame.gameUid;
             try {
                 for (int j = 0; j < cfg.blockSamples; j++) {
-                    // the service seeds a sampled DECISION by (game uid, seat, dec_idx): one uid per sample
-                    frame.gameUid = splitmix(uid0 ^ (0xb10c0000L + j));
+                    // the service seeds a sampled DECISION by (game uid, seat, dec_idx): one uid per sample.
+                    // work-units-1107 (blockSampleSeed, off): the uid comes from the game's seed, not the per-run game
+                    // uid, so the same game samples the same declarations on any run
+                    frame.gameUid = splitmix((cfg.blockSampleSeed ? splitmix(gameSeed ^ 0xb10c5eedL) : uid0) ^ (0xb10c0000L + j));
                     final RlWire.Decision d = client().decide(RlWire.encodeDecide(frame), true);
                     if (d.status != RlWire.ST_OK || d.steps == null || m.validate(d.steps) != null) {
                         continue;
@@ -1359,7 +3044,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lastForced = false;
         lastForcedMiss = false;
         armForce(mark());
-        final LookaheadSearch.GivenResult r = ls.decideBlocks(g, me, plans, decls, t0);
+        final LookaheadSearch.GivenResult r = ls.decideBlocks(g, me, plans, decls, bt0); // work-units-1107: bt0
         tookForce(r);
         if (r.givenIndex.length > 0) {
             blockSearched++;
@@ -1429,7 +3114,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("prep_ms", Math.round(prepMs * 10) / 10.0);
             row.addProperty("ms", Math.round(ms * 10) / 10.0);
             row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
-            rows.add(row);
+            addRow(row);
         }
         return answer;
     }
@@ -1609,6 +3294,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public void scheduledAsk(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final String askKey, final int ordinal, final int scheduled, final int mine) {
+        if (forge.ai.simulation.LeakTrace.ON) {
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
+        }
         final LiveMacro lm = liveMacro;
         if (cfg.labelSink == null || lm == null) {
             return;
@@ -1837,7 +3525,43 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final JsonObject o = new JsonObject();
         o.add("spec", cfg.toJson());
         o.addProperty("priority_asks", priorityAsks);
+        if (cfg.workUnits) {
+            o.addProperty("work_decisions", workDecisions); // work-units-1107: only when on
+            o.addProperty("work_wall_hits", workWallHits);
+        }
         o.addProperty("searched", searchedAsks);
+        if (cfg.provenOnly) {
+            o.addProperty("proven_only_policy", provenOnlyPolicy); // solver-distill-cc-1109: only when on
+            o.addProperty("proven_only_rows", provenOnlyRows);
+        }
+        if (cfg.explore != null) {
+            final JsonObject ex = new JsonObject(); // solver-distill-cc-1109: only when on
+            final JsonObject el = new JsonObject(), dv = new JsonObject();
+            for (Map.Entry<String, int[]> e : exploreEligible.entrySet()) {
+                final JsonArray a2 = new JsonArray();
+                a2.add(e.getValue()[0]);
+                a2.add(e.getValue()[1]);
+                el.add(e.getKey(), a2);
+            }
+            for (Map.Entry<String, int[]> e : exploreDeviated.entrySet()) {
+                final JsonArray a2 = new JsonArray();
+                a2.add(e.getValue()[0]);
+                a2.add(e.getValue()[1]);
+                dv.add(e.getKey(), a2);
+            }
+            final JsonObject eb = new JsonObject();
+            for (Map.Entry<String, int[]> e : exploreEligibleBy.entrySet()) {
+                final JsonArray a2 = new JsonArray();
+                a2.add(e.getValue()[0]);
+                a2.add(e.getValue()[1]);
+                eb.add(e.getKey(), a2);
+            }
+            ex.add("eligible", el);
+            ex.add("eligible_by", eb);
+            ex.add("deviated", dv);
+            ex.add("rows", exploreRows);
+            o.add("explore", ex);
+        }
         o.addProperty("departures", departures);
         o.addProperty("stack_skipped", searchStackSkipped);
         o.addProperty("score_calls", scoreCalls);
@@ -1850,8 +3574,59 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // sc-wallguard-1009: only when the budget stopped a play-out seat, so an unbudgeted summary is unchanged
             o.addProperty("playout_budget_stops", budgetStops.get());
         }
+        if (ls.getStats().trueFairNamingRefusals > 0) {
+            // review #130 S3-3: only when a true-world re-play was refused, so every other summary is unchanged
+            o.addProperty("true_fair_naming_refusals", ls.getStats().trueFairNamingRefusals);
+        }
+        if (cfg.playoutLoopGuard > 0 || cfg.playoutMaxDecisions > 0) {
+            // step3-playout-fixes-1028: only with a step-3 play-out key, so every other summary is unchanged
+            final long[] ps = playoutSeatStats();
+            final JsonObject po = new JsonObject();
+            po.addProperty("loop_guard_hits", ps[0]);
+            po.addProperty("cap_ends", ps[1]);
+            po.addProperty("default_cap_ends", ps[2]);
+            po.addProperty("max_sent_finished", ps[3]);
+            o.add("playout_seats", po);
+        }
+        if (cfg.mullKeep != null) {
+            // solver-distill-cc-1109: only with mullKeep, so every other summary is unchanged
+            final JsonObject mk = new JsonObject();
+            mk.addProperty("asks", mullKeepAsks);
+            mk.addProperty("fires", mullKeepFires);
+            mk.addProperty("stopped", mullKeepStopped);
+            o.add("mull_keep", mk);
+        }
+        if (cfg.mullValue != null) {
+            // solver-distill-cc-1109: only with mullValue, so every other summary is unchanged
+            final JsonObject mv = new JsonObject();
+            mv.addProperty("asks", mullValueAsks);
+            mv.addProperty("keeps", mullValueKeeps);
+            mv.addProperty("fails", mullValueFails);
+            o.add("mull_value", mv);
+        }
+        if (teachLeaves.get() > 0) {
+            // solver-distill-cc-1109: only with the teacher at the leaves, so every other summary is unchanged
+            final JsonObject te = new JsonObject();
+            te.addProperty("leaves", teachLeaves.get());
+            te.addProperty("gf_hits", teachGfHits.get());
+            te.addProperty("gfs_hits", teachGfsHits.get());
+            te.addProperty("raised", teachRaised.get());
+            te.addProperty("ms", teachNanos.get() / 1_000_000L);
+            o.add("teacher", te);
+        }
         if (voided != null) {
             o.addProperty("voided", voided);
+        }
+        synchronized (this) {
+            if (bigLeafBatches > 0) {
+                // bvw-p3-batch-1023: only when a leaf batch needed more than one frame, so every other summary is unchanged
+                final JsonObject lb = new JsonObject();
+                lb.addProperty("batches", bigLeafBatches);
+                lb.addProperty("frames", bigLeafFrames);
+                lb.addProperty("messages", bigLeafMessages);
+                lb.addProperty("max_leaves", bigLeafMax);
+                o.add("leaf_big", lb);
+            }
         }
         if (obsVersion != 1) {
             // search-v2-1009: only for an obs-v2 seat, so an S1 game's summary is unchanged
@@ -1919,6 +3694,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * records to {@code cfg.labelSink} as one gzip member (r3-distill-1010).
      */
     public void flushLog() {
+        if (cfg.valueSink != null && !valueRecs.isEmpty()) {
+            final String path = cfg.valueSink.replace("{actor}", actorId == null ? "actor" : actorId)
+                    .replace("{pid}", String.valueOf(ProcessHandle.current().pid()));
+            synchronized (RlSearch.class) {
+                try {
+                    appendGame(path, valueRecs);
+                } catch (IOException e) {
+                    System.err.println("[rlsearch] value sink failed: " + e);
+                }
+            }
+            valueRecs.clear();
+        }
         if (cfg.labelSink != null && !labelRecs.isEmpty()) {
             final String path = cfg.labelSink.replace("{actor}", actorId == null ? "actor" : actorId)
                     .replace("{pid}", String.valueOf(ProcessHandle.current().pid()));
@@ -2042,6 +3829,456 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return f;
     }
 
+    /**
+     * solver-distill-cc-1109 (REACH, spec key {@code reach}): the leaf value of a play-out is lifted by the seat's reach, the
+     * planner's chance of an unopposed line by its next turn over its next unknown draw ({@link ForcedWinSolver#reach}):
+     * P = a*R + (1 - a*R) * v * (1 - b*R_opp). {@code alpha} is P(win | an unverified unopposed line), {@code oppBeta} > 0
+     * also screens the opponent (its hand in the world is the belief's sample). Generic: no card or combo knowledge.
+     */
+    public static final class ReachCfg {
+        public double alpha = 0.85;
+        public double oppBeta = 0.0;
+        public int nodes = 2000;
+        public long ms = 60;
+        public int maxNames = 40;
+        /** Cost knobs ({@link forge.ai.simulation.ForcedWinSolver.ReachOpts}; defaults = the first REACH build). */
+        public int nameNodes = -1;
+        public boolean nameOnePass, skipCapped, sig;
+        /**
+         * The gate (false = off): a decision whose root shows no potential for the seat
+         * ({@link forge.ai.simulation.ForcedWinSolver#potential}: no line within five turns as it stands or with any one
+         * library card next) skips the seat's own reach at its leaves; once a game's root shows potential the gate stays
+         * open. A deck with no combo then pays (almost) nothing for the reach.
+         */
+        public boolean gate;
+        /**
+         * With {@link #gate}: the gate is the list's, not the position's. It opens at the seat's first decision when any
+         * of its cards can end the game in the planner's model ({@link forge.ai.simulation.ForcedWinSolver#hasEnder}),
+         * with no planner search. The position gate was found closed on half of the decisions at which a Doomsday seat
+         * held a tutor (its check runs at the turn's first decision, before the land drop, on a node allowance).
+         */
+        public boolean gateEnder;
+        /** The opponent's reach at a leaf is its no-new-card line only (one screen, not one per name). */
+        public boolean oppDirect;
+        /** A line k turns from the leaf counts gamma^k (1 = off): a line now outranks the same line a turn later. */
+        public double gamma = 1.0;
+        /**
+         * The departure rule for reach (0 = off): a candidate whose reach part (alpha x reach) is never below the default's
+         * in a world both finished, and above it by this much on average, needs no z test to replace the default. A line
+         * the planner found in a world is a fact about that world, not a noisy estimate.
+         */
+        public double depart = 0.0;
+        /**
+         * Labels only (0 = off; never read to decide): the value sink's rows also carry the SAMPLED goldfish of the seat
+         * there ({@code gfs}: the mean over this many orders of its unknown library of the planner's gamma^turn with the
+         * next draws known, {@code gfs_p}: the share of orders with a line). A lone piece of a kill scores what its
+         * partners' draws are worth; the unsampled goldfish scores it 0.
+         */
+        public int sinkSamples = 0;
+        /**
+         * The teacher at the leaves (off by default): a leaf's potential is also the seat's goldfish there (leafGf: the
+         * planner's gamma^turn over five turns with the land-drop relaxation, unknown draws blank) and leafGfsW x its
+         * sampled goldfish (leafGfs orders of the seat's unknown library; every leaf of a game sees the same orders).
+         * These are the value tower's teacher labels, computed exactly. leafGfFree (the default) runs them off the work
+         * clock: a ceiling read of what a perfectly distilled value would give at no cost; false charges the pilot.
+         */
+        public boolean leafGf;
+        public int leafGfs = 0;
+        public double leafGfsW = 0.5;
+        public boolean leafGfFree = true;
+        /**
+         * The teacher's planner allowance at a leaf: nodes of one screen and of the whole call (0 = the labels' own:
+         * 1,500 and 6,000). The labels' allowance does not find a three-turn Doomsday line from a real hand (GoldfishTest
+         * tutorHandPotential: none at 1,500 or 6,000 a screen, found at 12,000-20,000).
+         */
+        public int leafGfNodes = 0;
+        public long leafGfMaxNodes = 0;
+        static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
+                "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart",
+                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree", "gateEnder", "leafGfNodes", "leafGfMaxNodes"));
+
+        public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
+            final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
+            o.nodes = nodes;
+            o.ms = ms;
+            o.maxNames = maxNames;
+            o.window = true;
+            o.nameNodes = nameNodes;
+            o.nameOnePass = nameOnePass;
+            o.skipCapped = skipCapped;
+            o.sig = sig;
+            o.gamma = gamma;
+            return o;
+        }
+
+        public static ReachCfg parse(final JsonObject o) {
+            for (String k : o.keySet()) {
+                if (!KEYS.contains(k)) {
+                    throw new IllegalArgumentException("reach: unknown key " + k);
+                }
+            }
+            final ReachCfg c = new ReachCfg();
+            if (o.has("alpha")) c.alpha = o.get("alpha").getAsDouble();
+            if (o.has("oppBeta")) c.oppBeta = o.get("oppBeta").getAsDouble();
+            if (o.has("nodes")) c.nodes = o.get("nodes").getAsInt();
+            if (o.has("ms")) c.ms = o.get("ms").getAsLong();
+            if (o.has("maxNames")) c.maxNames = o.get("maxNames").getAsInt();
+            if (o.has("nameNodes")) c.nameNodes = o.get("nameNodes").getAsInt();
+            if (o.has("nameOnePass")) c.nameOnePass = o.get("nameOnePass").getAsBoolean();
+            if (o.has("skipCapped")) c.skipCapped = o.get("skipCapped").getAsBoolean();
+            if (o.has("sig")) c.sig = o.get("sig").getAsBoolean();
+            if (o.has("gate")) c.gate = o.get("gate").getAsBoolean();
+            if (o.has("oppDirect")) c.oppDirect = o.get("oppDirect").getAsBoolean();
+            if (o.has("gamma")) c.gamma = o.get("gamma").getAsDouble();
+            if (o.has("depart")) c.depart = o.get("depart").getAsDouble();
+            if (o.has("sinkSamples")) c.sinkSamples = o.get("sinkSamples").getAsInt();
+            if (o.has("gateEnder")) c.gateEnder = o.get("gateEnder").getAsBoolean();
+            if (o.has("leafGf")) c.leafGf = o.get("leafGf").getAsBoolean();
+            if (o.has("leafGfs")) c.leafGfs = o.get("leafGfs").getAsInt();
+            if (o.has("leafGfsW")) c.leafGfsW = o.get("leafGfsW").getAsDouble();
+            if (o.has("leafGfFree")) c.leafGfFree = o.get("leafGfFree").getAsBoolean();
+            if (o.has("leafGfNodes")) c.leafGfNodes = o.get("leafGfNodes").getAsInt();
+            if (o.has("leafGfMaxNodes")) c.leafGfMaxNodes = o.get("leafGfMaxNodes").getAsLong();
+            return c;
+        }
+    }
+
+    private ReachCfg reachCfg;
+    private forge.ai.simulation.ForcedWinSolver.Config reachSolverCfg;
+    /** One affordance reader per player id for this game (as the solver's readerPerGame). */
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Object> reachReaders = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private synchronized ReachCfg reachCfg() {
+        if (reachCfg == null) {
+            reachCfg = ReachCfg.parse(cfg.reach);
+            reachSolverCfg = cfg.plans != null ? PlanSearch.Spec.parse(cfg.plans).solverConfig()
+                    : new forge.ai.simulation.ForcedWinSolver.Config();
+            reachSolverCfg.sharedReader = false; // no preload per call: the reader below is per game
+            reachSolverCfg.honestProbes = false; // the play-out world is already a belief sample
+        }
+        return reachCfg;
+    }
+
+    /** The reach of {@code p} in {@code g}, with p's known library top from tracker {@code k}. NaN = failed. */
+    double reachOf(final RlKnowledge k, final Game g, final Player p) {
+        final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, p);
+        return r.failed ? Double.NaN : r.p;
+    }
+
+    /** The seat's known library top (top first), by its knowledge. */
+    private static List<Integer> knownTopOf(final RlKnowledge k, final Player p) {
+        final List<Integer> top = new ArrayList<>();
+        if (k != null) {
+            final int st = k.seatOf(p);
+            for (forge.game.card.Card c : p.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                if (st < 0 || !k.knows(st, c)) {
+                    break;
+                }
+                top.add(c.getId());
+            }
+        }
+        return top;
+    }
+
+    /** The opponent's reach at a leaf: {@link #reachFull}, or with oppDirect its no-new-card line only. */
+    private forge.ai.simulation.ForcedWinSolver.Reach reachOpp(final RlKnowledge k, final Game g, final Player opp, final ReachCfg rc) {
+        if (!rc.oppDirect) {
+            return reachFull(k, g, opp);
+        }
+        final forge.ai.simulation.ForcedWinSolver.ReachOpts o = rc.opts();
+        o.maxNames = 0;
+        final Object reader = reachReaders.computeIfAbsent(opp.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        return forge.ai.simulation.ForcedWinSolver.withReader(opp, reachSolverCfg, reader).reach(g, knownTopOf(k, opp), o);
+    }
+
+    /** The gate: this decision's own reach is on; the game has shown potential; the root state the last check read. */
+    private volatile boolean reachOn = true;
+    private boolean reachSeen;
+    private long reachGateKey = Long.MIN_VALUE;
+    public int reachGateChecks, reachGateOff;
+
+    /** SETUP: this decision's reach gate is open (no reach, or no gate: open). */
+    boolean reachGateOpen() {
+        return cfg.reach == null || !reachCfg().gate || reachOn;
+    }
+
+    /** {@link ReachCfg#gate}: read the root's potential (once per change of the seat's zones) and set this decision's gate. */
+    private void reachGate(final Game g, final Player me) {
+        final ReachCfg rc = reachCfg();
+        if (!rc.gate) {
+            reachOn = true;
+            return;
+        }
+        if (rc.gateEnder) {
+            if (!reachSeen && reachGateKey == Long.MIN_VALUE) {
+                reachGateKey = 0L; // asked once per game
+                reachGateChecks++;
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                reachSeen = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader).hasEnder(g);
+            }
+        } else if (!reachSeen) {
+            // one check per turn and library size (a draw or a search re-reads it)
+            final long key = g.getPhaseHandler().getTurn() * 1_000L + me.getCardsIn(forge.game.zone.ZoneType.Library).size();
+            if (key != reachGateKey) {
+                reachGateKey = key;
+                reachGateChecks++;
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                reachSeen = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, reader)
+                        .potential(g, knownTopOf(liveKnow, me), o, rc.maxNames, rc.sig, 12_000L);
+            }
+        }
+        reachOn = reachSeen;
+        if (!reachOn) {
+            reachGateOff++;
+        }
+    }
+
+    @Override
+    public double reachPart(final double[] r) {
+        return cfg.reach == null || r == null || Double.isNaN(r[0]) ? 0.0 : reachCfg().alpha * r[0];
+    }
+
+    @Override
+    public double reachDepart() {
+        return cfg.reach == null ? 0.0 : reachCfg().depart;
+    }
+
+    /** {@link #reachOf}'s full result (with its cost counters). */
+    forge.ai.simulation.ForcedWinSolver.Reach reachFull(final RlKnowledge k, final Game g, final Player p) {
+        final ReachCfg rc = reachCfg();
+        final List<Integer> top = new ArrayList<>();
+        if (k != null) {
+            final int st = k.seatOf(p);
+            for (forge.game.card.Card c : p.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                if (st < 0 || !k.knows(st, c)) {
+                    break;
+                }
+                top.add(c.getId());
+            }
+        }
+        final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).reach(g, top, rc.opts());
+    }
+
+    /**
+     * The value sink's goldfish label of a position ({@link forge.ai.simulation.ForcedWinSolver#goldfish}: five turns,
+     * windows of three, the land-drop relaxation; a call cap of four screens' nodes). Labels only: never read to decide.
+     */
+    forge.ai.simulation.ForcedWinSolver.Goldfish goldfishFull(final RlKnowledge k, final Game g, final Player p) {
+        final List<Integer> top = new ArrayList<>();
+        if (k != null) {
+            final int st = k.seatOf(p);
+            for (forge.game.card.Card c : p.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                if (st < 0 || !k.knows(st, c)) {
+                    break;
+                }
+                top.add(c.getId());
+            }
+        }
+        final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+        o.maxNodes = 4L * o.nodes;
+        o.ms = 10_000L; // node caps only: the caller runs it off the work clock
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).goldfish(g, top, o);
+    }
+
+    /**
+     * Labels only: {@link #goldfishFull} over {@code samples} orders of the seat's unknown library (the next draws of each
+     * order known to the plan; the land-drop relaxation stays). The seed is the game's, the decision's and the caller's
+     * salt, so a row's label is a function of the game. Never read to decide.
+     */
+    forge.ai.simulation.ForcedWinSolver.Goldfish goldfishSampled(final RlKnowledge k, final Game g, final Player p,
+            final int samples, final long salt) {
+        final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+        o.samples = samples;
+        o.maxNodes = 4L * o.nodes * samples;
+        o.ms = 10_000L; // node caps only: the caller runs it off the work clock
+        o.seed = splitmix(uid ^ (0x9E3779B97F4A7C15L * (sinkDecIdx + 1)) ^ salt);
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).goldfish(g, knownTopOf(k, p), o);
+    }
+
+    @Override
+    public double[] leafReach(final Object copyCtx, final Game g, final Player me) {
+        if (cfg.reach == null) {
+            return null;
+        }
+        final ReachCfg rc = reachCfg();
+        final RlKnowledge k = copyCtx instanceof CopyCtx ? ((CopyCtx) copyCtx).know : null;
+        // {R_me, R_opp, then cost (report only): planner nodes, s0 capped, skipped, per-card screens, per-card capped; then
+        // the value sink's leaf row (labels only, never read to decide): goldfish, its turn, 1 = this leaf is a sink row}
+        // [10], [11]: the sink row's sampled goldfish and its share of orders with a line (labels only; reach.sinkSamples)
+        final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0, Double.NaN, Double.NaN};
+        if (rc.gate && !reachOn) {
+            out[0] = 0.0; // the root showed no potential: no screens for the seat at this decision's leaves
+        } else {
+            final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
+            out[0] = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
+            addCost(out, r);
+            if (rc.leafGf || rc.leafGfs > 0) {
+                leafTeacher(rc, k, g, me, out);
+            }
+        }
+        if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
+            final forge.ai.simulation.ForcedWinSolver.Reach ro = reachOpp(k, g, me.getOpponents().get(0), rc);
+            out[1] = ro.failed ? Double.NaN : ro.p;
+            addCost(out, ro);
+        }
+        if (cfg.valueSink != null && (out[0] > 0 || out[1] > 0 || leafSeen.getAndIncrement() % LEAF_KEEP == 0)) {
+            // a sink row: every leaf with a reach above 0 (either seat) and one in LEAF_KEEP of the others, with the
+            // seat's goldfish there
+            out[9] = 1;
+            final forge.game.WorkClock.Clock clock = forge.game.WorkClock.install(null); // label work is not the pilot's
+            try {
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gf = goldfishFull(k, g, me);
+                if (!gf.failed && !Double.isNaN(gf.g)) {
+                    out[7] = gf.g;
+                    out[8] = gf.bestTurn;
+                }
+                if (rc.sinkSamples > 0) {
+                    final forge.ai.simulation.ForcedWinSolver.Goldfish gs = goldfishSampled(k, g, me, rc.sinkSamples,
+                            leafSeen.get());
+                    if (!gs.failed && !Double.isNaN(gs.g)) {
+                        out[10] = gs.g;
+                        out[11] = gs.p;
+                    }
+                }
+            } catch (RuntimeException e) {
+                // no label
+            } finally {
+                forge.game.WorkClock.install(clock);
+            }
+        }
+        return out;
+    }
+
+    /** {@link ReachCfg#leafGf}, {@link ReachCfg#leafGfs}: the teacher's potential at this leaf joins its reach. */
+    public final java.util.concurrent.atomic.AtomicLong teachLeaves = new java.util.concurrent.atomic.AtomicLong(),
+            teachGfHits = new java.util.concurrent.atomic.AtomicLong(), teachGfsHits = new java.util.concurrent.atomic.AtomicLong(),
+            teachRaised = new java.util.concurrent.atomic.AtomicLong(), teachNanos = new java.util.concurrent.atomic.AtomicLong();
+    /** The sampled orders' salt: one for the whole game, so every leaf (and every candidate) sees the same draws. */
+    static final long LEAF_GFS_SALT = 0x51DCC1109L;
+
+    private void leafTeacher(final ReachCfg rc, final RlKnowledge k, final Game g, final Player me, final double[] out) {
+        final long t0 = System.nanoTime();
+        final forge.game.WorkClock.Clock clock = rc.leafGfFree ? forge.game.WorkClock.install(null) : null;
+        try {
+            double pot = Double.isNaN(out[0]) ? 0.0 : out[0];
+            final double before = pot;
+            teachLeaves.incrementAndGet();
+            if (rc.leafGf) {
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gf;
+                if (rc.leafGfNodes > 0) {
+                    final Object rd = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                    final forge.ai.simulation.ForcedWinSolver.GoldfishOpts go = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                    go.nodes = rc.leafGfNodes;
+                    go.maxNodes = rc.leafGfMaxNodes > 0 ? rc.leafGfMaxNodes : 4L * rc.leafGfNodes;
+                    go.ms = 60_000L; // node caps only
+                    gf = forge.ai.simulation.ForcedWinSolver.withReader(me, reachSolverCfg, rd).goldfish(g, knownTopOf(k, me), go);
+                } else {
+                    gf = goldfishFull(k, g, me);
+                }
+                if (!gf.failed && !Double.isNaN(gf.g) && gf.g > 0) {
+                    teachGfHits.incrementAndGet();
+                    pot = Math.max(pot, gf.g);
+                }
+            }
+            if (rc.leafGfs > 0) {
+                final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+                final forge.ai.simulation.ForcedWinSolver.GoldfishOpts o = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+                o.samples = rc.leafGfs;
+                o.maxNodes = 4L * o.nodes * rc.leafGfs;
+                o.ms = 10_000L; // node caps only
+                o.seed = splitmix(uid ^ LEAF_GFS_SALT);
+                final forge.ai.simulation.ForcedWinSolver.Goldfish gs = forge.ai.simulation.ForcedWinSolver
+                        .withReader(me, reachSolverCfg, reader).goldfish(g, knownTopOf(k, me), o);
+                if (!gs.failed && !Double.isNaN(gs.g) && gs.g > 0) {
+                    teachGfsHits.incrementAndGet();
+                    pot = Math.max(pot, Math.min(1.0, rc.leafGfsW * gs.g / Math.max(1e-9, rc.alpha)));
+                }
+            }
+            if (pot > before) {
+                teachRaised.incrementAndGet();
+                out[0] = pot;
+            }
+        } catch (RuntimeException e) {
+            // the leaf keeps its reach
+        } finally {
+            if (rc.leafGfFree) {
+                forge.game.WorkClock.install(clock);
+            }
+            teachNanos.addAndGet(System.nanoTime() - t0);
+        }
+    }
+
+    private static void addCost(final double[] out, final forge.ai.simulation.ForcedWinSolver.Reach r) {
+        out[2] += r.nodes;
+        out[3] += r.s0Capped ? 1 : 0;
+        out[4] += r.skipped ? 1 : 0;
+        out[5] += r.names;
+        out[6] += r.nameCapped;
+    }
+
+    /** The value sink's leaf rows: every leaf with a reach above 0 (either seat), and one in LEAF_KEEP of the others. */
+    static final int LEAF_KEEP = 8;
+    private final java.util.concurrent.atomic.AtomicLong leafSeen = new java.util.concurrent.atomic.AtomicLong();
+    /** The decision being searched (set in decide0), for the leaf rows' headers. */
+    private int sinkDecIdx = -1, sinkSeat = -1, sinkTurn = -1;
+
+    @Override
+    public void noteLeaf(final Object payload0, final double v, final double[] r) {
+        if (cfg.valueSink == null || !(payload0 instanceof byte[]) || r == null || sinkSeat < 0) {
+            return;
+        }
+        final byte[] payload = (byte[]) payload0;
+        if (r.length < 10 || r[9] != 1) {
+            return; // leafReach chose the sink rows (and computed their goldfish)
+        }
+        final boolean hit = r[0] > 0 || r[1] > 0;
+        final JsonObject h = new JsonObject();
+        h.addProperty("kind", "vleaf");
+        h.addProperty("game_uid", Long.toUnsignedString(uid));
+        h.addProperty("seed", gameSeed);
+        h.addProperty("seat", sinkSeat);
+        h.addProperty("dec_idx", sinkDecIdx);
+        h.addProperty("turn", sinkTurn);
+        h.addProperty("obs", obsVersion);
+        h.addProperty("policy_sha", servedPolicySha);
+        h.addProperty("jar_sha", jarSha);
+        h.addProperty("actor", actorId);
+        if (!Double.isNaN(v)) {
+            h.addProperty("v", v);
+        }
+        if (!Double.isNaN(r[0])) {
+            h.addProperty("reach", r[0]);
+        }
+        if (!Double.isNaN(r[1])) {
+            h.addProperty("reach_opp", r[1]);
+        }
+        if (!Double.isNaN(r[7])) {
+            h.addProperty("gf", r[7]);
+            h.addProperty("gf_turn", (int) r[8]);
+        }
+        if (r.length >= 12 && !Double.isNaN(r[10])) {
+            h.addProperty("gfs", r[10]);
+            h.addProperty("gfs_p", r[11]);
+        }
+        h.addProperty("w", hit ? 1 : LEAF_KEEP);
+        valueRecs.add(labelRecord(h, payload));
+    }
+
+    @Override
+    public double combineReach(final double v, final double[] r) {
+        if (cfg.reach == null || r == null) {
+            return v;
+        }
+        final ReachCfg rc = reachCfg();
+        final double a = Double.isNaN(r[0]) ? 0 : rc.alpha * r[0];
+        final double b = Double.isNaN(r[1]) ? 0 : rc.oppBeta * r[1];
+        return a + (1 - a) * v * (1 - b);
+    }
+
     @Override
     public Object captureLeaf(final Object copyCtx, final Game g, final Player me) {
         final CopyCtx c = (CopyCtx) copyCtx;
@@ -2056,11 +4293,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ps.add((byte[]) p);
         }
         final float[] v;
+        leafError.remove();
         try {
-            v = client().values(ps);
+            final RlSearchClient c = client();
+            final long bb = c.bigBatches, bf = c.bigFrames, bm = c.bigMessages;
+            v = c.values(ps);
+            if (c.bigBatches != bb) {
+                // bvw-p3-batch-1023: a batch above one frame, scored in several frames / messages
+                synchronized (this) {
+                    bigLeafBatches++;
+                    bigLeafFrames += c.bigFrames - bf;
+                    bigLeafMessages += c.bigMessages - bm;
+                    bigLeafMax = Math.max(bigLeafMax, ps.size());
+                }
+            }
         } catch (IOException | RuntimeException e) {
             drop();
-            System.err.println("[rlsearch] LEAVES failed: " + e);
+            // bvw-p3-batch-1023: the cause also goes to the look-ahead, whose static-fallback line names it
+            final String why = "LEAVES failed: " + e + " (" + ps.size() + " leaves, "
+                    + RlSearchClient.leavesBytes(ps, 0, ps.size()) + " leaf bytes)";
+            leafError.set(why);
+            System.err.println("[rlsearch] " + why);
             return null;
         }
         final double[] out = new double[v.length];
@@ -2068,6 +4321,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             out[i] = (Math.max(-1.0, Math.min(1.0, v[i])) + 1.0) / 2.0;
         }
         return out;
+    }
+
+    /** Why this thread's last {@link #leafValues} returned null (bvw-p3-batch-1023), or null. */
+    private final ThreadLocal<String> leafError = new ThreadLocal<>();
+    /** Leaf batches above one frame (bvw-p3-batch-1023): batches, frames, messages, the largest batch's leaves. */
+    private long bigLeafBatches = 0, bigLeafFrames = 0, bigLeafMessages = 0, bigLeafMax = 0;
+
+    @Override
+    public String leafError() {
+        return leafError.get();
     }
 
     /** The policy-piloted seat of one play-out: a bridged controller whose asks the search service answers. */
@@ -2086,10 +4349,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
         PlayoutController(final Game g, final Player p, final forge.LobbyPlayer lp, final BenchSession session,
                 final int seat, final LookaheadSearch.LeafProbe probe, final boolean keepUltimatesFirst) {
-            super(g, p, lp, session, BenchSession.Mode.BRIDGE, seat, new CallCounter());
+            this(g, p, lp, session, seat, probe, keepUltimatesFirst, new CallCounter());
+        }
+
+        private PlayoutController(final Game g, final Player p, final forge.LobbyPlayer lp, final BenchSession session,
+                final int seat, final LookaheadSearch.LeafProbe probe, final boolean keepUltimatesFirst,
+                final CallCounter calls) {
+            super(g, p, lp, session, BenchSession.Mode.BRIDGE, seat, calls);
             this.probe = probe;
             this.keepUltimatesFirst = keepUltimatesFirst;
+            this.calls = calls;
         }
+
+        /** Review #123 S3-1: every controller entry point of this seat, by method (the true-world census). */
+        final CallCounter calls;
 
         /**
          * Block search (block-search-1019): the searched declaration, declared at this copy's first declare-blockers step
@@ -2148,6 +4421,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /** step3-playout-fixes-1028: every entry of {@code match} is an exact match (not the loose may-play path). */
+    static boolean looseMatchExact(final List<Integer> match, final RlCandidates.Menu m, final List<SpellAbility> objs,
+            final LookaheadSearch.FirstAction first) {
+        for (int i : match) {
+            final int ch = choiceOf(m, i);
+            if (!(ch == 0 ? first.pass : ch > 0 && ch <= objs.size() && first.matches(objs.get(ch - 1)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * Lane copy-fidelity-1010 (diagnostics, appended to the failure): what the play-out's first menu offered from the
      * searched candidate's card, and where the copy stood.
@@ -2193,8 +4478,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         for (int s = 0; s < ctl.length; s++) {
             ctl[s] = s == seat ? "rl:playout" : "forge";
         }
-        final RlSeat.Config sc = new RlSeat.Config();
-        sc.mode = "eval";
+        final RlSeat.Config sc = playoutSeatConfig(first);
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
@@ -2232,7 +4516,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return ((PlanSearch.Recorder) first.recorder).sample(frame, s);
             }
         };
-        final RlSeat rs = new RlSeat(cc.feat, ep, sc, seed, ctl, false);
+        final RlSeat rs = new RlSeat(cc.feat, ep, sc, seed, ctl, TEST_LEAK_PRIV);
         rs.setGame(g);
         rs.seenNames = cc.know::opponentSeen;
         final String[] why = {null};
@@ -2269,6 +4553,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                             match.add(i);
                         }
                     }
+                }
+                if (match.size() > 1 && first.mayPlayUnique && !looseMatchExact(match, m, objs, first)) {
+                    // step3-playout-fixes-1028 (review #130 S3-2): a re-play's loose may-play match must be unique
+                    why[0] = "the searched candidate is ambiguous in the play-out's menu (" + match.size()
+                            + " may-play entries)" + menuMiss(gg, m, objs, first);
+                    return -1;
                 }
                 if (match.isEmpty()) {
                     why[0] = "the searched candidate is not in the play-out's menu" + menuMiss(gg, m, objs, first);
@@ -2340,9 +4630,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         session.setLocalAnswerer(rs);
         final PlayoutController pc = new PlayoutController(g, me, me.getController().getLobbyPlayer(), session, seat, probe,
                 (cfg.copyFidelity == 1 || cfg.copyFidelity == 2 && ls.fidelityPass()) && !first.pass && !planned);
+        census(rs, pc); // review #123 S3-1: true-world re-plays only (a no-op otherwise)
         if (first.plan instanceof PlanSearch.LinePlan) {
             // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
-            pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first);
+            pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first,
+                    lineChoicesForge(), lineKeepOn());
         }
         pc.forcedBlocks = first.block;
         return new LookaheadSearch.PlayoutSeat() {
@@ -2353,6 +4645,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
             @Override
             public String failure() {
+                noteSeatEnd(rs, sc);
                 if (rs.fatal != null) {
                     return rs.fatal;
                 }
@@ -2362,5 +4655,254 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return rs.voidReason;
             }
         };
+    }
+
+    // ------------------------------------------------------------------------------------------------ S2T (step 2)
+
+    /**
+     * Tests only (bvw-step2-fork-1027, the honesty test's mutant; false otherwise): the play-out policy seats' frames carry
+     * the privileged block (the hidden cards). The honesty test must FAIL with it on. Never set outside tests.
+     */
+    public static volatile boolean TEST_LEAK_PRIV = false;
+
+    /**
+     * bvw-step2-fork-1027 (S2T, spec key {@code opponent} "policy"): the play-out opponent's seat, the same policy and
+     * service as ours: a bridged controller whose asks go to the service as DECIDE frames of ITS OWN observation (its
+     * seat's knowledge in the copy's tracker, its own featurizer), greedy like our play-out seat (or sampled with
+     * {@code playoutSample}), no first action, no plan, no leaf probe, no solver. Its faults fail the play-out.
+     */
+    @Override
+    public LookaheadSearch.PlayoutSeat opponentSeat(final Object copyCtx, final Game g, final Player opp, final long seed) {
+        return opponentSeat(copyCtx, g, opp, seed, null);
+    }
+
+    /**
+     * As above; {@code first} is the play-out's own first action (its decision's budget and whether it is an OPR
+     * roll-out), null = none (the step-2 seat exactly).
+     */
+    @Override
+    public LookaheadSearch.PlayoutSeat opponentSeat(final Object copyCtx, final Game g, final Player opp, final long seed,
+            final LookaheadSearch.FirstAction first) {
+        final CopyCtx cc = (CopyCtx) copyCtx;
+        final int seat = g.getRegisteredPlayers().indexOf(opp);
+        if (seat < 0) {
+            return null;
+        }
+        final BenchSession session = new BenchSession(new JsonRpcChannel(InputStream.nullInputStream(),
+                OutputStream.nullOutputStream()));
+        session.setEncodeState(false);
+        session.setLiveGame(g);
+        session.setKnowledgeObserver(cc.know);
+        final String[] ctl = new String[g.getRegisteredPlayers().size()];
+        for (int s = 0; s < ctl.length; s++) {
+            ctl[s] = s == seat ? "rl:playout-opp" : "forge";
+        }
+        final RlSeat.Config sc = playoutSeatConfig(first);
+        // step3-playout-fixes-1028 (playoutMaxDecisions; off: no stop, as step 2): the decision's budget stop
+        final boolean stopOnBudget = cfg.playoutMaxDecisions > 0 && first != null;
+        final RlFeaturizer feat = new RlFeaturizer(index);
+        feat.setVersion(obsVersion);
+        feat.setKnowledge(cc.know);
+        final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
+            @Override
+            public RlWire.Decision decide(final byte[] p) throws IOException {
+                if (stopOnBudget) {
+                    budgetStop(first);
+                }
+                try {
+                    return client().decide(p, cfg.playoutSample);
+                } catch (IOException | RuntimeException e) {
+                    drop();
+                    throw e;
+                }
+            }
+
+            @Override
+            public void record(final byte[] p) throws IOException {
+                throw new IOException("a play-out seat never records");
+            }
+        };
+        final RlSeat rs = new RlSeat(feat, ep, sc, seed, ctl, TEST_LEAK_PRIV);
+        rs.setGame(g);
+        rs.seenNames = cc.know::opponentSeen;
+        session.setLocalAnswerer(rs);
+        final PlayoutController pc = new PlayoutController(g, opp, opp.getController().getLobbyPlayer(), session, seat,
+                null, false);
+        census(rs, pc); // review #123 S3-1
+        synchronized (this) {
+            opponentSeats++;
+        }
+        return new LookaheadSearch.PlayoutSeat() {
+            @Override
+            public PlayerControllerAi controller() {
+                return pc;
+            }
+
+            @Override
+            public String failure() {
+                noteSeatEnd(rs, sc);
+                return rs.fatal != null ? rs.fatal : rs.voidReason;
+            }
+        };
+    }
+
+    /** S2T: opponent policy seats built (play-outs whose opponent was the policy). */
+    private int opponentSeats = 0;
+
+    // ------------------------------------------------------------------------------------------------ step 3 play-out seats
+
+    /**
+     * step3-playout-fixes-1028: a search play-out seat's run-level knobs (ours and the opponent's). With every key off
+     * these are the step-2 seat's exactly ({@code new RlSeat.Config()}, mode eval: no loop guard, 3,000 decisions).
+     * {@code playoutLoopGuard} K puts the "Cancel Search?" guard on the seat; {@code playoutMaxDecisions} N caps the
+     * seat at N sent decisions, except in an OPR roll-out (12 turns to the end of a game; its own turn and step caps).
+     */
+    RlSeat.Config playoutSeatConfig(final LookaheadSearch.FirstAction first) {
+        final RlSeat.Config sc = new RlSeat.Config();
+        sc.mode = "eval";
+        if (cfg.playoutLoopGuard > 0) {
+            sc.loopGuard = cfg.playoutLoopGuard;
+            sc.loopGuardLog = false; // counted in the summary instead of one stderr line per hit
+        }
+        if (cfg.playoutMaxDecisions > 0 && (first == null || !first.oprRollout)) {
+            sc.maxDecisions = cfg.playoutMaxDecisions;
+        }
+        return sc;
+    }
+
+    /** step3-playout-fixes-1028: loop-guard answers, reduced-cap ends, and the most decisions a finished seat sent. */
+    private final java.util.concurrent.atomic.AtomicLong playoutGuardHits = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong playoutCapEnds = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong playoutDefaultCapEnds = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicInteger playoutMaxSent = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.Set<RlSeat> playoutSeatsNoted = java.util.Collections.newSetFromMap(
+            new java.util.WeakHashMap<>());
+
+    /** Once per seat (failure() may be read more than once): its counts into the step-3 play-out statistics. */
+    private void noteSeatEnd(final RlSeat rs, final RlSeat.Config sc) {
+        synchronized (playoutSeatsNoted) {
+            if (!playoutSeatsNoted.add(rs)) {
+                return;
+            }
+        }
+        playoutGuardHits.addAndGet(rs.loopGuardHits());
+        if ("max_decisions".equals(rs.voidReason)) {
+            (sc.maxDecisions < new RlSeat.Config().maxDecisions ? playoutCapEnds : playoutDefaultCapEnds).incrementAndGet();
+        } else if (rs.voidReason == null && rs.fatal == null) {
+            playoutMaxSent.accumulateAndGet(rs.totalSent(), Math::max);
+        }
+    }
+
+    /** This search's spec. */
+    public Config config() {
+        return cfg;
+    }
+
+    /** Tests and the summary: {guard hits, reduced-cap ends, default-cap ends, most decisions of a finished seat}. */
+    public long[] playoutSeatStats() {
+        return new long[] {playoutGuardHits.get(), playoutCapEnds.get(), playoutDefaultCapEnds.get(), playoutMaxSent.get()};
+    }
+
+    /** S2T: the opponent policy seats built so far (tests). */
+    public synchronized int opponentSeats() {
+        return opponentSeats;
+    }
+
+    /**
+     * bvw-step2-fork-1027 (S2T logging): the leaves also take the opponent's own frame (v_o) for the leaf pairs; with
+     * {@code leafSym} off the decision's leaves are step 1's exactly and v_o comes from a second call afterwards.
+     */
+    void setLeafPairs(final boolean on) {
+        ls.getConfig().leafOpp = on || cfg.leafSym;
+    }
+
+    /**
+     * bvw-step2-fork-1027: {@link LookaheadSearch#replayCandidate} of the last search's candidate {@code cand}; a
+     * true-world re-play (T, OPR) also records the census of its play-out seats (review #123 S3-1).
+     */
+    LookaheadSearch.Replay replayCandidate(final Game g, final Player me, final int cand, final long salt, final int knownTop,
+            final int worlds, final int mode, final int capTurns, final int capSteps) {
+        if (mode == LookaheadSearch.WORLD_BELIEF) {
+            return ls.replayCandidate(g, me, cand, salt, knownTop, worlds, mode, capTurns, capSteps);
+        }
+        final java.util.Map<String, Integer> forge = new TreeMap<>(), asked = new TreeMap<>();
+        final List<CallCounter> counters = new ArrayList<>();
+        censusForge = forge;
+        censusAsked = asked;
+        censusCounters = counters;
+        final LookaheadSearch.Replay r;
+        try {
+            r = ls.replayCandidate(g, me, cand, salt, knownTop, worlds, mode, capTurns, capSteps);
+        } finally {
+            censusForge = null;
+            censusAsked = null;
+            censusCounters = null;
+        }
+        // the controller entry points that never asked a policy seat (Forge AI answered them): calls minus asks
+        final java.util.Map<String, Integer> calls = new TreeMap<>(), refused = new TreeMap<>();
+        synchronized (counters) {
+            for (CallCounter cc : counters) {
+                final JsonObject cj = cc.toJson();
+                for (Map.Entry<String, JsonElement> e : cj.getAsJsonObject("calls").entrySet()) {
+                    calls.merge(e.getKey(), e.getValue().getAsInt(), Integer::sum);
+                }
+                // a policy answer the bridge refused: Forge AI answered it
+                for (Map.Entry<String, JsonElement> e : cj.getAsJsonObject("delegatedRefused").entrySet()) {
+                    refused.merge(e.getKey(), e.getValue().getAsInt(), Integer::sum);
+                }
+            }
+        }
+        final JsonObject fa = new JsonObject(), fc = new JsonObject();
+        synchronized (forge) {
+            for (Map.Entry<String, Integer> e : forge.entrySet()) {
+                fa.addProperty(e.getKey(), e.getValue());
+            }
+            for (Map.Entry<String, Integer> e : calls.entrySet()) {
+                final int n = e.getValue() - asked.getOrDefault(e.getKey(), 0);
+                if (n > 0) {
+                    fc.addProperty(e.getKey(), n);
+                }
+            }
+        }
+        final JsonObject fr = new JsonObject();
+        for (Map.Entry<String, Integer> e : refused.entrySet()) {
+            fr.addProperty(e.getKey(), e.getValue());
+        }
+        final JsonObject o = new JsonObject();
+        o.add("asks", fa);
+        o.add("calls", fc);
+        o.add("refused", fr);
+        r.forge = o;
+        return r;
+    }
+
+    /** Review #123 S3-1: the census of the true-world re-play in progress (null otherwise; decision thread sets it). */
+    private volatile java.util.Map<String, Integer> censusForge, censusAsked;
+    private volatile List<CallCounter> censusCounters;
+
+    private void census(final RlSeat rs, final PlayoutController pc) {
+        final java.util.Map<String, Integer> f = censusForge, a = censusAsked;
+        final List<CallCounter> cs = censusCounters;
+        if (f == null || a == null || cs == null) {
+            return;
+        }
+        rs.forgeLog = f;
+        rs.askLog = a;
+        synchronized (cs) {
+            cs.add(pc.calls);
+        }
+    }
+
+    /**
+     * Review #123 S2-1: some seat knows this library card of the live position (a fork of the replay's seat knowledge,
+     * so the live tracker is never settled from here), for the T re-play's library shuffle.
+     */
+    @Override
+    public java.util.function.Predicate<forge.game.card.Card> knownToAnySeat(final Game live) {
+        if (liveKnow == null) {
+            return null;
+        }
+        final RlKnowledge k = liveKnow.forkFor(live);
+        return c -> k.knows(0, c) || k.knows(1, c);
     }
 }

@@ -32,6 +32,8 @@ import forge.game.spellability.SpellAbility;
  *       one turn the seat passes ({@code cap_hits}); a game is void after {@code maxDecisions} sent decisions.</li>
  *   <li><b>Refusals:</b> when the bridge (or {@code CombatUtil}) refuses a decoded answer, Forge decides; the dec_idx
  *       goes into {@code overridden} (GAME_END and the tape), counted per family in {@code census.refused}.</li>
+ *   <li><b>Search changes</b> (sdcc-solver-loop-1111): a decision whose answer an attached search changed away from the
+ *       policy's own is in {@code overridden} too ({@link #searchOverridden}); nothing changes without a search.</li>
  *   <li><b>Record mode:</b> the seat delegates EVERY ask, so the game is Forge Default's own; at each non-trivial
  *       Phase A ask it builds the DECIDE layout, and when the bridge echoes Forge's answer it maps the answer to
  *       candidate steps and sends a RECORD frame. A priority echo also yields one TARGETS row per targeting ability of
@@ -65,9 +67,15 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         public int maxDecisions = 3000;
         /**
          * Live play (lane forge-live-fixes-1012; 0 = off, the default, and then nothing changes): the "Cancel Search?"
-         * loop guard's K ({@link RlLoopGuard}). Set only by the live seat ({@link RlLiveSeat.Spec#loopGuard}).
+         * loop guard's K ({@link RlLoopGuard}). Set by the live seat ({@link RlLiveSeat.Spec#loopGuard}), the bench's main
+         * seat, and (step3-playout-fixes-1028, spec key {@code playoutLoopGuard}) the search's play-out seats.
          */
         public int loopGuard = 0;
+        /**
+         * step3-playout-fixes-1028: the guard's one stderr line per answer (true, the default, as before); a search
+         * play-out seat counts its answers instead ({@link #loopGuardHits}).
+         */
+        public boolean loopGuardLog = true;
     }
 
     /** Thrown out of the game thread's answer path never; the runner reads {@link #fatal} instead. */
@@ -129,6 +137,433 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     /** S1: priority decisions whose candidate the search replaced. */
     public int searchDepartures = 0;
 
+    /**
+     * sdcc-solver-loop-1111: decisions whose answer the search changed away from the policy's own (a priority departure,
+     * a followed line step or an exploration deviation; a block-search or choice-scorer departure; a window's scheduled
+     * answer). Their dec_idx are also in {@link #overridden}, as a plan hook's handed-over priority is, so a learner
+     * never trains the played answer as the policy's choice (the server's row holds the policy's own steps and log-prob).
+     * Always 0 without a search.
+     */
+    public int searchOverridden = 0;
+
+    private void searchOverride(final int decIdx) {
+        if (overridden.isEmpty() || overridden.get(overridden.size() - 1) != decIdx) {
+            overridden.add(decIdx);
+            searchOverridden++;
+        }
+    }
+
+    // ---- sdcc-imit-1111: imitation labels (only with a search whose spec sets {@code imit}; else nothing changes)
+    /**
+     * The generic kind of search component that chose a played answer (never a card or a rule): a proven line's step
+     * played by the plan hook; the priority look-ahead (a departure or a followed plan step); the choice scorer (a card
+     * menu, a pile); the block search; a mulligan evaluator; an exploration deviation (random); a choice window's
+     * scheduled answer. A learner imitates the first five at most (mtgx appo: learner.imit); refusals, guard vetoes and
+     * delegations carry no label.
+     */
+    public static final int IMIT_LINE = 1, IMIT_SEARCH = 2, IMIT_CHOICE = 3, IMIT_BLOCK = 4, IMIT_MULL = 5,
+            IMIT_EXPLORE = 6, IMIT_WINDOW = 7;
+    /**
+     * sdcc-imit2-1111: a choice ask inside a followed line (a card pick, a pile or an order, targets, a confirm, the
+     * line's attack, a cost's cards), answered by the plan hook or, as in the copies that verified the line, by Forge AI.
+     */
+    public static final int IMIT_LINECHOICE = 8;
+    /** dec_idx → {reason, the steps played}: overridden decisions whose played answer a search component chose. */
+    private final Map<Integer, Object[]> imit = new TreeMap<>();
+    /** Line priorities the plan hook played that got a row of their own, and those whose answer no candidate matched. */
+    public int imitHookRows = 0, imitMapFailed = 0;
+    /** sdcc-imit2-1111: a followed line's choice asks (and its steps' targets) that got a row of their own. */
+    public int imitChoiceRows = 0;
+    /** sdcc-imit2-1111: the dec_idx of every row a followed line added (hook priorities and choice asks), in order. */
+    public final List<Integer> imitAdded = new ArrayList<>();
+    /** The priority just handed to the plan hook: {dec_idx, menu, the tape row, the observation} (null = none). */
+    private Object[] imitHandoff;
+
+    private boolean imitOn(final int seat) {
+        final PrioritySearch s = searchFor(seat);
+        return s != null && s.imit();
+    }
+
+    /** True when a search of this game labels its answers (GAME_END and the tape then carry {@code imit}). */
+    public boolean imitOn() {
+        return search != null && search.imit() || searchAlt != null && searchAlt.imit();
+    }
+
+    private void imitMark(final int seat, final int decIdx, final int reason, final short[] steps) {
+        if (reason > 0 && imitOn(seat)) {
+            imit.put(decIdx, new Object[] {reason, steps.clone()});
+        }
+    }
+
+    /** {@code [[dec_idx, reason, [steps...]], ...]} in dec_idx order (see {@link #IMIT_LINE}). */
+    public JsonArray imitJson() {
+        final JsonArray out = new JsonArray();
+        for (Map.Entry<Integer, Object[]> e : imit.entrySet()) {
+            final JsonArray row = new JsonArray();
+            row.add(e.getKey());
+            row.add((Integer) e.getValue()[0]);
+            final JsonArray st = new JsonArray();
+            for (short x : (short[]) e.getValue()[1]) {
+                st.add(x);
+            }
+            row.add(st);
+            out.add(row);
+        }
+        return out;
+    }
+
+    @Override
+    public boolean wantsHook(final Game g, final Player player) {
+        if (g != game || g.isGameOver() || voidReason != null) {
+            return false;
+        }
+        final int seat = seatOf(g, player);
+        return seat >= 0 && seat < roles.length && roles[seat] == Role.RL && imitOn(seat);
+    }
+
+    /**
+     * sdcc-imit2-1111: one ask of a followed line that the seat is not asked (the plan hook or Forge AI answers it),
+     * as the row it becomes: the frame built before the answer, its tape row once sent.
+     */
+    private static final class Shadow {
+        final int seat;
+        final RlCandidates.Menu m;
+        final RlFeaturizer.Obs obs;
+        final RlWire.Decide frame;
+        /** dec_idx once sent (-1 before); the tape row; the policy's own answer was not a legal row. */
+        int dec = -1;
+        JsonArray row;
+        boolean dead;
+
+        Shadow(final int seat, final RlCandidates.Menu m, final RlFeaturizer.Obs obs, final RlWire.Decide frame) {
+            this.seat = seat;
+            this.m = m;
+            this.obs = obs;
+            this.frame = frame;
+        }
+    }
+
+    private static String imitFam(final int family) {
+        return family == RlSchema.F_PRIORITY ? "prio" : "choice." + RlSchema.familyName(family);
+    }
+
+    /**
+     * An ask of a followed line that the plan hook (or, for the line's choice asks, Forge AI) is about to answer without
+     * asking the seat: the DECIDE frame of that ask, built before the answer (null = no row: a family the seat does not
+     * answer, a trivial, unposable or capped menu, or the decision cap). Census notes {@code imit.*} say which.
+     */
+    @Override
+    public Object hookPrepare(final Game g, final Player player, final String method, final String kind,
+            final JsonObject body, final Object objs) {
+        if (!wantsHook(g, player) || body == null) {
+            return null;
+        }
+        final int seat = seatOf(g, player);
+        final int family = RlSchema.familyOf(kind, method);
+        if (!RlSchema.isLearned(family)) {
+            note("imit.choice.unlearned." + method);
+            return null;
+        }
+        final String f = imitFam(family);
+        note("imit." + f + ".asks");
+        if (decIdx >= cfg.maxDecisions) {
+            note("imit." + f + ".decCap");
+            return null;
+        }
+        final RlCandidates.Menu m = RlCandidates.build(g, player, method, kind, body, objs,
+                family == RlSchema.F_NAME ? seen(g, player, seat) : null);
+        if (m == null || m.unposable != null) {
+            note("imit." + f + ".unposed");
+            return null;
+        }
+        if (m.trivial) {
+            note("imit." + f + ".trivial");
+            return null;
+        }
+        if (m.C() > RlSchema.C_MAX || m.S() > RlSchema.S_MAX) {
+            note("imit." + f + ".capped");
+            return null;
+        }
+        final RlFeaturizer.Obs obs = feat.observe(g, player, m.mullK, priv, m);
+        m.bind(obs, feat, player);
+        return new Shadow(seat, m, obs, frame(seat, g, m, obs));
+    }
+
+    /**
+     * The prepared frame is sent (the server's row holds the policy's own sample and log-prob, as every overridden
+     * row's) and the decision is overridden; the tape row holds the policy's answer until {@link #hookAnswered} names
+     * the one played.
+     */
+    @Override
+    public void hookSend(final Game g, final Player player, final Object prepared) {
+        if (g == game && voidReason == null && prepared instanceof Shadow) {
+            send((Shadow) prepared);
+        }
+    }
+
+    private boolean send(final Shadow s) {
+        if (s.dec >= 0) {
+            return true;
+        }
+        if (s.dead || decIdx >= cfg.maxDecisions) {
+            s.dead = true;
+            return false;
+        }
+        s.frame.decIdx = decIdx;
+        final RlWire.Decision d = decide(s.frame);
+        if (d == null) {
+            s.dead = true;
+            return false;
+        }
+        // neither the played answer (not known yet) nor an illegal policy answer is a row: the frame was sent, so the
+        // decision is still counted, with no steps
+        final boolean ok = d.status == RlWire.ST_OK && s.m.validate(d.steps) == null;
+        unkNames += s.obs.unknownNames;
+        c(s.m.family).asks++;
+        noteSent(s.seat, s.m.family, s.m, s.frame, ok ? d.steps : new short[0]);
+        noteVersion(s.seat, controllers[s.seat].substring(3), d.policyVersion);
+        searchOverride(s.frame.decIdx);
+        s.dec = s.frame.decIdx;
+        s.row = dec.get(dec.size() - 1).getAsJsonArray();
+        imitAdded.add(s.dec);
+        if (s.m.family == RlSchema.F_PRIORITY) {
+            imitHookRows++;
+        } else {
+            imitChoiceRows++;
+        }
+        note("imit." + imitFam(s.m.family) + ".rows");
+        return true;
+    }
+
+    /** The answer played on a sent shadow row: the tape row's steps and the label. */
+    private void label(final Shadow s, final short[] steps, final int reason) {
+        final JsonArray st = new JsonArray();
+        for (short x : steps) {
+            st.add(x);
+        }
+        s.row.set(4, st);
+        imitMark(s.seat, s.dec, reason, steps);
+        note("imit." + imitFam(s.m.family) + ".labelled");
+    }
+
+    private void unmatched(final int family, final String why, final JsonObject echo) {
+        imitMapFailed++;
+        note("imit." + imitFam(family) + ".unmatched." + why);
+        if (IMIT_DEBUG) {
+            System.err.println("[imit] unmatched " + RlSchema.familyName(family) + " " + why + " " + echo);
+        }
+    }
+
+    /** Diagnosis only (-Drl.imitDebug=true): each answer of a followed line that no candidate names, to stderr. */
+    static final boolean IMIT_DEBUG = Boolean.getBoolean("rl.imitDebug");
+
+    /** How the bridge found a labelled line step on the menu (the echo's {@code match}), as a census note. */
+    private void noteMatch(final JsonObject echo) {
+        if (echo != null && echo.has("match") && !echo.get("match").isJsonNull()) {
+            note("imit.prio.match." + echo.get("match").getAsString());
+        }
+    }
+
+    /** Why a priority echo names no candidate (generic: the kind of mismatch, never a card). */
+    private static String whyPriority(final JsonObject echo, final short[] steps) {
+        if (echo != null && echo.has("why")) {
+            return echo.get("why").getAsString();
+        }
+        if (echo == null || !echo.has("choice") || echo.get("choice").isJsonNull()) {
+            return "offMenu";
+        }
+        return steps == null ? "x" : "invalid";
+    }
+
+    @Override
+    public void hookAnswered(final Game g, final Player player, final Object prepared, final JsonObject hookAnswer) {
+        hookAnswered(g, player, prepared, hookAnswer, null);
+    }
+
+    /**
+     * The answer played to an ask of a followed line, in the ask's answer shape. {@code prepared} =
+     * {@link #hookPrepare}'s frame: it is sent now unless {@link #hookSend} already did, the decision is overridden, and
+     * when the menu names the answer it is labelled {@link #IMIT_LINE} (a priority) or {@link #IMIT_LINECHOICE} (any
+     * other ask); a two-frame ask's second frame is a row of its own. Null = the priority the seat's search just handed
+     * over: that decision's label. {@code decision}: a priority's ability as the line prepared it; its targets become
+     * TARGETS rows (the seat would have been asked them; the line set them itself).
+     */
+    @Override
+    public void hookAnswered(final Game g, final Player player, final Object prepared, final JsonObject hookAnswer,
+            final Object decision) {
+        if (g != game || voidReason != null) {
+            return;
+        }
+        if (prepared == null) {
+            final Object[] h = imitHandoff;
+            imitHandoff = null;
+            if (h == null) {
+                return;
+            }
+            final RlCandidates.Menu m = (RlCandidates.Menu) h[1];
+            final short[] steps = priorityXSet(m, hookAnswer) ? m.fromEcho(hookAnswer) : null;
+            imitFloatHandoff = null;
+            if (steps == null || m.validate(steps) != null) {
+                final String why = whyPriority(hookAnswer, steps);
+                unmatched(RlSchema.F_PRIORITY, why, hookAnswer);
+                if ("mana".equals(why)) {
+                    // the row exists (the seat's own DECIDE): it may take the action the mana is floated for
+                    final Shadow s = new Shadow(seatOf(g, player), m, (RlFeaturizer.Obs) h[3], null);
+                    s.dec = (Integer) h[0];
+                    s.row = (JsonArray) h[2];
+                    imitFloatHandoff = s;
+                }
+                return;
+            }
+            final JsonArray st = new JsonArray();
+            for (short x : steps) {
+                st.add(x);
+            }
+            ((JsonArray) h[2]).set(4, st); // the tape row carries the answer played
+            final int seat = seatOf(g, player);
+            imitMark(seat, (Integer) h[0], IMIT_LINE, steps);
+            note("imit.prio.labelled");
+            noteMatch(hookAnswer);
+            lineTargets(seat, g, player, (RlFeaturizer.Obs) h[3], decision);
+            return;
+        }
+        if (!(prepared instanceof Shadow)) {
+            return;
+        }
+        final Shadow s = (Shadow) prepared;
+        if (!send(s)) {
+            return;
+        }
+        final RlCandidates.Menu m = s.m;
+        if (RlSchema.isTwoFrame(m.family)) {
+            final Object[] two = m.fromEchoTwoFrame(hookAnswer);
+            if (two == null) {
+                unmatched(m.family, "map", hookAnswer);
+                return;
+            }
+            label(s, (short[]) two[0], IMIT_LINECHOICE);
+            final RlCandidates.Menu m2 = (RlCandidates.Menu) two[1];
+            if (m2 != null && !m2.trivial && m2.unposable == null && m2.C() <= RlSchema.C_MAX) {
+                m2.bind(s.obs, feat, player);
+                final Shadow s2 = new Shadow(s.seat, m2, s.obs, frame(s.seat, g, m2, s.obs));
+                if (send(s2)) {
+                    label(s2, (short[]) two[2], IMIT_LINECHOICE);
+                }
+            }
+            return;
+        }
+        final boolean prio = m.family == RlSchema.F_PRIORITY;
+        short[] steps = !prio || priorityXSet(m, hookAnswer) ? m.fromEcho(hookAnswer) : null;
+        if (steps != null && m.validate(steps) != null) {
+            steps = null;
+        }
+        if (steps == null && m.family == RlSchema.F_TARGETS && decision instanceof SpellAbility) {
+            // a targeted spell or ability on the stack: the echo's id is not the menu's; the objects are
+            steps = m.fromTargetsOf((SpellAbility) decision);
+            if (steps != null) {
+                note("imit.choice.TARGETS.byObject");
+            }
+        }
+        if (steps == null) {
+            // "empty": the answerer picked nothing where the ask requires a pick (no candidate set names that)
+            final boolean empty = !prio && hookAnswer != null && hookAnswer.has("choices")
+                    && hookAnswer.get("choices").isJsonArray() && hookAnswer.getAsJsonArray("choices").size() == 0;
+            unmatched(m.family, prio ? whyPriority(hookAnswer, steps) : empty ? "empty" : "map", hookAnswer);
+            return;
+        }
+        label(s, steps, prio ? IMIT_LINE : IMIT_LINECHOICE);
+        if (prio) {
+            noteMatch(hookAnswer);
+            lineTargets(s.seat, g, player, s.obs, decision);
+        }
+    }
+
+    /**
+     * A line priority answered with a mana ability takes the line's next action as its label when its own menu names
+     * that action ({@code prepared}: that priority's frame, or null for the handed-over one). The mana was floated to
+     * pay it, and the seat's action space has no mana abilities: there the answer at that priority is the action.
+     */
+    @Override
+    public void hookRelabel(final Game g, final Player player, final Object prepared, final JsonObject answer) {
+        if (g != game || voidReason != null) {
+            return;
+        }
+        final Shadow s = prepared == null ? imitFloatHandoff : prepared instanceof Shadow ? (Shadow) prepared : null;
+        if (prepared == null) {
+            imitFloatHandoff = null;
+        }
+        if (s == null || s.dec < 0 || imit.containsKey(s.dec)) {
+            return;
+        }
+        short[] steps = priorityXSet(s.m, answer) ? s.m.fromEcho(answer) : null;
+        if (steps == null || steps.length != 1 || s.m.validate(steps) != null) {
+            note("imit.prio.float.offMenu");
+            return;
+        }
+        label(s, steps, IMIT_LINE);
+        imitMapFailed--;
+        note("imit.prio.float.labelled");
+    }
+
+    /** The handed-over priority the hook answered with a mana ability (see {@link #hookRelabel}), or null. */
+    private Shadow imitFloatHandoff;
+
+    /**
+     * False when the echoed ability has an X the line has not set yet (the payment chooses it) and the menu offers
+     * that ability at more than one X: no candidate is the answer played.
+     */
+    private static boolean priorityXSet(final RlCandidates.Menu m, final JsonObject echo) {
+        if (echo == null || !echo.has("xUnset") || !echo.has("choice") || echo.get("choice").isJsonNull()) {
+            return true;
+        }
+        final int k = echo.get("choice").getAsInt();
+        int n = 0;
+        for (int i = 0; i < m.C(); i++) {
+            final com.google.gson.JsonElement f = m.fragment(i);
+            if (f.isJsonObject() && f.getAsJsonObject().has("choice") && f.getAsJsonObject().get("choice").getAsInt() == k) {
+                n++;
+            }
+        }
+        return n <= 1;
+    }
+
+    /**
+     * The targets of a line step. The line plays an ability with its targets already set, so the seat is never asked
+     * them: one TARGETS row per targeting ability of the step's chain, as the seat's own ask would name them (the
+     * record-mode synthesis, on the priority's observation), overridden and labelled {@link #IMIT_LINECHOICE}.
+     */
+    private void lineTargets(final int seat, final Game g, final Player player, final RlFeaturizer.Obs obs,
+            final Object decision) {
+        if (obs == null || !(decision instanceof List) || ((List<?>) decision).isEmpty()
+                || !(((List<?>) decision).get(0) instanceof SpellAbility)) {
+            return;
+        }
+        final SpellAbility chosen = (SpellAbility) ((List<?>) decision).get(0);
+        for (Object[] t : RlCandidates.targetsFromChosen(g, chosen)) {
+            final RlCandidates.Menu tm = (RlCandidates.Menu) t[0];
+            final short[] ts = (short[]) t[1];
+            note("imit.choice.TARGETS.asks");
+            if (tm.forgeIllegal != null || tm.unposable != null || ts == null) {
+                note("imit.choice.TARGETS.unposed");
+                continue;
+            }
+            if (tm.trivial) {
+                note("imit.choice.TARGETS.trivial");
+                continue;
+            }
+            if (tm.C() > RlSchema.C_MAX || tm.S() > RlSchema.S_MAX) {
+                note("imit.choice.TARGETS.capped");
+                continue;
+            }
+            tm.bind(obs, feat, player);
+            final Shadow s = new Shadow(seat, tm, obs, frame(seat, g, tm, obs));
+            if (!send(s)) {
+                return;
+            }
+            label(s, ts, IMIT_LINECHOICE);
+        }
+    }
+
     /** S1: the search hook (implemented by {@link RlSearch}). */
     public interface PrioritySearch {
         /**
@@ -144,6 +579,25 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
          * adopted); the seat gives no answer (the bridge asks the hook again), and the decision is marked overridden.
          */
         int HOOK = -3;
+
+        /** sdcc-imit-1111: the spec's {@code imit} (false by default, and then nothing changes): label the answers. */
+        default boolean imit() {
+            return false;
+        }
+
+        /**
+         * sdcc-imit-1111: the kind of component that chose the last answer of {@link #decide}, {@link #decideBlocks} or
+         * {@link #decideChoice} (an {@code RlSeat.IMIT_*} code; 0 = none: a rule or a fallback, never imitated).
+         */
+        default int reason() {
+            return 0;
+        }
+
+        /**
+         * solver-distill-cc-1109 (mullKeep.stopUnfired): the game ends here as a draw, not a void: the arm's rule changes
+         * nothing in it, and a paired read plays out only the games the rule touches. Never returned unless that key is on.
+         */
+        int STOP = -4;
 
         /**
          * S-t (lane cm-choice-search-1009): after {@link #decide}, the forced answers of a macro departure (the window
@@ -171,6 +625,19 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 Object objs) {
             return null;
         }
+
+        /**
+         * choice-scorer-1106: the spec's choice scorer answers this family ({@link #decideChoice}). Always false unless
+         * the spec's {@code choiceScorer} is set.
+         */
+        default boolean choiceAsk(int family) {
+            return false;
+        }
+
+        /** choice-scorer-1106: the steps to play instead of the policy's {@code greedy}, or null to keep them. */
+        default short[] decideChoice(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, short[] greedy) {
+            return null;
+        }
     }
 
     /**
@@ -178,6 +645,20 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
      * seat (the default; nothing changes).
      */
     public int searchSeat = -1;
+    /**
+     * choice-search-1105 (null by default, and then nothing changes): a second look-ahead for one seat ({@link #altSeat}),
+     * a paired arm with its own spec in the same game; {@link #search} then runs for the other seat.
+     */
+    public PrioritySearch searchAlt;
+    public int altSeat = -1;
+
+    /** The look-ahead that runs for {@code seat}: the alt seat's own, else the seat's (null = none). */
+    private PrioritySearch searchFor(final int seat) {
+        if (searchAlt != null && altSeat >= 0) {
+            return seat == altSeat ? searchAlt : search;
+        }
+        return search != null && (searchSeat < 0 || seat == searchSeat) ? search : null;
+    }
 
     /**
      * S-t (lane cm-choice-search-1009; null by default, and then nothing changes): the seat's current choice window, a
@@ -213,6 +694,11 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
 
     public interface PriorityTrace {
         void answered(Game g, Player p, RlCandidates.Menu m, List<SpellAbility> menuObjs, int choice);
+
+        /** unified-search-1106: the same, with the answer's announced X (-1 = none). */
+        default void answered(Game g, Player p, RlCandidates.Menu m, List<SpellAbility> menuObjs, int choice, int x) {
+            answered(g, p, m, menuObjs, choice);
+        }
     }
 
     /** S1: the forced first priority answer of a play-out seat. */
@@ -379,11 +865,30 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     @Override
     public JsonObject answer(final Game g, final Player player, final String method, final String kind,
             final JsonObject body, final Object objs) {
-        if (loopGuard == null) {
-            return answer0(g, player, method, kind, body, objs);
+        final JsonObject a = loopGuard == null ? answer0(g, player, method, kind, body, objs)
+                : guarded(g, player, method, kind, body, objs);
+        final Map<String, Integer> fl = forgeLog;
+        if (fl != null) {
+            // review #123 S3-1 (true-world re-plays only): every ask by method, and those Forge AI answered by family
+            synchronized (fl) {
+                if (method != null && askLog != null) {
+                    askLog.merge(method, 1, Integer::sum);
+                }
+                if (a == null || isDelegate(a)) {
+                    fl.merge(RlSchema.familyName(RlSchema.familyOf(kind, method)), 1, Integer::sum);
+                }
+            }
         }
-        return guarded(g, player, method, kind, body, objs);
+        return a;
     }
+
+    /**
+     * Review #123 S3-1 (null = off, the default, and then nothing is recorded): the census of a true-world play-out
+     * seat: the asks Forge AI answered (no answer, or a delegate), by family; every ask by method ({@link #askLog}).
+     * Shared by the re-play's seats; guarded by {@code forgeLog}'s monitor. Never changes an answer.
+     */
+    public volatile Map<String, Integer> forgeLog = null;
+    public volatile Map<String, Integer> askLog = null;
 
     /** Times the loop guard answered a "Cancel Search?" confirm yes (0 without the guard). */
     public int loopGuardHits() {
@@ -421,7 +926,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             o.addProperty("answer", "yes");
             o.addProperty("decisions", decIdx);
             o.addProperty("hits", loopGuard.hits);
-            System.err.println("[loop-guard] " + o);
+            if (cfg.loopGuardLog) {
+                System.err.println("[loop-guard] " + o);
+            }
             final JsonObject yes = new JsonObject();
             yes.addProperty("yes", true);
             return yes;
@@ -441,6 +948,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             return null;
         }
         final int family = RlSchema.familyOf(kind, method);
+        imitHandoff = null;
         if (window != null && roles[seat] == Role.RL && window.endsAt(g, family)) {
             // S-t: the seat's next priority with an empty stack (or a new turn) ends the action's choice window
             window.saw(RlSchema.F_PRIORITY, family == RlSchema.F_PRIORITY && g.getStack().isEmpty() ? "closedAtPriority"
@@ -497,7 +1005,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 lastFamily.put(method, RlSchema.F_PRIORITY);
                 ok(method);
                 if (priorityTrace != null) {
-                    priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt());
+                    priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt(), ans.has("x") ? ans.get("x").getAsInt() : -1);
                 }
                 return ans;
             }
@@ -592,7 +1100,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             endGame("server_error");
             return null;
         }
-        if (search != null && (searchSeat < 0 || seat == searchSeat) && family == RlSchema.F_PRIORITY
+        final PrioritySearch search = searchFor(seat); // choice-search-1105: the seat's own look-ahead (alt arm or the game's)
+        if (search != null && family == RlSchema.F_PRIORITY
                 && d.status == RlWire.ST_OK && objs instanceof List) {
             // S1: the look-ahead over the policy's own priority decision (the policy's choice is its default)
             @SuppressWarnings("unchecked")
@@ -602,12 +1111,21 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 endGame("cpu_cap");
                 return null;
             }
+            if (alt == PrioritySearch.STOP) {
+                if (!g.isGameOver()) {
+                    g.setGameOver(GameEndReason.Draw);
+                }
+                return null;
+            }
             if (alt == PrioritySearch.HOOK) {
                 // search-bones-1015: the seat's plan hook plays this priority (the bridge asks it again)
                 noteSent(seat, family, m, frame, d.steps);
                 noteVersion(seat, controllers[seat].substring(3), d.policyVersion);
                 overridden.add(frame.decIdx);
                 forgeDecidedExtra.merge("planHook", 1, Integer::sum);
+                if (imitOn(seat)) {
+                    imitHandoff = new Object[] {frame.decIdx, m, dec.get(dec.size() - 1), obs}; // sdcc-imit-1111
+                }
                 return null;
             }
             if (alt >= 0 && alt != d.steps[0]) {
@@ -618,6 +1136,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 }
                 d.steps = new short[] {(short) alt};
                 searchDepartures++;
+                searchOverride(frame.decIdx);
+                imitMark(seat, frame.decIdx, search.reason(), d.steps);
             }
             final ChoiceWindow w = search.takeWindow();
             if (w != null) {
@@ -629,7 +1149,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 window.open(g.getPhaseHandler().getTurn());
             }
         }
-        if (search != null && (searchSeat < 0 || seat == searchSeat) && family == RlSchema.F_BLOCK
+        if (search != null && family == RlSchema.F_BLOCK
                 && d.status == RlWire.ST_OK) {
             // block-search-1019: the look-ahead over block assignments (the policy's own declaration is its default; a
             // no-op unless the spec turns block search on)
@@ -642,7 +1162,22 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 } else {
                     d.steps = alt;
                     searchDepartures++;
+                    searchOverride(frame.decIdx);
+                    imitMark(seat, frame.decIdx, search.reason(), d.steps);
                 }
+            }
+        }
+        if (search != null && d.status == RlWire.ST_OK && search.choiceAsk(family)) {
+            // choice-scorer-1106: the options applied on copies, one batched value pass (the policy's answer is the default)
+            final short[] alt = search.decideChoice(g, player, m, frame, d.steps);
+            if (alt != null && m.validate(alt) == null) {
+                if (!java.util.Arrays.equals(alt, d.steps)) {
+                    searchOverride(frame.decIdx); // an answer equal to the policy's own stays the policy's choice
+                    imit.remove(frame.decIdx);
+                    imitMark(seat, frame.decIdx, search.reason(), alt);
+                }
+                d.steps = alt;
+                searchDepartures++;
             }
         }
         if (wAsk != null && !(d.status == RlWire.ST_OK && d.steps.length <= 1)) {
@@ -676,6 +1211,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             if (forced >= 0 && forced != mine && m.validate(new short[] {(short) forced}) == null) {
                 d.steps = new short[] {(short) forced};
                 windowOverrides++;
+                searchOverride(frame.decIdx);
+                imit.remove(frame.decIdx);
+                imitMark(seat, frame.decIdx, IMIT_WINDOW, d.steps);
             }
             if (forced >= 0 && search != null && m.validate(new short[] {(short) forced}) == null) {
                 // r3-distill-1010: the label sink's choice record (a no-op unless the sink is on)
@@ -688,6 +1226,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             note("targets." + m.origin + ".sent");
         }
         if (d.status == RlWire.ST_DELEGATE) {
+            imit.remove(frame.decIdx);
             overridden.add(frame.decIdx);
             forgeDecidedExtra.merge("serverDelegate:" + RlSchema.familyName(family), 1, Integer::sum);
             return null;
@@ -742,7 +1281,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             // search-bones-1015 (S-b proposals): the recorder sees the answer played
             @SuppressWarnings("unchecked")
             final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
-            priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt());
+            priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt(), ans.has("x") ? ans.get("x").getAsInt() : -1);
         }
         if (family == RlSchema.F_PRIORITY && ans.get("choice").getAsInt() > 0) {
             final int turn = g.getPhaseHandler().getTurn();
@@ -1017,6 +1556,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         if (d2 != null) {
             overridden.add(d2);
         }
+        imit.remove(d); // sdcc-imit-1111: a refused answer was not played
         if (d >= 0) {
             overridden.add(d);
             if (fam != null) {
@@ -1046,6 +1586,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             overridden.add(d2);
         }
         if (d != null && d >= 0) {
+            imit.remove(d); // sdcc-imit-1111: a vetoed answer was not played
             overridden.add(d);
             okAnswers.merge(method, -1, Integer::sum);
             guardOverridden++;

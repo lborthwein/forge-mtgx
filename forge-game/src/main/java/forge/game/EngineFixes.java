@@ -85,9 +85,39 @@ public final class EngineFixes {
         return researchFixes;
     }
 
+    /**
+     * shipA-on-leakfix-1112: the research line's client-side sites that the live port (live-fixes-1107) did not take:
+     * RlSearchClient's split LEAVES batches and the bench seat's InfoStates attach (RlSearch.attachInfoStates). On the
+     * research line they follow {@code -Dforge.researchFixes=true}; here they follow that property only when it is SET
+     * (as on the research line), never the {@code forge.liveFixes} default, so the live line's play is unchanged.
+     */
+    private static boolean researchClient = Boolean.getBoolean("forge.researchFixes");
+
+    public static boolean researchClient() {
+        return researchClient;
+    }
+
     /** For tests. */
     public static void setResearchFixesForTest(final boolean on) {
         researchFixes = on;
+        researchClient = on;
+    }
+
+    /**
+     * ledger-sweep-1107, ledger row 18 ({@code -Dforge.standInEffect=true}, off by default; not a live fix: liveFixes does
+     * not turn it on). A frame install with {@code forge.gamestate.installAsIs} links an exiled card whose recorded source
+     * is in no zone to a stand-in object. Off, the stand-in is a blank {@code new Card(id, game)}; on, it is built as Forge
+     * builds any effect object.
+     */
+    private static boolean standInEffect = Boolean.getBoolean("forge.standInEffect");
+
+    public static boolean standInEffect() {
+        return standInEffect;
+    }
+
+    /** For tests. */
+    public static void setStandInEffectForTest(final boolean on) {
+        standInEffect = on;
     }
 
     /** For tests. */

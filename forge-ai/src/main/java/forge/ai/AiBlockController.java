@@ -82,8 +82,20 @@ public class AiBlockController {
     // finds the creatures able to block the attacker
     private static List<Card> getPossibleBlockers(final Combat combat, final Card attacker, final List<Card> blockersLeft, final boolean solo) {
         final List<Card> blockers = new ArrayList<>();
+        // rollout-budget-1101: each (attacker, blocker) check is charged 1 + the combat's attackers (canBlock's
+        // must-block test walks them all); no budget open = a no-op
+        final long work = AiWork.current() == null ? 0 : 1L + combat.getAttackers().size();
 
+        // work-units-1107: one work unit per (attacker, blocker) pair (no clock = no-op). AMEND-2: the 1 + attackers charge
+        // overweighted wide boards (block prediction 63-74 % of a capped decision's span, real time about half of it)
+        final long clockWork = forge.game.WorkClock.active() ? 1L : 0;
         for (final Card blocker : blockersLeft) {
+            if (work > 0) {
+                AiWork.tick("getPossibleBlockers", work);
+            }
+            if (clockWork > 0) {
+                forge.game.WorkClock.tick(forge.game.WorkClock.Site.AI_BLOCK, clockWork);
+            }
             // if the blocker can block a creature with lure it can't block a creature without
             if (CombatUtil.canBlock(attacker, blocker, combat)) {
                 boolean cantBlockAlone = blocker.hasKeyword("CARDNAME can't attack or block alone.") || blocker.hasKeyword("CARDNAME can't block alone.");

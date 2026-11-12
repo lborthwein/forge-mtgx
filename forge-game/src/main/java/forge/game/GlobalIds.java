@@ -24,6 +24,20 @@ public final class GlobalIds {
     }
 
     /**
+     * Lane bvw-decision-log-1027: the counters a game's ids come from. {@code scope} is the game thread's own id scope
+     * ({@link forge.util.IdScope#capture}; a bench game runs inside one, from 1e9): then its counters, in this class's
+     * form; null (a live server game, no scope): the process-wide counters, {@link #capture()}.
+     */
+    public static int[] capture(final Object scope) {
+        return scope == null ? capture() : forge.util.IdScope.peek(scope);
+    }
+
+    /** Lane bvw-decision-log-1027: {@link #restoreForward(int[])} on the counters {@link #capture(Object)} reads. */
+    public static int restoreForward(final Object scope, final int[] to) {
+        return scope == null ? restoreForward(to) : forge.util.IdScope.restoreForward(scope, to);
+    }
+
+    /**
      * Move every counter forward to {@code to} (from {@link #capture}); a counter already past it is left alone (ids
      * already handed out are never handed out again). Returns how many counters were already past.
      */

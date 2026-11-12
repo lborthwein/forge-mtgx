@@ -83,6 +83,13 @@ public final class LookaheadSearch {
     public static final class Config {
         public int worlds = 1;
         public int breadth = 4;
+        /**
+         * endstep-rows-1103 (N12, live; 0 = off, the default, and then nothing changes): at a priority outside our own
+         * main phases (their turn, our upkeep/combat/end, a response), every distinct castable spell or ability past the
+         * breadth-B cut is also a candidate, up to this many candidates in all, so a flash creature or an instant tutor at
+         * their end step is never cut by Forge's own ordering.
+         */
+        public int offTurnBreadth = 0;
         public int horizonTurns = 2;
         public int maxSteps = 5000;
         public long seed = 0L;
@@ -121,6 +128,13 @@ public final class LookaheadSearch {
          * play-outs cannot tell the candidates apart -- one divergent or terminal world must not decide.
          */
         public double departZ = 0.0;
+        /**
+         * unified-search-1106 (off by default; proof decisions only): one anytime comparison. Each candidate is compared with
+         * the default on the worlds both finished, by the departZ test on those paired differences. A failed or unfinished
+         * world drops that world, not the candidate or the decision; a default with no finished world is estimated by
+         * the root's value. With every world finished this chooses exactly as the plain gate.
+         */
+        public boolean anytime = false;
         /**
          * Target variants (lane forge-ai-misplays-0928; 0 = off, the default: candidates unchanged). Up to this many
          * extra candidates per decision: a single-target spell or ability among the candidates played with a target
@@ -295,6 +309,14 @@ public final class LookaheadSearch {
         /** Tutor ranking: the checkpoint the service must serve (GET /v1/health checkpointSha256), checked once per JVM. */
         public String tutorCheckpointSha256 = null;
 
+        /**
+         * r2-choose-a-card-1029 (research; null = off, the default, and then nothing is built and the config JSON is
+         * unchanged): the choose-a-card spec ({@link ChooseACard.Config#fromJson}). The look-ahead seat's controller
+         * installs a {@link ChooseACard} on itself in the live game; its value is the search's value leaf
+         * ({@link SearchHooks}) when the search has one, else Forge's static evaluator (report only).
+         */
+        public JsonObject cac = null;
+
         /** Tutor ranking is on (a ranker call and play-outs at qualifying searches, acting or shadow). */
         public boolean tutorOn() {
             return tutorRank > 0 || tutorShadow;
@@ -341,20 +363,20 @@ public final class LookaheadSearch {
         public String beliefCubeSha256 = null;
         /** Copies of each basic land type in the pool. */
         public int beliefBasics = 8;
-        /** House p8 (live-fixes-1107: default {@link #LIVE_BELIEF_STATICS}): later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
-        public boolean beliefStatics = LIVE_BELIEF_STATICS;
-        /** House release (live-fixes-1107: default {@link #LIVE_BELIEF_REMEMBERED_HAND}): beliefRememberedHand. */
-        public boolean beliefRememberedHand = LIVE_BELIEF_REMEMBERED_HAND;
-        /** House release (live-fixes-1107: default {@link #LIVE_STACK_ABILITY_COPIES}): stackAbilityCopies. */
-        public boolean stackAbilityCopies = LIVE_STACK_ABILITY_COPIES;
-        /** House release (live-fixes-1107: default {@link #LIVE_COPY_BACK_FACE}): copyBackFace. */
-        public boolean copyBackFace = LIVE_COPY_BACK_FACE;
-        /** House release (live-fixes-1107: default {@link #LIVE_OFF_BATTLEFIELD_LIMITS}): offBattlefieldLimits. */
-        public boolean offBattlefieldLimits = LIVE_OFF_BATTLEFIELD_LIMITS;
-        /** House release (live-fixes-1107: default {@link #LIVE_COPY_TURN_LIMITS}): copyTurnLimits. */
-        public boolean copyTurnLimits = LIVE_COPY_TURN_LIMITS;
-        /** House release (live-fixes-1107: default {@link #LIVE_BELIEF_PLAYER_STATICS}): beliefPlayerStatics. */
-        public boolean beliefPlayerStatics = LIVE_BELIEF_PLAYER_STATICS;
+        /** Default off: later engine copies tolerate static effects of hidden cards replaced in belief worlds. */
+        public boolean beliefStatics = LIVE_BELIEF_STATICS; // live-fixes-1107 default
+        /** Default off: carry player-only stale-static repair into resampled look-ahead copies. */
+        public boolean beliefPlayerStatics = LIVE_BELIEF_PLAYER_STATICS; // live-fixes-1107 default
+        /** Default off: preserve opponent-hand identities remembered by the searching seat's observation tracker. */
+        public boolean beliefRememberedHand = LIVE_BELIEF_REMEMBERED_HAND; // live-fixes-1107 default
+        /** Default off: preserve this turn's use limits in look-ahead copies, as p9 does for solver copies. */
+        public boolean copyTurnLimits = LIVE_COPY_TURN_LIMITS; // live-fixes-1107 default
+        /** Default off: retain turn-use limits outside the battlefield. */
+        public boolean offBattlefieldLimits = LIVE_OFF_BATTLEFIELD_LIMITS; // live-fixes-1107 default
+        public boolean historyLki = false;
+        public boolean copyBackFace = LIVE_COPY_BACK_FACE; // live-fixes-1107 default
+        public boolean stackAbilityCopies = LIVE_STACK_ABILITY_COPIES; // live-fixes-1107 default
+        public boolean stackHistory = false;
         /**
          * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
          * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
@@ -373,6 +395,56 @@ public final class LookaheadSearch {
          * server sets it per game.
          */
         public java.util.List<String> beliefSeen = null;
+        /**
+         * deck-belief-1105 (off by default, and then nothing changes): with a belief on, every world deals the
+         * opponents' hidden cards from {@link DeckBelief} (a deck of the colours they have shown, the hand weighted by
+         * what they declined to do) instead of the uniform or decision belief. Spec key {@code beliefDeck}.
+         */
+        public boolean beliefDeck = false;
+
+        // ---- bvw-step2-fork-1027 (S2T, the symmetric teacher; every field off by default, and then nothing changes)
+        /**
+         * S2T, belief "codraft": the co-draft table ({@code syn[a][b]}: public co-draft data, never their real cards) of
+         * the deck prior every world draws the opponent's hidden cards with ({@link #opponentRedrawPrior}: hand and
+         * library together, weight {@code 1 + gain * max_s syn[s][card]^2} over the cards they showed in THIS game). Not
+         * a JSON key (RlSearch's spec pins the table by its sha256).
+         */
+        public java.util.Map<String, java.util.Map<String, Double>> beliefPriorTable = null;
+        /** S2T, belief "codraft": the prior's gain. */
+        public double beliefPriorGain = 20.0;
+        /**
+         * S2T: the opponents' play-out seats are the hooks' policy seats ({@link SearchHooks#opponentSeat}, the same
+         * bridged policy and service as the searching seat) instead of Forge AI ({@link RolloutAi}). Policy play-outs only.
+         */
+        public boolean opponentPolicy = false;
+        /** S2T: a value leaf also takes the opponent's own frame at the same moment (its v_o). */
+        public boolean leafOpp = false;
+        /** S2T: a value leaf is (v_s + 1 - v_o) / 2 (needs {@link #leafOpp}); terminal play-outs stay 1 / 0 / 0.5. */
+        public boolean leafSym = false;
+        /**
+         * step3-playout-fixes-1028 (false = off, and then nothing changes): the re-plays ({@link #replayCandidate},
+         * {@link #reevaluate}) copy at level 0, where a face-up exiled may-play card's description names the effect card
+         * instead of its source; they also match such a candidate by its base description ({@link #sameMayPlay}), as the
+         * level-2 pass does, after the exact and prefix matches failed.
+         */
+        public boolean replayMayPlayLoose = false;
+
+        /** S2T: the belief is the co-draft deck prior. */
+        public boolean codraft() {
+            return "codraft".equals(belief);
+        }
+
+        /**
+         * belief-n11-1030 (N11), belief "deck": the learned opponent-deck model every world (and the plans' and
+         * choose-a-card's solver worlds) draws the opponent's hidden hand and library from, given the cards they showed
+         * in this game ({@link #redrawOpponentsDeck}). Not a JSON key (RlSearch's spec pins the export by its sha256).
+         */
+        public DeckBeliefModel beliefDeckModel = null;
+
+        /** belief-n11-1030: the belief is the learned deck model. */
+        public boolean deck() {
+            return "deck".equals(belief);
+        }
 
         /** A belief is computed at searched decisions (acting or shadow). */
         public boolean beliefOn() {
@@ -421,6 +493,9 @@ public final class LookaheadSearch {
             o.addProperty("breadth", breadth);
             if (infoState) {
                 o.addProperty("infoState", true); // order-memory-1102: only when on
+            }
+            if (offTurnBreadth > 0) {
+                o.addProperty("offTurnBreadth", offTurnBreadth); // endstep-rows-1103: only when on
             }
             o.addProperty("horizonTurns", horizonTurns);
             o.addProperty("maxSteps", maxSteps);
@@ -473,8 +548,10 @@ public final class LookaheadSearch {
             if (copyTurnLimits) o.addProperty("copyTurnLimits", true);
             if (beliefRememberedHand) o.addProperty("beliefRememberedHand", true);
             if (offBattlefieldLimits) o.addProperty("offBattlefieldLimits", true);
-            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true); // house p16
-            if (copyBackFace) o.addProperty("copyBackFace", true); // house p15
+            if (historyLki) o.addProperty("historyLki", true);
+            if (copyBackFace) o.addProperty("copyBackFace", true);
+            if (stackAbilityCopies) o.addProperty("stackAbilityCopies", true);
+            if (stackHistory) o.addProperty("stackHistory", true);
             if (copyFidelity != 0) {
                 o.addProperty("copyFidelity", copyFidelity);
             }
@@ -509,6 +586,9 @@ public final class LookaheadSearch {
                 o.addProperty("priorTimeoutMs", priorTimeoutMs);
                 o.addProperty("priorCheckpointSha256", priorCheckpointSha256);
             }
+            if (cac != null) {
+                o.add("chooseACard", cac);
+            }
             if (tutorOn()) {
                 o.addProperty("tutorRank", tutorRank);
                 o.addProperty("tutorShadow", tutorShadow);
@@ -534,6 +614,28 @@ public final class LookaheadSearch {
                 if (!beliefSingleton) {
                     o.addProperty("beliefSingleton", false);
                 }
+                if (beliefDeck) {
+                    o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
+                if (codraft()) {
+                    o.addProperty("beliefPriorGain", beliefPriorGain); // bvw-step2-fork-1027: only with codraft
+                }
+                if (deck() && beliefDeckModel != null) {
+                    o.addProperty("beliefDeckSha256", beliefDeckModel.sha256); // belief-n11-1030: only with deck
+                }
+            }
+            // bvw-step2-fork-1027 (S2T): only when on, so every other config's JSON is unchanged
+            if (opponentPolicy) {
+                o.addProperty("opponentPolicy", true);
+            }
+            if (leafOpp) {
+                o.addProperty("leafOpp", true);
+            }
+            if (leafSym) {
+                o.addProperty("leafSym", true);
+            }
+            if (replayMayPlayLoose) {
+                o.addProperty("replayMayPlayLoose", true); // step3-playout-fixes-1028: only when on
             }
             if (rankerOn()) {
                 final JsonObject r = new JsonObject();
@@ -695,6 +797,9 @@ public final class LookaheadSearch {
         public final Map<String, Long> tutorWhy = new TreeMap<>();
         /** One entry per searched (or refused) choice: source, destination, names, Forge's pick, ranked, EVs, choice. */
         public final JsonArray tutorDecisions = new JsonArray();
+        /** r2-choose-a-card-1029: the seat's choose-a-card decisions (only when the option is on), and those past 512. */
+        public final JsonArray cacDecisions = new JsonArray();
+        public long cacDropped;
         /**
          * Belief (reported only when the option is on): searched decisions with a belief; skipped (nothing hidden, not
          * two players); service calls, failures (= uniform fallbacks), call time; worlds drawn from a belief (acting or
@@ -732,6 +837,37 @@ public final class LookaheadSearch {
         public boolean s1On;
         public long givenDecisions, givenStackSkipped, givenUncontested, leafCalls, leafLeaves, leafFallbacks, leafLate,
                 leafNanos, playoutSeatFailures, searchCpuNanos;
+        /** bvw-step2-fork-1027 (S2T): logging-only opponent leaf calls that failed (reported only when > 0). */
+        public long leafOppFailures;
+        /** solver-distill-cc-1109 (REACH): value leaves that carried a reach, and those whose own reach was above 0. */
+        public long reachLeaves, reachHits, reachNaN;
+        public double reachSum;
+        /** solver-distill-cc-1109 (report only): reach cost: planner nodes, capped no-new-card screens, skipped, per-card screens and capped. */
+        public long reachNodes, reachS0Capped, reachSkipped, reachNameScreens, reachNameCapped;
+        /** solver-distill-cc-1109: departures the reach rule allowed past a failed z test. */
+        public int reachDeparts;
+
+        /** One leaf's reach (the hooks' array: R_me, R_opp, then cost counters when present). */
+        synchronized void noteReach(final double[] rr) {
+            reachLeaves++;
+            if (rr[0] > 0) {
+                reachHits++;
+                reachSum += rr[0];
+            } else if (Double.isNaN(rr[0])) {
+                reachNaN++;
+            }
+            if (rr.length >= 7) {
+                reachNodes += (long) rr[2];
+                reachS0Capped += (long) rr[3];
+                reachSkipped += (long) rr[4];
+                reachNameScreens += (long) rr[5];
+                reachNameCapped += (long) rr[6];
+            }
+        }
+        /** Step-3 hygiene: true-world re-plays refused because fair naming was not on for every player. Always 0 on
+         *  research/bvw-step2-keys-1028: the refusal itself is in the excluded hygiene commit 8043ba81bf3; the field
+         *  exists only so the S3-3 report (b387c8c1318) compiles. */
+        public long trueFairNamingRefusals;
         /** S-t (lane cm-choice-search-1009; reported only when a decision expanded choices): decisions with macro
          *  candidates, macro candidates played, macro departures. */
         public long givenMacroDecisions, givenMacros, givenMacroDepartures, givenMacroRedundant;
@@ -973,6 +1109,10 @@ public final class LookaheadSearch {
                 }
                 o.add("tutorDecisions", tutorDecisions);
             }
+            if (cacDecisions.size() > 0 || cacDropped > 0) {
+                o.add("cacDecisions", cacDecisions);
+                o.addProperty("cacDropped", cacDropped);
+            }
             if (beliefOn) {
                 o.addProperty("beliefDecisions", beliefDecisions);
                 o.addProperty("beliefSkipped", beliefSkipped);
@@ -1014,9 +1154,28 @@ public final class LookaheadSearch {
                 s.addProperty("leafLeaves", leafLeaves);
                 s.addProperty("leafFallbacks", leafFallbacks);
                 s.addProperty("leafLate", leafLate);
+                if (reachLeaves > 0) {
+                    s.addProperty("reachLeaves", reachLeaves);
+                    s.addProperty("reachHits", reachHits);
+                    s.addProperty("reachNaN", reachNaN);
+                    s.addProperty("reachSum", Math.round(reachSum * 1000) / 1000.0);
+                    if (reachNodes > 0 || reachNameScreens > 0) {
+                        s.addProperty("reachNodes", reachNodes);
+                        s.addProperty("reachS0Capped", reachS0Capped);
+                        s.addProperty("reachSkipped", reachSkipped);
+                        s.addProperty("reachNameScreens", reachNameScreens);
+                        s.addProperty("reachNameCapped", reachNameCapped);
+                    }
+                    if (reachDeparts > 0) {
+                        s.addProperty("reachDeparts", reachDeparts);
+                    }
+                }
                 s.addProperty("leafMs", leafNanos / 1e6);
                 s.addProperty("playoutSeatFailures", playoutSeatFailures);
                 s.addProperty("searchCpuMs", searchCpuNanos / 1e6);
+                if (leafOppFailures > 0) {
+                    s.addProperty("leafOppFailures", leafOppFailures); // bvw-step2-fork-1027: only when one failed
+                }
                 final JsonArray cpu = new JsonArray();
                 for (Double d : searchCpuMsEach) {
                     cpu.add(Math.round(d * 10) / 10.0);
@@ -1310,6 +1469,14 @@ public final class LookaheadSearch {
         Budget budget;
         /** Copy fidelity: a may-play spell may also match by its base description ({@link #matchesMayPlay}). */
         public boolean mayPlayLoose = false;
+        /** step3-playout-fixes-1028: this play-out is an OPR roll-out ({@link #WORLD_OPR}; its seats keep their cap). */
+        public boolean oprRollout = false;
+        /**
+         * step3-playout-fixes-1028 (review #130 S3-2; set only by {@link Config#replayMayPlayLoose} outside a fidelity
+         * pass): the loose match compares the text before the LAST " by " exactly ({@link #sameMayPlayText}), and the
+         * play-out seat accepts it only when exactly one menu entry matches.
+         */
+        public boolean mayPlayUnique = false;
         /** Lane search-bones-1015 (S-b): the turn-plan this play-out follows (null = a single first action). */
         public final Object plan;
         /** S-b: what became of the plan in this play-out: 0 = not finished, 1 = played to its end, 2 = broke. */
@@ -1360,7 +1527,8 @@ public final class LookaheadSearch {
          */
         public boolean matchesMayPlay(SpellAbility sa) {
             return mayPlayLoose && sa != null && !pass && sa.getHostCard() != null && sa.getHostCard().getId() == hostId
-                    && sa.isLandAbility() == land && sameMayPlay(desc, sa);
+                    && sa.isLandAbility() == land && (mayPlayUnique ? sa.getMayPlay() != null
+                    && sameMayPlayText(desc, sa.getDescription()) : sameMayPlay(desc, sa));
         }
     }
 
@@ -1376,16 +1544,50 @@ public final class LookaheadSearch {
         TurnWatch watch;
         Object payload;
         volatile boolean done;
+        /**
+         * bvw-step2-fork-1027 (S2T, {@link Config#leafOpp}; null otherwise): the opponent whose own frame is taken at the
+         * same moment as the searching seat's, and that frame.
+         */
+        Player opp;
+        Object payloadOpp;
+        /** solver-distill-cc-1109: {@link SearchHooks#leafReach} at the leaf (null = off or failed). */
+        double[] reach;
 
         LeafProbe(SearchHooks hooks, Object ctx) {
             this.hooks = hooks;
             this.ctx = ctx;
         }
 
+        /**
+         * S2T: the opponent's frame, or null when taking it failed (never a failure of the play-out: without leafSym the
+         * play-out and its value are step 1's whether v_o is logged or not; with it a missing frame is a fallback).
+         */
+        Object captureOpp(Game g) {
+            try {
+                return hooks.captureLeaf(ctx, g, opp);
+            } catch (RuntimeException e) {
+                return null;
+            }
+        }
+
+        /** solver-distill-cc-1109: the reach at the leaf, never a failure of the play-out. */
+        void takeReach(Game g, Player me) {
+            try {
+                reach = hooks.leafReach(ctx, g, me);
+            } catch (RuntimeException | StackOverflowError e) {
+                reach = null;
+            }
+        }
+
         /** The searching seat has priority in play-out {@code g}: take the leaf there if the horizon turn has begun. */
         public void onPriority(Game g, Player me) {
             if (!done && watch != null && watch.reached) {
                 payload = hooks.captureLeaf(ctx, g, me);
+                takeReach(g, me);
+                if (opp != null) {
+                    // S2T: the opponent's own observation at the same state (its seat's frame, never ours)
+                    payloadOpp = captureOpp(g);
+                }
                 done = true;
             }
         }
@@ -1416,8 +1618,68 @@ public final class LookaheadSearch {
         /** Decision thread: one value per leaf payload, P(the seat wins) in [0, 1], in order; null = failed. */
         double[] leafValues(List<Object> payloads);
 
+        /**
+         * solver-distill-cc-1109 (REACH; null = off, the default, and then nothing changes): play-out thread, at the leaf,
+         * {@code [reach of me, reach of the opponent]} ({@link ForcedWinSolver#reach}; NaN where not computed).
+         */
+        default double[] leafReach(Object copyCtx, Game g, Player me) {
+            return null;
+        }
+
+        /** solver-distill-cc-1109: the leaf value given its reach (identity by default). */
+        default double combineReach(double v, double[] reach) {
+            return v;
+        }
+
+        /**
+         * solver-distill-cc-1109 (report only; nothing by default): decision thread, one value leaf with its frame, its
+         * value before the reach and its reach, for a sink of (leaf frame, reach) rows.
+         */
+        default void noteLeaf(Object payload, double v, double[] reach) {
+        }
+
+        /** solver-distill-cc-1109: the part of a leaf's value its own reach contributes (0 by default). */
+        default double reachPart(double[] reach) {
+            return 0.0;
+        }
+
+        /** solver-distill-cc-1109: the mean reach-part gain that departs without the z test (0 = off, the default). */
+        default double reachDepart() {
+            return 0.0;
+        }
+
+        /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
+        default String leafError() {
+            return null;
+        }
+
         /** Play-out thread: the searching seat's controller for a policy play-out that starts with {@code first}. */
         PlayoutSeat playoutSeat(Object copyCtx, Game g, Player me, FirstAction first, long seed, LeafProbe probe);
+
+        /**
+         * bvw-step2-fork-1027 (S2T, {@link Config#opponentPolicy}; never called otherwise): play-out thread, the policy
+         * seat of opponent {@code opp} in play-out {@code g} (its own observation only), or null (none: the play-out
+         * fails).
+         */
+        default PlayoutSeat opponentSeat(Object copyCtx, Game g, Player opp, long seed) {
+            return null;
+        }
+
+        /**
+         * step3-playout-fixes-1028: as {@link #opponentSeat(Object, Game, Player, long)}, with the play-out's own first
+         * action (its decision's budget, whether it is an OPR roll-out). The default ignores it.
+         */
+        default PlayoutSeat opponentSeat(Object copyCtx, Game g, Player opp, long seed, FirstAction first) {
+            return opponentSeat(copyCtx, g, opp, seed);
+        }
+
+        /**
+         * Review #123 S2-1 (decision thread, true-world re-plays only): which library cards of {@code live} some seat
+         * knows (its seat knowledge, e.g. after a scry), or null (Forge's visibility only).
+         */
+        default java.util.function.Predicate<Card> knownToAnySeat(Game live) {
+            return null;
+        }
     }
 
     private SearchHooks hooks = null;
@@ -1560,6 +1822,18 @@ public final class LookaheadSearch {
         } else {
             prior = null;
         }
+        if (cfg.cac != null) {
+            // review #143 S3: refuse a choose-a-card spec when the config is read, never at the first priority
+            final ChooseACard.Config cc = ChooseACard.Config.fromJson(cfg.cac);
+            if (cc.mode == ChooseACard.Config.Mode.ON && !cc.testUnsafe) {
+                throw new IllegalArgumentException("chooseACard: mode on needs an RL search seat (the value tower and the "
+                        + "solver check); a look-ahead (K8) seat runs it in shadow only");
+            }
+            if (cc.mode != ChooseACard.Config.Mode.OFF && !cfg.beliefOn()) {
+                throw new IllegalArgumentException("chooseACard: needs a belief (the copies re-draw the opponent's hidden "
+                        + "cards); set belief");
+            }
+        }
         if (cfg.tutorOn()) {
             if (cfg.tutorRank < 1) {
                 throw new IllegalStateException("tutorShadow needs tutorRank >= 1 (how many ranked names are played out)");
@@ -1590,12 +1864,25 @@ public final class LookaheadSearch {
             ranker = null;
         }
         if (cfg.beliefOn()) {
-            if (!"off".equals(cfg.belief) && !"human".equals(cfg.belief) && !"uniform".equals(cfg.belief)) {
-                throw new IllegalStateException("belief must be off, human or uniform: " + cfg.belief);
+            if (!"off".equals(cfg.belief) && !"human".equals(cfg.belief) && !"uniform".equals(cfg.belief)
+                    && !cfg.codraft() && !cfg.deck()) {
+                throw new IllegalStateException("belief must be off, human, uniform, codraft or deck: " + cfg.belief);
+            }
+            if (cfg.deck() && cfg.beliefDeckModel == null) {
+                // belief-n11-1030: the learned deck belief needs its model
+                throw new IllegalStateException("belief=deck needs its model (beliefDeckModel)");
+            }
+            if (cfg.codraft() && (cfg.beliefPriorTable == null || !(cfg.beliefPriorGain >= 0))) {
+                // bvw-step2-fork-1027: the co-draft prior needs its table (and a gain >= 0)
+                throw new IllegalStateException("belief=codraft needs its prior table and a gain >= 0");
             }
             if (cfg.reuse) {
                 // A carried world keeps live card ids; a belief world holds cards the live game does not have.
                 throw new IllegalStateException("belief does not combine with reuse (carried worlds hold live card ids)");
+            }
+            if (cfg.beliefShadow && cfg.deck()) {
+                // review #150 S2-4: the shadow builds uniform worlds, so it would never exercise the deck model
+                throw new IllegalStateException("beliefShadow does not combine with belief=deck");
             }
             if (cfg.beliefShadow && "off".equals(cfg.belief)) {
                 throw new IllegalStateException("beliefShadow needs belief=human or uniform (the belief to build and discard)");
@@ -1634,6 +1921,34 @@ public final class LookaheadSearch {
      */
     public static String checkPriorService(Config c) {
         return PriorClient.checkHealth(c.priorUrl, c.priorCheckpointSha256, c.priorTimeoutMs);
+    }
+
+    /** r2-choose-a-card-1029: the seat's choose-a-card engine (null unless {@link Config#cac}); built on first use. */
+    private ChooseACard cacEngine = null;
+
+    public synchronized ChooseACard chooseACard() {
+        if (cfg.cac == null) {
+            return null;
+        }
+        if (cacEngine == null) {
+            final ChooseACard.Config c = ChooseACard.Config.fromJson(cfg.cac);
+            cacEngine = new ChooseACard(c, hooks != null ? ChooseACard.of(hooks) : StaticValuer.INSTANCE, null);
+            // review S1-2: the copies' opponent hidden cards come from this seat's belief (null = no belief: install refuses)
+            cacEngine.setRedraw(solverRedraw());
+            // review S2-2: every decision entry goes to this game's stats (the bench row), bounded
+            cacEngine.setSink(e -> {
+                synchronized (stats) {
+                    if (stats.cacDecisions.size() < 512) {
+                        stats.cacDecisions.add(e);
+                    } else {
+                        stats.cacDropped++;
+                    }
+                }
+            });
+        } else if (hooks != null) {
+            cacEngine.setValuer(ChooseACard.of(hooks));
+        }
+        return cacEngine;
     }
 
     public Config getConfig() {
@@ -1680,9 +1995,12 @@ public final class LookaheadSearch {
             this.deadline = deadline;
         }
 
-        /** Past the deadline, or stopped by the wall. */
+        /**
+         * Past the deadline, or stopped by the wall. work-units-1107: the deadline is on {@link forge.game.WorkClock}'s
+         * time (a play-out reads its lane's clock; without a clock it is System.nanoTime, as before).
+         */
         public boolean over() {
-            return stopped || System.nanoTime() - deadline > 0;
+            return stopped || forge.game.WorkClock.nanoTime() - deadline > 0;
         }
 
         void stop() {
@@ -1741,9 +2059,11 @@ public final class LookaheadSearch {
         }
 
         final long t0 = System.nanoTime();
+        // work-units-1107: the budget's start on the work clock (no clock: t0, as before)
+        final long v0 = forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
         // lane forge-continue-1011: a "Continue from here" rebuild (forge.ai.WallClock) stretches the deadline so it never
         // binds; the budgeted/unbudgeted test here and every failure path stay the configured ones
-        budget = cfg.budgetMs > 0 ? new Budget(t0 + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
+        budget = cfg.budgetMs > 0 ? new Budget(v0 + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         try {
             return decideSearched(ctrl, def, live, me, index, onStack, ph, turn, t0);
         } catch (RuntimeException e) {
@@ -1818,6 +2138,12 @@ public final class LookaheadSearch {
         labelTargets = labelSink != null ? new JsonArray[n] : null;
         final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
         final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
+        if (beliefCube != null && !cfg.beliefShadow && cfg.deck() && cfg.beliefDeckModel != null) {
+            // review #155 S1: gate every opponent at the decision, outside the per-world try blocks
+            for (Player o : me.getOpponents()) {
+                cfg.beliefDeckModel.requireHeld(o.getRegisteredPlayer());
+            }
+        }
         final BeliefSampler.Dist bd = beliefCube == null ? null
                 : belief(live, me, beliefRoot == null ? null : beliefRoot[0], index, turn, onStack);
         lastBelief = bd;
@@ -2172,6 +2498,11 @@ public final class LookaheadSearch {
         public String played;
         /** J1: an {@link AiReplay} mark made this decision play the live choice / named a choice that was not a candidate. */
         public boolean forced, forcedMiss;
+        /**
+         * bvw-step2-fork-1027 (S2T, {@link Config#leafOpp}; null otherwise): per searched candidate and world, {v_s, v_o,
+         * terminal} as {@code pairs[0..2][candidate][world]} (P(win) of each seat; terminal 1 / 0 / 0.5, NaN = a leaf).
+         */
+        public double[][][] pairs;
     }
 
     /**
@@ -2230,6 +2561,24 @@ public final class LookaheadSearch {
      * of its budget; 0 = the play-outs' own start (S-c).
      */
     private volatile long decisionStartNanos = 0L;
+    /** unified-search-1106 ({@link Config#anytime}): the root's P(win) from the value head, NaN = none. */
+    private volatile double rootP = Double.NaN;
+
+    public void setRootP(double p) {
+        this.rootP = p;
+    }
+
+    /**
+     * line-adoption-1107 (plans.lineHorizon; 0 = none, the default): the absolute turn at whose start (with a value leaf:
+     * the seat's first priority in it) every play-out of the decision in progress ends, when later than now + horizon. Set
+     * by a plan point whose solver line wins past the search's horizon, so the line is scored by its own outcome and its
+     * alternatives by the same leaf, in the same worlds. Cleared when the decision ends.
+     */
+    private volatile int planHorizonTurn = 0;
+
+    public void setPlanHorizonTurn(int turn) {
+        this.planHorizonTurn = turn;
+    }
     /**
      * S-b: cards on top of our library the seat placed itself (pile memory, ForcedWinSolver.knownTopCount); every world
      * keeps them in place. 0 = S-c's worlds (only the cards we can see stay).
@@ -2273,8 +2622,247 @@ public final class LookaheadSearch {
             ownKnownTop = 0;
             decisionStartNanos = 0L;
             oppCheck = null;
+            rootP = Double.NaN;
+            planHorizonTurn = 0;
         }
     }
+
+    /**
+     * bvw-step1-build-1024 (ruling 4; the step-1 labeller only, nothing in play calls it): the last given search's
+     * candidate {@code cand} (its index among the searched candidates) played out again in K FRESH worlds seeded by
+     * {@code salt} (never the decision's own world seeds), with the same play-outs and leaf values, our known top kept as
+     * {@code knownTop}. A departure's own K-world mean won a max over noisy means, so it is biased up; these worlds are
+     * not. Returns the per-world values, or null (a failed play-out, a budget stop, a leaf fallback).
+     */
+    public double[] reevaluate(Game live, Player me, int cand, long salt, int knownTop) {
+        final List<Cand> cs = lastCandidates;
+        if (cs == null || cand < 0 || cand >= cs.size()) {
+            return null;
+        }
+        final int k = Math.max(1, cfg.worlds);
+        final double[][] values = new double[1][k];
+        final Rollout[][] outs = new Rollout[1][k];
+        final boolean[] ok = {true};
+        final int prevTop = ownKnownTop;
+        final boolean prevReplaying = replaying;
+        ownKnownTop = Math.max(0, knownTop);
+        replaying = true;
+        try {
+            final long fb = stats.leafFallbacks;
+            final int aborted = playAll(live, me, java.util.Collections.singletonList(cs.get(cand)), null, mix(cfg.seed, salt),
+                    new Carried[k], values, outs, ok, null);
+            if (aborted > 0 || !ok[0]) {
+                return null;
+            }
+            if (hookLeaf) {
+                valueLeaves(values, outs, ok, k);
+                if (stats.leafFallbacks != fb) {
+                    return null;
+                }
+            }
+            return values[0];
+        } finally {
+            ownKnownTop = prevTop;
+            replaying = prevReplaying;
+        }
+    }
+
+    // ------------------------------------------------------------------ bvw-step2-fork-1027 (S2T): re-plays
+
+    /** S2T: how {@link #prepare} draws a world: the belief (every search world), or a TRUE world (T re-play, OPR). */
+    public static final int WORLD_BELIEF = 0, WORLD_TRUE = 1, WORLD_OPR = 2;
+    /** The world mode of the re-play in progress (decision thread only; WORLD_BELIEF outside {@link #replayCandidate}). */
+    private volatile int worldMode = WORLD_BELIEF;
+    /** step3-playout-fixes-1028: a re-play ({@link #replayCandidate}, {@link #reevaluate}) is in progress (decision thread). */
+    private volatile boolean replaying = false;
+    /** OPR: the cap of the roll-outs in progress (turns past the start, main-loop steps). */
+    private volatile int oprTurns = 0, oprSteps = 0;
+
+    /** S2T: one candidate's re-play ({@link #replayCandidate}). */
+    public static final class Replay {
+        /** Per world: its value (P(win) of the searching seat); NaN = failed, or an OPR roll-out at its cap. */
+        public double[] values;
+        /** With {@link Config#leafOpp} (T, belief): {v_s, v_o, terminal} per world ({@code pairs[0..2][world]}), else null. */
+        public double[][] pairs;
+        public int worlds, failed, capped;
+        /** Null = usable; else why not: no_candidate, aborted, failed (a world failed), leaf_fallback. */
+        public String why;
+        /**
+         * Review #123 S3-1 (set by the hooks' owner; null otherwise): the asks Forge AI answered in these play-outs, by
+         * family, and the controller calls that never reached a policy seat, by method.
+         */
+        public com.google.gson.JsonObject forge;
+    }
+
+    /**
+     * bvw-step2-fork-1027 (S2T; the step-2 labeller only, nothing in play calls it): the last given search's candidate
+     * {@code cand} (its index among the searched candidates) played again in {@code worlds} worlds seeded by {@code salt}
+     * (never the decision's own world seeds), with the same seats and leaves:
+     * <ul>
+     *   <li>{@link #WORLD_BELIEF}: fresh belief worlds (as {@link #reevaluate}, plus the leaf pairs);</li>
+     *   <li>{@link #WORLD_TRUE}: the T re-play, copies of the REAL position (both hands kept, every library shuffled below
+     *       its known top, {@link #trueShuffle}), valued at the horizon by the same leaf;</li>
+     *   <li>{@link #WORLD_OPR}: the own-policy roll-out reference, true worlds as T, no leaf: each roll-out plays to the
+     *       end of the game, at most {@code capTurns} turns and {@code capSteps} main-loop steps; its value is the game's
+     *       result (1 / 0 / 0.5), a roll-out at its cap is counted, not scored (NaN).</li>
+     * </ul>
+     * The real hidden cards only seed a true world's starting state: every decision in it is a seat's own (the policy
+     * seats read their own observation; with {@link Config#opponentPolicy} there is no Forge AI seat), and the candidate
+     * itself was chosen in belief worlds. The decision's own state (its candidates, index, departures) is not changed.
+     */
+    public Replay replayCandidate(Game live, Player me, int cand, long salt, int knownTop, int worlds, int mode,
+            int capTurns, int capSteps) {
+        final Replay out = new Replay();
+        final List<Cand> cs = lastCandidates;
+        final int k = Math.max(1, worlds);
+        out.worlds = k;
+        if (cs == null || cand < 0 || cand >= cs.size()) {
+            out.why = "no_candidate";
+            return out;
+        }
+        if (mode != WORLD_BELIEF && !(hookPlayout && cfg.opponentPolicy)) {
+            // the honesty refusal: a true world needs every seat to be a policy seat on its own observation
+            throw new IllegalStateException("refused: a true-world re-play needs policy seats on both sides");
+        }
+        final double[][] values = new double[1][k];
+        final Rollout[][] outs = new Rollout[1][k];
+        final boolean[] ok = {true};
+        final int prevTop = ownKnownTop;
+        final int prevMode = worldMode;
+        final boolean prevReplaying = replaying;
+        ownKnownTop = Math.max(0, knownTop);
+        worldMode = mode;
+        replaying = true;
+        oprTurns = mode == WORLD_OPR ? capTurns : 0;
+        oprSteps = mode == WORLD_OPR ? capSteps : 0;
+        trueKnown = mode == WORLD_BELIEF ? null : hooks.knownToAnySeat(live);
+        try {
+            final long fb = stats.leafFallbacks;
+            final int aborted = playAll(live, me, java.util.Collections.singletonList(cs.get(cand)), null, mix(cfg.seed, salt),
+                    new Carried[k], values, outs, ok, null);
+            out.values = new double[k];
+            Arrays.fill(out.values, Double.NaN);
+            for (int w = 0; w < k; w++) {
+                if (outs[0][w] == null || !outs[0][w].ok) {
+                    out.failed++;
+                }
+            }
+            if (aborted > 0) {
+                out.why = "aborted";
+                return out;
+            }
+            if (mode == WORLD_OPR) {
+                for (int w = 0; w < k; w++) {
+                    final Rollout r = outs[0][w];
+                    if (r != null && r.ok) {
+                        if (Double.isNaN(r.pTerminal)) {
+                            out.capped++;
+                        } else {
+                            out.values[w] = r.pTerminal;
+                        }
+                    }
+                }
+                return out;
+            }
+            if (!ok[0]) {
+                // review #123 S3-6: which world failed and why
+                out.why = "failed";
+                for (int w = 0; w < k; w++) {
+                    final Rollout r = outs[0][w];
+                    if (r != null && !r.ok) {
+                        final String f = r.seatFailure != null ? r.seatFailure : r.failDetail;
+                        out.why = "failed: world " + w + " " + failureClass(r)
+                                + (f == null ? "" : " " + (f.length() > 120 ? f.substring(0, 120) : f));
+                        break;
+                    }
+                }
+                return out;
+            }
+            if (hookLeaf) {
+                if (cfg.leafOpp) {
+                    final double[][][][] po = new double[1][][][];
+                    valueLeavesS2t(values, outs, ok, k, po);
+                    if (po[0] != null) {
+                        out.pairs = new double[][] {po[0][0][0], po[0][1][0], po[0][2][0]};
+                    }
+                } else {
+                    valueLeaves(values, outs, ok, k);
+                }
+                if (stats.leafFallbacks != fb) {
+                    out.why = "leaf_fallback";
+                    out.pairs = null;
+                    return out;
+                }
+            }
+            out.values = values[0];
+            return out;
+        } finally {
+            ownKnownTop = prevTop;
+            worldMode = prevMode;
+            replaying = prevReplaying;
+            oprTurns = 0;
+            oprSteps = 0;
+            trueKnown = null;
+        }
+    }
+
+    /**
+     * bvw-step2-fork-1027 (S2T): a TRUE world (the T re-play, OPR) in copy {@code g} of the real position: both hands as
+     * they are; every library keeps its known top (the cards at its top that any player may see in the live game, and,
+     * for our own, the top we placed ourselves: {@link #ownKnownTop}) and the rest is shuffled with {@code rng}. Players
+     * in the copy's order. The real hidden cards seed only this starting state.
+     */
+    void trueShuffle(Game live, Player liveMe, Game g, Player me, Random rng) {
+        trueShuffle(live, liveMe, g, me, rng, trueKnown);
+    }
+
+    /** As above with {@code knownBySeat} (null = Forge's visibility only): the library cards some seat knows. */
+    void trueShuffle(Game live, Player liveMe, Game g, Player me, Random rng, java.util.function.Predicate<Card> knownBySeat) {
+        final List<PlayerView> views = new ArrayList<>();
+        for (Player lp : live.getRegisteredPlayers()) {
+            views.add(lp.getView());
+        }
+        for (Player q : g.getRegisteredPlayers()) {
+            final List<Card> lib = new ArrayList<>(q.getCardsIn(ZoneType.Library));
+            // review #123 S2-1: every library card SOME seat knows (Forge shows it to a player, the seat-knowledge
+            // tracker knows it: scry, Brainstorm, a pile), and our own placed top, stays where it is; the others are
+            // shuffled among the other positions (so the forked seat knowledge still agrees with the order)
+            final boolean[] keep = new boolean[lib.size()];
+            final List<Card> rest = new ArrayList<>();
+            for (int i = 0; i < lib.size(); i++) {
+                final Card lc = live.findById(lib.get(i).getId());
+                boolean k = q == me && i < ownKnownTop;
+                if (!k && lc != null) {
+                    for (PlayerView v : views) {
+                        if (lc.getView().canBeShownTo(v)) {
+                            k = true;
+                            break;
+                        }
+                    }
+                    if (!k && knownBySeat != null && knownBySeat.test(lc)) {
+                        k = true;
+                    }
+                }
+                keep[i] = k;
+                if (!k) {
+                    rest.add(lib.get(i));
+                }
+            }
+            Collections.shuffle(rest, rng);
+            final List<Card> nl = new ArrayList<>(lib.size());
+            int r = 0;
+            for (int i = 0; i < lib.size(); i++) {
+                nl.add(keep[i] ? lib.get(i) : rest.get(r++));
+            }
+            q.getZone(ZoneType.Library).setCards(nl);
+        }
+    }
+
+    /**
+     * Review #123 S2-1: during a true-world re-play, whether some seat knows a library card of the live position (the
+     * hooks' seat knowledge, {@link SearchHooks#knownToAnySeat}); null = Forge's visibility only.
+     */
+    private volatile java.util.function.Predicate<Card> trueKnown = null;
 
     /** S-b: the next searched decision's world-0 seed (its recordings play in the same world 0 as its valuation). */
     public long nextWorld0Seed() {
@@ -2419,7 +3007,9 @@ public final class LookaheadSearch {
         forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
         // lane forge-continue-1011: as in decide, a rebuild's deadline never binds (forge.ai.WallClock); the test is unchanged
         // search-bones-1015: S-b's proposal stage spent part of the decision's budget before this call (0 = none)
-        final long start = decisionStartNanos != 0L ? decisionStartNanos : t0;
+        // work-units-1107: decisionStartNanos is on the work clock when one is installed; the own start too
+        final long start = decisionStartNanos != 0L ? decisionStartNanos
+                : forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
         final Budget b = cfg.budgetMs > 0 ? new Budget(start + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         budget = b;
         boolean searched = false;
@@ -2595,7 +3185,24 @@ public final class LookaheadSearch {
         } finally {
             forceFidelity = false;
         }
-        if (proof && aborted > 0) {
+        // unified-search-1106 (anytime): which play-outs finished; null = the plain path
+        final boolean[][] finished = proof && cfg.anytime ? finishedWorlds(outs, n, k) : null;
+        if (finished != null) {
+            int otherWorlds = 0;
+            for (int c = 0; c < n; c++) {
+                boolean any = false;
+                for (int w = 0; w < k; w++) {
+                    any |= finished[c][w];
+                    otherWorlds += c > 0 && finished[c][w] ? 1 : 0;
+                }
+                ok[c] = any;
+            }
+            if (aborted > 0 && otherWorlds > 0) {
+                aborted = 0;
+                stats.partialDecisions++;
+                res.partialWorlds = otherWorlds;
+            }
+        } else if (proof && aborted > 0) {
             // search-bones-1015 (S-b): anytime. Over the budget, the worlds every candidate finished in decide (common
             // random numbers kept), when there are at least two; otherwise the decision is capped as S-c's
             final List<Integer> full = new ArrayList<>();
@@ -2634,17 +3241,28 @@ public final class LookaheadSearch {
         // (aborted is always 0 without a budget: the S1 read's path is unchanged)
         if (hookLeaf && aborted == 0) {
             final long fb = stats.leafFallbacks;
-            valueLeaves(values, outs, ok, k);
+            if (cfg.leafOpp) {
+                // bvw-step2-fork-1027 (S2T): both seats' frames at every leaf; the pairs go to the result
+                final double[][][][] po = new double[1][][][];
+                valueLeavesS2t(values, outs, ok, k, po);
+                res.pairs = po[0];
+            } else {
+                valueLeaves(values, outs, ok, k);
+            }
             res.leafFallback = stats.leafFallbacks != fb;
         }
         final boolean overBudget = aborted > 0;
         final double[] ev = new double[n];
         for (int c = 0; c < n; c++) {
             double s = 0;
+            int kc = 0;
             for (int w = 0; w < k; w++) {
-                s += values[c][w];
+                if (finished == null || finished[c][w]) {
+                    s += values[c][w];
+                    kc++;
+                }
             }
-            ev[c] = ok[c] ? s / k : Double.NaN;
+            ev[c] = ok[c] ? s / kc : Double.NaN;
             if (!ok[c]) {
                 stats.candidatesDropped++;
                 res.failed++;
@@ -2674,11 +3292,15 @@ public final class LookaheadSearch {
         final boolean[] provenWin = new boolean[n], provenLoss = new boolean[n];
         final int[] planBroken = new int[n];
         int provenPick = -1;
-        if (proof && !overBudget && k >= Math.min(3, Math.max(1, cfg.worlds))) {
+        if (proof && !overBudget && (finished != null || k >= Math.min(3, Math.max(1, cfg.worlds)))) {
             for (int c = 0; c < n; c++) {
                 boolean win = ok[c], loss = ok[c];
                 for (int w = 0; w < k; w++) {
                     final Rollout r = outs[c][w];
+                    if (finished != null && !finished[c][w]) {
+                        loss = false; // unified-search-1106: a world not finished is not evidence for a win
+                        continue;
+                    }
                     if (r == null || !r.ok) {
                         win = false;
                         loss = false;
@@ -2718,9 +3340,14 @@ public final class LookaheadSearch {
             res.provenLoss = provenLoss;
             res.planBroken = planBroken;
         }
-        final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick : argmax(values, okArg, n, k);
+        final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick
+                : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP,
+                        hooks.reachDepart() > 0 && reachPart != null && reachPart.length == n ? reachPart : null,
+                        hooks.reachDepart(), stats)
+                : argmax(values, okArg, n, k);
+        reachPart = null; // this decision's only
         int best = plainBest;
-        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0) {
+        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0 && finished == null) {
             final int medBest = argmaxMedian(values, okArg, n, k);
             if (medBest != plainBest) {
                 stats.departMedianChanged++;
@@ -2990,10 +3617,19 @@ public final class LookaheadSearch {
     /**
      * S1 value leaf: replace one decision's static leaf values by the hooks' P(win) (terminal play-outs 1 / 0 / 0.5). One
      * call carries every non-terminal leaf, world-major then candidate-minor. On a failure the decision keeps its static
-     * values (all of them: a decision never mixes the two scales) and the fallback is counted.
+     * values (all of them: a decision never mixes the two scales) and the fallback is counted. Every fallback is said on
+     * stderr with its cause ("[lookahead] value leaf failed, static fallback: ...", bvw-p3-batch-1023).
      */
+    /** solver-distill-cc-1109: the last valued decision's reach part per candidate and world (null = the rule is off). */
+    private double[][] reachPart;
+
     private void valueLeaves(double[][] values, Rollout[][] outs, boolean[] ok, int k) {
+        if (cfg.leafOpp) {
+            valueLeavesS2t(values, outs, ok, k, null);
+            return;
+        }
         final int n = values.length;
+        reachPart = hooks.reachDepart() > 0 ? new double[n][k] : null;
         final List<Object> leaves = new ArrayList<>();
         final List<int[]> where = new ArrayList<>();
         for (int w = 0; w < k; w++) {
@@ -3003,6 +3639,7 @@ public final class LookaheadSearch {
                     if (r.leafPayload == null) {
                         stats.leafFallbacks++;
                         stats.leafLastError = "a non-terminal play-out has no leaf payload";
+                        staticFallbackLine(-1);
                         return;
                     }
                     leaves.add(r.leafPayload);
@@ -3013,10 +3650,12 @@ public final class LookaheadSearch {
         double[] p = null;
         if (!leaves.isEmpty()) {
             final long t = System.nanoTime();
+            boolean threw = false;
             try {
                 p = hooks.leafValues(leaves);
             } catch (RuntimeException e) {
                 p = null;
+                threw = true;
                 stats.leafLastError = String.valueOf(e);
             }
             stats.leafNanos += System.nanoTime() - t;
@@ -3024,8 +3663,12 @@ public final class LookaheadSearch {
                 stats.leafFallbacks++;
                 if (p != null) {
                     stats.leafLastError = "leaf values: " + p.length + " for " + leaves.size() + " leaves";
+                } else if (!threw) {
+                    // bvw-p3-batch-1023: the hook's own reason (it used to be lost: "static fallback: null")
+                    final String why = hooks.leafError();
+                    stats.leafLastError = why != null ? why : "the value hook returned no values";
                 }
-                System.err.println("[lookahead] value leaf failed, static fallback: " + stats.leafLastError);
+                staticFallbackLine(leaves.size());
                 return;
             }
             stats.leafCalls++;
@@ -3040,8 +3683,162 @@ public final class LookaheadSearch {
             }
         }
         for (int i = 0; i < where.size(); i++) {
-            values[where.get(i)[0]][where.get(i)[1]] = p[i];
+            final int c = where.get(i)[0], w = where.get(i)[1];
+            final double[] rr = outs[c][w].leafReach;
+            values[c][w] = rr == null ? p[i] : hooks.combineReach(p[i], rr);
+            if (rr != null) {
+                stats.noteReach(rr);
+                hooks.noteLeaf(outs[c][w].leafPayload, p[i], rr);
+                if (reachPart != null && c < reachPart.length && w < reachPart[c].length) {
+                    reachPart[c][w] = hooks.reachPart(rr);
+                }
+            }
         }
+    }
+
+    /**
+     * bvw-step2-fork-1027 (S2T, {@link Config#leafOpp}): the value leaves with both seats' frames. Every non-terminal leaf
+     * has the searching seat's frame (v_s) and the opponent's own frame at the same moment (v_o). With
+     * {@link Config#leafSym} the leaf is (v_s + 1 - v_o) / 2 and both go in ONE call (the searching seat's frames first,
+     * then the opponent's, world-major then candidate-minor); without it the leaf is v_s from exactly step 1's call, and
+     * v_o comes from a second call afterwards (logging only: a failure there is counted, never a fallback). Terminal
+     * play-outs stay 1 / 0 / 0.5 (v_o = 1 - v_s). {@code pairs} (null = none): [v_s, v_o, terminal (NaN = a leaf)] per
+     * candidate and world, NaN where unknown. A missing frame or a failed decision call is the static fallback.
+     */
+    private void valueLeavesS2t(double[][] values, Rollout[][] outs, boolean[] ok, int k, double[][][][] pairsOut) {
+        final int n = values.length;
+        reachPart = hooks.reachDepart() > 0 ? new double[n][k] : null;
+        final double[][][] pairs = new double[3][n][k];
+        for (double[][] a : pairs) {
+            for (double[] b : a) {
+                Arrays.fill(b, Double.NaN);
+            }
+        }
+        if (pairsOut != null) {
+            pairsOut[0] = pairs;
+        }
+        final List<Object> leaves = new ArrayList<>();
+        final List<Object> opp = new ArrayList<>();
+        final List<int[]> where = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final Rollout r = outs[c][w];
+                if (ok[c] && r != null && r.ok && Double.isNaN(r.pTerminal)) {
+                    if (r.leafPayload == null || cfg.leafSym && r.leafPayloadOpp == null) {
+                        stats.leafFallbacks++;
+                        stats.leafLastError = r.leafPayload == null ? "a non-terminal play-out has no leaf payload"
+                                : "a non-terminal play-out has no opponent leaf payload";
+                        staticFallbackLine(-1);
+                        return;
+                    }
+                    leaves.add(r.leafPayload);
+                    opp.add(r.leafPayloadOpp); // null (no v_o) only without leafSym
+                    where.add(new int[] {c, w});
+                }
+            }
+        }
+        final int m = leaves.size();
+        double[] ps = null, po = null;
+        if (m > 0) {
+            final List<Object> batch = cfg.leafSym ? new ArrayList<>(leaves) : leaves;
+            if (cfg.leafSym) {
+                batch.addAll(opp);
+            }
+            final long t = System.nanoTime();
+            double[] p = null;
+            boolean threw = false;
+            try {
+                p = hooks.leafValues(batch);
+            } catch (RuntimeException e) {
+                p = null;
+                threw = true;
+                stats.leafLastError = String.valueOf(e);
+            }
+            stats.leafNanos += System.nanoTime() - t;
+            if (p == null || p.length != batch.size()) {
+                stats.leafFallbacks++;
+                if (p != null) {
+                    stats.leafLastError = "leaf values: " + p.length + " for " + batch.size() + " leaves";
+                } else if (!threw) {
+                    final String why = hooks.leafError();
+                    stats.leafLastError = why != null ? why : "the value hook returned no values";
+                }
+                staticFallbackLine(batch.size());
+                return;
+            }
+            stats.leafCalls++;
+            stats.leafLeaves += batch.size();
+            ps = cfg.leafSym ? Arrays.copyOfRange(p, 0, m) : p;
+            if (cfg.leafSym) {
+                po = Arrays.copyOfRange(p, m, 2 * m);
+            } else {
+                // logging only: the opponent's frames after the decision's values are fixed (a missing one: no v_o)
+                final List<Object> have = new ArrayList<>();
+                for (Object x : opp) {
+                    if (x != null) {
+                        have.add(x);
+                    }
+                }
+                double[] got = null;
+                if (!have.isEmpty()) {
+                    try {
+                        got = hooks.leafValues(have);
+                    } catch (RuntimeException e) {
+                        got = null;
+                    }
+                }
+                if (have.size() < m) {
+                    stats.leafOppFailures++;
+                }
+                if (!have.isEmpty() && (got == null || got.length != have.size())) {
+                    stats.leafOppFailures++;
+                } else if (!have.isEmpty()) {
+                    stats.leafCalls++;
+                    stats.leafLeaves += have.size();
+                    po = new double[m];
+                    for (int i = 0, j = 0; i < m; i++) {
+                        po[i] = opp.get(i) == null ? Double.NaN : got[j++];
+                    }
+                }
+            }
+        }
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final Rollout r = outs[c][w];
+                if (ok[c] && r != null && r.ok && !Double.isNaN(r.pTerminal)) {
+                    values[c][w] = r.pTerminal;
+                    pairs[0][c][w] = r.pTerminal;
+                    pairs[1][c][w] = 1.0 - r.pTerminal;
+                    pairs[2][c][w] = r.pTerminal;
+                }
+            }
+        }
+        for (int i = 0; i < m; i++) {
+            final int c = where.get(i)[0], w = where.get(i)[1];
+            final double vs = ps[i];
+            final double vo = po == null ? Double.NaN : po[i];
+            values[c][w] = cfg.leafSym ? (vs + 1.0 - vo) / 2.0 : vs;
+            final double[] rr = outs[c][w].leafReach;
+            if (rr != null) {
+                hooks.noteLeaf(outs[c][w].leafPayload, values[c][w], rr);
+                values[c][w] = hooks.combineReach(values[c][w], rr);
+                stats.noteReach(rr);
+                if (reachPart != null && c < reachPart.length && w < reachPart[c].length) {
+                    reachPart[c][w] = hooks.reachPart(rr);
+                }
+            }
+            pairs[0][c][w] = vs;
+            pairs[1][c][w] = vo;
+        }
+    }
+
+    /**
+     * Every value-leaf static fallback, loud (bvw-p3-batch-1023): the cause, the leaves that keep static values (-1 =
+     * not collected) and the running count. The line's prefix is the one Stage A's leafq.py counts.
+     */
+    private void staticFallbackLine(int leaves) {
+        System.err.println("[lookahead] value leaf failed, static fallback: " + stats.leafLastError + " [STATIC leaf values"
+                + (leaves >= 0 ? " for " + leaves + " leaves" : "") + "; leafFallbacks " + stats.leafFallbacks + "]");
     }
 
     /**
@@ -3688,6 +4485,136 @@ public final class LookaheadSearch {
     }
 
     /** The search's choice from its values: the argmax, ties and a failed Forge answer to Forge's answer (index 0). */
+    private static boolean[][] finishedWorlds(Rollout[][] outs, int n, int k) {
+        final boolean[][] f = new boolean[n][k];
+        for (int c = 0; c < n; c++) {
+            for (int w = 0; w < k; w++) {
+                final Rollout r = outs[c][w];
+                f[c][w] = r != null && r.ok && !r.aborted;
+            }
+        }
+        return f;
+    }
+
+    /**
+     * unified-search-1106 ({@link Config#anytime}): the candidate with the largest mean gain over the default, among those
+     * whose gain passes the z test. Pairs are the worlds both finished; where the default has none, its mean, or with no
+     * finished world at all {@code rootP}. A candidate with fewer worlds than the decision's uses the larger of its own and
+     * the decision's pooled variance, so a thin sample carries the uncertainty the rest of the decision shows.
+     * With every world finished this is {@link #argmax}.
+     */
+    static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP) {
+        return chooseAnytime(v, f, ok, n, k, z, margin, rootP, null, 0.0, null);
+    }
+
+    /**
+     * solver-distill-cc-1109: is candidate c's reach part never below the default's in a world both finished, and above
+     * it by {@code depart} on average? Such a candidate replaces the default without the z test.
+     */
+    static boolean reachExempt(double[][] rp, boolean[][] f, int c, int k, double depart) {
+        if (rp == null || c >= rp.length || rp[c].length < k || rp[0].length < k || !(depart > 0)) {
+            return false;
+        }
+        double sum = 0;
+        int cnt = 0;
+        for (int w = 0; w < k; w++) {
+            if (f[c][w] && f[0][w]) {
+                final double d = rp[c][w] - rp[0][w];
+                if (d < -1e-9) {
+                    return false;
+                }
+                sum += d;
+                cnt++;
+            }
+        }
+        return cnt > 0 && sum / cnt >= depart;
+    }
+
+    /** {@link #chooseAnytime} with the reach departure rule ({@code rp}: each candidate's reach part per world, or null). */
+    static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP,
+            double[][] rp, double depart, Stats st) {
+        double defSum = 0;
+        int defN = 0;
+        for (int w = 0; w < k; w++) {
+            if (f[0][w]) {
+                defSum += v[0][w];
+                defN++;
+            }
+        }
+        final double defAll = defN > 0 ? defSum / defN : rootP;
+        if (Double.isNaN(defAll)) {
+            return 0;
+        }
+        final double[] mean = new double[n], var = new double[n];
+        final int[] kc = new int[n];
+        double poolSs = 0;
+        int poolDof = 0;
+        for (int c = 1; c < n; c++) {
+            if (!ok[c]) {
+                continue;
+            }
+            double sum = 0;
+            for (int w = 0; w < k; w++) {
+                if (f[c][w]) {
+                    sum += v[c][w] - (f[0][w] ? v[0][w] : defAll);
+                    kc[c]++;
+                }
+            }
+            if (kc[c] == 0) {
+                continue;
+            }
+            mean[c] = sum / kc[c];
+            double ss = 0;
+            for (int w = 0; w < k; w++) {
+                if (f[c][w]) {
+                    final double d = v[c][w] - (f[0][w] ? v[0][w] : defAll) - mean[c];
+                    ss += d * d;
+                }
+            }
+            var[c] = kc[c] > 1 ? ss / (kc[c] - 1) : Double.NaN;
+            poolSs += ss;
+            poolDof += Math.max(0, kc[c] - 1);
+        }
+        final double pooled = poolDof > 0 ? poolSs / poolDof : Double.NaN;
+        int best = 0;
+        double bestGain = margin;
+        boolean bestByReach = false;
+        for (int c = 1; c < n; c++) {
+            if (!ok[c] || kc[c] == 0 || !(mean[c] > 0)) {
+                continue;
+            }
+            boolean byReach = false;
+            if (z > 0 && k >= 2) {
+                final double s2;
+                boolean pass;
+                if (kc[c] == k) {
+                    s2 = var[c];
+                    pass = mean[c] > z * Math.sqrt(s2 / kc[c]);
+                } else if (Double.isNaN(pooled)) {
+                    pass = false; // nothing to measure a thin sample's uncertainty by
+                } else {
+                    s2 = Double.isNaN(var[c]) ? pooled : Math.max(var[c], pooled);
+                    pass = mean[c] > z * Math.sqrt(s2 / kc[c]);
+                }
+                if (!pass) {
+                    if (!reachExempt(rp, f, c, k, depart)) {
+                        continue;
+                    }
+                    byReach = true;
+                }
+            }
+            if (mean[c] > bestGain) {
+                best = c;
+                bestGain = mean[c];
+                bestByReach = byReach;
+            }
+        }
+        if (bestByReach && st != null) {
+            st.reachDeparts++;
+        }
+        return best;
+    }
+
     int argmax(double[][] values, boolean[] ok, int n, int k) {
         if (!ok[0]) {
             return 0;
@@ -4034,6 +4961,9 @@ public final class LookaheadSearch {
             }
             return true;
         }
+        if (forge.game.WorkClock.active()) {
+            return runLanes(tasks, wall); // work-units-1107: a work clock on the deciding thread
+        }
         List<Future<?>> fs = new ArrayList<>();
         final java.util.concurrent.atomic.AtomicLong[] acc = poolCpu == null ? null : forge.ai.CpuAccount.get();
         // the wall only: how many tasks are running (to count the stragglers at a cut)
@@ -4098,6 +5028,91 @@ public final class LookaheadSearch {
                 throw new RuntimeException("look-ahead worker failed", e);
             }
         }
+        return true;
+    }
+
+    /**
+     * work-units-1107 (a work clock on the deciding thread; never without one): the tasks on fixed virtual lanes. Task
+     * i runs on lane i mod L (L = the configured threads, 8 when auto, so the lanes never depend on the host), each lane
+     * runs its tasks in order on one pool thread under a fork of the deciding thread's clock, which starts at the
+     * decision's virtual now; a play-out's budget reads its lane's clock. Which play-outs a budget cuts is then a
+     * function of their work, not of the host's speed or the pool's scheduling. After the join the deciding clock is at
+     * the latest lane's end. The hard wall is the clock's real-time safety wall (none armed: the plain wait) plus
+     * {@link #WALL_GRACE_MS}; a cut there is a safety-wall hit (nondeterministic, counted), as in {@link #runAll}.
+     */
+    private boolean runLanes(List<Runnable> tasks, Budget wall) {
+        final forge.game.WorkClock.Clock parent = forge.game.WorkClock.current();
+        final int lanesCfg = cfg.threads > 0 ? cfg.threads : 8;
+        final int nl = Math.max(1, Math.min(lanesCfg, tasks.size()));
+        final forge.game.WorkClock.Clock[] lanes = new forge.game.WorkClock.Clock[nl];
+        final List<List<Runnable>> per = new ArrayList<>();
+        for (int i = 0; i < nl; i++) {
+            lanes[i] = parent.fork();
+            per.add(new ArrayList<>());
+        }
+        for (int i = 0; i < tasks.size(); i++) {
+            per.get(i % nl).add(tasks.get(i));
+        }
+        final java.util.concurrent.atomic.AtomicLong[] acc = poolCpu == null ? null : forge.ai.CpuAccount.get();
+        final AtomicInteger running = new AtomicInteger();
+        final List<Future<?>> fs = new ArrayList<>();
+        for (int i = 0; i < nl; i++) {
+            final forge.game.WorkClock.Clock lane = lanes[i];
+            final List<Runnable> mine = per.get(i);
+            fs.add(pool.submit(() -> {
+                final forge.game.WorkClock.Clock prev = forge.game.WorkClock.install(lane);
+                final long c0 = acc == null ? 0L : forge.ai.CpuAccount.now();
+                if (acc != null) {
+                    forge.ai.CpuAccount.set(acc);
+                }
+                running.incrementAndGet();
+                try {
+                    for (Runnable r : mine) {
+                        r.run();
+                    }
+                } finally {
+                    running.decrementAndGet();
+                    if (acc != null) {
+                        forge.ai.CpuAccount.set(null);
+                        forge.ai.CpuAccount.charge(acc, forge.ai.CpuAccount.now() - c0);
+                    }
+                    forge.game.WorkClock.install(prev);
+                }
+            }));
+        }
+        final long safety = parent.safetyWall();
+        final boolean cutOk = wall != null && safety != 0;
+        final long cut = safety + WALL_GRACE_MS * 1_000_000L;
+        for (int i = 0; i < fs.size(); i++) {
+            try {
+                if (cutOk) {
+                    fs.get(i).get(Math.max(0L, cut - System.nanoTime()), TimeUnit.NANOSECONDS);
+                } else {
+                    fs.get(i).get();
+                }
+            } catch (TimeoutException e) {
+                wall.stop();
+                wall.wallCut = true;
+                for (int j = i; j < fs.size(); j++) {
+                    fs.get(j).cancel(false);
+                }
+                stats.wallCuts++;
+                stats.wallStragglers += running.get();
+                parent.markWallHit();
+                System.err.println("[lookahead] work-units safety wall: lanes ran " + WALL_GRACE_MS + " ms past it; "
+                        + running.get() + " still running were told to stop, the decision is capped");
+                return false;
+            } catch (Exception e) {
+                if (wall != null) {
+                    wall.stop();
+                }
+                for (int j = i + 1; j < fs.size(); j++) {
+                    fs.get(j).cancel(false);
+                }
+                throw new RuntimeException("look-ahead worker failed", e);
+            }
+        }
+        parent.join(lanes);
         return true;
     }
 
@@ -4190,8 +5205,12 @@ public final class LookaheadSearch {
                     }
                 }
             }
+            final PhaseHandler eph = g.getPhaseHandler();
+            // endstep-rows-1103 (offTurnBreadth): outside our main phases the cut is the wider one
+            final int cut = cfg.offTurnBreadth > cfg.breadth && !(eph.isPlayerTurn(me) && eph.getPhase() != null
+                    && eph.getPhase().isMain()) ? cfg.offTurnBreadth : cfg.breadth;
             for (SpellAbility sa : legal) {
-                if (out.size() >= cfg.breadth) {
+                if (out.size() >= cut) {
                     break;
                 }
                 Cand c = new Cand(sa, false);
@@ -4484,6 +5503,14 @@ public final class LookaheadSearch {
 
     /** As {@link #locate(Game, Player, Cand)}; with {@code mayPlayLoose} (copy fidelity), last a may-play match. */
     static SpellAbility locate(Game g, Player p, Cand c, boolean mayPlayLoose) {
+        return locate(g, p, c, mayPlayLoose, false);
+    }
+
+    /**
+     * As above; with {@code unique} (step3-playout-fixes-1028, review #130 S3-2: the re-plays' key) the loose match is
+     * {@link #sameMayPlayText} and is accepted only when exactly one ability matches (else null: candidate_not_in_copy).
+     */
+    static SpellAbility locate(Game g, Player p, Cand c, boolean mayPlayLoose, boolean unique) {
         final Card host = g.findById(c.hostId);
         if (host == null) {
             return null;
@@ -4500,6 +5527,17 @@ public final class LookaheadSearch {
                 return sa;
             }
         }
+        if (mayPlayLoose && unique) {
+            SpellAbility one = null;
+            int n = 0;
+            for (SpellAbility sa : all) {
+                if (sa.isLandAbility() == c.land && sa.getMayPlay() != null && sameMayPlayText(c.desc, sa.getDescription())) {
+                    one = sa;
+                    n++;
+                }
+            }
+            return n == 1 ? one : null;
+        }
         if (mayPlayLoose) {
             for (SpellAbility sa : all) {
                 if (sa.isLandAbility() == c.land && sameMayPlay(c.desc, sa)) {
@@ -4508,6 +5546,16 @@ public final class LookaheadSearch {
             }
         }
         return null;
+    }
+
+    /**
+     * step3-playout-fixes-1028 (review #130 S3-2): the may-play suffix starts at the LAST " by " (rules text may contain
+     * " by " itself: "dealt damage by", "reduced by"). True when {@code copy} and the searched {@code desc} have the same
+     * text before their last " by " and differ after it (the effect's source as printed).
+     */
+    static boolean sameMayPlayText(String desc, String copy) {
+        final int i = copy.lastIndexOf(" by ");
+        return i > 0 && desc.lastIndexOf(" by ") == i && desc.regionMatches(0, copy, 0, i + 4) && !desc.equals(copy);
     }
 
     /**
@@ -4924,6 +5972,10 @@ public final class LookaheadSearch {
         /** S1 value leaf: the hooks' payload for a non-terminal play-out (null otherwise), and whether it came late. */
         Object leafPayload;
         boolean leafLate;
+        /** bvw-step2-fork-1027 (S2T, leafOpp): the opponent's own leaf frame at the same moment, or null. */
+        Object leafPayloadOpp;
+        /** solver-distill-cc-1109: the leaf's reach ({@link SearchHooks#leafReach}), or null. */
+        double[] leafReach;
         /** S1 policy play-out: why its seat could not play it (the play-out failed), or null. */
         String seatFailure;
         /** Lane copy-fidelity-1010: a failure's class when the play-out itself knows it ({@link #failureClass}), or null. */
@@ -5194,6 +6246,12 @@ public final class LookaheadSearch {
          * main-loop step enters declare blockers, so priority is not given to the seat.
          */
         boolean rewound;
+        /**
+         * bvw-step2-fork-1027 (S2T, an OPR roll-out; 0 / false otherwise = the config's): turns past the start (the cap),
+         * main-loop steps at most, and no value leaf (the roll-out plays to the end of the game or its cap).
+         */
+        int capTurns, capSteps;
+        boolean noLeaf;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
@@ -5236,11 +6294,25 @@ public final class LookaheadSearch {
                     }
                     MyRandom.setThreadRandom(PlayoutKeys.TrackedRandom.ofSnapshot(carried.rng));
                 } else {
-                    if (resample) {
+                    final int wm = worldMode;
+                    if (wm != WORLD_BELIEF) {
+                        // bvw-step2-fork-1027 (S2T: the T re-play, OPR): a TRUE world, the real position's hands kept,
+                        // every library shuffled below its known top. Its hidden cards only seed this starting state.
+                        trueShuffle(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                        if (wm == WORLD_OPR) {
+                            p.capTurns = oprTurns;
+                            p.capSteps = oprSteps;
+                            p.noLeaf = true;
+                        }
+                    } else if (resample) {
                         redraw(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                         if (ownKnownTop > 0) {
                             // search-bones-1015: the top of our library we placed ourselves (pile memory) stays in place
                             restoreOwnTop(liveMe, p.me, ownKnownTop);
+                        }
+                        if (beliefWorldDecks()) {
+                            // review #123 S1-1: the opponent's registered decklist is a hidden card list too
+                            worldDecks(p.g, p.me);
                         }
                     }
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
@@ -5259,9 +6331,14 @@ public final class LookaheadSearch {
                     // only that the candidate exists in the copy. The seed is the world's: common random numbers.
                     p.firstAction = new FirstAction(c);
                     p.firstAction.budget = p.budget;
-                    p.firstAction.mayPlayLoose = fidelityPass();
+                    // step3-playout-fixes-1028 (replayMayPlayLoose): a re-play's level-0 copy matches may-play loosely too
+                    final boolean unique = !fidelityPass() && cfg.replayMayPlayLoose && replaying;
+                    final boolean loose = fidelityPass() || unique;
+                    p.firstAction.mayPlayLoose = loose;
+                    p.firstAction.mayPlayUnique = unique;
+                    p.firstAction.oprRollout = p.noLeaf;
                     p.playoutSeed = mix(worldSeed, 5);
-                    if (!c.pass && c.plan == null && c.block == null && locate(p.g, p.me, c, fidelityPass()) == null) {
+                    if (!c.pass && c.plan == null && c.block == null && locate(p.g, p.me, c, loose, unique) == null) {
                         p.failed = true;
                         p.missWhy = locateMiss(p.g, p.me, c);
                     }
@@ -5300,8 +6377,10 @@ public final class LookaheadSearch {
         final GameCopier c = new GameCopier(live, true);
         if (cfg.copyTurnLimits) c.setTurnLimits(true);
         if (cfg.offBattlefieldLimits) c.setOffBattlefieldLimits(true);
-        if (cfg.stackAbilityCopies) c.setStackAbilityCopies(true); // house p16
-        if (cfg.copyBackFace) c.setCopyBackFace(true); // house p15
+        if (cfg.historyLki) c.setHistoryLki(true);
+        if (cfg.copyBackFace) c.setCopyBackFace(true);
+        if (cfg.stackAbilityCopies) c.setStackAbilityCopies(true);
+        if (cfg.stackHistory) c.setStackHistory(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }
@@ -5350,7 +6429,12 @@ public final class LookaheadSearch {
             // S1 (null unless the hooks are set): the value-leaf probe, and a policy-piloted searching seat
             // search-bones-1015: a recording play-out (S-b's sampled plans) has no leaf and ends with our turn
             final boolean recording = p.firstAction != null && p.firstAction.recorder != null;
-            final LeafProbe probe = hookLeaf && !recording ? new LeafProbe(hooks, p.hookCtx) : null;
+            // bvw-step2-fork-1027: an OPR roll-out (noLeaf) plays to the end of the game or its cap, without a leaf
+            final LeafProbe probe = hookLeaf && !recording && !p.noLeaf ? new LeafProbe(hooks, p.hookCtx) : null;
+            if (probe != null && cfg.leafOpp && me.getOpponents().size() == 1) {
+                probe.opp = me.getOpponents().get(0); // S2T: the opponent's own frame at the leaf too
+            }
+            List<PlayoutSeat> oppSeats = null;
             PlayoutSeat seat = null;
             final int[] stepRef = new int[1];
             if (hookPlayout) {
@@ -5365,7 +6449,20 @@ public final class LookaheadSearch {
             }
             for (Player o : g.getPlayers()) {
                 if (o != me) {
-                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                    if (cfg.opponentPolicy) {
+                        // bvw-step2-fork-1027 (S2T): the opponent is the same policy seat (its own observation only)
+                        final PlayoutSeat os = hookPlayout ? hooks.opponentSeat(p.hookCtx, g, o, p.playoutSeed, p.firstAction) : null;
+                        if (os == null) {
+                            throw new IllegalStateException("S2T: no policy seat for the play-out's opponent");
+                        }
+                        o.dangerouslySetController(os.controller());
+                        if (oppSeats == null) {
+                            oppSeats = new ArrayList<>(1);
+                        }
+                        oppSeats.add(os);
+                    } else {
+                        o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                    }
                 }
             }
             final PhaseHandler ph = g.getPhaseHandler();
@@ -5375,8 +6472,10 @@ public final class LookaheadSearch {
                     setFirstPriority(ph, p.firstPriority);
                 }
             }
-            final TurnWatch watch = new TurnWatch(ph.getTurn() + (recording ? 1 : cfg.horizonTurns),
-                    Boolean.TRUE.equals(wantFp) ? me : null);
+            // line-adoption-1107: planHorizonTurn 0 unless plans.lineHorizon
+            final TurnWatch watch = new TurnWatch(recording ? ph.getTurn() + 1 : Math.max(ph.getTurn()
+                    + (p.capTurns > 0 ? p.capTurns : cfg.horizonTurns), planHorizonTurn), Boolean.TRUE.equals(wantFp) ? me : null);
+            final int maxSteps = p.capSteps > 0 ? p.capSteps : cfg.maxSteps;
             g.subscribeToEvents(watch);
             if (probe != null) {
                 probe.watch = watch;
@@ -5396,7 +6495,7 @@ public final class LookaheadSearch {
             // Without a probe: to the start of the horizon turn (K8). With one: on to the seat's first priority in it,
             // at most leafExtraSteps main-loop steps past its start.
             while (!g.isGameOver() && !(probe == null ? watch.reached : probe.done || watch.reached && extra >= cfg.leafExtraSteps)
-                    && steps < cfg.maxSteps) {
+                    && steps < maxSteps) {
                 if (p.budget != null && p.budget.over()) {
                     r.aborted = true;
                     break;
@@ -5484,7 +6583,13 @@ public final class LookaheadSearch {
                 r.fingerprint = src.fingerprint;
             } else {
                 r.capped = !g.isGameOver() && !watch.reached;
-                r.value = value(g, me);
+                if (p.noLeaf) {
+                    // bvw-step2-fork-1027 (OPR): only the game's result counts; a roll-out at its cap is not scored
+                    r.pTerminal = terminalP(g, me);
+                    r.value = Double.isNaN(r.pTerminal) ? 0 : (2 * r.pTerminal - 1) * TERMINAL;
+                } else {
+                    r.value = value(g, me);
+                }
                 if (model != null) {
                     r.pTerminal = terminalP(g, me);
                     if (Double.isNaN(r.pTerminal)) {
@@ -5497,10 +6602,16 @@ public final class LookaheadSearch {
                         if (!probe.done) {
                             // no priority of the seat within the extra steps (or a capped play-out): the leaf is here
                             probe.payload = hooks.captureLeaf(p.hookCtx, g, me);
+                            probe.takeReach(g, me);
+                            if (probe.opp != null) {
+                                probe.payloadOpp = probe.captureOpp(g); // S2T
+                            }
                             probe.done = true;
                             r.leafLate = true;
                         }
                         r.leafPayload = probe.payload;
+                        r.leafPayloadOpp = probe.payloadOpp;
+                        r.leafReach = probe.reach;
                     }
                 }
                 r.fingerprint = watch.fingerprint;
@@ -5516,6 +6627,18 @@ public final class LookaheadSearch {
                 r.ok = false;
                 r.value = Double.NEGATIVE_INFINITY;
                 r.seatFailure = seat.failure();
+            }
+            if (oppSeats != null && r.ok) {
+                // bvw-step2-fork-1027 (S2T): an opponent policy seat that could not play (a fault ends its copy as a
+                // draw) fails the play-out as our seat's would
+                for (PlayoutSeat os : oppSeats) {
+                    if (os.failure() != null) {
+                        r.ok = false;
+                        r.value = Double.NEGATIVE_INFINITY;
+                        r.seatFailure = "opponent seat: " + os.failure();
+                        break;
+                    }
+                }
             }
             if (p.firstAction != null) {
                 r.planState = p.firstAction.planState;
@@ -5789,6 +6912,11 @@ public final class LookaheadSearch {
     }
 
     /** The copy resumes exactly where the live seat stands: it holds priority, it acted first. */
+    /** bvw-step1-build-1024: {@link #givePriority} for the step-1 labeller's root copy (forge.bench.rl.StepSearch). */
+    public static void givePriorityTo(PhaseHandler ph, Player p) {
+        givePriority(ph, p);
+    }
+
     static void givePriority(PhaseHandler ph, Player p) {
         initFields();
         try {
@@ -6308,7 +7436,9 @@ public final class LookaheadSearch {
         poolCpu = pc;
         final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
         forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
-        final long start = startNanos != 0L ? startNanos : t0;
+        // work-units-1107: startNanos is on the work clock when one is installed; the own start too
+        final long start = startNanos != 0L ? startNanos
+                : forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
         final Budget b = cfg.budgetMs > 0 ? new Budget(start + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         budget = b;
         boolean searched = false;
@@ -7334,9 +8464,22 @@ public final class LookaheadSearch {
      * belief off or in shadow mode, {@link #resample} as before.
      */
     void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
-        if (cfg.beliefStatics) g.staleStatics = true; // house p8
-        if (cfg.beliefPlayerStatics) g.stalePlayerStatics = true; // house p10
-        if (beliefCube != null && !cfg.beliefShadow) {
+        if (cfg.beliefStatics) g.staleStatics = true;
+        if (cfg.beliefPlayerStatics) g.stalePlayerStatics = true;
+        if (beliefCube != null && !cfg.beliefShadow && cfg.beliefDeck) {
+            // deck-belief-1105: the opponents' hidden cards from the deck posterior, then our own library as before
+            redrawOpponentsDeck(live, liveMe, g, me, rng, DECK_PARAMS);
+            ownLibrary(live, liveMe, me, rng);
+        } else if (beliefCube != null && !cfg.beliefShadow && cfg.deck()) {
+            // belief-n11-1030: the learned deck model over the cards they showed in this game, then our own library
+            redrawOpponentsDeck(live, liveMe, g, me, rng, cfg.beliefDeckModel);
+            ownLibrary(live, liveMe, me, rng);
+        } else if (beliefCube != null && !cfg.beliefShadow && cfg.codraft()) {
+            // bvw-step2-fork-1027 (S2T): the co-draft deck prior over the cards they showed in this game (honest: public
+            // co-draft data and public cards), then our own library below its known top
+            redrawOpponentsPrior(live, liveMe, g, me, rng, cfg.beliefPriorTable, cfg.beliefPriorGain, false, null, 0);
+            ownLibrary(live, liveMe, me, rng);
+        } else if (beliefCube != null && !cfg.beliefShadow) {
             resampleBelief(live, liveMe, g, me, rng, decisionBelief);
         } else if (cfg.infoState) {
             resample(live, liveMe, g, me, rng, InfoStates.find(live)); // review #172 S2: find only
@@ -7358,6 +8501,72 @@ public final class LookaheadSearch {
     }
 
     /**
+     * bvw-step2-fork-1027: the solver's re-draw that matches this search's belief: the co-draft prior's
+     * ({@link #opponentRedrawPrior}, this game's shown cards only) with belief "codraft", else {@link #opponentRedraw}.
+     */
+    public ForcedWinSolver.Redraw solverRedraw() {
+        final ForcedWinSolver.Redraw base = cfg.deck() ? opponentRedrawDeck(cfg.beliefDeckModel)
+                : cfg.codraft() ? opponentRedrawPrior(cfg.beliefPriorTable, cfg.beliefPriorGain)
+                : opponentRedraw();
+        if (base == null || !beliefWorldDecks()) {
+            return base;
+        }
+        // review #123 S1-1 (S2T): the solver's belief worlds carry the world's own decklist for the opponent too
+        return (live, liveMe, g, me, rng) -> {
+            base.apply(live, liveMe, g, me, rng);
+            worldDecks(g, me);
+        };
+    }
+
+    /**
+     * Review #123 S1-1 (S2T only: {@link Config#opponentPolicy}; step 1's worlds are unchanged): a belief world gives each
+     * opponent the world's own decklist ({@link #worldDecks}). Off in the T re-play and OPR, whose real decklist is
+     * that seat's own knowledge.
+     */
+    boolean beliefWorldDecks() {
+        return cfg.opponentPolicy && beliefCube != null && !cfg.beliefShadow && !TEST_REAL_DECKS;
+    }
+
+    /** Tests only (the honesty test's deck mutant; false otherwise): belief worlds keep the real decklists. */
+    public static volatile boolean TEST_REAL_DECKS = false;
+
+    private static volatile java.lang.reflect.Field rpDeck;
+
+    /**
+     * Review #123 S1-1: in belief world {@code g}, each opponent's registered deck (the decklist its own frames, NAME
+     * candidates and Forge-decided asks read) becomes the world's own: one main section of every non-token card it owns
+     * in this world (its visible cards and its redrawn hand and library), no other section, no key cards or hints. The
+     * real decklist names cards we have not seen; it never reaches a belief-world decision or frame.
+     */
+    static void worldDecks(Game g, Player me) {
+        for (Player opp : me.getOpponents()) {
+            final forge.game.player.RegisteredPlayer rp = opp.getRegisteredPlayer();
+            if (rp == null) {
+                continue;
+            }
+            final forge.deck.Deck d = new forge.deck.Deck("belief-world");
+            final forge.deck.CardPool main = d.getOrCreate(forge.deck.DeckSection.Main);
+            for (Card c : g.getCardsInGame()) {
+                if (c.getOwner() == opp && !c.isToken() && c.getPaperCard() instanceof forge.item.PaperCard) {
+                    main.add((forge.item.PaperCard) c.getPaperCard());
+                }
+            }
+            try {
+                java.lang.reflect.Field f = rpDeck;
+                if (f == null) {
+                    f = forge.game.player.RegisteredPlayer.class.getDeclaredField("currentDeck");
+                    f.setAccessible(true);
+                    rpDeck = f;
+                }
+                f.set(rp, d);
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                // refuse the world rather than let the real decklist through
+                throw new IllegalStateException("S2T: cannot give the belief world its own decklist: " + e, e);
+            }
+        }
+    }
+
+    /**
      * honest-belief-1020: the solver's re-draw ({@link ForcedWinSolver#redraw}): the opponents' hidden cards from the
      * belief pool, uniformly; our own library is left to the solver (its known-top rule). Null when no belief is on.
      */
@@ -7373,6 +8582,97 @@ public final class LookaheadSearch {
                 return rememberedHand(live, observer, card);
             }
         };
+    }
+
+    /**
+     * deck-belief-1105 (solver key {@code deckBelief}): as {@link #opponentRedraw}, but each world's hidden hand and
+     * library are dealt by {@link DeckBelief#deal} from the same pool: a deck of colours consistent with what the
+     * opponent has shown, its hand weighted by what it declined to do. Null when no belief is on.
+     */
+    /** deck-belief-1105: the search worlds' deck-belief parameters (the model defaults). */
+    private static final DeckBelief.Params DECK_PARAMS = new DeckBelief.Params();
+
+    public ForcedWinSolver.Redraw opponentRedrawDeck(final DeckBelief.Params p) {
+        if (beliefCube == null || cfg.beliefShadow) {
+            return null;
+        }
+        return new ForcedWinSolver.Redraw() {
+            @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                redrawOpponentsDeck(live, liveMe, g, me, rng, p);
+            }
+            @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                return rememberedHand(live, observer, card);
+            }
+        };
+    }
+
+    /** The solver's re-draw for a solver config: {@link #opponentRedrawDeck} with {@code deckBelief}, else as before. */
+    public ForcedWinSolver.Redraw solverRedraw(final ForcedWinSolver.Config sc) {
+        return sc != null && sc.deckBelief ? opponentRedrawDeck(sc.deckParams()) : opponentRedraw();
+    }
+
+    private void redrawOpponentsDeck(Game live, Player liveMe, Game g, Player me, Random rng, DeckBelief.Params p) {
+        final PlayerView myView = liveMe.getView();
+        for (Player opp : me.getOpponents()) {
+            final Player liveOpp = (Player) live.getPlayer(opp.getId());
+            if (liveOpp == null) {
+                throw new IllegalStateException("belief: no live player for opponent " + opp.getId());
+            }
+            final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            final List<Card> keep = new ArrayList<>();
+            for (Card c : hand) {
+                Card lc = live.findById(c.getId());
+                if (lc != null && handKnown(live, liveMe, lc)) {
+                    keep.add(c);
+                }
+            }
+            final Map<Integer, Card> pins = cfg.infoState ? InfoStates.oppPins(InfoStates.find(live), liveMe, liveOpp, g) : null;
+            final List<Card> libKnownTop = new ArrayList<>();
+            if (pins == null) {
+                for (Card lc : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library))) {
+                    if (lc.getView().canBeShownTo(myView)) {
+                        Card cc = g.findById(lc.getId());
+                        if (cc != null) {
+                            libKnownTop.add(cc);
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+            final int need = hand.size() - keep.size();
+            final int libNeed = opp.getCardsIn(ZoneType.Library).size() - (pins != null ? pins.size() : libKnownTop.size());
+            if (need == 0 && libNeed == 0) {
+                continue;
+            }
+            final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
+            if (pins != null) {
+                for (Card pc : pins.values()) {
+                    if (!liveOpp.getGame().findById(pc.getId()).getView().canBeShownTo(myView)) {
+                        pool.remove(pc.getName());
+                    }
+                }
+            }
+            final long c0 = System.nanoTime();
+            final DeckBelief.Evidence ev = DeckBelief.Evidence.read(live, liveOpp, myView);
+            final DeckBelief.Deal d = DeckBelief.deal(pool, beliefCube.paper::get, ev, need, Math.max(0, libNeed), p, rng);
+            final List<Card> newHand = new ArrayList<>(keep);
+            for (String nm : d.hand) {
+                newHand.add(beliefCard(nm, opp, g));
+            }
+            final List<Card> newLib = new ArrayList<>(libKnownTop);
+            for (String nm : d.library) {
+                newLib.add(beliefCard(nm, opp, g));
+            }
+            opp.getZone(ZoneType.Hand).setCards(newHand);
+            opp.getZone(ZoneType.Library).setCards(pins == null ? newLib
+                    : InfoStates.assemble(opp.getCardsIn(ZoneType.Library).size(), pins, newLib));
+            synchronized (stats) {
+                stats.beliefWorlds++;
+                stats.beliefCards += d.hand.size() + d.library.size();
+                stats.beliefCreateNanos += System.nanoTime() - c0;
+            }
+        }
     }
 
     /**
@@ -7448,7 +8748,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && handKnown(live, liveMe, lc)) {
+                if (lc != null && lc.getView().canBeShownTo(myView)) {
                     keep.add(c);
                 }
             }
@@ -7477,7 +8777,7 @@ public final class LookaheadSearch {
                 }
             }
             for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
-                // review #123 S3-4 (forge.researchFixes): a face-down spell (a morph cast face down) or one we cannot see shows nothing
+                // review #123 S3-4: a face-down spell (a morph cast face down) or one we cannot see shows nothing
                 final Card sc = si.getSourceCard();
                 if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getPaperCard() != null
                         && (!forge.game.EngineFixes.researchFixes() || !sc.isFaceDown() && sc.getView().canBeShownTo(myView))) {
@@ -7641,6 +8941,104 @@ public final class LookaheadSearch {
             synchronized (stats) {
                 stats.beliefWorlds++;
                 stats.beliefCards += hs.size() + libSlots.size();
+                stats.beliefCreateNanos += System.nanoTime() - c0;
+            }
+        }
+        if (changed) refreshBeliefStatics(g);
+    }
+
+    /**
+     * belief-n11-1030 (N11): the solver's re-draw with the learned deck model ({@link #redrawOpponentsDeck}). Null when
+     * no belief is on or no model is given.
+     */
+    public ForcedWinSolver.Redraw opponentRedrawDeck(final DeckBeliefModel model) {
+        if (beliefCube == null || cfg.beliefShadow || model == null) {
+            return null;
+        }
+        return (live, liveMe, g, me, rng) -> redrawOpponentsDeck(live, liveMe, g, me, rng, model);
+    }
+
+    /**
+     * belief-n11-1030 (N11): each opponent's hidden hand and library (together: the rest of their deck) drawn from the
+     * learned deck model given the card instances they have shown in this game (battlefield, graveyard, exile, command,
+     * their spells on the stack, hand cards we can see), never from their real cards. Kept hand cards and the known top
+     * of their library stay. Hidden counts are matched exactly; the drawn cards are shuffled and dealt hand first.
+     */
+    private void redrawOpponentsDeck(Game live, Player liveMe, Game g, Player me, Random rng, DeckBeliefModel model) {
+        boolean changed = false;
+        final PlayerView myView = liveMe.getView();
+        for (Player opp : me.getOpponents()) {
+            final Player liveOpp = (Player) live.getPlayer(opp.getId());
+            if (liveOpp == null) {
+                throw new IllegalStateException("belief: no live player for opponent " + opp.getId());
+            }
+            final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            final List<Card> keep = new ArrayList<>();
+            for (Card c : hand) {
+                Card lc = live.findById(c.getId());
+                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                    keep.add(c);
+                }
+            }
+            final List<Card> libKnownTop = new ArrayList<>();
+            for (Card lc : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library))) {
+                if (lc.getView().canBeShownTo(myView)) {
+                    Card cc = g.findById(lc.getId());
+                    if (cc != null) {
+                        libKnownTop.add(cc);
+                        continue;
+                    }
+                }
+                break;
+            }
+            final int need = hand.size() - keep.size();
+            final int libNeed = opp.getCardsIn(ZoneType.Library).size() - libKnownTop.size();
+            if (need == 0 && libNeed == 0) {
+                continue;
+            }
+            // the card instances they have shown (a name per card, so basics repeat), by card id order
+            final List<Card> shownCards = new ArrayList<>();
+            for (Card c : live.getCardsInGame()) {
+                if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && !c.isCopiedSpell()
+                        && c.getPaperCard() != null && c.getView().canBeShownTo(myView)) {
+                    shownCards.add(c);
+                }
+            }
+            for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
+                final Card sc = si.getSourceCard();
+                if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getPaperCard() != null && !sc.isFaceDown()
+                        && !sc.isToken() && !sc.isCopiedSpell() && sc.getView().canBeShownTo(myView)
+                        && !shownCards.contains(sc)) {
+                    shownCards.add(sc);
+                }
+            }
+            shownCards.sort(java.util.Comparator.comparingInt(Card::getId));
+            final List<String> shown = new ArrayList<>();
+            for (Card c : shownCards) {
+                shown.add(c.getPaperCard().getName());
+            }
+            // review #1530 S1 ruling: the per-deck gate (cached in the model; sticky on refusal)
+            model.requireHeld(liveOpp.getRegisteredPlayer());
+            final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
+            final long c0 = System.nanoTime();
+            final List<String> drawn = new ArrayList<>(model.sample(shown, pool, need + libNeed, rng));
+            Collections.shuffle(drawn, rng);
+            final List<Card> newHand = new ArrayList<>(keep);
+            final List<Card> newLib = new ArrayList<>(libKnownTop);
+            for (int k = 0; k < drawn.size(); k++) {
+                final Card nc = beliefCard(drawn.get(k), opp, g);
+                if (k < need) {
+                    newHand.add(nc);
+                } else {
+                    newLib.add(nc);
+                }
+            }
+            opp.getZone(ZoneType.Hand).setCards(newHand);
+            opp.getZone(ZoneType.Library).setCards(newLib);
+            changed = true;
+            synchronized (stats) {
+                stats.beliefWorlds++;
+                stats.beliefCards += drawn.size();
                 stats.beliefCreateNanos += System.nanoTime() - c0;
             }
         }
@@ -7978,7 +9376,7 @@ public final class LookaheadSearch {
         return sb.length() > 1500 ? sb.substring(0, 1500) : sb.toString();
     }
 
-    static long mix(long a, long b) {
+    public static long mix(long a, long b) {
         long x = a * 0x9E3779B97F4A7C15L + b;
         x ^= (x >>> 30);
         x *= 0xBF58476D1CE4E5B9L;

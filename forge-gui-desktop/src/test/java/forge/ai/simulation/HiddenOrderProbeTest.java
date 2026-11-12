@@ -15,7 +15,7 @@ import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 
 /**
- * live-leak-1111 (ported from sdcc-leak-1111): a sandbox probe must not read the real order of the seat's library (nor the opponent's hidden hand)
+ * sdcc-leak-1111: a sandbox probe must not read the real order of the seat's library (nor the opponent's hidden hand)
  * when the solver hides it. The probe of a draw spell on a copy of the real game drew the real top cards. With
  * {@link ForcedWinProbe#HIDE} (a reader of a {@code hideOwnLibrary} solver without {@code hiddenOrderLegacy}) the
  * sandbox is scrubbed first, and what it draws is a function of the card ids and the seed, not of the real order.
@@ -127,5 +127,6 @@ public class HiddenOrderProbeTest extends forge.ai.AITest {
         final ForcedWinSolver.Config legacy = ForcedWinSolver.Config.fromProps(
                 k -> "hideOwnLibrary".equals(k) || "hiddenOrderLegacy".equals(k) ? "true" : null);
         Assert.assertFalse(legacy.hideHidden(), "hiddenOrderLegacy: the old behaviour");
+        Assert.assertFalse(on.breakOnCounter, "breakOnCounter is off by default");
     }
 }

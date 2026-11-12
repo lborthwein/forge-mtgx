@@ -129,6 +129,16 @@ public final class RlCandidates {
             return cands.size();
         }
 
+        /** The KEEP candidate of a mulligan ask, or -1. */
+        public int keepIndex() {
+            for (int i = 0; i < cands.size(); i++) {
+                if (cands.get(i).kind == RlSchema.K_KEEP) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
         public int S() {
             return slotCards.size();
         }
@@ -465,6 +475,41 @@ public final class RlCandidates {
                 }
                 default:
                     return null;
+            }
+        }
+
+        /**
+         * sdcc-imit2-1111: the targets {@code sa} carries as steps of this TARGETS menu, by object identity, or null. An
+         * echo names a stack target by its ability's id while the menu (and an answer) names its stack entry, so
+         * {@link #fromEcho} cannot map a targeted spell or ability; the objects can.
+         */
+        public short[] fromTargetsOf(final SpellAbility sa) {
+            if (family != RlSchema.F_TARGETS || sa == null) {
+                return null;
+            }
+            try {
+                final List<Short> out = new ArrayList<>();
+                for (GameObject go : sa.getTargets()) {
+                    int at = -1;
+                    for (int i = 0; i < C() && at < 0; i++) {
+                        final Cand x = cands.get(i);
+                        if ((x.host != null && x.host == go) || (x.tgt0 != null && x.tgt0 == go)
+                                || (x.hostStack != null && x.hostStack.getSpellAbility() == go)) {
+                            at = i;
+                        }
+                    }
+                    if (at < 0) {
+                        return null;
+                    }
+                    out.add((short) at);
+                }
+                final short[] steps = new short[out.size()];
+                for (int i = 0; i < steps.length; i++) {
+                    steps[i] = out.get(i);
+                }
+                return validate(steps) == null ? steps : null;
+            } catch (RuntimeException e) {
+                return null;
             }
         }
 

@@ -85,6 +85,60 @@ public final class BenchSession {
         }
 
         /**
+         * sdcc-imit-1111 (default false, and then the bridge does nothing new): this answerer wants the priority answers
+         * a seat's plan hook plays while it follows a line ({@link #hookPrepare}, {@link #hookAnswered}).
+         */
+        default boolean wantsHook(forge.game.Game game, forge.game.player.Player player) {
+            return false;
+        }
+
+        /**
+         * sdcc-imit-1111: a priority of a line the plan hook is following, before the hook is asked: the ask as
+         * {@link #answer} would get it. Called inside the bridge's observer isolation (the live game is not moved).
+         * Returns a token for {@link #hookAnswered}, or null (nothing to record).
+         */
+        default Object hookPrepare(forge.game.Game game, forge.game.player.Player player, String method, String kind,
+                com.google.gson.JsonObject body, Object menuObjects) {
+            return null;
+        }
+
+        /**
+         * sdcc-imit-1111: the plan hook's answer to that priority, in the ask's own answer shape (as an echo).
+         * {@code prepared} = {@link #hookPrepare}'s token, or null for the priority this answerer was just asked and
+         * handed to the hook. Never changes the answer.
+         */
+        default void hookAnswered(forge.game.Game game, forge.game.player.Player player, Object prepared,
+                com.google.gson.JsonObject hookAnswer) {
+        }
+
+        /**
+         * sdcc-imit2-1111: {@link #hookPrepare}'s frame is sent now, before the answer exists (a line's choice ask that
+         * Forge AI is about to answer: asks nested inside it then keep the order they were raised in). The later
+         * {@link #hookAnswered} only names the answer played. Default: nothing.
+         */
+        default void hookSend(forge.game.Game game, forge.game.player.Player player, Object prepared) {
+        }
+
+        /**
+         * sdcc-imit2-1111: {@link #hookAnswered} with the raw decision where the bridge has one (priority: the hook's
+         * {@code List<SpellAbility>}, whose targets the line has already set). Default: the answer alone.
+         */
+        default void hookAnswered(forge.game.Game game, forge.game.player.Player player, Object prepared,
+                com.google.gson.JsonObject hookAnswer, Object decision) {
+            hookAnswered(game, player, prepared, hookAnswer);
+        }
+
+        /**
+         * sdcc-imit2-1111: an earlier priority of the line ({@code prepared}: its {@link #hookPrepare} token, or null
+         * for the handed-over one) was answered with a mana ability, which no priority menu names; {@code answer} is
+         * the line's next action as an echo against THAT priority's menu (the action the mana was floated for). Default:
+         * nothing.
+         */
+        default void hookRelabel(forge.game.Game game, forge.game.player.Player player, Object prepared,
+                com.google.gson.JsonObject answer) {
+        }
+
+        /**
          * Called where the bridge publishes a delegated echo (this answerer delegated, Forge decided), before the
          * closed-channel return: Forge's answer in the ask's own answer shape, plus the raw decision where the
          * bridge has one (priority: the returned {@code List<SpellAbility>}, whose targets Forge's AI has already

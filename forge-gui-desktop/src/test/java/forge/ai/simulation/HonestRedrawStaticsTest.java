@@ -1,5 +1,6 @@
 package forge.ai.simulation;
 
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -80,7 +81,7 @@ public class HonestRedrawStaticsTest extends SimulationTest {
 
     @DataProvider(name = "paths")
     public Object[][] paths() {
-        return new Object[][] {{"uniform"}, {"prior"}}; // live-fixes-1107: no HonestLabel (research) on the live line
+        return new Object[][] {{"uniform"}, {"prior"}, {"label"}};
     }
 
     @DataProvider(name = "hiddenStatics")
@@ -114,6 +115,21 @@ public class HonestRedrawStaticsTest extends SimulationTest {
 
     private Game world(Game live, String path) throws Exception {
         Player me = live.getPlayers().get(0), opp = live.getPlayers().get(1);
+        if (path.equals("label")) {
+            HonestLabel.Spec spec = new HonestLabel.Spec();
+            spec.redraw = "belief";
+            spec.solverCfg.addProperty("hideOwnLibrary", "true");
+            spec.lossCfg.addProperty("hideOwnLibrary", "true");
+            spec.beliefCube = pool();
+            spec.beliefCubeSha256 = null; // test-owned pool, no corpus configuration
+            spec.beliefBasics = 2;
+            spec.beliefSingleton = false;
+            HonestLabel.Seat seat = new HonestLabel.Seat(spec);
+            Method method = HonestLabel.Seat.class.getDeclaredMethod("world", Game.class, Player.class,
+                    Player.class, Random.class);
+            method.setAccessible(true);
+            return (Game) ((Object[]) method.invoke(seat, live, me, opp, new Random(1023)))[0];
+        }
         LookaheadSearch.Config cfg = new LookaheadSearch.Config();
         cfg.belief = "uniform";
         cfg.beliefCube = pool();
