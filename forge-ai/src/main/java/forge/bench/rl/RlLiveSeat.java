@@ -103,7 +103,8 @@ public final class RlLiveSeat {
                 "breakOnCounter", "copyBackFace", "engineLongLoops", "engineLoopBisect", "engineLoopHoist", "engineLoopReach",
                 "engineMoves", "engineNodesPerSearch", "engineRerun", "historyLki", "landEntersProbe", "lineUncapped", "loopMarginal",
                 "offBattlefieldLimits", "planDiscardWall", "planExpandCap", "probeSettle", "readerPerGame", "sourceColorsLive",
-                "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds"));
+                "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds",
+                "passBlockers"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -116,7 +117,8 @@ public final class RlLiveSeat {
                 "breakOnCounter", "copyBackFace", "engineLongLoops", "engineLoopBisect", "engineLoopHoist", "engineLoopReach",
                 "engineMoves", "engineNodesPerSearch", "engineRerun", "historyLki", "landEntersProbe", "lineUncapped", "loopMarginal",
                 "offBattlefieldLimits", "planDiscardWall", "planExpandCap", "probeSettle", "readerPerGame", "sourceColorsLive",
-                "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds"));
+                "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds",
+                "passBlockers"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
@@ -159,7 +161,7 @@ public final class RlLiveSeat {
                 java.util.Map.entry("tieBreakTurns", "[0-2]"),
                 java.util.Map.entry("defendMs", "[5-9]\\d\\d|[1-5]\\d{3}|6000"),
                 java.util.Map.entry("sharedReader", "true|false"), java.util.Map.entry("priorFillBasics", "true|false"),
-                java.util.Map.entry("readerPerGame", "true|false"),
+                java.util.Map.entry("readerPerGame", "true|false"), java.util.Map.entry("passBlockers", "true|false"),
                 java.util.Map.entry("defenseWorlds", "[1-9]|1[0-6]"),
                 java.util.Map.entry("counterDelta", "0(\\.\\d+)?|1(\\.0+)?"),
                 java.util.Map.entry("threatExtraTurns", "[0-2]"), java.util.Map.entry("planMs", "\\d{1,5}"),

@@ -72,7 +72,7 @@ public class CardScorerHiddenReadTest extends forge.ai.AITest {
     }
 
     /** The game with {@code spell} cast from hand and waiting on the stack (the position a resolving ask replays from). */
-    private static Game cast(final String hand, final String library, final String spell) {
+    public static Game cast(final String hand, final String library, final String spell) {
         final Game g = ForcedWinSolverTest.game("Default", "Default", frame(hand, library));
         final Player me = g.getPlayers().get(0);
         final Card host = ForcedWinSolverTest.inZone(me, ZoneType.Hand, spell);

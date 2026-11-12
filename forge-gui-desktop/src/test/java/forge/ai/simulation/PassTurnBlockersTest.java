@@ -34,6 +34,7 @@ public class PassTurnBlockersTest extends forge.ai.AITest {
     private static ForcedWinPlanner.Result plan(ForcedWinModel.Position pos) {
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.horizon = 2;
+        lim.passBlockers = true; // shipA-on-leakfix-1112: blockers-1109 is behind solverCfg passBlockers on the live line
         lim.ms = -1L; // nodes only: the test does not depend on the host's speed
         return ForcedWinPlanner.plan(pos, lim);
     }

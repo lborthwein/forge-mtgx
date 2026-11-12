@@ -401,6 +401,13 @@ public final class ForcedWinPlanner {
          */
         boolean expandCap;
         /**
+         * shipA-on-leakfix-1112 (solverCfg passBlockers; false = off, the default on the live line, and nothing changes):
+         * blockers-1109 (ledger row 81). On, a pass counts as blockers only our creatures that can block at the opponent's
+         * declare-blockers step ({@link Perm#block}, read by {@link ForcedWinModel.Position#blockCode}); off, every
+         * creature of ours, as the live line's planner does.
+         */
+        boolean passBlockers;
+        /**
          * planner-fixes-1110 (solverCfg planOrder; 0 = off, the default, and nothing changes): where the search spends its
          * nodes. A sum of:
          * <ul>
@@ -776,7 +783,7 @@ public final class ForcedWinPlanner {
             p.tapped = pos.tapped.get(i);
             p.loyalty = pos.battlefield.get(i).startLoyalty;
             p.activated = i < pos.used.size() && pos.used.get(i);
-            if (i < pos.block.size()) {
+            if (lim.passBlockers && i < pos.block.size()) {
                 p.block = pos.block.get(i);
             }
             s.bf.add(p);
@@ -1783,6 +1790,10 @@ public final class ForcedWinPlanner {
     int blockers(S s) {
         int n = 0;
         for (Perm p : s.bf) {
+            if (!lim.passBlockers) {
+                n += cards.get(p.card).creature ? 1 : 0; // shipA-on-leakfix-1112: off = every creature, as the live line
+                continue;
+            }
             if (cards.get(p.card).creature && p.block != ForcedWinModel.Position.BLOCK_NO
                     && (!p.tapped || p.block == ForcedWinModel.Position.BLOCK_TAPPED)) {
                 n++;

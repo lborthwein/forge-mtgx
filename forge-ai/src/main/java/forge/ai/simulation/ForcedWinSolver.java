@@ -308,6 +308,12 @@ public final class ForcedWinSolver {
          */
         public boolean planExpandCap = false;
         /**
+         * shipA-on-leakfix-1112 (off by default: the live line's planner, where every creature of ours blocks after a pass):
+         * blockers-1109 (ledger row 81), which the research line has without a key. On, the planner's visible clock counts
+         * only our creatures that can block at the opponent's declare-blockers step (ForcedWinPlanner.Limits#passBlockers).
+         */
+        public boolean passBlockers = false;
+        /**
          * solver-distill-cc-1109 (planLoops; false = off): the screens (reach, goldfish, the reach gate) count a loop the
          * engine found in a sandbox (a permanent whose tap ability targets a card, with a partner creature: both in play =
          * an unbounded attack) as a line. The width model has no copy or untap effects, so such decks had no reach at all.
@@ -949,6 +955,7 @@ public final class ForcedWinSolver {
             c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.planExpandCap = boolOrLive(get.apply("planExpandCap")); // live-fixes-1107: default forge.liveFixes; // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
+            c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.probeObjects = "true".equals(get.apply("probeObjects")); // sdcc-probeobj-1111
@@ -4396,6 +4403,7 @@ public final class ForcedWinSolver {
     ForcedWinPlanner.Limits limits() {
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.expandCap = cfg.planExpandCap;
+        lim.passBlockers = cfg.passBlockers; // shipA-on-leakfix-1112
         lim.depth = cfg.planDepth; // solver-distill-cc-1109 (18 = the default)
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
