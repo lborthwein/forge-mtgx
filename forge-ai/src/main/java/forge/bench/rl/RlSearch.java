@@ -354,6 +354,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * Generic: no card or deck logic.
          */
         public boolean imit = false;
+        /**
+         * sdcc-route-1111 (null = off, the default, and then absent from the JSON, no file is read and nothing
+         * changes): the path of a route file ({@link RlRouteLabels}). With {@code imit}, each card-choice ask of the seat
+         * whose deck holds a route of the file gets a TRAINING label (reason {@link RlSeat#IMIT_ROUTE}) computed after
+         * the answer is final. The search, the solver, the scorer and the policy's inputs never read the file, and no
+         * answer changes.
+         */
+        public String routeLabels;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -416,7 +424,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit", "routeLabels"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -450,6 +458,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
             if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
             if (o.has("imit")) c.imit = o.get("imit").getAsBoolean();
+            if (o.has("routeLabels") && !o.get("routeLabels").isJsonNull()) {
+                c.routeLabels = o.get("routeLabels").getAsString();
+                if (c.routeLabels.isEmpty()) {
+                    c.routeLabels = null;
+                }
+            }
             if (o.has("explore") && !o.get("explore").isJsonNull()) {
                 c.explore = o.getAsJsonObject("explore");
                 for (String k : c.explore.keySet()) {
@@ -785,6 +799,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (imit) {
                 o.addProperty("imit", true); // sdcc-imit-1111: only when on
+            }
+            if (routeLabels != null) {
+                o.addProperty("routeLabels", routeLabels); // sdcc-route-1111: only when on
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -1561,6 +1578,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public boolean imit() {
         return cfg.imit;
+    }
+
+    @Override
+    public String routeLabels() {
+        return cfg.routeLabels;
     }
 
     @Override

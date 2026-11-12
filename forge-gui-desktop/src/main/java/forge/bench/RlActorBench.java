@@ -1366,6 +1366,12 @@ public final class RlActorBench {
                 end.addProperty("imit_choice_rows", seat.imitChoiceRows); // sdcc-imit2-1111: a line's choice asks as rows
                 end.addProperty("imit_map_failed", seat.imitMapFailed);
             }
+            if (seat.routeOn()) {
+                // sdcc-route-1111 (only with the spec's routeLabels): the audit of the route labels in `imit`,
+                // [[dec_idx, kind, route id, family, same as played], ...]
+                end.add("route", seat.routeJson());
+                end.addProperty("route_errors", seat.routeErrors);
+            }
             if (searchAlt != null) {
                 end.add("search_alt", searchAlt.summary()); // choice-search-1105 (only when on)
                 end.addProperty("search_alt_seat", seat.altSeat);
@@ -1450,6 +1456,10 @@ public final class RlActorBench {
                 t.addProperty("imit_hook_rows", seat.imitHookRows);
                 t.addProperty("imit_choice_rows", seat.imitChoiceRows);
                 t.addProperty("imit_map_failed", seat.imitMapFailed);
+            }
+            if (end.has("route")) {
+                t.add("route", end.get("route")); // sdcc-route-1111
+                t.addProperty("route_errors", seat.routeErrors);
             }
             if (end.has("search_alt")) {
                 t.add("search_alt", end.get("search_alt")); // choice-search-1105

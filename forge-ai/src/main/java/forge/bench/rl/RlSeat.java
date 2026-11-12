@@ -195,7 +195,10 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
     }
 
-    /** {@code [[dec_idx, reason, [steps...]], ...]} in dec_idx order (see {@link #IMIT_LINE}). */
+    /**
+     * {@code [[dec_idx, reason, [steps...]], ...]} in dec_idx order (see {@link #IMIT_LINE}); with the spec's
+     * {@code routeLabels} the route labels follow ({@link #IMIT_ROUTE}), also in dec_idx order.
+     */
     public JsonArray imitJson() {
         final JsonArray out = new JsonArray();
         for (Map.Entry<Integer, Object[]> e : imit.entrySet()) {
@@ -207,6 +210,84 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 st.add(x);
             }
             row.add(st);
+            out.add(row);
+        }
+        for (Map.Entry<Integer, RlRouteLabels.Label> e : route.entrySet()) {
+            final JsonArray row = new JsonArray();
+            row.add(e.getKey());
+            row.add(IMIT_ROUTE);
+            final JsonArray st = new JsonArray();
+            for (short x : e.getValue().steps) {
+                st.add(x);
+            }
+            row.add(st);
+            out.add(row);
+        }
+        return out;
+    }
+
+    // ---- sdcc-route-1111: route labels (only with a search whose spec sets {@code imit} and {@code routeLabels})
+    /**
+     * A TRAINING-DATA label, not a search answer: the answer to a card-choice ask that the routes of the seat's own
+     * deck name ({@link RlRouteLabels}; a data file). It is computed AFTER the seat's answer is final and is only
+     * written to GAME_END and the tape; nothing that decides reads it, and the answer played is never changed. Unlike
+     * the other reasons its steps may differ from the answer played, and its decision need not be overridden.
+     */
+    public static final int IMIT_ROUTE = 10;
+    /** dec_idx → the route label of that decision. */
+    private final Map<Integer, RlRouteLabels.Label> route = new TreeMap<>();
+    private RlRouteLabels.Seat[] routeSeats;
+    /** Route labels by kind (take, keep, protect), those equal to the answer played, and labeller errors. */
+    public int routeErrors = 0;
+
+    private boolean routeOn(final int seat) {
+        final PrioritySearch s = searchFor(seat);
+        return s != null && s.imit() && s.routeLabels() != null;
+    }
+
+    /** True when a search of this game writes route labels (GAME_END and the tape then carry {@code route}). */
+    public boolean routeOn() {
+        return search != null && search.imit() && search.routeLabels() != null
+                || searchAlt != null && searchAlt.imit() && searchAlt.routeLabels() != null;
+    }
+
+    /**
+     * After the answer {@code played} is final: the route label of this ask, if the seat's deck's routes name one. Reads
+     * the game and the menu only; a failure is counted and leaves no label.
+     */
+    private void routeMark(final int seat, final Game g, final Player player, final int family, final String method,
+            final JsonObject body, final RlCandidates.Menu m, final int decIdx, final short[] played) {
+        if (!routeOn(seat)) {
+            return;
+        }
+        try {
+            if (routeSeats == null) {
+                routeSeats = new RlRouteLabels.Seat[roles.length];
+            }
+            if (routeSeats[seat] == null) {
+                routeSeats[seat] = RlRouteLabels.load(searchFor(seat).routeLabels()).seat(g, player);
+            }
+            final RlRouteLabels.Label l = routeSeats[seat].label(g, family, method, body, m, played.clone());
+            if (l != null) {
+                route.put(decIdx, l);
+            }
+        } catch (IllegalStateException e) {
+            throw e; // the route file cannot be read: an error of the run, not of one ask
+        } catch (RuntimeException e) {
+            routeErrors++;
+        }
+    }
+
+    /** {@code [[dec_idx, kind, route id, family, same as played (0 / 1)], ...]}: the audit of the route labels. */
+    public JsonArray routeJson() {
+        final JsonArray out = new JsonArray();
+        for (Map.Entry<Integer, RlRouteLabels.Label> e : route.entrySet()) {
+            final JsonArray row = new JsonArray();
+            row.add(e.getKey());
+            row.add(e.getValue().kind);
+            row.add(e.getValue().route);
+            row.add(e.getValue().family);
+            row.add(e.getValue().same ? 1 : 0);
             out.add(row);
         }
         return out;
@@ -583,6 +664,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         /** sdcc-imit-1111: the spec's {@code imit} (false by default, and then nothing changes): label the answers. */
         default boolean imit() {
             return false;
+        }
+
+        /**
+         * sdcc-route-1111: the spec's {@code routeLabels} (null by default, and then nothing changes and no file is
+         * read): the path of the route file of {@link RlRouteLabels}, read only to write training labels.
+         */
+        default String routeLabels() {
+            return null;
         }
 
         /**
@@ -1231,6 +1320,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             forgeDecidedExtra.merge("serverDelegate:" + RlSchema.familyName(family), 1, Integer::sum);
             return null;
         }
+        // sdcc-route-1111: the answer is final; the route label is data about it (never read back by this method)
+        routeMark(seat, g, player, family, method, body, m, frame.decIdx, d.steps);
         // two-frame families (SCRY, SURVEIL): the PERMUTE frame over the cards kept on top, if two or more
         RlCandidates.Menu m2 = null;
         RlWire.Decide frame2 = null;
@@ -1557,6 +1648,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             overridden.add(d2);
         }
         imit.remove(d); // sdcc-imit-1111: a refused answer was not played
+        route.remove(d); // sdcc-route-1111
         if (d >= 0) {
             overridden.add(d);
             if (fam != null) {
@@ -1587,6 +1679,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
         if (d != null && d >= 0) {
             imit.remove(d); // sdcc-imit-1111: a vetoed answer was not played
+            route.remove(d); // sdcc-route-1111
             overridden.add(d);
             okAnswers.merge(method, -1, Integer::sum);
             guardOverridden++;
