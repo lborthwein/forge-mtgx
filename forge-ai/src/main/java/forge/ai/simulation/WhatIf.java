@@ -83,7 +83,8 @@ public final class WhatIf {
         /**
          * The whole-menu what-if (0 = off, the default): one position per ask, "if I had every card this search
          * offers": the first adding option's position with every other adding option's card moved from our library to
-         * our hand, one world, {@code all} own turns of land drops, {@code allNodes} a probe, up to {@code allRounds}
+         * our hand, one world, {@code all} own turns of land drops (each probe also searches lines that pass the turn
+         * once), {@code allNodes} a probe, up to {@code allRounds}
          * kills (the cards of a found kill are put back before the next round, so another kill needs other cards).
          * Each option whose card a kill's line needs gets {@code allDiscount^(m - 1) * gamma^turn}, m = how many of
          * the menu's cards that line needs (the fetches or draws still to come, this one included); an option's
@@ -614,8 +615,8 @@ public final class WhatIf {
         }
         final Opts po = new Opts();
         po.nodes = o.allNodes;
-        po.probeMs = o.probeMs;
-        po.pass = false;
+        po.probeMs = Math.max(o.probeMs, o.allNodes * 100L); // the stage's own allowance: about 100 ms a node
+        po.pass = true; // the engine's own two-turn lines: a piece played this turn, the kill on the next
         po.dev = "land";
         po.maxSteps = o.maxSteps;
         final java.util.Set<String> spent = new java.util.HashSet<>();
@@ -641,9 +642,13 @@ public final class WhatIf {
                 lim.rootIds = w.ids;
                 final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
                 final long now = forge.game.WorkClock.nanoTime();
-                final Line l = ForcedWinEngine.search(w.g, w.me, lim, st,
-                        Math.min(askEnd, o.probeMs > 0 ? now + o.probeMs * 1_000_000L : Long.MAX_VALUE),
+                final Line l = ForcedWinEngine.search(w.g, w.me, lim, st, Math.min(askEnd, now + po.probeMs * 1_000_000L),
                         LookaheadSearch.mix(LookaheadSearch.mix(o.seed, 0xA11B0BEL + t), round));
+                if (TRACE) {
+                    ForcedWinSolver.receipt("FORCED_WIN whatif     all round=" + round + " t=" + t + " hand=" + w.me.getCardsIn(ZoneType.Hand)
+                            + " -> " + (l == null ? "no kill" : String.valueOf(l)) + " nodes=" + st.nodes + " capStops=" + st.capStops
+                            + " deadlineStops=" + st.deadlineStops);
+                }
                 ask.probes++;
                 ask.nodes += st.nodes;
                 if (l == null) {
@@ -698,7 +703,7 @@ public final class WhatIf {
         }
         final Opts po = new Opts();
         po.nodes = o.secondNodes;
-        po.probeMs = o.probeMs;
+        po.probeMs = Math.max(o.probeMs, o.secondNodes * 100L); // the stage's own allowance: about 100 ms a node
         po.pass = false;
         po.dev = o.dev;
         po.maxSteps = o.maxSteps;
@@ -725,8 +730,7 @@ public final class WhatIf {
                     lim.rootIds = w.ids;
                     final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
                     final long now = forge.game.WorkClock.nanoTime();
-                    final Line l = ForcedWinEngine.search(w.g, w.me, lim, st,
-                            Math.min(askEnd, o.probeMs > 0 ? now + o.probeMs * 1_000_000L : Long.MAX_VALUE),
+                    final Line l = ForcedWinEngine.search(w.g, w.me, lim, st, Math.min(askEnd, now + po.probeMs * 1_000_000L),
                             LookaheadSearch.mix(LookaheadSearch.mix(o.seed, 0x2B0BEL + t), i * 1000L + j));
                     ask.probes++;
                     ask.nodes += st.nodes;
