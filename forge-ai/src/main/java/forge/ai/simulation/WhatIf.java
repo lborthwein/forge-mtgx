@@ -80,6 +80,20 @@ public final class WhatIf {
         public int secondNodes = 120;
         public double secondDiscount = 0.5;
         public int secondMax = 300;
+        /**
+         * The whole-menu what-if (0 = off, the default): one position per ask, "if I had every card this search
+         * offers": the first adding option's position with every other adding option's card moved from our library to
+         * our hand, one world, {@code all} own turns of land drops, {@code allNodes} a probe, up to {@code allRounds}
+         * kills (the cards of a found kill are put back before the next round, so another kill needs other cards).
+         * Each option whose card a kill's line needs gets {@code allDiscount^(m - 1) * gamma^turn}, m = how many of
+         * the menu's cards that line needs (the fetches or draws still to come, this one included); an option's
+         * value is the largest of its one-step, two-step and whole-menu values. The engine names the kill's cards;
+         * nothing here knows a route.
+         */
+        public int all = 0;
+        public int allNodes = 400;
+        public int allRounds = 2;
+        public double allDiscount = 0.5;
     }
 
     /** One option's position: the applied copy itself (never played on; every world is a copy of it). */
@@ -167,6 +181,10 @@ public final class WhatIf {
         /** The value from this option's own lines only (no pooling); = value when pooling is off. */
         public double raw = Double.NaN;
         public final List<Integer> rawTurns = new ArrayList<>();
+        /** The whole-menu value (NaN = not asked), how many menu cards its kill needs, and its line. */
+        public double all = Double.NaN;
+        public int allNeeds;
+        public String lineAll;
         /** The two-step value (NaN = not asked), its partner's label index and its line. */
         public double second = Double.NaN;
         public int partner = -1;
@@ -558,6 +576,9 @@ public final class WhatIf {
             if (o.second > 0 && !ask.cut) {
                 second(options, cfg, o, ask, askEnd, killers);
             }
+            if (o.all > 0 && !ask.cut) {
+                all(options, cfg, o, ask, askEnd, killers);
+            }
         } catch (RuntimeException | StackOverflowError e) {
             ForcedWinSolver.receipt("FORCED_WIN whatif error " + e);
             for (Result r : ask.results) {
@@ -573,6 +594,95 @@ public final class WhatIf {
             ask.nanos = System.nanoTime() - real0;
         }
         return ask;
+    }
+
+    /** The whole-menu stage ({@link Opts#all}). */
+    private static void all(final List<Snapshot> options, final ForcedWinSolver.Config cfg, final Opts o, final Ask ask,
+            final long askEnd, final java.util.Set<String> killers) {
+        final List<Integer> adds = new ArrayList<>();
+        final java.util.Map<String, Integer> byCard = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < options.size(); i++) {
+            final Snapshot s = options.get(i);
+            if (s != null && s.mode == Snapshot.ADDS && s.card != null && ask.results.get(i).fail == null
+                    && byCard.putIfAbsent(s.card, i) == null) {
+                adds.add(i);
+                ask.results.get(i).all = 0.0;
+            }
+        }
+        if (adds.size() < 2) {
+            return;
+        }
+        final Opts po = new Opts();
+        po.nodes = o.allNodes;
+        po.probeMs = o.probeMs;
+        po.pass = false;
+        po.dev = "land";
+        po.maxSteps = o.maxSteps;
+        final java.util.Set<String> spent = new java.util.HashSet<>();
+        for (int round = 0; round < Math.max(1, o.allRounds); round++) {
+            final List<String> extras = new ArrayList<>();
+            for (int i : adds.subList(1, adds.size())) {
+                if (!spent.contains(options.get(i).card)) {
+                    extras.add(options.get(i).card);
+                }
+            }
+            if (forge.game.WorkClock.nanoTime() >= askEnd) {
+                ask.cut2 = true;
+                return;
+            }
+            final World w = start(options.get(adds.get(0)), LookaheadSearch.mix(o.seed, 0xA11000L + round), po, askEnd, extras);
+            boolean found = false;
+            for (int t = 0; t < o.all && !w.dead && !found; t++) {
+                if (t > 0 && !advance(w, false, po, askEnd)) {
+                    break;
+                }
+                final ForcedWinEngine.Limits lim = limits(cfg, po);
+                lim.focusKillers = killers;
+                lim.rootIds = w.ids;
+                final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+                final long now = forge.game.WorkClock.nanoTime();
+                final Line l = ForcedWinEngine.search(w.g, w.me, lim, st,
+                        Math.min(askEnd, o.probeMs > 0 ? now + o.probeMs * 1_000_000L : Long.MAX_VALUE),
+                        LookaheadSearch.mix(LookaheadSearch.mix(o.seed, 0xA11B0BEL + t), round));
+                ask.probes++;
+                ask.nodes += st.nodes;
+                if (l == null) {
+                    continue;
+                }
+                found = true;
+                final java.util.Set<String> names = new java.util.HashSet<>();
+                names(l.steps, w.g, names);
+                final List<Integer> needs = new ArrayList<>();
+                for (String n : names) {
+                    final Integer i = byCard.get(n);
+                    if (i != null) {
+                        needs.add(i);
+                    }
+                }
+                if (needs.isEmpty()) {
+                    return; // a kill that needs no card of the menu: the one-step values hold it already
+                }
+                final double v = Math.pow(o.allDiscount, needs.size() - 1) * Math.pow(o.gamma, t + l.winTurn);
+                for (int i : needs) {
+                    final Result r = ask.results.get(i);
+                    if (v > r.all) {
+                        r.all = v;
+                        r.allNeeds = needs.size();
+                        r.lineAll = String.valueOf(l);
+                    }
+                    spent.add(options.get(i).card);
+                }
+            }
+            if (!found) {
+                break;
+            }
+        }
+        for (int i : adds) {
+            final Result r = ask.results.get(i);
+            if (!Double.isNaN(r.value) && r.all > r.value) {
+                r.value = r.all;
+            }
+        }
     }
 
     /** The two-step stage ({@link Opts#second}). */
@@ -688,11 +798,15 @@ public final class WhatIf {
 
     /** A world of an option: a copy of its snapshot, the unknown library in the world's order, at our first main phase. */
     private static World start(final Snapshot s, final long seed, final Opts o, final long wall) {
-        return start(s, seed, o, wall, null);
+        return start(s, seed, o, wall, (List<String>) null);
     }
 
-    /** As above; {@code extra}: a card of that name is moved from our library to our hand first (the two-step). */
     private static World start(final Snapshot s, final long seed, final Opts o, final long wall, final String extra) {
+        return start(s, seed, o, wall, extra == null ? null : List.of(extra));
+    }
+
+    /** As above; {@code extras}: a card of each name is moved from our library to our hand first. */
+    private static World start(final Snapshot s, final long seed, final Opts o, final long wall, final List<String> extras) {
         final World w = new World();
         try {
             forge.util.IdScope.install(ForcedWinEngine.cloneScope(s.ids));
@@ -717,21 +831,26 @@ public final class WhatIf {
                 }
             }
             reorder(w.me, s.knownTop, seed);
-            if (extra != null) {
-                Card x = null;
-                int at = 0;
-                for (Card c : w.me.getCardsIn(ZoneType.Library)) {
-                    if (at++ >= s.knownTop && c.getName().equals(extra)) {
-                        x = c;
-                        break;
+            if (extras != null) {
+                for (String extra : extras) {
+                    Card x = null;
+                    int at = 0;
+                    for (Card c : w.me.getCardsIn(ZoneType.Library)) {
+                        if (at++ >= s.knownTop && c.getName().equals(extra)) {
+                            x = c;
+                            break;
+                        }
                     }
+                    if (x == null) {
+                        if (extras.size() == 1) {
+                            w.dead = true;
+                            w.line = "noExtra";
+                            return w;
+                        }
+                        continue;
+                    }
+                    w.g.getAction().moveToHand(x, null);
                 }
-                if (x == null) {
-                    w.dead = true;
-                    w.line = "noExtra";
-                    return w;
-                }
-                w.g.getAction().moveToHand(x, null);
             }
             if (s.pregame) {
                 ForcedWinProbe.toFirstMain(w.g, w.me);
@@ -827,6 +946,7 @@ public final class WhatIf {
                     + "/" + r.worlds + " killTurns=" + r.killTurns + (r.rawTurns.equals(r.killTurns) ? "" : " ownTurns=" + r.rawTurns)
                     + " probes=" + r.probes + " nodes=" + r.nodes
                     + (r.capped > 0 ? " capped=" + r.capped : "") + (r.fail != null ? " fail=" + r.fail : "")
+                    + (r.all > 0 ? " all=" + Math.round(r.all * 1000) / 1000.0 + " needs=" + r.allNeeds + " " + r.lineAll : "")
                     + (r.second > 0 ? " second=" + Math.round(r.second * 1000) / 1000.0 + " with #" + r.partner + " " + r.line2 : "")
                     + (r.line != null ? " line(t" + r.bestTurn + ")=" + r.line : ""));
         }

@@ -35,16 +35,16 @@ public final class WhatIfChoice {
     }
 
     public static final class Config {
-        public int worlds = 3, horizon = 4, nodes = 60, maxSteps = 600, second = 0, secondNodes = 120, secondMax = 300;
+        public int worlds = 3, horizon = 4, nodes = 60, maxSteps = 600, second = 0, secondNodes = 120, secondMax = 300, all = 0, allNodes = 400, allRounds = 2;
         public long probeMs = 1500, askMs = 60_000;
-        public double gamma = 0.8, alpha = 1.0, secondDiscount = 0.5;
+        public double gamma = 0.8, alpha = 1.0, secondDiscount = 0.5, allDiscount = 0.5;
         public boolean pass = false, shadow = false, pool = true;
         public String dev = "ai";
         /** Real-time guard of one ask, ms (0 = none): checked between options' applications only. */
         public long realMs = 0;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("worlds", "horizon", "nodes", "probeMs",
-                "askMs", "gamma", "alpha", "pass", "shadow", "dev", "maxSteps", "realMs", "pool", "second", "secondNodes", "secondDiscount", "secondMax"));
+                "askMs", "gamma", "alpha", "pass", "shadow", "dev", "maxSteps", "realMs", "pool", "second", "secondNodes", "secondDiscount", "secondMax", "all", "allNodes", "allRounds", "allDiscount"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -67,6 +67,10 @@ public final class WhatIfChoice {
             if (o.has("secondNodes")) c.secondNodes = o.get("secondNodes").getAsInt();
             if (o.has("secondDiscount")) c.secondDiscount = o.get("secondDiscount").getAsDouble();
             if (o.has("secondMax")) c.secondMax = o.get("secondMax").getAsInt();
+            if (o.has("all")) c.all = o.get("all").getAsInt();
+            if (o.has("allNodes")) c.allNodes = o.get("allNodes").getAsInt();
+            if (o.has("allRounds")) c.allRounds = o.get("allRounds").getAsInt();
+            if (o.has("allDiscount")) c.allDiscount = o.get("allDiscount").getAsDouble();
             if (o.has("dev")) c.dev = o.get("dev").getAsString();
             if (o.has("maxSteps")) c.maxSteps = o.get("maxSteps").getAsInt();
             if (o.has("realMs")) c.realMs = o.get("realMs").getAsLong();
@@ -96,6 +100,12 @@ public final class WhatIfChoice {
             }
             o.addProperty("dev", dev);
             o.addProperty("maxSteps", maxSteps);
+            if (all > 0) {
+                o.addProperty("all", all);
+                o.addProperty("allNodes", allNodes);
+                o.addProperty("allRounds", allRounds);
+                o.addProperty("allDiscount", allDiscount);
+            }
             if (realMs > 0) {
                 o.addProperty("realMs", realMs);
             }
@@ -116,6 +126,10 @@ public final class WhatIfChoice {
             w.secondNodes = secondNodes;
             w.secondDiscount = secondDiscount;
             w.secondMax = secondMax;
+            w.all = all;
+            w.allNodes = allNodes;
+            w.allRounds = allRounds;
+            w.allDiscount = allDiscount;
             w.dev = dev;
             w.maxSteps = maxSteps;
             w.seed = seed;
@@ -345,6 +359,10 @@ public final class WhatIfChoice {
                 }
                 if (!Double.isNaN(ps[i])) {
                     x.addProperty("p", Math.round(ps[i] * 1e4) / 1e4);
+                }
+                if (r.all > 0) {
+                    x.addProperty("all", Math.round(r.all * 1e4) / 1e4);
+                    x.addProperty("all_needs", r.allNeeds);
                 }
                 if (r.second > 0) {
                     x.addProperty("second", Math.round(r.second * 1e4) / 1e4);

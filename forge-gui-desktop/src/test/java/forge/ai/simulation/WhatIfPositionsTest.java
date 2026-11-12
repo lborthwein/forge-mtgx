@@ -199,6 +199,10 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                         o.second = Integer.parseInt(c[9]); // name:K,T,nodes,probeMs,askMs,dev,pass,pool,second,secondNodes
                         o.secondNodes = c.length > 10 ? Integer.parseInt(c[10]) : o.secondNodes;
                     }
+                    if (c.length > 11) {
+                        o.all = Integer.parseInt(c[11]); // ...,second,secondNodes,all,allNodes
+                        o.allNodes = c.length > 12 ? Integer.parseInt(c[12]) : o.allNodes;
+                    }
                     o.seed = 0x5DCCL * 31 + line;
                     final JsonObject out = new JsonObject();
                     out.addProperty("tag", ask.get("tag").getAsString());
@@ -243,6 +247,11 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                             if (!Double.isNaN(r.value)) {
                                 x.addProperty("w", Math.round(r.value * 1e4) / 1e4);
                                 x.addProperty("w_own", Math.round(r.raw * 1e4) / 1e4);
+                                if (r.all > 0) {
+                                    x.addProperty("all", Math.round(r.all * 1e4) / 1e4);
+                                    x.addProperty("all_needs", r.allNeeds);
+                                    x.addProperty("line_all", r.lineAll.length() > 300 ? r.lineAll.substring(0, 300) : r.lineAll);
+                                }
                                 if (r.second > 0) {
                                     x.addProperty("second", Math.round(r.second * 1e4) / 1e4);
                                     x.addProperty("with", labels.get(r.partner));
