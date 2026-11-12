@@ -151,13 +151,16 @@ public class RlLiveSeatTest {
     public void specRefusesTheSbKeysLiveDoesNotSupport() {
         final String hide = ",plans.solverCfg.hideOwnLibrary=true";
         for (String bad : new String[] {"plans.opp=true" + hide, "plans.oppCfg.budgetMs=500" + hide, "plans.pay=on" + hide,
-                "plans.solverCfg.paySearch=true" + hide, "plans.solverCfg.act=true" + hide,
+                "plans.solverCfg.act=true" + hide,
                 "plans.solverCfg.defense=true" + hide, "plans.solverCfg.likely=true" + hide, "plans.wat=1" + hide,
                 "plans.samples=4", "plans.samples=4,plans.solverCfg.hideOwnLibrary=false",
                 "plans.samples=four" + hide, "plans.solverCfg.cycles=yes" + hide, "plans.solverCfg.budgetMs=6s" + hide,
                 "plans.samples=4,plans.samples=2" + hide, "plans.solver=1" + hide}) {
             Assert.assertThrows(bad, IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("127.0.0.1:1", bad)));
         }
+        // shipA-on-leakfix-1112: paySearch is a live solver key (the parser has accepted it since the pay search went
+        // in, and the ship candidate's string sets it); this test still listed it among the refused keys
+        RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "plans.solverCfg.paySearch=true" + hide));
     }
 
     @Test
