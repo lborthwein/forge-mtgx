@@ -203,6 +203,9 @@ public class Zone implements java.io.Serializable, Iterable<Card> {
     }
 
     public final Card get(final int index) {
+        if (LcTap.ON) {
+            LcTap.read(this, "get"); // sdcc-lctap-1112 (diagnostics; off: nothing)
+        }
         return cardList.get(index);
     }
 
@@ -211,6 +214,9 @@ public class Zone implements java.io.Serializable, Iterable<Card> {
     }
 
     public CardCollectionView getCards(final boolean filter) {
+        if (LcTap.ON) {
+            LcTap.read(this, "getCards"); // sdcc-lctap-1112 (diagnostics; off: nothing)
+        }
         return cardList; // Non-Battlefield PlayerZones don't care about the filter
     }
 
@@ -275,6 +281,9 @@ public class Zone implements java.io.Serializable, Iterable<Card> {
 
     @Override
     public Iterator<Card> iterator() {
+        if (LcTap.ON) {
+            LcTap.read(this, "iterator"); // sdcc-lctap-1112 (diagnostics; off: nothing)
+        }
         return cardList.iterator();
     }
 
