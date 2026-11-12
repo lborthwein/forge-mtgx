@@ -1404,6 +1404,10 @@ public final class LookaheadSearch {
         TurnWatch watch;
         Object payload;
         volatile boolean done;
+        /** Diagnostics (LeafDump; unused unless -Dforge.rl.leafDump): the play-out's candidate, world and priority count. */
+        String dumpLabel;
+        long dumpWorld;
+        int dumpStep;
 
         LeafProbe(SearchHooks hooks, Object ctx) {
             this.hooks = hooks;
@@ -1415,6 +1419,11 @@ public final class LookaheadSearch {
             if (!done && watch != null && watch.reached) {
                 payload = hooks.captureLeaf(ctx, g, me);
                 done = true;
+                if (LeafDump.ON) {
+                    LeafDump.write("leaf", dumpLabel, dumpWorld, dumpStep++, g, me, payload);
+                }
+            } else if (LeafDump.ALL && !done) {
+                LeafDump.write("pre", dumpLabel, dumpWorld, dumpStep++, g, me, hooks.captureLeaf(ctx, g, me));
             }
         }
     }
@@ -2421,6 +2430,10 @@ public final class LookaheadSearch {
         stats.decisions++;
         stats.givenDecisions++;
         final int index = decisionIndex++;
+        if (LeafDump.ON) {
+            LeafDump.decision = index;
+            LeafDump.write("root", "", 0L, -1, live, me, null);
+        }
         final boolean onStack = !live.getStack().isEmpty();
         if (onStack) {
             stats.stackDecisions++;
@@ -5360,6 +5373,9 @@ public final class LookaheadSearch {
         Random rnd;
         /** Diagnostics only (lookahead.stress): one entry per main-loop step, the position and the new log lines. */
         List<String> stepLog;
+        /** Diagnostics only (LeafDump). */
+        String dumpLabel;
+        long dumpWorld;
         /** Reuse probe: where the searching seat's priority points go (null = off). */
         List<TrajPoint> trajectory;
         /** Tutor ranking: the card id the replayed search must take (-1 = not a tutor play-out). */
@@ -5395,6 +5411,8 @@ public final class LookaheadSearch {
     Prepared prepare(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, TrajPoint carried) {
         final Prepared p = new Prepared();
         p.budget = budget;
+        p.dumpLabel = c == null ? "?" : c.label;
+        p.dumpWorld = worldSeed;
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
@@ -5536,6 +5554,10 @@ public final class LookaheadSearch {
             // search-bones-1015: a recording play-out (S-b's sampled plans) has no leaf and ends with our turn
             final boolean recording = p.firstAction != null && p.firstAction.recorder != null;
             final LeafProbe probe = hookLeaf && !recording ? new LeafProbe(hooks, p.hookCtx) : null;
+            if (probe != null) {
+                probe.dumpLabel = p.dumpLabel;
+                probe.dumpWorld = p.dumpWorld;
+            }
             PlayoutSeat seat = null;
             final int[] stepRef = new int[1];
             if (hookPlayout) {
@@ -5684,6 +5706,9 @@ public final class LookaheadSearch {
                             probe.payload = hooks.captureLeaf(p.hookCtx, g, me);
                             probe.done = true;
                             r.leafLate = true;
+                            if (LeafDump.ON) {
+                                LeafDump.write("late", probe.dumpLabel, probe.dumpWorld, probe.dumpStep++, g, me, probe.payload);
+                            }
                         }
                         r.leafPayload = probe.payload;
                     }
