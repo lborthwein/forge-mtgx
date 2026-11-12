@@ -69,18 +69,6 @@ public final class WhatIf {
          */
         public boolean pool = true;
         /**
-         * The two-step what-if (0 = off, the default): after the values above, every pair of options that add a card
-         * (a search's picks) is asked "if I also had that other card": the first option's position with the second's
-         * card moved from our library to our hand, one world, {@code second} own turns, {@code secondNodes} a probe.
-         * A kill whose line needs both cards gives each {@code secondDiscount * gamma^turn} (the price of the fetch
-         * or draw still to come); an option's value is the larger of its one-step and two-step values. At most
-         * {@code secondMax} pairs, in menu order.
-         */
-        public int second = 0;
-        public int secondNodes = 120;
-        public double secondDiscount = 0.5;
-        public int secondMax = 300;
-        /**
          * The whole-menu what-if (0 = off, the default): one position per ask, "if I had every card this search
          * offers": the first adding option's position with every other adding option's card moved from our library to
          * our hand, one world, {@code all} own turns of land drops (each probe also searches lines that pass the turn
@@ -88,13 +76,18 @@ public final class WhatIf {
          * kills (the cards of a found kill are put back before the next round, so another kill needs other cards).
          * Each option whose card a kill's line needs gets {@code allDiscount^(m - 1) * gamma^turn}, m = how many of
          * the menu's cards that line needs (the fetches or draws still to come, this one included); an option's
-         * value is the largest of its one-step, two-step and whole-menu values. The engine names the kill's cards;
+         * value is the larger of its one-step and whole-menu values. The engine names the kill's cards;
          * nothing here knows a route.
          */
         public int all = 0;
         public int allNodes = 400;
         public int allRounds = 2;
         public double allDiscount = 0.5;
+        /**
+         * Labeller only (false = off): the whole-menu position's own permanents are untapped first, so the probe asks
+         * "which cards kill from this board" and not "which kill can this turn's left-over mana pay for".
+         */
+        public boolean allUntap = false;
     }
 
     /** One option's position: the applied copy itself (never played on; every world is a copy of it). */
@@ -186,10 +179,6 @@ public final class WhatIf {
         public double all = Double.NaN;
         public int allNeeds;
         public String lineAll;
-        /** The two-step value (NaN = not asked), its partner's label index and its line. */
-        public double second = Double.NaN;
-        public int partner = -1;
-        public String line2;
     }
 
     /** The whole ask's result. */
@@ -201,8 +190,7 @@ public final class WhatIf {
         public long nanos, workNanos;
         public int probes;
         public long nodes;
-        /** Two-step pairs asked, and whether the budget cut them. */
-        public int pairs;
+        /** The whole-menu stage was cut by the budget. */
         public boolean cut2;
     }
 
@@ -532,14 +520,7 @@ public final class WhatIf {
                                         || ask.results.get(j).fail != null || turn >= 0 && killTurn[j] >= turn) {
                                     continue;
                                 }
-                                boolean ok = true;
-                                for (String id : killHosts[j]) {
-                                    if (me.mode == Snapshot.REMOVES ? id.equals(me.card) : !id.equals(me.card) && optionCards.contains(id)) {
-                                        ok = false;
-                                        break;
-                                    }
-                                }
-                                if (ok) {
+                                if (compatible(me.mode, me.card, killHosts[j], optionCards)) {
                                     turn = killTurn[j];
                                     line = "(pooled) " + killLine[j];
                                 }
@@ -573,9 +554,6 @@ public final class WhatIf {
                     }
                     r.raw = rs / r.worlds;
                 }
-            }
-            if (o.second > 0 && !ask.cut) {
-                second(options, cfg, o, ask, askEnd, killers);
             }
             if (o.all > 0 && !ask.cut) {
                 all(options, cfg, o, ask, askEnd, killers);
@@ -631,7 +609,7 @@ public final class WhatIf {
                 ask.cut2 = true;
                 return;
             }
-            final World w = start(options.get(adds.get(0)), LookaheadSearch.mix(o.seed, 0xA11000L + round), po, askEnd, extras);
+            final World w = start(options.get(adds.get(0)), LookaheadSearch.mix(o.seed, 0xA11000L + round), po, askEnd, extras, o.allUntap);
             boolean found = false;
             for (int t = 0; t < o.all && !w.dead && !found; t++) {
                 if (t > 0 && !advance(w, false, po, askEnd)) {
@@ -690,78 +668,23 @@ public final class WhatIf {
         }
     }
 
-    /** The two-step stage ({@link Opts#second}). */
-    private static void second(final List<Snapshot> options, final ForcedWinSolver.Config cfg, final Opts o, final Ask ask,
-            final long askEnd, final java.util.Set<String> killers) {
-        final List<Integer> adds = new ArrayList<>();
-        for (int i = 0; i < options.size(); i++) {
-            final Snapshot s = options.get(i);
-            if (s != null && s.mode == Snapshot.ADDS && s.card != null && ask.results.get(i).fail == null) {
-                adds.add(i);
-                ask.results.get(i).second = 0.0;
+    /**
+     * May an option count a kill line another option's probe found? {@code lineCards}: the names of the cards the line
+     * plays, picks, sacrifices or targets; {@code optionCards}: the cards of all the ask's options. An option that
+     * REMOVES its card (a discard) may not count a line that needs that card; any other pooling option (it ADDS its
+     * card, or takes NOTHING) may not count a line that needs another option's card.
+     */
+    static boolean compatible(final int mode, final String card, final java.util.Set<String> lineCards,
+            final java.util.Set<String> optionCards) {
+        if (mode == Snapshot.OWN) {
+            return false;
+        }
+        for (String id : lineCards) {
+            if (mode == Snapshot.REMOVES ? id.equals(card) : !id.equals(card) && optionCards.contains(id)) {
+                return false;
             }
         }
-        final Opts po = new Opts();
-        po.nodes = o.secondNodes;
-        po.probeMs = Math.max(o.probeMs, o.secondNodes * 100L); // the stage's own allowance: about 100 ms a node
-        po.pass = false;
-        po.dev = o.dev;
-        po.maxSteps = o.maxSteps;
-        pairs:
-        for (int a = 0; a < adds.size(); a++) {
-            for (int b = a + 1; b < adds.size(); b++) {
-                if (ask.pairs >= o.secondMax || forge.game.WorkClock.nanoTime() >= askEnd) {
-                    ask.cut2 = true;
-                    break pairs;
-                }
-                final int i = adds.get(a), j = adds.get(b);
-                final Snapshot si = options.get(i), sj = options.get(j);
-                if (si.card.equals(sj.card)) {
-                    continue;
-                }
-                ask.pairs++;
-                final World w = start(si, LookaheadSearch.mix(o.seed, 0x2ECD00L), o, askEnd, sj.card);
-                for (int t = 0; t < o.second && !w.dead; t++) {
-                    if (t > 0 && !advance(w, false, o, askEnd)) {
-                        break;
-                    }
-                    final ForcedWinEngine.Limits lim = limits(cfg, po);
-                    lim.focusKillers = killers;
-                    lim.rootIds = w.ids;
-                    final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
-                    final long now = forge.game.WorkClock.nanoTime();
-                    final Line l = ForcedWinEngine.search(w.g, w.me, lim, st, Math.min(askEnd, now + po.probeMs * 1_000_000L),
-                            LookaheadSearch.mix(LookaheadSearch.mix(o.seed, 0x2B0BEL + t), i * 1000L + j));
-                    ask.probes++;
-                    ask.nodes += st.nodes;
-                    ask.results.get(i).probes++;
-                    ask.results.get(i).nodes += st.nodes;
-                    if (l == null) {
-                        continue;
-                    }
-                    final java.util.Set<String> names = new java.util.HashSet<>();
-                    names(l.steps, w.g, names);
-                    if (names.contains(si.card) && names.contains(sj.card)) {
-                        final double v = o.secondDiscount * Math.pow(o.gamma, t + l.winTurn);
-                        for (int[] x : new int[][] {{i, j}, {j, i}}) {
-                            final Result r = ask.results.get(x[0]);
-                            if (v > r.second) {
-                                r.second = v;
-                                r.partner = x[1];
-                                r.line2 = String.valueOf(l);
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        for (int i : adds) {
-            final Result r = ask.results.get(i);
-            if (!Double.isNaN(r.value) && r.second > r.value) {
-                r.value = r.second;
-            }
-        }
+        return true;
     }
 
     private static final java.util.regex.Pattern CARD_REF = java.util.regex.Pattern.compile("C(\\d+)");
@@ -802,15 +725,14 @@ public final class WhatIf {
 
     /** A world of an option: a copy of its snapshot, the unknown library in the world's order, at our first main phase. */
     private static World start(final Snapshot s, final long seed, final Opts o, final long wall) {
-        return start(s, seed, o, wall, (List<String>) null);
+        return start(s, seed, o, wall, null, false);
     }
 
-    private static World start(final Snapshot s, final long seed, final Opts o, final long wall, final String extra) {
-        return start(s, seed, o, wall, extra == null ? null : List.of(extra));
-    }
+
 
     /** As above; {@code extras}: a card of each name is moved from our library to our hand first. */
-    private static World start(final Snapshot s, final long seed, final Opts o, final long wall, final List<String> extras) {
+    private static World start(final Snapshot s, final long seed, final Opts o, final long wall, final List<String> extras,
+            final boolean untap) {
         final World w = new World();
         try {
             forge.util.IdScope.install(ForcedWinEngine.cloneScope(s.ids));
@@ -846,14 +768,16 @@ public final class WhatIf {
                         }
                     }
                     if (x == null) {
-                        if (extras.size() == 1) {
-                            w.dead = true;
-                            w.line = "noExtra";
-                            return w;
-                        }
                         continue;
                     }
                     w.g.getAction().moveToHand(x, null);
+                }
+            }
+            if (untap) {
+                for (Card c : w.me.getCardsIn(ZoneType.Battlefield)) {
+                    if (c.isTapped()) {
+                        c.setTapped(false);
+                    }
                 }
             }
             if (s.pregame) {
@@ -939,7 +863,7 @@ public final class WhatIf {
         final StringBuilder sb = new StringBuilder("FORCED_WIN whatif ").append(tag).append(" K=").append(o.worlds)
                 .append(" T=").append(o.horizon).append(" nodes=").append(o.nodes).append(" dev=").append(o.dev)
                 .append(o.pass ? " pass" : "").append(o.pool ? " pool" : "").append(" stages=").append(a.stages).append(a.cut ? " CUT" : "")
-                .append(o.second > 0 ? " pairs=" + a.pairs + (a.cut2 ? " CUT2" : "") : "").append(" probes=").append(a.probes).append(" engineNodes=").append(a.nodes).append(" ms=")
+                .append(a.cut2 ? " CUT2" : "").append(" probes=").append(a.probes).append(" engineNodes=").append(a.nodes).append(" ms=")
                 .append(a.nanos / 1_000_000).append(" workMs=").append(a.workNanos / 1_000_000)
                 .append(" (goldfish: no opponent, their hand unknown)");
         ForcedWinSolver.receipt(sb.toString());
@@ -951,7 +875,6 @@ public final class WhatIf {
                     + " probes=" + r.probes + " nodes=" + r.nodes
                     + (r.capped > 0 ? " capped=" + r.capped : "") + (r.fail != null ? " fail=" + r.fail : "")
                     + (r.all > 0 ? " all=" + Math.round(r.all * 1000) / 1000.0 + " needs=" + r.allNeeds + " " + r.lineAll : "")
-                    + (r.second > 0 ? " second=" + Math.round(r.second * 1000) / 1000.0 + " with #" + r.partner + " " + r.line2 : "")
                     + (r.line != null ? " line(t" + r.bestTurn + ")=" + r.line : ""));
         }
     }

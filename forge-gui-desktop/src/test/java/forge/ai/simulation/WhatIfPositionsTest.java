@@ -121,6 +121,82 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
         Assert.assertNotNull(pb);
     }
 
+    /** Pooling: which option may count a kill line another option's probe found. */
+    @Test
+    public void aPooledLineCountsOnlyForOptionsThatHoldItsCards() {
+        final java.util.Set<String> menu = new java.util.HashSet<>(java.util.Arrays.asList("Deceiver Exarch", "Island", "Sol Ring"));
+        final java.util.Set<String> needsExarch = new java.util.HashSet<>(java.util.Arrays.asList("Kiki-Jiki, Mirror Breaker", "Deceiver Exarch"));
+        final java.util.Set<String> needsNoMenuCard = new java.util.HashSet<>(java.util.Arrays.asList("Kiki-Jiki, Mirror Breaker", "Pestermite"));
+        // a search's picks: a line that needs another option's card is not mine; one that needs no menu card is everyone's
+        Assert.assertFalse(WhatIf.compatible(WhatIf.Snapshot.ADDS, "Island", needsExarch, menu));
+        Assert.assertTrue(WhatIf.compatible(WhatIf.Snapshot.ADDS, "Deceiver Exarch", needsExarch, menu));
+        Assert.assertTrue(WhatIf.compatible(WhatIf.Snapshot.ADDS, "Island", needsNoMenuCard, menu));
+        // declining the search: only lines that need no menu card
+        Assert.assertFalse(WhatIf.compatible(WhatIf.Snapshot.NOTHING, null, needsExarch, menu));
+        Assert.assertTrue(WhatIf.compatible(WhatIf.Snapshot.NOTHING, null, needsNoMenuCard, menu));
+        // a discard: a line that needs the discarded card is lost, any other stays
+        Assert.assertFalse(WhatIf.compatible(WhatIf.Snapshot.REMOVES, "Deceiver Exarch", needsExarch, menu));
+        Assert.assertTrue(WhatIf.compatible(WhatIf.Snapshot.REMOVES, "Island", needsExarch, menu));
+        // an option outside the pooling counts its own lines only
+        Assert.assertFalse(WhatIf.compatible(WhatIf.Snapshot.OWN, "Island", needsNoMenuCard, menu));
+    }
+
+    /**
+     * Pooling in a run: the kill needs no menu card (both pieces are in hand already), so every pick gets the same value;
+     * and the whole-menu stage: with the piece still in the library, the position that holds every offered card names it.
+     */
+    @Test
+    public void poolingFlattensAnIndependentKillAndTheWholeMenuNamesThePiece() {
+        final String bf = "Mountain;Mountain;Mountain;Mountain;Mountain;Island;Island;Island";
+        final String lib = "Island;Island;Swamp;Island;Island;Island;Island;Island;Island;Island";
+        final List<WhatIf.Snapshot> flat = new ArrayList<>();
+        for (String pick : new String[] {"Island", "Swamp"}) {
+            final WhatIf.Snapshot s = snap(state("Kiki-Jiki, Mirror Breaker;Deceiver Exarch;" + pick, bf, lib), 0, 0);
+            s.mode = WhatIf.Snapshot.ADDS;
+            s.card = pick;
+            flat.add(s);
+        }
+        final WhatIf.Opts o = new WhatIf.Opts();
+        o.worlds = 1;
+        o.horizon = 1;
+        o.nodes = 250;
+        o.probeMs = 20000;
+        o.askMs = 240000;
+        o.seed = 11;
+        final WhatIf.Ask a = WhatIf.evaluate(flat, SolverDriver.config(cfgOn()), o);
+        Assert.assertEquals(a.results.get(0).value, a.results.get(1).value, 1e-9, "a kill that needs neither pick");
+        Assert.assertTrue(a.results.get(0).value > 0.5);
+
+        // the menu: Island, Deceiver Exarch, Swamp; the piece is still in the library in the first option's position
+        final List<WhatIf.Snapshot> menu = new ArrayList<>();
+        final String[][] picks = {{"Island", "Island;Deceiver Exarch;Swamp;Island;Island;Island;Island;Island;Island"},
+                {"Deceiver Exarch", "Island;Island;Swamp;Island;Island;Island;Island;Island;Island"},
+                {"Swamp", "Island;Island;Deceiver Exarch;Island;Island;Island;Island;Island;Island"}};
+        for (String[] p : picks) {
+            final WhatIf.Snapshot s = snap(state("Kiki-Jiki, Mirror Breaker;" + p[0], bf, p[1]), 0, 0);
+            s.mode = WhatIf.Snapshot.ADDS;
+            s.card = p[0];
+            menu.add(s);
+        }
+        final WhatIf.Opts w = new WhatIf.Opts();
+        w.worlds = 1;
+        w.horizon = 1;
+        w.nodes = 1; // the one-step stage is not what is tested
+        w.probeMs = 20000;
+        w.askMs = 240000;
+        w.all = 1;
+        w.allNodes = 250;
+        w.allRounds = 1;
+        w.seed = 12;
+        final WhatIf.Ask b = WhatIf.evaluate(menu, SolverDriver.config(cfgOn()), w);
+        System.out.println("WHATIF-UNIT all: " + b.results.get(0).all + " " + b.results.get(1).all + " " + b.results.get(2).all
+                + " needs=" + b.results.get(1).allNeeds + " line=" + b.results.get(1).lineAll);
+        Assert.assertTrue(b.results.get(1).all > 0.5, "the whole-menu kill needs the piece");
+        Assert.assertEquals(b.results.get(1).allNeeds, 1);
+        Assert.assertEquals(b.results.get(0).all, 0.0, 1e-9, "a land is not in the kill set");
+        Assert.assertEquals(b.results.get(2).all, 0.0, 1e-9);
+    }
+
     @Test
     public void whatIfKeyDefaultsOffAndParses() {
         final forge.bench.rl.ChoiceScorer.Config off = forge.bench.rl.ChoiceScorer.Config
@@ -196,12 +272,10 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                     o.pass = Boolean.parseBoolean(c[7]);
                     o.pool = c.length <= 8 || Boolean.parseBoolean(c[8]);
                     if (c.length > 9) {
-                        o.second = Integer.parseInt(c[9]); // name:K,T,nodes,probeMs,askMs,dev,pass,pool,second,secondNodes
-                        o.secondNodes = c.length > 10 ? Integer.parseInt(c[10]) : o.secondNodes;
-                    }
-                    if (c.length > 11) {
-                        o.all = Integer.parseInt(c[11]); // ...,second,secondNodes,all,allNodes
-                        o.allNodes = c.length > 12 ? Integer.parseInt(c[12]) : o.allNodes;
+                        o.all = Integer.parseInt(c[9]); // name:K,T,nodes,probeMs,askMs,dev,pass,pool,all,allNodes,allRounds,allUntap
+                        o.allNodes = c.length > 10 ? Integer.parseInt(c[10]) : o.allNodes;
+                        o.allRounds = c.length > 11 ? Integer.parseInt(c[11]) : o.allRounds;
+                        o.allUntap = c.length > 12 && Boolean.parseBoolean(c[12]);
                     }
                     o.seed = 0x5DCCL * 31 + line;
                     final JsonObject out = new JsonObject();
@@ -237,7 +311,6 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                         out.addProperty("cut", a.cut);
                         out.addProperty("probes", a.probes);
                         out.addProperty("nodes", a.nodes);
-                        out.addProperty("pairs", a.pairs);
                         out.addProperty("cut2", a.cut2);
                         WhatIf.receipt(ask.get("tag").getAsString() + " cfg=" + c[0], labels, a, o);
                         for (int i = 0; i < snaps.size(); i++) {
@@ -251,11 +324,6 @@ public class WhatIfPositionsTest extends forge.ai.AITest {
                                     x.addProperty("all", Math.round(r.all * 1e4) / 1e4);
                                     x.addProperty("all_needs", r.allNeeds);
                                     x.addProperty("line_all", r.lineAll.length() > 300 ? r.lineAll.substring(0, 300) : r.lineAll);
-                                }
-                                if (r.second > 0) {
-                                    x.addProperty("second", Math.round(r.second * 1e4) / 1e4);
-                                    x.addProperty("with", labels.get(r.partner));
-                                    x.addProperty("line2", r.line2.length() > 300 ? r.line2.substring(0, 300) : r.line2);
                                 }
                                 x.addProperty("kills", r.kills);
                                 x.addProperty("worlds", r.worlds);

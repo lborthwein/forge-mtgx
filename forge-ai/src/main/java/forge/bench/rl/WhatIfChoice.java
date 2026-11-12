@@ -35,16 +35,16 @@ public final class WhatIfChoice {
     }
 
     public static final class Config {
-        public int worlds = 3, horizon = 4, nodes = 60, maxSteps = 600, second = 0, secondNodes = 120, secondMax = 300, all = 0, allNodes = 400, allRounds = 2;
+        public int worlds = 3, horizon = 4, nodes = 60, maxSteps = 600, all = 0, allNodes = 400, allRounds = 2;
         public long probeMs = 1500, askMs = 60_000;
-        public double gamma = 0.8, alpha = 1.0, secondDiscount = 0.5, allDiscount = 0.5;
+        public double gamma = 0.8, alpha = 1.0, allDiscount = 0.5;
         public boolean pass = false, shadow = false, pool = true;
         public String dev = "ai";
         /** Real-time guard of one ask, ms (0 = none): checked between options' applications only. */
         public long realMs = 0;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("worlds", "horizon", "nodes", "probeMs",
-                "askMs", "gamma", "alpha", "pass", "shadow", "dev", "maxSteps", "realMs", "pool", "second", "secondNodes", "secondDiscount", "secondMax", "all", "allNodes", "allRounds", "allDiscount"));
+                "askMs", "gamma", "alpha", "pass", "shadow", "dev", "maxSteps", "realMs", "pool", "all", "allNodes", "allRounds", "allDiscount"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -63,10 +63,6 @@ public final class WhatIfChoice {
             if (o.has("pass")) c.pass = o.get("pass").getAsBoolean();
             if (o.has("shadow")) c.shadow = o.get("shadow").getAsBoolean();
             if (o.has("pool")) c.pool = o.get("pool").getAsBoolean();
-            if (o.has("second")) c.second = o.get("second").getAsInt();
-            if (o.has("secondNodes")) c.secondNodes = o.get("secondNodes").getAsInt();
-            if (o.has("secondDiscount")) c.secondDiscount = o.get("secondDiscount").getAsDouble();
-            if (o.has("secondMax")) c.secondMax = o.get("secondMax").getAsInt();
             if (o.has("all")) c.all = o.get("all").getAsInt();
             if (o.has("allNodes")) c.allNodes = o.get("allNodes").getAsInt();
             if (o.has("allRounds")) c.allRounds = o.get("allRounds").getAsInt();
@@ -92,12 +88,6 @@ public final class WhatIfChoice {
             o.addProperty("pass", pass);
             o.addProperty("shadow", shadow);
             o.addProperty("pool", pool);
-            if (second > 0) {
-                o.addProperty("second", second);
-                o.addProperty("secondNodes", secondNodes);
-                o.addProperty("secondDiscount", secondDiscount);
-                o.addProperty("secondMax", secondMax);
-            }
             o.addProperty("dev", dev);
             o.addProperty("maxSteps", maxSteps);
             if (all > 0) {
@@ -122,10 +112,6 @@ public final class WhatIfChoice {
             w.gamma = gamma;
             w.pass = pass;
             w.pool = pool;
-            w.second = second;
-            w.secondNodes = secondNodes;
-            w.secondDiscount = secondDiscount;
-            w.secondMax = secondMax;
             w.all = all;
             w.allNodes = allNodes;
             w.allRounds = allRounds;
@@ -363,10 +349,6 @@ public final class WhatIfChoice {
                 if (r.all > 0) {
                     x.addProperty("all", Math.round(r.all * 1e4) / 1e4);
                     x.addProperty("all_needs", r.allNeeds);
-                }
-                if (r.second > 0) {
-                    x.addProperty("second", Math.round(r.second * 1e4) / 1e4);
-                    x.addProperty("with", s.options.get(r.partner).label);
                 }
                 if (r.bestTurn >= 0) {
                     x.addProperty("turn", r.bestTurn);
