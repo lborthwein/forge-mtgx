@@ -95,7 +95,46 @@ final class InteractiveState {
         addVisibleLibraryTops(view, game, viewer);
         sanitizeStack(view, game, viewer);
         sanitizeCombat(view, game, viewer);
+        addBlockedWithoutBlockers(view, game);
         return view;
+    }
+
+    /**
+     * combat-damage-view-1111: an attacker that became blocked stays blocked for the rest of combat after every blocker
+     * has left combat (CR 509.1h), for example after dying to first-strike damage. It then deals no combat damage unless
+     * it has trample. {@code blockedBy} is empty then, so the client's hit preview read it as unblocked. This marks
+     * exactly that attacker {@code "blocked": true}. Any other attacker's entry is unchanged, because a non-empty
+     * {@code blockedBy} already says blocked. Only the interactive wire gets it; the shared StateEncoder that bench and
+     * training read doesn't.
+     */
+    static void addBlockedWithoutBlockers(final JsonObject view, final Game game) {
+        final forge.game.combat.Combat combat = game.getCombat();
+        if (combat == null || !view.has("combat") || !view.get("combat").isJsonObject()) {
+            return;
+        }
+        final JsonObject wire = view.getAsJsonObject("combat");
+        if (!wire.has("attackers") || !wire.get("attackers").isJsonArray()) {
+            return;
+        }
+        for (JsonElement element : wire.getAsJsonArray("attackers")) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            final JsonObject attacker = element.getAsJsonObject();
+            final JsonElement blockedBy = attacker.get("blockedBy");
+            if (!attacker.has("fid") || (blockedBy != null && blockedBy.isJsonArray() && blockedBy.getAsJsonArray().size() > 0)) {
+                continue;
+            }
+            final Card card;
+            try {
+                card = game.findById(attacker.get("fid").getAsInt());
+            } catch (RuntimeException e) {
+                continue;
+            }
+            if (card != null && combat.isBlocked(card) && combat.getBlockers(card).isEmpty()) {
+                attacker.addProperty("blocked", true);
+            }
+        }
     }
 
     /**
