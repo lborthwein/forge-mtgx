@@ -1,5 +1,6 @@
 package forge.ai.simulation;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
 
@@ -223,6 +224,62 @@ public class LookaheadDeadAltCostTest extends SimulationTest {
             AssertJUnit.assertEquals(0, s.getStats().deadAltCostDropped);
         } finally {
             s.shutdown();
+        }
+    }
+
+    /** The policy seat's given set as the live seat sends it: pass first (the default), then every legal play. */
+    private static List<SpellAbility> given(Player a) {
+        final List<SpellAbility> g = new ArrayList<>();
+        g.add(null);
+        g.addAll(new SpellAbilityPicker(a).getCandidateSpellsAndAbilities());
+        return g;
+    }
+
+    private static int evokeAt(List<SpellAbility> g) {
+        for (int i = 1; i < g.size(); i++) {
+            final SpellAbility sa = g.get(i);
+            if (sa != null && sa.isEvoke() && sa.getHostCard().getName().equals("Fury")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean searched(LookaheadSearch.GivenResult r, int idx) {
+        for (int i : r.givenIndex) {
+            if (i == idx) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The live path: the misplay came from the policy seat's given set (decideGiven, guardGiven), not enumerate. */
+    @Test
+    public void thePolicySeatsGivenSetDropsItWhenOn() {
+        Game g1 = turnOne();
+        Player a1 = g1.getPlayers().get(0);
+        List<SpellAbility> giv1 = given(a1);
+        int at1 = evokeAt(giv1);
+        AssertJUnit.assertTrue("the evoke line is in the given set, after the default", at1 > 0);
+        LookaheadSearch off = search(AiFixes.Mode.OFF);
+        Game g2 = turnOne();
+        Player a2 = g2.getPlayers().get(0);
+        List<SpellAbility> giv2 = given(a2);
+        int at2 = evokeAt(giv2);
+        LookaheadSearch on = search(AiFixes.Mode.ON);
+        try {
+            AssertJUnit.assertTrue("OFF: the evoke line is searched, as it was live", searched(off.decideGiven(g1, a1, giv1, 4), at1));
+            String before = LookaheadSearch.fingerprint(g2);
+            LookaheadSearch.GivenResult r = on.decideGiven(g2, a2, giv2, 4);
+            AssertJUnit.assertEquals(before, LookaheadSearch.fingerprint(g2));
+            AssertJUnit.assertFalse("ON: the evoke line is not searched", searched(r, at2));
+            AssertJUnit.assertTrue(r.chosen != at2);
+            AssertJUnit.assertEquals(1, on.getStats().deadAltCostDropped);
+            AssertJUnit.assertEquals(0, off.getStats().deadAltCostDropped);
+        } finally {
+            off.shutdown();
+            on.shutdown();
         }
     }
 
