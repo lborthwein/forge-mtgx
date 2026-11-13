@@ -1592,6 +1592,8 @@ public final class LookaheadSearch {
         public final Object block;
         /** untested-keys-1113 (holdDeploy): the deferred cast this pass play-out holds for (null = none). */
         public final Deploy deploy;
+        /** untested-keys-1113 (holdDeploy.followLine): the candidate's key (the decision's proof cache is keyed by it). */
+        public final String candKey;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
@@ -1602,6 +1604,7 @@ public final class LookaheadSearch {
             this.plan = c.plan;
             this.block = c.block;
             this.deploy = c.deploy;
+            this.candKey = c.key();
         }
 
         /**
@@ -2702,11 +2705,14 @@ public final class LookaheadSearch {
      * outcome and its alternatives by the same leaf in the same worlds; the pilot's time moves the decision's deadline.
      */
     public interface HoldPilot {
-        /** Decision thread, before the pilot: a new decision (the last decision's line is dropped). */
+        /** Decision thread, before the pilots: a new decision with this proof window (the last decision's lines dropped). */
         void begin(Deploy window);
 
-        /** Decision thread, after the pilot: the absolute turn the proven line wins in, 0 = no line. */
+        /** Decision thread, after the pilots: the latest absolute turn a proven line wins in, 0 = no line. */
         int winTurn();
+
+        /** Decision thread, when the decision ends: no window. */
+        void end();
     }
 
     public volatile HoldPilot holdPilot;
@@ -2715,25 +2721,39 @@ public final class LookaheadSearch {
     private volatile boolean holdHorizonSet = false;
 
     void runHoldPilot(final Game live, final Player me, final List<Cand> cands, final long decisionSeed) {
-        Cand hold = null;
+        Deploy w = null;
         for (Cand c : cands) {
-            if (c.deploy != null && (hold == null || c.deploy.turn > hold.deploy.turn
-                    || c.deploy.turn == hold.deploy.turn && c.deploy.phase.compareTo(hold.deploy.phase) > 0)) {
-                hold = c;
+            if (c.deploy != null && (w == null || c.deploy.turn > w.turn
+                    || c.deploy.turn == w.turn && c.deploy.phase.compareTo(w.phase) > 0)) {
+                w = c.deploy;
             }
         }
-        if (hold == null) {
+        if (w == null) {
             return;
         }
+        // every candidate but a plan line (which follows its own line) gets one proof at the same window, from its own
+        // world-0 play-out: the comparison stays fair (a line the solver proves after any candidate is found for it)
         final HoldPilot hp = holdPilot;
         final long t0 = System.nanoTime();
-        hp.begin(hold.deploy);
-        stats.holdPilots++;
-        try {
-            play(prepare(live, me, hold, null, mix(decisionSeed, 1000), cfg.resample, null), null);
-        } catch (RuntimeException e) {
-            System.err.println("[lookahead] hold pilot failed: " + e);
+        hp.begin(w);
+        final List<Runnable> tasks = new ArrayList<>();
+        int n = 0;
+        for (Cand c : cands) {
+            if (c.plan != null) {
+                continue;
+            }
+            final Prepared p = prepare(live, me, c, null, mix(decisionSeed, 1000), cfg.resample, null);
+            tasks.add(() -> {
+                try {
+                    play(p, null);
+                } catch (RuntimeException e) {
+                    System.err.println("[lookahead] hold pilot failed: " + e);
+                }
+            });
+            n++;
         }
+        stats.holdPilots += n;
+        runAll(tasks);
         final int win = hp.winTurn();
         if (win > 0) {
             stats.holdPilotProven++;
@@ -2747,7 +2767,8 @@ public final class LookaheadSearch {
         }
         stats.holdPilotMs += ns / 1_000_000L;
         if (EXPLAIN) {
-            System.err.println("[lookahead] hold pilot " + hold.label + ": win turn " + win + ", " + ns / 1_000_000L + " ms");
+            System.err.println("[lookahead] hold pilots " + n + " at their " + w.phase + " turn " + w.turn + ": latest win turn "
+                    + win + ", " + ns / 1_000_000L + " ms");
         }
     }
 
@@ -3203,6 +3224,10 @@ public final class LookaheadSearch {
             if (holdHorizonSet) {
                 planHorizonTurn = 0; // untested-keys-1113: the pilot's horizon ends with the decision
                 holdHorizonSet = false;
+            }
+            final HoldPilot hpEnd = holdPilot;
+            if (hpEnd != null) {
+                hpEnd.end();
             }
             if (b != null && b.wallCut) {
                 res.wall = true;
