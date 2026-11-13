@@ -5029,6 +5029,56 @@ public final class LookaheadSearch {
         runAll(tasks);
     }
 
+    /**
+     * searchspeed-1113 (test hosts; RlSearch reads -Dsdcc.warmReaders, default off): {@code n} belief-world copies of the
+     * live position, the hooks' leaf reach read on each, on the pool. Nothing is returned or kept here: the card models
+     * the screens learn stay in the hooks' readers, as after {@code n} leaves of a search. For a JVM resumed at a recorded
+     * position, whose readers are empty where a live game's have learned the cards in earlier turns. Outside any
+     * decision's budget. Returns the wall time, ms.
+     */
+    public double warmLeaves(Game live, Player me, int n) {
+        final long t0 = System.nanoTime();
+        if (!hookLeaf || n <= 0) {
+            return 0.0;
+        }
+        final Cand pass = new Cand((SpellAbility) null, false);
+        final List<Runnable> tasks = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            final Prepared p;
+            try {
+                p = prepare(live, me, pass, null, mix(0x3A77C0DEL, i), cfg.resample, null);
+            } catch (RuntimeException | StackOverflowError e) {
+                continue;
+            }
+            if (p.failed || p.g == null) {
+                continue;
+            }
+            tasks.add(() -> {
+                final Random prev = MyRandom.getThreadRandom();
+                final Object prevIds = forge.util.IdScope.capture();
+                final Object prevCache = AiCache.captureScope();
+                MyRandom.setThreadRandom(p.rnd);
+                AiCache.installScope(p.cache);
+                forge.util.IdScope.install(p.ids);
+                try {
+                    hooks.leafReach(p.hookCtx, p.g, p.me);
+                } catch (RuntimeException | StackOverflowError e) {
+                    // a warm-up read that fails learns nothing
+                } finally {
+                    AiCache.installScope(prevCache);
+                    forge.util.IdScope.install(prevIds);
+                    MyRandom.setThreadRandom(prev);
+                }
+            });
+        }
+        try {
+            runAll(tasks);
+        } catch (RuntimeException e) {
+            System.err.println("[lookahead] warm-up failed: " + e);
+        }
+        return (System.nanoTime() - t0) / 1e6;
+    }
+
     // ---- searchspeed-1113: racing with paired worlds (Config.race; all three fields idle unless a race is on)
     private int raceLo = 0, raceHi = Integer.MAX_VALUE;
     private boolean[] raceAlive;
