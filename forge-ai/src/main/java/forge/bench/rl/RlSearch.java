@@ -1661,6 +1661,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** searchspeed-1113: the body of {@link #decide} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
     private int decideP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
+        if (WARM_READERS > 0 && !warmed) {
+            // searchspeed-1113 (test hosts, -Dsdcc.warmReaders=N; default 0 = off): before this seat's first searched
+            // priority, the reach readers learn the cards of N belief worlds, off the decision's clock
+            warmed = true;
+            try {
+                if (cfg.reach != null) {
+                    reachCfg();
+                }
+                final double ms = ls.warmLeaves(g, me, WARM_READERS);
+                dumpReaders("warm");
+                System.err.println("[warm-readers] seat=" + me.getId() + " worlds=" + WARM_READERS + " ms=" + Math.round(ms)
+                        + " templates=" + readerSizes());
+            } catch (RuntimeException e) {
+                System.err.println("[warm-readers] failed: " + e);
+            }
+        }
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
@@ -4012,6 +4028,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * records to {@code cfg.labelSink} as one gzip member (r3-distill-1010).
      */
     public void flushLog() {
+        dumpReaders("end"); // searchspeed-1113 (off unless -Dsdcc.readerDump)
         if (cfg.valueSink != null && !valueRecs.isEmpty()) {
             final String path = cfg.valueSink.replace("{actor}", actorId == null ? "actor" : actorId)
                     .replace("{pid}", String.valueOf(ProcessHandle.current().pid()));
@@ -4378,6 +4395,33 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** owner-misplays-1113: log the reach gate and every leaf's reach (diagnosis only; never read to decide). */
     static final boolean REACH_LOG = Boolean.getBoolean("sdcc.reachLog");
+    /** searchspeed-1113 (test hosts): warm-up worlds before a seat's first decision; a directory for the readers' templates. */
+    static final int WARM_READERS = Integer.getInteger("sdcc.warmReaders", 0);
+    static final String READER_DUMP = System.getProperty("sdcc.readerDump");
+    private boolean warmed;
+
+    private String readerSizes() {
+        final StringBuilder sb = new StringBuilder();
+        reachReaders.forEach((id, r) -> sb.append(sb.length() == 0 ? "" : ",").append(id).append(':')
+                .append(forge.ai.simulation.ForcedWinSolver.readerSize(r)));
+        return sb.toString();
+    }
+
+    /** -Dsdcc.readerDump=DIR (measurement only): the reach readers' templates as JSON, one file per reader and tag. */
+    private void dumpReaders(final String tag) {
+        if (READER_DUMP == null) {
+            return;
+        }
+        reachReaders.forEach((id, r) -> {
+            try {
+                java.nio.file.Files.createDirectories(java.nio.file.Paths.get(READER_DUMP));
+                java.nio.file.Files.write(java.nio.file.Paths.get(READER_DUMP, "reader-" + System.identityHashCode(this) + "-p" + id + "-" + tag + ".json"),
+                        forge.ai.simulation.ForcedWinSolver.readerJson(r).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } catch (java.io.IOException | RuntimeException e) {
+                System.err.println("[reader-dump] failed: " + e);
+            }
+        });
+    }
     /** discard-guard-1113 (diagnostics; off unless set): every card-scorer ask's row on stderr. */
     static final boolean CHOICE_LOG = Boolean.getBoolean("sdcc.choiceLog");
 
