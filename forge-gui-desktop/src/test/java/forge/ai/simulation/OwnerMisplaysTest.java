@@ -149,6 +149,40 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
         Assert.assertTrue(reach("G16 turn 9, artifact spent", G16_BOARD, "Splinter Twin", G16_LIB, "Old One Eye;Forest;Forest;Forest", true) < 1.0);
     }
 
+    /**
+     * G16 root (owner, step 22, turn 9 second main phase): the creature in play, the Aura and an off-route artifact in hand,
+     * the land of the Aura's colour untapped and a one-shot artifact as the second source. Casting the off-route artifact
+     * spends the one-shot source. The look-ahead's reach part (spec reach, gate on) is read only when the root shows
+     * potential ({@link ForcedWinSolver#potential}): it needs a card that ends games in the planner's model, and a copy
+     * loop is one only with the loop screens (planLoops). Report: the gate with and without, and the two leaves' reach.
+     */
+    @Test
+    public void g16AtTheOffRouteCastTheGateAndTheTwoLeaves() {
+        final String board = "Mountain;Island|Tapped;Island|Tapped;Island|Tapped;Island|Tapped;Swamp|Tapped;Lotus Petal;Pestermite;Baleful Strix";
+        final String opp = "Old One Eye;Ketria Triome;Forest;Forest;Forest";
+        final String lib = "Badlands;" + G16_LIB;
+        for (boolean loops : new boolean[] {false, true}) {
+            final String frame = ForcedWinSolverTest.frame("Splinter Twin;Smuggler's Copter", board, 9, "", opp, 18, "human")
+                    .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + lib);
+            final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinSolver s = screenSolver(me, loops);
+            final boolean ender = s.hasEnder(g);
+            final boolean pot = s.potential(g, s.knownTop(g), new ForcedWinSolver.GoldfishOpts(), 40, true, 12_000L);
+            System.out.println("OWNERMISPLAYS G16 step 22 loops=" + loops + " hasEnder=" + ender + " potential=" + pot);
+            if (loops) {
+                Assert.assertTrue(pot, "with the loop screens the root shows potential: the gate opens");
+            }
+        }
+        // the two leaves at our next turn (lands untapped): the one-shot source kept, or spent on the off-route cast
+        final double hold = reach("G16 next turn, source kept", "Mountain;Island;Island;Island;Island;Swamp;Lotus Petal;Pestermite;Baleful Strix",
+                "Splinter Twin;Smuggler's Copter", lib, opp, true);
+        final double spent = reach("G16 next turn, source spent", "Mountain;Island;Island;Island;Island;Swamp;Smuggler's Copter;Pestermite;Baleful Strix",
+                "Splinter Twin", lib, opp, true);
+        Assert.assertEquals(hold, 1.0, 1e-9);
+        Assert.assertTrue(spent < hold, "spending the source costs the line: " + spent);
+    }
+
     /** G08: the loot's discard between a creature that copies its partner in play and a tutor creature; three sources in play. */
     @Test
     public void g08KeepingTheCopyingCreatureHasALineKeepingTheTutorHasNone() {
