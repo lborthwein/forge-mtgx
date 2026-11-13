@@ -108,9 +108,21 @@ public final class RlLiveSeat {
                 // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
                 // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
                 "planLoops",
+                // searchspeed-1113 (absent = off): learned card models are read without the reader's monitor (timing only)
+                "cardLock",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // untested-keys-1113 (each absent = off, the seat as before; until now label-side or bench-only): the engine
+                // search at the windows the pilot already plans at besides our main phase (engineAnyWindow: their end step
+                // and our second main phase; engineEndStepOpen: no board-power gate there; engineEveryWindow: any empty-stack
+                // window of ours, a plan point permitting; enginePassBudget: the turn-crossing pass gets its own step and card
+                // budgets; enginePassToEnd, read with engineAnyWindow: from our main phase that pass may also rest in their
+                // end step, the flash window before our turn), and the engine's move order and loop credit (engineFocus:
+                // productive lines first; engineLoopCredit: unbounded resource loops fast-forwarded)
+                "engineAnyWindow", "engineEndStepOpen", "engineEveryWindow", "enginePassBudget", "enginePassToEnd", "engineFocus",
+                "engineLoopCredit",
+                "engineLoopCreditCap"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -128,9 +140,20 @@ public final class RlLiveSeat {
                 // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
                 // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
                 "planLoops",
+                // searchspeed-1113 (absent = off): learned card models are read without the reader's monitor (timing only)
+                "cardLock",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // untested-keys-1113 (each absent = off, the seat as before; until now label-side or bench-only): the engine
+                // search at the windows the pilot already plans at besides our main phase (engineAnyWindow: their end step
+                // and our second main phase; engineEndStepOpen: no board-power gate there; engineEveryWindow: any empty-stack
+                // window of ours, a plan point permitting; enginePassBudget: the turn-crossing pass gets its own step and card
+                // budgets; enginePassToEnd, read with engineAnyWindow: from our main phase that pass may also rest in their
+                // end step, the flash window before our turn), and the engine's move order and loop credit (engineFocus:
+                // productive lines first; engineLoopCredit: unbounded resource loops fast-forwarded)
+                "engineAnyWindow", "engineEndStepOpen", "engineEveryWindow", "enginePassBudget", "enginePassToEnd", "engineFocus",
+                "engineLoopCredit"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
@@ -320,6 +343,51 @@ public final class RlLiveSeat {
                     case "zeroX": c.zeroX = v; break;
                     case "crewNoop": c.crewNoop = v; break;
                     case "deadAltCost": c.deadAltCost = v; break; // evoke-empty-board-1111 (live default off)
+                    // untested-keys-1113: "hold, then deploy" candidates (absent = off: the seat byte for byte as before)
+                    case "holdDeploy":
+                        if (!"true".equals(v) && !"false".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: holdDeploy=" + v + " (want true or false)");
+                        }
+                        c.holdDeploy = Boolean.parseBoolean(v);
+                        break;
+                    case "holdDeploy.commit":
+                    case "holdDeploy.followLine":
+                        if (!"true".equals(v) && !"false".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want true or false)");
+                        }
+                        if (k.endsWith("commit")) {
+                            c.holdDeployCommit = Boolean.parseBoolean(v);
+                        } else {
+                            c.holdDeployFollowLine = Boolean.parseBoolean(v);
+                        }
+                        break;
+                    // untested-keys-1113: the play-out opponent (absent = "forge", Forge AI, as before; "policy" = the
+                    // same policy seat as ours on its own observation, needs playout=policy)
+                    // untested-keys-1113: the search worlds deal the opponent's hidden cards from DeckBelief (absent = off,
+                    // the seat as before; needs the live belief, which the seat always sets)
+                    case "beliefDeck":
+                        if (!"true".equals(v) && !"false".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: beliefDeck=" + v + " (want true or false)");
+                        }
+                        c.beliefDeck = Boolean.parseBoolean(v);
+                        break;
+                    // untested-keys-1113: the deck belief's held-mana term ("a/b/c", factors for h = 1, 2, 3+) and the
+                    // deck-inclusion prior (true|false); absent = off, the seat as before; both need beliefDeck=true
+                    case "beliefDeckHeld":
+                        c.beliefDeckHeld = forge.ai.simulation.DeckBelief.parseHeld(v);
+                        break;
+                    case "beliefDeckInclusion":
+                        if (!"true".equals(v) && !"false".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: beliefDeckInclusion=" + v + " (want true or false)");
+                        }
+                        c.beliefDeckInclusion = Boolean.parseBoolean(v);
+                        break;
+                    case "opponent":
+                        if (!"forge".equals(v) && !"policy".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: opponent=" + v + " (want forge or policy)");
+                        }
+                        c.opponent = v;
+                        break;
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
                     case "connectTimeoutMs": c.connectTimeoutMs = Integer.parseInt(v); break;

@@ -1,0 +1,642 @@
+{
+"held": [
+1,
+1.25,
+1.5
+],
+"decline": 0.35,
+"handWeight": [
+{
+"name": "Bitter Triumph",
+"offTurn": true,
+"openMana": 0,
+"openColors": 7,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Get Lost",
+"offTurn": false,
+"openMana": 0,
+"openColors": 3,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Seething Song",
+"offTurn": true,
+"openMana": 3,
+"openColors": 3,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Chrome Mox",
+"offTurn": false,
+"openMana": 4,
+"openColors": 7,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Bitter Triumph",
+"offTurn": true,
+"openMana": 2,
+"openColors": 11,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Plateau",
+"offTurn": true,
+"openMana": 1,
+"openColors": 2,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Deceiver Exarch",
+"offTurn": true,
+"openMana": 0,
+"openColors": 15,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Mana Leak",
+"offTurn": true,
+"openMana": 2,
+"openColors": 25,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Tear Asunder",
+"offTurn": true,
+"openMana": 5,
+"openColors": 27,
+"noLandLastTurn": false,
+"weight": 1.5
+},
+{
+"name": "Birds of Paradise",
+"offTurn": false,
+"openMana": 0,
+"openColors": 30,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "The Wandering Emperor",
+"offTurn": true,
+"openMana": 3,
+"openColors": 16,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Breeding Pool",
+"offTurn": true,
+"openMana": 5,
+"openColors": 3,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Mana Leak",
+"offTurn": true,
+"openMana": 5,
+"openColors": 19,
+"noLandLastTurn": false,
+"weight": 1.5
+},
+{
+"name": "Splinter Twin",
+"offTurn": false,
+"openMana": 2,
+"openColors": 7,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Reprieve",
+"offTurn": false,
+"openMana": 1,
+"openColors": 10,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Thalia, Guardian of Thraben",
+"offTurn": true,
+"openMana": 2,
+"openColors": 17,
+"noLandLastTurn": true,
+"weight": 0.35
+},
+{
+"name": "The Wandering Emperor",
+"offTurn": false,
+"openMana": 1,
+"openColors": 19,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "True-Name Nemesis",
+"offTurn": false,
+"openMana": 2,
+"openColors": 5,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Brain Freeze",
+"offTurn": false,
+"openMana": 4,
+"openColors": 19,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Ignoble Hierarch",
+"offTurn": true,
+"openMana": 2,
+"openColors": 24,
+"noLandLastTurn": false,
+"weight": 0.35
+},
+{
+"name": "Path to Exile",
+"offTurn": true,
+"openMana": 5,
+"openColors": 14,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Chaos Defiler",
+"offTurn": true,
+"openMana": 1,
+"openColors": 17,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Get Lost",
+"offTurn": true,
+"openMana": 5,
+"openColors": 3,
+"noLandLastTurn": false,
+"weight": 1.5
+},
+{
+"name": "Enlightened Tutor",
+"offTurn": true,
+"openMana": 2,
+"openColors": 23,
+"noLandLastTurn": false,
+"weight": 1.25
+},
+{
+"name": "Ancestral Recall",
+"offTurn": true,
+"openMana": 0,
+"openColors": 30,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Smuggler's Copter",
+"offTurn": true,
+"openMana": 0,
+"openColors": 12,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Manamorphose",
+"offTurn": true,
+"openMana": 5,
+"openColors": 11,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Currency Converter",
+"offTurn": true,
+"openMana": 5,
+"openColors": 26,
+"noLandLastTurn": false,
+"weight": 0.35
+},
+{
+"name": "Deceiver Exarch",
+"offTurn": true,
+"openMana": 0,
+"openColors": 5,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Council's Judgment",
+"offTurn": true,
+"openMana": 5,
+"openColors": 25,
+"noLandLastTurn": false,
+"weight": 0.35
+},
+{
+"name": "Pyrokinesis",
+"offTurn": true,
+"openMana": 1,
+"openColors": 7,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Emry, Lurker of the Loch",
+"offTurn": true,
+"openMana": 1,
+"openColors": 22,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Flash",
+"offTurn": true,
+"openMana": 4,
+"openColors": 29,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Imperial Seal",
+"offTurn": false,
+"openMana": 1,
+"openColors": 27,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Snapcaster Mage",
+"offTurn": true,
+"openMana": 1,
+"openColors": 11,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Fabled Passage",
+"offTurn": true,
+"openMana": 0,
+"openColors": 31,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Reprieve",
+"offTurn": false,
+"openMana": 2,
+"openColors": 3,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Portal to Phyrexia",
+"offTurn": true,
+"openMana": 5,
+"openColors": 12,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Solitude",
+"offTurn": true,
+"openMana": 1,
+"openColors": 19,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Prismatic Vista",
+"offTurn": true,
+"openMana": 4,
+"openColors": 18,
+"noLandLastTurn": true,
+"weight": 0.35
+},
+{
+"name": "Once Upon a Time",
+"offTurn": true,
+"openMana": 3,
+"openColors": 10,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Vindicate",
+"offTurn": false,
+"openMana": 3,
+"openColors": 0,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Subtlety",
+"offTurn": true,
+"openMana": 5,
+"openColors": 29,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Relic of Progenitus",
+"offTurn": true,
+"openMana": 2,
+"openColors": 19,
+"noLandLastTurn": true,
+"weight": 0.35
+},
+{
+"name": "Tishana's Tidebinder",
+"offTurn": false,
+"openMana": 3,
+"openColors": 21,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Fiend Artisan",
+"offTurn": true,
+"openMana": 1,
+"openColors": 0,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "The Wandering Emperor",
+"offTurn": true,
+"openMana": 0,
+"openColors": 25,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Dismember",
+"offTurn": true,
+"openMana": 1,
+"openColors": 9,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Pestermite",
+"offTurn": true,
+"openMana": 5,
+"openColors": 18,
+"noLandLastTurn": false,
+"weight": 1.5
+},
+{
+"name": "Helm of Awakening",
+"offTurn": true,
+"openMana": 3,
+"openColors": 4,
+"noLandLastTurn": false,
+"weight": 0.35
+},
+{
+"name": "Once Upon a Time",
+"offTurn": true,
+"openMana": 1,
+"openColors": 3,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Sakura-Tribe Elder",
+"offTurn": false,
+"openMana": 1,
+"openColors": 17,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Cathar Commando",
+"offTurn": true,
+"openMana": 2,
+"openColors": 30,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Goldspan Dragon",
+"offTurn": true,
+"openMana": 5,
+"openColors": 27,
+"noLandLastTurn": false,
+"weight": 0.35
+},
+{
+"name": "Restoration Angel",
+"offTurn": true,
+"openMana": 1,
+"openColors": 25,
+"noLandLastTurn": false,
+"weight": 1.0
+},
+{
+"name": "Winds of Abandon",
+"offTurn": true,
+"openMana": 0,
+"openColors": 9,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Mystic Confluence",
+"offTurn": true,
+"openMana": 4,
+"openColors": 24,
+"noLandLastTurn": true,
+"weight": 1.0
+},
+{
+"name": "Chandra, Torch of Defiance",
+"offTurn": true,
+"openMana": 4,
+"openColors": 8,
+"noLandLastTurn": false,
+"weight": 0.35
+},
+{
+"name": "Solitude",
+"offTurn": true,
+"openMana": 5,
+"openColors": 13,
+"noLandLastTurn": true,
+"weight": 1.5
+},
+{
+"name": "Stomping Ground",
+"offTurn": true,
+"openMana": 5,
+"openColors": 11,
+"noLandLastTurn": false,
+"weight": 1.0
+}
+],
+"rates": [
+{
+"name": "Arid Mesa",
+"colors": 18,
+"rate": 0.008794074803149607
+},
+{
+"name": "Stern Scolding",
+"colors": 18,
+"rate": 0.08989555118110236
+},
+{
+"name": "Arbor Elf",
+"colors": 12,
+"rate": 0.0011023168316831684
+},
+{
+"name": "Fury",
+"colors": 26,
+"rate": 0.08239581395348838
+},
+{
+"name": "Monastery Mentor",
+"colors": 17,
+"rate": 0.12136422297297299
+},
+{
+"name": "Bonecrusher Giant",
+"colors": 4,
+"rate": 0.03190973684210526
+},
+{
+"name": "Wasteland",
+"colors": 17,
+"rate": 0.05621030405405405
+},
+{
+"name": "Jace, the Mind Sculptor",
+"colors": 25,
+"rate": 0.02095613636363636
+},
+{
+"name": "Displacer Kitten",
+"colors": 26,
+"rate": 0.06918383720930232
+},
+{
+"name": "Currency Converter",
+"colors": 9,
+"rate": 0.09968590099009901
+},
+{
+"name": "Venser, Shaper Savant",
+"colors": 24,
+"rate": 0.0027155591054313097
+},
+{
+"name": "Arbor Elf",
+"colors": 24,
+"rate": 0.05609159744408946
+},
+{
+"name": "Student of Warfare",
+"colors": 4,
+"rate": 0.01626736842105263
+},
+{
+"name": "Talisman of Creativity",
+"colors": 12,
+"rate": 0.02879162376237624
+},
+{
+"name": "Tendrils of Agony",
+"colors": 5,
+"rate": 0.09850152777777778
+},
+{
+"name": "Fury",
+"colors": 11,
+"rate": 0.11483094339622643
+},
+{
+"name": "Grave Titan",
+"colors": 24,
+"rate": 0.0037761022364217254
+},
+{
+"name": "Natural Order",
+"colors": 26,
+"rate": 0.1101196511627907
+},
+{
+"name": "Show and Tell",
+"colors": 2,
+"rate": 0.1148766037735849
+},
+{
+"name": "Damnation",
+"colors": 29,
+"rate": 0.04577052631578947
+},
+{
+"name": "Old One Eye",
+"colors": 24,
+"rate": 0.1361823003194888
+},
+{
+"name": "Touch the Spirit Realm",
+"colors": 30,
+"rate": 0.030536129032258066
+},
+{
+"name": "Abrupt Decay",
+"colors": 1,
+"rate": 0.008412142857142858
+},
+{
+"name": "Mana Crypt",
+"colors": 14,
+"rate": 0.1723925
+},
+{
+"name": "Restoration Angel",
+"colors": 3,
+"rate": 0.1331379846153846
+},
+{
+"name": "Lotus Petal",
+"colors": 27,
+"rate": 0.21486857142857144
+},
+{
+"name": "Windswept Heath",
+"colors": 4,
+"rate": 0.00936
+},
+{
+"name": "Wooded Foothills",
+"colors": 20,
+"rate": 0.04180875
+},
+{
+"name": "Imperial Recruiter",
+"colors": 4,
+"rate": 0.03546131578947369
+},
+{
+"name": "Beseech the Mirror",
+"colors": 27,
+"rate": 0.056973333333333334
+}
+]
+}

@@ -1055,6 +1055,12 @@ public final class ForcedWinModel {
         volatile boolean hideLibrary;
 
         /**
+         * searchspeed-1113 solver key cardLock, kept so specs that set it still parse. On this base it changes nothing:
+         * state-machines-1113 already learns each card under its own key lock (keyLocks) for every reader.
+         */
+        volatile boolean cardLock;
+
+        /**
          * search-bones-1015: a reader may be shared by the play-outs' threat checks, (d). state-machines-1113: callers of
          * one card wait for each other (its key's monitor); callers of different cards do not.
          */

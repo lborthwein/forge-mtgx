@@ -46,6 +46,102 @@ public final class DeckBelief {
         public double landShare = 0.425;
         /** Prior weight of a deck colour set by its size (index 1..3), before the shown-colour constraint. */
         public double[] sizePrior = {0, 0.15, 0.6, 0.25};
+        /**
+         * untested-keys-1113 (null = off, the default, and then nothing changes): the held-mana term, the likelihood
+         * factor for h = 1, 2, 3+ of an instant-speed nonland card it could cast with the mana it holds off its turn (see
+         * {@link #handWeight}). Spec key {@code beliefDeckHeld}.
+         */
+        public double[] held = null;
+        /**
+         * untested-keys-1113 (null = off, the default, and then nothing changes): the deck-inclusion prior; the hidden
+         * spells and nonbasic lands are dealt by weighted draw by how often each card makes a main deck of the world's
+         * colours (see {@link #deal}). Spec key {@code beliefDeckInclusion}.
+         */
+        public Inclusion inclusion = null;
+    }
+
+    /**
+     * untested-keys-1113: the deck-inclusion table ({@code deck-inclusion-mush-1113.json}: built 2026-11-13 from the
+     * walk-mix-1111-ho4 deck bank and the train half of the owner-review recordings' decklists; source, build date and the
+     * offline test are in the file). A card's rate in a deck of colours C is
+     * {@code max(floor, (counts[C][card] + shrink * global[card]) / (decks[C] + shrink))}. Data only: no roles, no classes.
+     */
+    public static final class Inclusion {
+        public static final String LIVE = "classpath:/forge/ai/simulation/deck-inclusion-mush-1113.json";
+        public static final String LIVE_SHA256 = "12d9b429753f";
+        private static volatile Inclusion live;
+        public final String sha256;
+        final double shrink, floor;
+        final java.util.Map<Integer, Integer> decks = new java.util.HashMap<>();
+        final java.util.Map<String, Double> global = new java.util.HashMap<>();
+        final java.util.Map<Integer, java.util.Map<String, Integer>> counts = new java.util.HashMap<>();
+
+        Inclusion(final byte[] bytes) {
+            this.sha256 = sha256(bytes);
+            final com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(
+                    new String(bytes, java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+            if (!"deck-inclusion/1".equals(o.get("schema").getAsString())) {
+                throw new IllegalArgumentException("deck inclusion: schema " + o.get("schema"));
+            }
+            shrink = o.get("shrink").getAsDouble();
+            floor = o.get("floor").getAsDouble();
+            for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : o.getAsJsonObject("colorSets").entrySet()) {
+                decks.put(Integer.parseInt(e.getKey()), e.getValue().getAsInt());
+            }
+            for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : o.getAsJsonObject("global").entrySet()) {
+                global.put(e.getKey(), e.getValue().getAsDouble());
+            }
+            for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : o.getAsJsonObject("counts").entrySet()) {
+                final java.util.Map<String, Integer> m = new java.util.HashMap<>();
+                for (java.util.Map.Entry<String, com.google.gson.JsonElement> x : e.getValue().getAsJsonObject().entrySet()) {
+                    m.put(x.getKey(), x.getValue().getAsInt());
+                }
+                counts.put(Integer.parseInt(e.getKey()), m);
+            }
+        }
+
+        static String sha256(final byte[] b) {
+            try {
+                final StringBuilder sb = new StringBuilder();
+                for (byte x : java.security.MessageDigest.getInstance("SHA-256").digest(b)) {
+                    sb.append(String.format("%02x", x));
+                }
+                return sb.toString();
+            } catch (java.security.NoSuchAlgorithmException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        /** The table shipped in the jar, checked against its pinned sha256 prefix. */
+        public static Inclusion live() {
+            Inclusion t = live;
+            if (t == null) {
+                synchronized (Inclusion.class) {
+                    t = live;
+                    if (t == null) {
+                        try {
+                            t = new Inclusion(BeliefSampler.readCube(LIVE));
+                        } catch (java.io.IOException e) {
+                            throw new IllegalStateException("deck inclusion: " + LIVE, e);
+                        }
+                        if (!t.sha256.startsWith(LIVE_SHA256)) {
+                            throw new IllegalStateException("deck inclusion: " + LIVE + " sha256 " + t.sha256 + ", pinned " + LIVE_SHA256);
+                        }
+                        live = t;
+                    }
+                }
+            }
+            return t;
+        }
+
+        /** How often {@code name} makes a main deck of colours {@code colors}, shrunk to its rate over every deck it fits. */
+        public double rate(final String name, final byte colors) {
+            final int c = colors & 0x1f;
+            final double g = global.getOrDefault(name, 0.01);
+            final java.util.Map<String, Integer> m = counts.get(c);
+            final int k = m == null ? 0 : m.getOrDefault(name, 0);
+            return Math.max(floor, (k + shrink * g) / (decks.getOrDefault(c, 0) + shrink));
+        }
     }
 
     /** What the seat has seen of one opponent. */
@@ -140,7 +236,9 @@ public final class DeckBelief {
      * The likelihood factor of the opponent holding {@code pc} given what it left undone (off its own turn only):
      * {@code decline} for a sorcery-speed nonland spell it could have paid with the mana it left open (mana value at
      * most its open sources, every coloured pip among their colours), and for a land when it made no land drop last
-     * turn; 1 otherwise (instants, flash, what it could not afford).
+     * turn; 1 otherwise (instants, flash, what it could not afford). With {@link Params#held} (untested-keys-1113): an
+     * instant-speed nonland card it could cast with the mana it holds (h = its untapped sources, mana value at most h, every
+     * coloured pip among their colours) gets {@code held[min(h, 3) - 1]}.
      */
     public static double handWeight(final PaperCard pc, final Evidence e, final Params p) {
         if (pc == null || !e.offTurn) {
@@ -151,6 +249,10 @@ public final class DeckBelief {
             return e.noLandLastTurn ? p.decline : 1.0;
         }
         if (r.getType().isInstant() || r.hasKeyword(forge.game.keyword.Keyword.FLASH.toString())) {
+            if (p.held != null && e.openMana > 0 && r.getManaCost().getCMC() <= e.openMana
+                    && ColorSet.fromMask(r.getManaCost().getColorProfile()).hasNoColorsExcept(e.openColors)) {
+                return p.held[Math.min(e.openMana, 3) - 1];
+            }
             return 1.0;
         }
         final int mv = r.getManaCost().getCMC();
@@ -204,10 +306,18 @@ public final class DeckBelief {
         int hl = (int) Math.round(p.landShare * (e.seen + total)) - e.seenLands;
         hl = Math.max(0, Math.min(total, hl));
         final List<String> dealt = new ArrayList<>();
-        Collections.shuffle(spells, rng);
-        Collections.shuffle(offSpells, rng);
-        Collections.shuffle(lands, rng);
-        Collections.shuffle(offLands, rng);
+        if (p.inclusion == null) {
+            Collections.shuffle(spells, rng);
+            Collections.shuffle(offSpells, rng);
+            Collections.shuffle(lands, rng);
+            Collections.shuffle(offLands, rng);
+        } else {
+            // untested-keys-1113: weighted order without replacement by the inclusion rate in a deck of these colours
+            weightedOrder(spells, p.inclusion, d.colors, rng);
+            weightedOrder(offSpells, p.inclusion, d.colors, rng);
+            weightedOrder(lands, p.inclusion, d.colors, rng);
+            weightedOrder(offLands, p.inclusion, d.colors, rng);
+        }
         // lands: the fitting nonbasics and the basics of the deck's colours, about half each
         int li = 0;
         for (int i = 0; i < hl; i++) {
@@ -270,6 +380,55 @@ public final class DeckBelief {
             }
         }
         return d;
+    }
+
+    /**
+     * untested-keys-1113: the held-mana factors from a spec value "a/b/c" (h = 1, 2, 3+; '/' because the live string is
+     * comma-separated): three finite numbers, each > 0 and non-decreasing (the fitted table is monotone).
+     */
+    public static double[] parseHeld(final String v) {
+        final String[] t = v.split("/", -1);
+        if (t.length != 3) {
+            throw new IllegalArgumentException("beliefDeckHeld=" + v + " (want three factors a/b/c for h = 1, 2, 3+)");
+        }
+        final double[] out = new double[3];
+        for (int i = 0; i < 3; i++) {
+            try {
+                out[i] = Double.parseDouble(t[i].trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("beliefDeckHeld=" + v + " (want numbers)");
+            }
+            if (!(out[i] > 0) || Double.isInfinite(out[i]) || (i > 0 && out[i] < out[i - 1])) {
+                throw new IllegalArgumentException("beliefDeckHeld=" + v + " (want positive, non-decreasing factors)");
+            }
+        }
+        return out;
+    }
+
+    /** The spec value of {@link #parseHeld}'s result. */
+    public static String heldString(final double[] h) {
+        final StringBuilder sb = new StringBuilder();
+        for (double x : h) {
+            sb.append(sb.length() == 0 ? "" : "/").append(x == Math.rint(x) ? String.valueOf((long) x) : String.valueOf(x));
+        }
+        return sb.toString();
+    }
+
+    /** Weighted order without replacement (Efraimidis-Spirakis: sort by u^(1/w), largest first). */
+    static void weightedOrder(final List<String> names, final Inclusion inc, final byte colors, final Random rng) {
+        final double[] key = new double[names.size()];
+        final Integer[] idx = new Integer[names.size()];
+        for (int i = 0; i < key.length; i++) {
+            key[i] = Math.pow(rng.nextDouble(), 1.0 / inc.rate(names.get(i), colors));
+            idx[i] = i;
+        }
+        java.util.Arrays.sort(idx, (a, b) -> Double.compare(key[b], key[a]));
+        final List<String> out = new ArrayList<>(names.size());
+        for (Integer i : idx) {
+            out.add(names.get(i));
+        }
+        names.clear();
+        names.addAll(out);
     }
 
     /** For tests and receipts: the colour mask as letters. */

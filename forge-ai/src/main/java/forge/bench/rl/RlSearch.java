@@ -99,6 +99,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public double departZ = 1.645;
         /** unified-search-1106 (off by default): {@link LookaheadSearch.Config#anytime}. */
         public boolean anytime = false;
+        /** untested-keys-1113 (off by default): {@link LookaheadSearch.Config#holdDeploy}, "hold, then deploy" candidates. */
+        public boolean holdDeploy = false;
+        /**
+         * untested-keys-1113 (off by default; live key holdDeploy.commit): after a departure to a hold candidate in our own
+         * turn, every later priority of ours in that turn at an empty stack answers pass (a land play the policy chooses
+         * still stands; responses at a non-empty stack are decided as usual). Dropped when the turn ends or the opponent
+         * puts anything on the stack in our turn.
+         */
+        public boolean holdDeployCommit = false;
+        /**
+         * untested-keys-1113 (off by default; live key holdDeploy.followLine): in a hold candidate's play-out, at the deploy
+         * window, the seat's solver (with the end-step engine keys on, a capped budget) runs once on the copy: the copy's
+         * hidden cards are belief samples, so a line comes from the seat's own information only. A proven line is followed
+         * there (the solver line follower); without one the deferred cast is made as before.
+         */
+        public boolean holdDeployFollowLine = false;
         public double margin = 0.0;
         /** static | value */
         public String leaf = "static";
@@ -271,6 +287,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * cards from {@link forge.ai.simulation.DeckBelief} ({@link LookaheadSearch.Config#beliefDeck}); needs a belief.
          */
         public boolean beliefDeck = false;
+        /**
+         * untested-keys-1113 (null = off, the default, and then absent from the JSON): the held-mana term of the deck
+         * belief, factors for h = 1, 2, 3+ ({@link forge.ai.simulation.DeckBelief.Params#held}); needs beliefDeck.
+         */
+        public double[] beliefDeckHeld = null;
+        /** untested-keys-1113 (false = off, the default, and then absent from the JSON): the deck-inclusion prior; needs beliefDeck. */
+        public boolean beliefDeckInclusion = false;
         /** choice-scorer-1106 (null = off, the default, and then absent from the JSON): {@link ChoiceScorer.Config}. */
         public JsonObject choiceScorer = null;
         /** solver-distill-cc-1109 (REACH; null = off, the default, and then nothing changes): {@link ReachCfg}. */
@@ -413,9 +436,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "beliefDeckHeld", "beliefDeckInclusion", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
+                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "holdDeploy", "holdDeployCommit", "holdDeployFollowLine", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
@@ -448,6 +471,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("leafExtraSteps")) c.leafExtraSteps = o.get("leafExtraSteps").getAsInt();
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
             if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
+            if (o.has("holdDeploy")) c.holdDeploy = o.get("holdDeploy").getAsBoolean();
+            if (o.has("holdDeployCommit")) c.holdDeployCommit = o.get("holdDeployCommit").getAsBoolean();
+            if (o.has("holdDeployFollowLine")) c.holdDeployFollowLine = o.get("holdDeployFollowLine").getAsBoolean();
             if (o.has("provenOnly")) c.provenOnly = o.get("provenOnly").getAsBoolean();
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
             if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
@@ -578,6 +604,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     c.beliefDeckModel = bd.getAsString();
                 }
             }
+            if (o.has("beliefDeckHeld")) c.beliefDeckHeld = forge.ai.simulation.DeckBelief.parseHeld(o.get("beliefDeckHeld").getAsString());
+            if (o.has("beliefDeckInclusion")) c.beliefDeckInclusion = o.get("beliefDeckInclusion").getAsBoolean();
             if (o.has("opponent")) c.opponent = o.get("opponent").getAsString();
             if (o.has("leafSym")) c.leafSym = o.get("leafSym").getAsBoolean();
             if (o.has("beliefPrior") && !o.get("beliefPrior").isJsonNull()) c.beliefPrior = o.get("beliefPrior").getAsString();
@@ -672,6 +700,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (!"deck".equals(belief) && (beliefDeckModel != null || beliefDeckSha256 != null)) {
                 throw new IllegalArgumentException("search.beliefDeck is for belief=deck only");
             }
+            if ((beliefDeckHeld != null || beliefDeckInclusion) && !beliefDeck) {
+                throw new IllegalArgumentException("search.beliefDeckHeld / beliefDeckInclusion need beliefDeck=true"); // untested-keys-1113
+            }
             if (!"forge".equals(opponent) && !"policy".equals(opponent)) {
                 throw new IllegalArgumentException("search.opponent must be forge or policy, not " + opponent);
             }
@@ -722,6 +753,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("crewNoop", crewNoop);
             if (!"off".equals(deadAltCost)) {
                 o.addProperty("deadAltCost", deadAltCost);
+            }
+            if (holdDeploy) {
+                o.addProperty("holdDeploy", true); // untested-keys-1113: only when on
+            }
+            if (holdDeployCommit) {
+                o.addProperty("holdDeployCommit", true); // untested-keys-1113: only when on
+            }
+            if (holdDeployFollowLine) {
+                o.addProperty("holdDeployFollowLine", true); // untested-keys-1113: only when on
             }
             o.addProperty("departMedian", departMedian);
             o.addProperty("stack", stack);
@@ -832,6 +872,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("beliefSingleton", beliefSingleton);
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
+                if (beliefDeckHeld != null) {
+                    o.addProperty("beliefDeckHeld", forge.ai.simulation.DeckBelief.heldString(beliefDeckHeld)); // untested-keys-1113
+                }
+                if (beliefDeckInclusion) {
+                    o.addProperty("beliefDeckInclusion", true); // untested-keys-1113: only when on
                 }
                 if ("codraft".equals(belief)) {
                     // bvw-step2-fork-1027: only with codraft
@@ -1138,6 +1184,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.threads = cfg.threads;
         lc.departZ = cfg.departZ;
         lc.anytime = cfg.anytime;
+        lc.holdDeploy = cfg.holdDeploy;
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
@@ -1174,6 +1221,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefPool = cfg.beliefPool;
             lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
             lc.beliefDeck = cfg.beliefDeck; // deck-belief-1105 (off by default)
+            lc.beliefDeckHeld = cfg.beliefDeckHeld; // untested-keys-1113 (off by default)
+            lc.beliefDeckInclusion = cfg.beliefDeckInclusion; // untested-keys-1113 (off by default)
             if ("codraft".equals(cfg.belief)) {
                 // bvw-step2-fork-1027 (S2T): the co-draft deck prior, its table pinned by sha256
                 lc.beliefPriorTable = PlanSearch.loadSynPinned(cfg.beliefPrior, cfg.beliefPriorSha256);
@@ -1194,6 +1243,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.stack = true;
         }
         this.ls = new LookaheadSearch(lc);
+        if (cfg.holdDeploy && cfg.holdDeployFollowLine) {
+            ls.holdPilot = holdPilot(); // untested-keys-1113 (holdDeploy.followLine)
+        }
         ls.setHooks(this, "value".equals(cfg.leaf), "policy".equals(cfg.playout));
         this.choiceFams = cfg.choices > 0 ? (cfg.choiceFamilySet != null ? cfg.choiceFamilySet
                 : ChoiceWindow.parseFamilies(cfg.choiceFamilies)) : null;
@@ -1584,6 +1636,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lastForced = false;
         lastForcedMiss = false;
         priorityAsks++;
+        final int committed = holdCommitAnswer(g, me, m, greedy, menuObjs);
+        if (committed >= 0) {
+            tap("hold_commit", null, null, 0, committed);
+            return committed;
+        }
         sinkDecIdx = frame.decIdx;
         sinkSeat = frame.seat;
         sinkTurn = g.getPhaseHandler().getTurn();
@@ -1795,6 +1852,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         ck.ended(DecisionClock.Phase.GIVEN);
         tookForce(r);
+        if (cfg.holdDeployCommit && r.deploy != null && "departed".equals(r.outcome) && g.getPhaseHandler().isPlayerTurn(me)) {
+            holdCommitTurn = g.getPhaseHandler().getTurn(); // untested-keys-1113: the hold binds for the rest of our turn
+            holdCommits++;
+        }
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
         if (r.givenIndex.length > 0) {
@@ -2056,6 +2117,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("partial_worlds", r.partialWorlds);
                 row.addProperty("proven", r.proven);
             }
+            svcRow(row); // eprime-1113 (-Dsdcc.svcCount; off: no field)
             row.addProperty("ms", Math.round(r.ms * 10) / 10.0);
             row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
             row.addProperty("score_ms", Math.round((System.nanoTime() - t0) / 1e5 - r.ms * 10) / 10.0);
@@ -2475,6 +2537,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("partial_worlds", r.partialWorlds);
             row.addProperty("search_ms", Math.round(r.ms * 10) / 10.0);
         }
+        svcRow(row); // eprime-1113 (-Dsdcc.svcCount; off: no field)
         row.addProperty("answer", answer);
         row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
         addRow(row);
@@ -3692,6 +3755,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // sc-wallguard-1009: only when the budget stopped a play-out seat, so an unbudgeted summary is unchanged
             o.addProperty("playout_budget_stops", budgetStops.get());
         }
+        if (holdDeployCast.get() + holdDeployMissed.get() > 0) {
+            // untested-keys-1113 (holdDeploy): only when a hold play-out ran, so every other summary is unchanged
+            o.addProperty("hold_deploy_cast", holdDeployCast.get());
+            o.addProperty("hold_deploy_missed", holdDeployMissed.get());
+        }
+        if (holdCommits + holdFollowTried.get() > 0) {
+            // untested-keys-1113 (holdDeploy.commit / followLine): only when one acted
+            o.addProperty("hold_commits", holdCommits);
+            o.addProperty("hold_commit_passes", holdCommitPasses);
+            o.addProperty("hold_commit_drops", holdCommitDrops);
+            o.addProperty("hold_follow_tried", holdFollowTried.get());
+            o.addProperty("hold_follow_adopted", holdFollowAdopted.get());
+            o.addProperty("hold_proofs", holdProofs.get());
+            o.addProperty("hold_proofs_proven", holdProofsProven.get());
+            o.addProperty("hold_proof_ms", holdProofMs.get());
+        }
         if (ls.getStats().trueFairNamingRefusals > 0) {
             // review #130 S3-3: only when a true-world re-play was refused, so every other summary is unchanged
             o.addProperty("true_fair_naming_refusals", ls.getStats().trueFairNamingRefusals);
@@ -4554,6 +4633,304 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /** untested-keys-1113 (holdDeploy.commit): the own turn a hold departure binds (-1 = none), and counts. */
+    private int holdCommitTurn = -1;
+    private long holdCommits = 0, holdCommitPasses = 0, holdCommitDrops = 0;
+
+    /**
+     * untested-keys-1113 (holdDeploy.commit): the answer while a hold binds (the pass's candidate index), or -1 = decide as
+     * usual. The bind ends with our turn, or when the opponent has anything on the stack in it.
+     */
+    int holdCommitAnswer(final Game g, final Player me, final RlCandidates.Menu m, final int greedy, final List<SpellAbility> menuObjs) {
+        if (holdCommitTurn < 0) {
+            return -1;
+        }
+        final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+        if (!ph.isPlayerTurn(me) || ph.getTurn() != holdCommitTurn) {
+            holdCommitTurn = -1;
+            return -1;
+        }
+        if (!g.getStack().isEmpty()) {
+            for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+                if (si.getActivatingPlayer() != me) {
+                    holdCommitTurn = -1; // the opponent acted in our turn: the hold no longer binds
+                    holdCommitDrops++;
+                    break;
+                }
+            }
+            return -1; // a response is decided as usual
+        }
+        final int gc = greedy >= 0 && greedy < m.C() ? choiceOf(m, greedy) : -1;
+        if (gc > 0 && gc <= menuObjs.size() && menuObjs.get(gc - 1) != null && menuObjs.get(gc - 1).isLandAbility()) {
+            return -1; // the policy's land play stands
+        }
+        for (int i = 0; i < m.C(); i++) {
+            if (m.cands.get(i).kind > 0 && choiceOf(m, i) == 0) {
+                holdCommitPasses++;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** untested-keys-1113 (holdDeploy.followLine): the follow solver's config (lazily), tries and adoptions. */
+    private volatile forge.ai.simulation.ForcedWinSolver.Config holdFollowCfg;
+    final java.util.concurrent.atomic.AtomicLong holdFollowTried = new java.util.concurrent.atomic.AtomicLong(),
+            holdFollowAdopted = new java.util.concurrent.atomic.AtomicLong();
+
+    /** The seat's own solver config (its own budget: plans.solverCfg) with the end-step engine keys on. */
+    forge.ai.simulation.ForcedWinSolver.Config holdFollowConfig() {
+        forge.ai.simulation.ForcedWinSolver.Config c = holdFollowCfg;
+        if (c == null) {
+            final JsonObject p = cfg.plans == null ? new JsonObject() : cfg.plans.deepCopy();
+            final JsonObject sc = p.has("solverCfg") ? p.getAsJsonObject("solverCfg") : new JsonObject();
+            for (String k : new String[] {"engineAnyWindow", "engineEndStepOpen", "enginePassBudget"}) {
+                sc.addProperty(k, "true");
+            }
+            p.add("solverCfg", sc);
+            c = PlanSearch.Spec.parse(p).solverConfig();
+            holdFollowCfg = c;
+        }
+        return c;
+    }
+
+    /**
+     * untested-keys-1113 (holdDeploy.followLine): the decision's proofs. {@link LookaheadSearch#runHoldPilot} names the
+     * window (the latest hold window) and runs one pilot play-out a candidate; each pilot's hook proves once at that window
+     * on its copy (hidden cards are belief samples: the seat's own information) and keeps the line under its candidate's
+     * key. Every later play-out of that candidate follows the line from the window. A candidate without a proven line
+     * plays on as before (a hold: the deferred cast).
+     */
+    private volatile LookaheadSearch.Deploy holdProofWindow;
+    private volatile boolean holdPilotPhase;
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> holdProofLines = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Object NO_LINE = new Object();
+    final java.util.concurrent.atomic.AtomicLong holdProofs = new java.util.concurrent.atomic.AtomicLong(),
+            holdProofsProven = new java.util.concurrent.atomic.AtomicLong(), holdProofMs = new java.util.concurrent.atomic.AtomicLong();
+
+    LookaheadSearch.HoldPilot holdPilot() {
+        return new LookaheadSearch.HoldPilot() {
+            @Override
+            public void begin(final LookaheadSearch.Deploy window) {
+                holdProofLines.clear();
+                holdProofWindow = window;
+                holdPilotPhase = true;
+            }
+
+            @Override
+            public int winTurn() {
+                holdPilotPhase = false; // only the pilots prove
+                final LookaheadSearch.Deploy w = holdProofWindow;
+                int t = 0;
+                for (Object o : holdProofLines.values()) {
+                    if (o instanceof forge.ai.simulation.ForcedWinSolver.Proposal && w != null) {
+                        t = Math.max(t, w.turn + Math.max(0, ((forge.ai.simulation.ForcedWinSolver.Proposal) o).winTurn));
+                    }
+                }
+                return t;
+            }
+
+            @Override
+            public void end() {
+                holdPilotPhase = false;
+                holdProofWindow = null;
+                holdProofLines.clear();
+            }
+        };
+    }
+
+    /**
+     * untested-keys-1113 (holdDeploy.followLine): the plan hook of a play-out in a decision with a proof window (every
+     * candidate but a plan line). Silent until the window (the opponent's turn {@code w.turn}, step {@code w.phase},
+     * empty stack); there the candidate's pilot proves, and every later play-out of the candidate follows its line.
+     */
+    PlayerControllerBridge.PlanHook holdFollowHook(final Player copyMe, final LookaheadSearch.Deploy w,
+            final LookaheadSearch.FirstAction first) {
+        return new PlayerControllerBridge.PlanHook() {
+            PlayerControllerBridge.PlanHook in;
+            boolean tried;
+
+            @Override
+            public List<SpellAbility> priority(final PlayerControllerBridge c) {
+                if (in == null && !tried) {
+                    final Game g = copyMe.getGame();
+                    final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+                    if (!ph.isPlayerTurn(copyMe) && ph.getTurn() == w.turn && ph.getPhase() == w.phase && g.getStack().isEmpty()) {
+                        tried = true;
+                        holdFollowTried.incrementAndGet();
+                        final String key = first.candKey;
+                        if (holdPilotPhase && holdProofLines.putIfAbsent(key, NO_LINE) == null) {
+                            final long t0 = System.nanoTime();
+                            holdProofs.incrementAndGet();
+                            try {
+                                forge.ai.simulation.ForcedWinSolver.Proposal best = null;
+                                for (forge.ai.simulation.ForcedWinSolver.Proposal p
+                                        : new forge.ai.simulation.ForcedWinSolver(copyMe, holdFollowConfig()).propose(g)) {
+                                    if (p.proven(1) && (best == null || p.winTurn < best.winTurn)) {
+                                        best = p;
+                                    }
+                                }
+                                if (best != null) {
+                                    holdProofLines.put(key, best);
+                                    holdProofsProven.incrementAndGet();
+                                }
+                            } catch (RuntimeException e) {
+                                // no line for this candidate
+                            }
+                            holdProofMs.addAndGet((System.nanoTime() - t0) / 1_000_000L);
+                        }
+                        final Object line = holdProofLines.get(key);
+                        if (line instanceof forge.ai.simulation.ForcedWinSolver.Proposal) {
+                            try {
+                                in = PlanSearch.copyLineHook(copyMe, followConfig(),
+                                        new PlanSearch.LinePlan((forge.ai.simulation.ForcedWinSolver.Proposal) line), first,
+                                        lineChoicesForge(), lineKeepOn());
+                                holdFollowAdopted.incrementAndGet();
+                            } catch (RuntimeException e) {
+                                in = null; // no line here: play on as before
+                            }
+                        }
+                    }
+                }
+                return in == null ? PlayerControllerBridge.NO_OPINION : in.priority(c);
+            }
+
+            @Override
+            public boolean handoff() {
+                return in != null && in.handoff();
+            }
+
+            @Override
+            public boolean lineActive() {
+                return in != null && in.lineActive();
+            }
+
+            @Override
+            public boolean attack(final Player attacker, final forge.game.combat.Combat combat) {
+                return in != null && in.attack(attacker, combat);
+            }
+
+            @Override
+            public org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection> look(
+                    final forge.game.card.CardCollection topN) {
+                return in == null ? null : in.look(topN);
+            }
+
+            @Override
+            public List<SpellAbility> triggers(final List<SpellAbility> abilities) {
+                return in == null ? null : in.triggers(abilities);
+            }
+
+            @Override
+            public forge.game.card.Card pick(final forge.game.zone.ZoneType destination, final List<forge.game.zone.ZoneType> origin,
+                    final SpellAbility sa, final forge.game.card.CardCollection choices, final Player decider) {
+                return in == null ? null : in.pick(destination, origin, sa, choices, decider);
+            }
+
+            @Override
+            public forge.game.card.CardCollectionView order(final forge.game.card.CardCollectionView cards,
+                    final forge.game.zone.ZoneType destination, final SpellAbility source) {
+                return in == null ? null : in.order(cards, destination, source);
+            }
+
+            @Override
+            public forge.game.card.CardCollection discard(final Player p, final SpellAbility sa, final forge.game.card.CardCollection valid,
+                    final int min, final int max) {
+                return in == null ? null : in.discard(p, sa, valid, min, max);
+            }
+
+            @Override
+            public forge.game.card.CardCollection discard(final Player p, final SpellAbility sa, final forge.game.card.CardCollection valid,
+                    final int min, final int max, final forge.game.card.CardCollectionView visibleToChooser) {
+                return in == null ? null : in.discard(p, sa, valid, min, max, visibleToChooser);
+            }
+
+            @Override
+            public forge.game.card.CardCollection lineKeep(final forge.game.card.CardCollection ordinary,
+                    final forge.game.card.CardCollection valid) {
+                return in == null ? ordinary : in.lineKeep(ordinary, valid);
+            }
+
+            @Override
+            public Boolean confirm(final SpellAbility sa, final String message) {
+                return in == null ? null : in.confirm(sa, message);
+            }
+
+            @Override
+            public boolean confirmTrigger(final forge.game.trigger.WrappedAbility w) {
+                return in != null && in.confirmTrigger(w);
+            }
+
+            @Override
+            public Boolean binary(final forge.game.player.PlayerController.BinaryChoiceType kind, final Boolean defaultVal) {
+                return in == null ? null : in.binary(kind, defaultVal);
+            }
+
+            @Override
+            public boolean forgeCosts() {
+                return in != null && in.forgeCosts();
+            }
+
+            @Override
+            public boolean forgeChoices() {
+                return in != null && in.forgeChoices();
+            }
+        };
+    }
+
+    /** untested-keys-1113 (holdDeploy): deferred casts made / windows that passed without the card on offer. */
+    final java.util.concurrent.atomic.AtomicLong holdDeployCast = new java.util.concurrent.atomic.AtomicLong(),
+            holdDeployMissed = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * untested-keys-1113 (holdDeploy): the play-out seat of a "hold, then deploy" candidate. Its first ask is the pass
+     * (forced first action); after it, PASS at every priority of this seat until the opponent's turn {@code d.turn}
+     * reaches step {@code d.phase} with an empty stack; there the deferred spell (same card and description) if it is on
+     * offer. From then on (cast, not on offer, or the window passed) the policy decides every ask.
+     */
+    RlSeat.PlanCursor deployCursor(final LookaheadSearch.Deploy d) {
+        return new RlSeat.PlanCursor() {
+            boolean done = false;
+
+            @Override
+            public int choose(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs) {
+                if (done) {
+                    return -1;
+                }
+                final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+                final boolean ours = ph.isPlayerTurn(p);
+                final int t = ph.getTurn();
+                if (t > d.turn || ours && t == d.turn || !ours && t == d.turn && ph.getPhase() != null
+                        && ph.getPhase().ordinal() > d.phase.ordinal()) {
+                    done = true; // past the window (an extra turn of ours counts as past it)
+                    holdDeployMissed.incrementAndGet();
+                    return -1;
+                }
+                if (!ours && t == d.turn && ph.getPhase() == d.phase && g.getStack().isEmpty()) {
+                    for (int i = 0; i < m.C(); i++) {
+                        final int ch = m.cands.get(i).kind <= 0 ? -1 : choiceOf(m, i);
+                        if (ch > 0 && ch <= objs.size()) {
+                            final SpellAbility sa = objs.get(ch - 1);
+                            if (sa != null && sa.isSpell() && sa.getHostCard() != null && sa.getHostCard().getId() == d.hostId
+                                    && d.desc.equals(sa.getDescription())) {
+                                done = true;
+                                holdDeployCast.incrementAndGet();
+                                return i;
+                            }
+                        }
+                    }
+                }
+                // the hold: pass until the window
+                for (int i = 0; i < m.C(); i++) {
+                    if (m.cands.get(i).kind > 0 && choiceOf(m, i) == 0) {
+                        return i;
+                    }
+                }
+                return -1;
+            }
+        };
+    }
+
     /** step3-playout-fixes-1028: every entry of {@code match} is an exact match (not the loose may-play path). */
     static boolean looseMatchExact(final List<Integer> match, final RlCandidates.Menu m, final List<SpellAbility> objs,
             final LookaheadSearch.FirstAction first) {
@@ -4617,6 +4994,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             public RlWire.Decision decide(final byte[] p) throws IOException {
                 budgetStop(first);
                 try {
+                    if (SVC_COUNT) svcMe.incrementAndGet(); // eprime-1113: request counter
                     return client().decide(p, cfg.playoutSample);
                 } catch (IOException | RuntimeException e) {
                     drop();
@@ -4663,6 +5041,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             rs.priorityTrace = rec;
         } else if (first.plan instanceof PlanSearch.PolicyPlan) {
             rs.planCursor = new PlanSearch.Cursor((PlanSearch.PolicyPlan) first.plan, first, 0);
+        } else if (first.deploy != null) {
+            rs.planCursor = deployCursor(first.deploy);
         }
         if (!planned) rs.playoutFirst = new RlSeat.PlayoutFirst() {
             @Override
@@ -4769,6 +5149,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first,
                     lineChoicesForge(), lineKeepOn());
         }
+        final LookaheadSearch.Deploy proofWindow = holdProofWindow;
+        if (cfg.holdDeployFollowLine && proofWindow != null && pc.planHook == null) {
+            pc.planHook = holdFollowHook(me, proofWindow, first); // untested-keys-1113 (holdDeploy.followLine)
+        }
         pc.forcedBlocks = first.block;
         return new LookaheadSearch.PlayoutSeat() {
             @Override
@@ -4843,6 +5227,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     budgetStop(first);
                 }
                 try {
+                    if (SVC_COUNT) svcOpp.incrementAndGet(); // eprime-1113: request counter
                     return client().decide(p, cfg.playoutSample);
                 } catch (IOException | RuntimeException e) {
                     drop();
@@ -4877,6 +5262,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return rs.fatal != null ? rs.fatal : rs.voidReason;
             }
         };
+    }
+
+    /**
+     * eprime-1113 (measurement only; -Dsdcc.svcCount, default off and then no field is written): the policy service
+     * requests of our play-out seats ({@code svc_me}) and of the opponent's play-out policy seats ({@code svc_opp}) since
+     * the previous logged decision of this search, written into each decision row.
+     */
+    static final boolean SVC_COUNT = Boolean.getBoolean("sdcc.svcCount");
+    private final java.util.concurrent.atomic.AtomicLong svcMe = new java.util.concurrent.atomic.AtomicLong(),
+            svcOpp = new java.util.concurrent.atomic.AtomicLong();
+    private long svcMeSeen, svcOppSeen;
+
+    private synchronized void svcRow(final JsonObject row) {
+        if (!SVC_COUNT) {
+            return;
+        }
+        final long m = svcMe.get(), o = svcOpp.get();
+        row.addProperty("svc_me", m - svcMeSeen);
+        row.addProperty("svc_opp", o - svcOppSeen);
+        svcMeSeen = m;
+        svcOppSeen = o;
     }
 
     /** S2T: opponent policy seats built (play-outs whose opponent was the policy). */
