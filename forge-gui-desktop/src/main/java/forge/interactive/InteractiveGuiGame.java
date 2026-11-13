@@ -60,6 +60,7 @@ import forge.player.PlayerZoneUpdate;
 import forge.trackable.TrackableCollection;
 import forge.util.FSerializableFunction;
 import forge.util.ITriggerEvent;
+import forge.util.StateMachine;
 
 import com.google.common.eventbus.Subscribe;
 
@@ -102,6 +103,58 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private final ConcurrentHashMap<String, PendingInput> inputIds = new ConcurrentHashMap<>();
     private final Set<Input> inFlightInputs = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean aborting = new AtomicBoolean();
+    /**
+     * state-machines-1113 (survey M2), SHADOW MODE: this seat's pending decision as one explicit phase. It is derived
+     * from the fields that hold it ({@link #activeRequest} and its claim, {@link #inFlightInputs}, {@link
+     * #modalRequest} and its claim, {@link #aborting}, the channel's end) at every site that changes them, and each
+     * change is checked against {@link #SEAT}. Nothing reads it to decide: the predicates ({@link #parkedOn}, {@link
+     * #awaitingOwnAnswer}, {@link #parkedForWaitingView}) and the enumeration triggers are unchanged.
+     * Trace: {@code -Dforge.state.trace=seat}; the key is the seat and the request the phase is about ({@code 0:r12}).
+     */
+    enum SeatPhase {
+        /** No request: Forge's game thread runs, an AI thinks, the seat auto-passes, or Forge shows InputLockUI. */
+        NONE,
+        /** An input request is on the wire, unclaimed: Forge's game thread is parked on it. */
+        PUBLISHED,
+        /** An answer won the claim; its action is queued or running on an action lane. */
+        IN_FLIGHT,
+        /** The action returned (accepted, refused or abandoned); the EDT settle task has not yet run. */
+        SETTLING,
+        /** A blocking callback ({@link #ask}) waits for its answer. */
+        MODAL_OPEN,
+        /** A modal answer is being validated or applied. */
+        MODAL_CLAIMED,
+        /** The session failed or ended, or the game finished. Absorbing. */
+        ENDED
+    }
+
+    /**
+     * The seat table. Edges a correct run never takes: a claim with no request seen (NONE to IN_FLIGHT or SETTLING), a
+     * modal answer with no modal seen (anything but MODAL_OPEN to MODAL_CLAIMED), an action reopening after its settle
+     * began (SETTLING to IN_FLIGHT), an input published over an unanswered modal (MODAL_OPEN to PUBLISHED: the
+     * 2026-09-24 superseded-refusal stall), and anything out of ENDED. MODAL_CLAIMED to PUBLISHED is the survey's B2
+     * window (a modal answer nulls the modal before it completes; an EDT publish may land in between).
+     */
+    static final StateMachine<SeatPhase> SEAT = StateMachine.builder("seat", SeatPhase.class)
+            .edge(SeatPhase.NONE, SeatPhase.PUBLISHED, SeatPhase.MODAL_OPEN, SeatPhase.ENDED)
+            .edge(SeatPhase.PUBLISHED, SeatPhase.PUBLISHED, SeatPhase.IN_FLIGHT, SeatPhase.NONE, SeatPhase.SETTLING,
+                    SeatPhase.MODAL_OPEN, SeatPhase.ENDED)
+            .edge(SeatPhase.IN_FLIGHT, SeatPhase.PUBLISHED, SeatPhase.SETTLING, SeatPhase.NONE, SeatPhase.MODAL_OPEN,
+                    SeatPhase.ENDED)
+            .edge(SeatPhase.SETTLING, SeatPhase.PUBLISHED, SeatPhase.NONE, SeatPhase.MODAL_OPEN, SeatPhase.ENDED)
+            .edge(SeatPhase.MODAL_OPEN, SeatPhase.MODAL_CLAIMED, SeatPhase.NONE, SeatPhase.IN_FLIGHT,
+                    SeatPhase.SETTLING, SeatPhase.ENDED)
+            .edge(SeatPhase.MODAL_CLAIMED, SeatPhase.MODAL_OPEN, SeatPhase.NONE, SeatPhase.IN_FLIGHT,
+                    SeatPhase.SETTLING, SeatPhase.PUBLISHED, SeatPhase.ENDED)
+            .doc("one interactive seat's pending decision (InteractiveGuiGame), shadow of its request/modal fields")
+            .build();
+    /** Shadow bookkeeping for the phase: inputs whose action returned and whose settle task has not finished. */
+    private final Set<Input> settlingInputs = ConcurrentHashMap.newKeySet();
+    /** Shadow bookkeeping for the phase: {@link #finishGame} ran. */
+    private volatile boolean seatEnded;
+    /** The phase's trace key, and the lock that makes each derive-and-check one step. */
+    private final SeatKey seatKey;
+    private final StateMachine.Cell<SeatPhase> seatPhase;
     /** Where cards entered the battlefield from, for {@code land_played}'s {@code fromZone} (lane bridgemeta-1018). */
     private final InteractiveGameEvents.Moves eventMoves = new InteractiveGameEvents.Moves();
     private final ExecutorService actions;
@@ -193,6 +246,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         this.channel = Objects.requireNonNull(channel);
         this.humanSeat = humanSeat;
         this.table = table;
+        this.seatKey = new SeatKey(humanSeat);
+        this.seatPhase = SEAT.cell(seatKey, SeatPhase.NONE);
         if (table != null) {
             table.seats.add(this);
         }
@@ -594,6 +649,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             lastInputFingerprint = "";
             lesson.offer(install);
             final InputPassPriority priority = (InputPassPriority) request.input;
+            seatPhase("claim install");
             actions.execute(() -> {
                 try {
                     if (controller.getInputProxy().getInput() == priority) {
@@ -695,6 +751,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (request.input != controller.getInputProxy().getInput()) {
             activeRequest.compareAndSet(request, null);
             lastInputFingerprint = "";
+            seatPhase("withdrawn: Forge moved on");
             finishInput(input, pending, false, "request no longer matches the current decision");
             schedulePresentedInputPublish();
             return;
@@ -719,8 +776,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             // Concede may wake match.startGame and let Main emit terminal immediately.
             // Put its required accepted ack on the wire before triggering that outcome.
             finishInput(input, pending, true, null);
-            activeRequest.compareAndSet(request, null);
-            inFlightInputs.add(request.input);
+            synchronized (seatKey) { // shadow: these two writes are one step for the seat phase
+                activeRequest.compareAndSet(request, null);
+                inFlightInputs.add(request.input);
+            }
+            seatPhase("claim concede");
             actions.execute(() -> {
                 try {
                     controller.concede();
@@ -729,6 +789,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                             request.requestId, "dispatch:concede", request.kind, failure);
                 } finally {
                     inFlightInputs.remove(request.input);
+                    seatPhase("concede ran");
                 }
             });
             return;
@@ -742,6 +803,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             finishInput(input, pending, false, "another action is still executing for this decision");
             return;
         }
+        seatPhase("claim " + binding.type);
         actions.execute(() -> {
             ActionResult result;
             try {
@@ -801,10 +863,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      *                 now; null after an accepted or abandoned action
      */
     private void settleAction(final Input input, final ActiveRequest rejected) {
+        settlingInputs.add(input);
+        seatPhase(rejected != null ? "action refused" : "action returned");
         FThreads.invokeInEdtLater(() -> {
-            inFlightInputs.remove(input);
-            if (rejected != null) {
-                rejected.claimed.set(false);
+            synchronized (seatKey) { // shadow: the settle's writes are one step for the seat phase
+                inFlightInputs.remove(input);
+                settlingInputs.remove(input);
+                if (rejected != null) {
+                    rejected.claimed.set(false);
+                }
             }
             publishCurrentInput(input);
         });
@@ -820,10 +887,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             finishInput(input, pending, false, "another answer is already executing for this request");
             return;
         }
+        seatPhase("modal answer");
         if ("concede".equals(string(input.action(), "type"))
                 && "game:concede".equals(string(input.action(), "controlId"))) {
             finishInput(input, pending, true, null);
             modalRequest.compareAndSet(modal, null);
+            seatPhase("modal concede");
             try {
                 controller.concede();
             } finally {
@@ -836,16 +905,19 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             rejection = modal.validator.apply(input.action());
         } catch (Throwable e) {
             modal.claimed.set(false);
+            seatPhase("modal answer refused");
             finishInput(input, pending, false, "invalid modal answer: " + safeThrowable(e));
             return;
         }
         if (rejection != null) {
             modal.claimed.set(false);
+            seatPhase("modal answer refused");
             finishInput(input, pending, false, rejection);
             return;
         }
         finishInput(input, pending, true, null);
         modalRequest.compareAndSet(modal, null);
+        seatPhase("modal answered");
         modal.answer.complete(input.action().deepCopy());
     }
 
@@ -943,7 +1015,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         } finally {
             textSubject.remove();
             readOnlyQuery.set(false);
-            engineGate.unlock();
+            try {
+                seatPhase(settled != null ? "settled" : "publish");
+            } finally {
+                engineGate.unlock();
+            }
         }
     }
 
@@ -1897,6 +1973,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             activeRequest.set(null);
             lastInputFingerprint = "";
             observeRequest(requestId, kind);
+            // before the request is on the wire: its answer (the reader, no gate) is checked after this
+            seatPhase("modal open");
             channel.send("request", requestBody(requestId, kind, inputClass, title, message,
                     min, max, cancellable, controls));
             sent = true;
@@ -1910,6 +1988,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         } finally {
             if (!sent) {
                 modalRequest.compareAndSet(modal, null);
+                seatPhase("modal not sent");
             }
             engineGate.unlock();
         }
@@ -1922,6 +2001,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             throw new InteractiveAbort("modal request aborted", e.getCause());
         } finally {
             modalRequest.compareAndSet(modal, null);
+            seatPhase("modal closed");
             lastInputFingerprint = "";
             schedulePresentedInputPublish();
         }
@@ -2203,6 +2283,72 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         return "r" + requestSequence.incrementAndGet();
     }
 
+    /** state-machines-1113: the seat's phase as {@link #seatPhase} last derived it (tests, diagnostics). */
+    SeatPhase seatPhaseNow() {
+        return seatPhase.get();
+    }
+
+    /**
+     * Derive this seat's phase from its fields and record the change, checked against {@link #SEAT} (shadow mode: it
+     * returns nothing and nothing reads it to decide). Called after every write to those fields, inside the same gate
+     * section when the write holds {@link #engineGate}, and before a request reaches the wire.
+     */
+    private void seatPhase(final String why) {
+        synchronized (seatKey) {
+            final SeatPhase to = derivePhase();
+            final ModalRequest modal = modalRequest.get();
+            final ActiveRequest request = activeRequest.get();
+            final String requestId = modal != null ? modal.requestId : request != null ? request.requestId : null;
+            final SeatPhase from = seatPhase.get();
+            if (to != from || to == SeatPhase.PUBLISHED && requestId != null && !requestId.equals(seatKey.requestId)) {
+                if (requestId != null) {
+                    seatKey.requestId = requestId;
+                }
+                seatPhase.go(to, why);
+            }
+        }
+    }
+
+    private SeatPhase derivePhase() {
+        if (aborting.get() || channel.isEnded() || seatEnded) {
+            return SeatPhase.ENDED;
+        }
+        final ModalRequest modal = modalRequest.get();
+        if (modal != null) {
+            return modal.claimed.get() ? SeatPhase.MODAL_CLAIMED : SeatPhase.MODAL_OPEN;
+        }
+        final ActiveRequest request = activeRequest.get();
+        if (request != null) {
+            if (!request.claimed.get()) {
+                return SeatPhase.PUBLISHED;
+            }
+            // claimed: a refused action settling, or an action queued or running
+            return settlingInputs.contains(request.input) ? SeatPhase.SETTLING : SeatPhase.IN_FLIGHT;
+        }
+        for (Input input : inFlightInputs) {
+            if (!settlingInputs.contains(input)) {
+                return SeatPhase.IN_FLIGHT;
+            }
+        }
+        // an iterator, not isEmpty(): a concurrent set's count lags an add that contains() already sees
+        return settlingInputs.iterator().hasNext() ? SeatPhase.SETTLING : SeatPhase.NONE;
+    }
+
+    /** The {@link #SEAT} trace key: the seat and the request its phase is about ({@code 0:r12}). */
+    private static final class SeatKey {
+        private final int seat;
+        private volatile String requestId = "-";
+
+        private SeatKey(final int seat) {
+            this.seat = seat;
+        }
+
+        @Override
+        public String toString() {
+            return seat + ":" + requestId;
+        }
+    }
+
     /**
      * Lane game-review-1010 (null unless an offline review installs it): told each request id and kind just before the
      * request is sent, while Forge waits on it. A read only; it never decides and never changes what is sent.
@@ -2236,6 +2382,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (!aborting.compareAndSet(false, true)) {
             return;
         }
+        seatPhase("fail " + code);
         if (failure != null) {
             System.err.println("[forge.interactive] " + method + ": " + safeThrowable(failure));
             failure.printStackTrace(System.err);
@@ -2273,6 +2420,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     /** A table seat's share of another seat's failure: stop waiting for this browser. */
     private void releaseForTableEnd(final String message) {
         aborting.set(true);
+        seatPhase("table end");
         final ModalRequest modal = modalRequest.getAndSet(null);
         if (modal != null) {
             modal.answer.completeExceptionally(new InteractiveAbort(message));
@@ -2430,6 +2578,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 // THIS seat's modal: unwind it the way a concession inside the modal does.
                 final ModalRequest modal = modalRequest.getAndSet(null);
                 if (modal != null) {
+                    seatPhase("game over");
                     modal.answer.completeExceptionally(new GameConceded());
                 }
             }
@@ -2505,6 +2654,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public void finishGame() {
         activeRequest.set(null);
+        seatEnded = true;
+        seatPhase("game finished");
         emitState("game-finished");
     }
 

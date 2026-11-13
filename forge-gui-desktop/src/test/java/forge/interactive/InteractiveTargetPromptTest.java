@@ -59,6 +59,8 @@ public class InteractiveTargetPromptTest extends AITest {
         final BlockingQueue<JsonObject> wire = new LinkedBlockingQueue<>();
         final PipedWriter client = new PipedWriter();
         final AtomicBoolean closed = new AtomicBoolean();
+        /** The seat's priority loop, Forge's game thread here. */
+        final Thread forgeThread;
 
         Harness(final BiConsumer<Player, Player> board) throws IOException {
             game = initAndCreateGame();
@@ -80,7 +82,7 @@ public class InteractiveTargetPromptTest extends AITest {
             game.subscribeToEvents(gui);
             gui.startReader();
             // The seat's priority loop on a thread named like Forge's game threads.
-            final Thread forgeThread = new Thread(() -> {
+            forgeThread = new Thread(() -> {
                 while (!closed.get() && !gui.hasFailed() && !game.isGameOver()) {
                     final List<SpellAbility> chosen = controller.chooseSpellAbilityToPlay();
                     if (chosen != null) {
@@ -354,6 +356,54 @@ public class InteractiveTargetPromptTest extends AITest {
             final JsonObject after = h.request();
             assertFalse(after.get("requestId").getAsString().equals(target.get("requestId").getAsString()));
             assertFalse(after.toString().contains("--CARDS"), "the target was taken, not asked again: " + after);
+        }
+    }
+
+    /**
+     * state-machines-1113 (survey M4-B1): a concession at a target prompt ends Forge's game thread. The game-over
+     * release of the prompt's latch used to read as "not cancelled, not done", so TargetSelection asked again: a new
+     * prompt that nothing ever released, a game thread parked forever, no terminal, a leaked game in a shared host.
+     *
+     * <p>"Up to one target" (Rat Out) is the case that hung: once the game is over no card or player can be targeted
+     * (their owners are out of the game), so a required target ends the loop as "not enough candidates", but a
+     * target count of zero is still "enough" and the loop asked again.</p>
+     */
+    @Test(timeOut = 120000)
+    public void aConcessionAtATargetPromptEndsTheGameThread() throws Exception {
+        final Card[] ratOut = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            addCard("Swamp", seat);
+            ratOut[0] = addCardToZone("Rat Out", seat, ZoneType.Hand);
+            addCard("Grizzly Bears", foe);
+        })) {
+            final JsonObject target = h.cast(ratOut[0]);
+            assertEquals(target.get("kind").getAsString(), "target", target.toString());
+            assertTrue(target.toString().contains("game:concede"), "a target request offers the concession: " + target);
+            h.answer(target, "concede", "game:concede");
+            final JsonObject ack = h.next("ack");
+            assertTrue(ack.get("accepted").getAsBoolean(), ack.toString());
+            h.forgeThread.join(10000);
+            assertTrue(h.game.isGameOver(), "the concession ended the game");
+            assertFalse(h.forgeThread.isAlive(), "Forge's game thread left the target prompt within 10 s");
+        }
+    }
+
+    /** state-machines-1113 (M4-B1): the browser's stdin closing at a target prompt ends Forge's game thread too. */
+    @Test(timeOut = 120000)
+    public void aDisconnectAtATargetPromptEndsTheGameThread() throws Exception {
+        final Card[] ratOut = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            addCard("Swamp", seat);
+            ratOut[0] = addCardToZone("Rat Out", seat, ZoneType.Hand);
+            addCard("Grizzly Bears", foe);
+        })) {
+            final JsonObject target = h.cast(ratOut[0]);
+            assertEquals(target.get("kind").getAsString(), "target", target.toString());
+            h.client.close();
+            h.forgeThread.join(10000);
+            assertTrue(h.gui.hasFailed(), "end of input is the session's fatal");
+            assertTrue(h.game.isGameOver(), "the failed game was stopped");
+            assertFalse(h.forgeThread.isAlive(), "Forge's game thread left the target prompt within 10 s");
         }
     }
 

@@ -32,6 +32,7 @@ import forge.game.staticability.StaticAbilityMustTarget;
 import forge.game.zone.Zone;
 import forge.game.zone.ZoneType;
 import forge.gamemodes.match.input.InputSelectTargets;
+import forge.gamemodes.match.input.InputSyncronizedBase;
 import forge.util.Aggregates;
 import forge.util.IterableUtil;
 import forge.util.TextUtil;
@@ -188,9 +189,15 @@ public class TargetSelection {
             return ability.getTargets().add(validTargets.get(0));
         }
         if (!zones.contains(ZoneType.Stack)) {
+            // mtgx state-machines-1113 (survey M4-B1): once the game is over no prompt is released again, and no card
+            // or player can be targeted, but "up to N targets" still counts as enough and asked again: stop instead.
+            if (ability.getActivatingPlayer().getGame().isGameOver()) {
+                return false;
+            }
             InputSelectTargets inp = new InputSelectTargets(controller, validTargets, ability, mandatory, numTargets, divisionValues, filter, mustTargetFiltered);
             inp.showAndWait();
-            choiceResult = !inp.hasCancelled();
+            // A latch released for game over is no answer: a cancel, never a reason to ask again.
+            choiceResult = !inp.hasCancelled() && inp.getRelease() != InputSyncronizedBase.Release.GAME_OVER;
             bTargetingDone = inp.hasPressedOk();
         } else {
             // for every other case an all-purpose GuiChoose

@@ -54,8 +54,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * stderr and config-derived state ({@link ScopedSlot}). Forge's pooled threads (the game pool, the delayed pool, the
  * EDT) carry the submitting game's state ({@link GameContext#wrap}).</p>
  *
- * <p><b>Not hosted:</b> a "Continue from here" rebuild (its AI wall clock switch is process-wide) and a tape
- * replay/resume (its tape file is in the launch spec): the mtgx host gives those their own JVM as before.</p>
+ * <p><b>Not hosted:</b> a "Continue from here" rebuild (its AI wall clock switch is process-wide), a tape replay, resume
+ * or restore (it reads ONE tape file named in the launch spec, so every hosted game would replay it; a tape RECORD writes
+ * each game's own stderr and is hosted), an offline review and an AI replay (both name a game's own files): the mtgx host
+ * gives those their own JVM as before (its {@code UNSHARABLE} list), and this host refuses to start with any of them
+ * ({@link #notHosted}).</p>
  */
 public final class InteractiveHost {
     static final String PROTOCOL = "mtgx-forge-host/1";
@@ -77,8 +80,9 @@ public final class InteractiveHost {
         HOST_ERR = new PrintStream(realErr, true, StandardCharsets.UTF_8);
         System.setOut(routed);
         System.setErr(routed);
-        if (System.getProperty("forge.interactive.continuation") != null) {
-            System.err.println("[forge.host] a continuation rebuild is never hosted");
+        final String notHosted = notHosted();
+        if (notHosted != null) {
+            System.err.println("[forge.host] " + notHosted);
             System.exit(2);
         }
         final String socket = System.getProperty("forge.interactive.host.socket");
@@ -129,6 +133,31 @@ public final class InteractiveHost {
             game.setDaemon(true);
             game.start();
         }
+    }
+
+    /**
+     * Why this JVM's launch spec cannot host games, or null. state-machines-1113 (survey M1/M10): the class comment always
+     * excluded tape replays, but only the continuation was refused; a host started with
+     * {@code -Dforge.interactive.aiTape=forced:<file>} would have replayed that one tape into every game it served. The
+     * rule is the mtgx host's {@code UNSHARABLE} list (tools/forge/interactive-shared-host.ts): a continuation, a tape
+     * forced/resume/restore, a review, an AI replay. {@code aiTape=record} stays hosted (the live server records).
+     */
+    static String notHosted() {
+        if (System.getProperty("forge.interactive.continuation") != null) {
+            return "a continuation rebuild is never hosted";
+        }
+        final String tape = System.getProperty("forge.interactive.aiTape");
+        if (tape != null && (tape.startsWith("forced:") || tape.startsWith("resume:") || tape.startsWith("restore:"))) {
+            return "an AI tape replay (forge.interactive.aiTape=" + tape.substring(0, tape.indexOf(':'))
+                    + ") is never hosted";
+        }
+        if (System.getProperty("forge.interactive.review") != null) {
+            return "an offline review (forge.interactive.review) is never hosted";
+        }
+        if (System.getProperty("forge.interactive.aiReplay") != null) {
+            return "an AI replay (forge.interactive.aiReplay) is never hosted";
+        }
+        return null;
     }
 
     private static void exitWhenStdinCloses() {

@@ -42,6 +42,46 @@ public class InteractiveHostTest {
         IdScope.close();
     }
 
+    /** state-machines-1113 (survey M1/M10): a host refuses every per-JVM mode its class comment excludes. */
+    @Test
+    public void aHostRefusesTapeReviewAndContinuationSpecs() {
+        assertNull(InteractiveHost.notHosted(), "an ordinary launch spec is hosted");
+        for (String[] spec : new String[][] {
+                {"forge.interactive.continuation", "rebuild", "continuation"},
+                {"forge.interactive.aiTape", "forced:/tmp/tape.jsonl", "AI tape replay"},
+                {"forge.interactive.aiTape", "resume:/tmp/tape.jsonl", "AI tape replay"},
+                {"forge.interactive.aiTape", "restore:/tmp/tape.jsonl", "AI tape replay"},
+                {"forge.interactive.review", "/tmp/review.json", "review"},
+                {"forge.interactive.aiReplay", "/tmp/ai.jsonl", "AI replay"}}) {
+            final String was = System.getProperty(spec[0]);
+            System.setProperty(spec[0], spec[1]);
+            try {
+                final String refused = InteractiveHost.notHosted();
+                assertTrue(refused != null && refused.contains(spec[2]), spec[0] + "=" + spec[1] + ": " + refused);
+            } finally {
+                if (was == null) {
+                    System.clearProperty(spec[0]);
+                } else {
+                    System.setProperty(spec[0], was);
+                }
+            }
+        }
+        final String was = System.getProperty("forge.interactive.aiTape");
+        try {
+            System.setProperty("forge.interactive.aiTape", "off");
+            assertNull(InteractiveHost.notHosted(), "aiTape=off is no tape");
+            // the live server and the identity gate host games that RECORD their AI seat: each writes its own stderr
+            System.setProperty("forge.interactive.aiTape", "record");
+            assertNull(InteractiveHost.notHosted(), "a tape record is hosted");
+        } finally {
+            if (was == null) {
+                System.clearProperty("forge.interactive.aiTape");
+            } else {
+                System.setProperty("forge.interactive.aiTape", was);
+            }
+        }
+    }
+
     @Test
     public void offIsTheOldStaticBehaviour() {
         final ScopedSlot<String> slot = new ScopedSlot<>();

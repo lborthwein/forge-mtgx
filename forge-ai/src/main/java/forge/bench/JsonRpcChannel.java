@@ -25,10 +25,13 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+
+import forge.util.StateMachine;
 
 /**
  * Blocking newline-delimited JSON transport for the mtgx benchmark bridge
@@ -313,7 +316,29 @@ public final class JsonRpcChannel {
     private final BufferedReader in;
     private final PrintStream out;
     private final AtomicInteger nextId = new AtomicInteger(1);
-    private boolean closed = false;
+
+    /**
+     * state-machines-1113 (survey M8): the channel's state and why it left OPEN (was one non-volatile boolean, so the
+     * cause was lost). The first close wins; a closed channel never reopens. {@link #isClosed()} is unchanged. The move
+     * out of OPEN is traced on stderr under {@code -Dforge.state.trace=bench-channel} (EOF and IO failures also keep
+     * their own log lines, as before). The bench wire is unchanged: no result field carries it.
+     */
+    public enum ChannelState {
+        OPEN,
+        /** The host closed stdin while an answer was awaited. */
+        CLOSED_EOF,
+        /** Reading the host's answer failed. */
+        CLOSED_IO,
+        /** {@link #close()}: the live policy seat degraded (lane live-sc-1009). */
+        CLOSED_DEGRADED
+    }
+
+    public static final StateMachine<ChannelState> CHANNEL = StateMachine.builder("bench-channel", ChannelState.class)
+            .edge(ChannelState.OPEN, ChannelState.CLOSED_EOF, ChannelState.CLOSED_IO, ChannelState.CLOSED_DEGRADED)
+            .doc("the bench JSON-RPC channel (JsonRpcChannel): open until EOF, an IO failure or a degraded live seat")
+            .build();
+
+    private final AtomicReference<ChannelState> state = new AtomicReference<>(ChannelState.OPEN);
 
     public JsonRpcChannel(final InputStream is, final OutputStream os) {
         this.in = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
@@ -376,7 +401,7 @@ public final class JsonRpcChannel {
         // reader having to remember which session it came from.
         body.addProperty("protocolMinor", PROTOCOL_MINOR);
         send(body);
-        if (closed) {
+        if (isClosed()) {
             return delegateAnswer(id);
         }
         try {
@@ -394,17 +419,28 @@ public final class JsonRpcChannel {
                 }
                 return msg;
             }
-            closed = true;
+            closeAs(ChannelState.CLOSED_EOF, "ask " + id);
             log("host closed stdin while awaiting answer " + id + "; delegating from here on");
         } catch (IOException e) {
-            closed = true;
+            closeAs(ChannelState.CLOSED_IO, "ask " + id);
             logErr("channel read failure awaiting answer " + id, e);
         }
         return delegateAnswer(id);
     }
 
     public boolean isClosed() {
-        return closed;
+        return state.get() != ChannelState.OPEN;
+    }
+
+    /** The channel's state: OPEN, or why it closed. */
+    public ChannelState state() {
+        return state.get();
+    }
+
+    private void closeAs(final ChannelState why, final String detail) {
+        if (state.compareAndSet(ChannelState.OPEN, why) && CHANNEL.trace) {
+            CHANNEL.check("channel", ChannelState.OPEN, why, detail);
+        }
     }
 
     /**
@@ -413,7 +449,7 @@ public final class JsonRpcChannel {
      * else calls it.
      */
     public void close() {
-        closed = true;
+        closeAs(ChannelState.CLOSED_DEGRADED, "close()");
     }
 
     private static JsonObject delegateAnswer(final int id) {
