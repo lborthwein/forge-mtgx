@@ -320,6 +320,14 @@ public final class ForcedWinSolver {
          */
         public boolean planLoops = false;
         /**
+         * searchspeed-1113 (cardTable; null = off, and then nothing changes): the path of a saved card-model table
+         * ({@link ForcedWinCanon}). With it, this solver's readers take their card models from the table, learn a card it
+         * does not hold in the canonical sandbox instead of a copy of the position, and read planLoops' loop probes from
+         * it. A table stamped by another build is refused (one log line) and the solver is as without the key. This
+         * changes what a model holds (the sandbox is no longer the position at first sight): a behaviour key.
+         */
+        public String cardTable = null;
+        /**
          * sdcc-tutorcast-1110 (off by default, and then nothing changes): the width model knows a spell that searches our
          * library for a card and lets us cast it at once without paying its mana cost. The reader's probes observe the
          * effect ({@link ForcedWinModel.EffKind#TUTOR_CAST}: which of our cards the engine offers to cast, one sandbox
@@ -964,6 +972,7 @@ public final class ForcedWinSolver {
             c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.planExpandCap = boolOrLive(get.apply("planExpandCap")); // live-fixes-1107: default forge.liveFixes; // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
+            c.cardTable = get.apply("cardTable"); // searchspeed-1113 (absent = null = off)
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
@@ -1529,8 +1538,16 @@ public final class ForcedWinSolver {
         }
         // labeller-v2 (c): a planScry solver learns scry / surveil (own template keys); never the shared v1 reader
         // work-units-1107: readerPerGame gives this solver its own reader preloaded as the shared one starts
-        this.oppReader = cfg.sharedReader && !cfg.planScry ? (cfg.readerPerGame ? load() : sharedOppReader())
+        // searchspeed-1113 (cardTable; null without the key or when the table is refused): the saved models serve both
+        // readers, so the defender's reader starts empty instead of from the jar's older list
+        final ForcedWinCanon.Table table = ForcedWinCanon.open(cfg.cardTable);
+        this.oppReader = table != null ? new ForcedWinModel.Reader()
+                : cfg.sharedReader && !cfg.planScry ? (cfg.readerPerGame ? load() : sharedOppReader())
                 : new ForcedWinModel.Reader();
+        if (table != null) {
+            this.reader.table = table;
+            this.oppReader.table = table;
+        }
         if (cfg.planScry) {
             this.reader.planScry = true;
             this.oppReader.planScry = true;
@@ -4635,6 +4652,28 @@ public final class ForcedWinSolver {
                 }
             }
         }
+        // searchspeed-1113 (cardTable; null without the key): the pairs the table can answer are read from it (or probed
+        // in the canonical sandbox and saved); only a pair with a card that has no paper card (a token) is left to the
+        // position's own probe below
+        final ForcedWinCanon.Table table = ForcedWinCanon.open(cfg.cardTable);
+        if (table != null && !c.isToken() && c.getPaperCard() != null) {
+            final List<Card> saved = new ArrayList<>();
+            for (Card p : partners) {
+                if (!p.isToken() && p.getPaperCard() != null) {
+                    saved.add(p);
+                }
+            }
+            partners.removeAll(saved);
+            final long tt = System.nanoTime();
+            final long until = LOOP_DEADLINE.computeIfAbsent(loopScope(live), x -> tt + LOOP_NANOS);
+            final int state = fillLoopsSaved(table, cfg, c, t, saved, aura, until);
+            if (state < 0) {
+                t.loopChecked = false; // no time for a probe the table lacked: asked again at the template's next read
+            }
+            if (state > 0 || partners.isEmpty()) {
+                return;
+            }
+        }
         // loop-probe-1113: one probe per game, seat, card and PARTNER (not per partner list: past LOOP_PARTNERS names the
         // list depends on the library's order, so every re-dealt or hidden-order copy probed again). The seat's other
         // readers (the root solver's, the reach's, the choice scorer's) reuse each answer. A probe's time comes out of the
@@ -4687,6 +4726,72 @@ public final class ForcedWinSolver {
             receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste
                     + (cut ? " cut=true" : "") + " ms=" + (System.nanoTime() - t0) / 1_000_000L);
         }
+    }
+
+    /**
+     * searchspeed-1113 (cardTable): {@code t}'s loop partners among {@code partners} from the table; a pair it lacks is
+     * probed in the canonical sandbox within {@code until} (System.nanoTime) and saved. Returns 1 when the card wins
+     * alone (noted, as the position's probe does), -1 when a probe had no time (not an answer), else 0.
+     */
+    static int fillLoopsSaved(final ForcedWinCanon.Table table, final Config cfg, final Card c, final ACard t, final List<Card> partners,
+            final boolean aura, final long until) {
+        boolean cut = false;
+        final String tag = ForcedWinCanon.limTag(loopLimits(cfg));
+        Boolean alone = table.loop(c, null, aura, tag);
+        if (alone == null) {
+            alone = probeSaved(table, cfg, c, null, aura, tag, until);
+        }
+        if (alone == null) {
+            cut = true;
+        } else if (alone) {
+            t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe: wins alone";
+            return 1;
+        }
+        partners.sort((x, y) -> x.getName().compareTo(y.getName()));
+        for (Card p : partners) {
+            Boolean w = table.loop(c, p, aura, tag);
+            if (w == null && !cut) {
+                w = probeSaved(table, cfg, c, p, aura, tag, until);
+            }
+            if (w == null) {
+                cut = true;
+            } else if (w) {
+                t.loopWith.add(p.getName());
+            }
+        }
+        return cut ? -1 : 0;
+    }
+
+    private static Boolean probeSaved(final ForcedWinCanon.Table table, final Config cfg, final Card c, final Card partner,
+            final boolean aura, final String tag, final long until) {
+        final long now = System.nanoTime();
+        if (now >= until) {
+            return null;
+        }
+        LOOP_PROBES.incrementAndGet();
+        return table.probeLoop(c, partner, aura, tag, loopLimits(cfg), Math.min(LOOP_NANOS, until - now), LOOP_NANOS);
+    }
+
+    /** searchspeed-1113 (the table's generator): every loop probe of {@code c} with the creatures among {@code cards}, saved. */
+    static void fillLoopsCanon(final ForcedWinCanon.Table table, final Config cfg, final Card c, final ACard t, final List<Card> cards) {
+        if (!c.isPermanent() || c.isLand() || !makesCopies(c)) {
+            return;
+        }
+        boolean taps = false;
+        for (ForcedWinModel.Abil ab : t.onBattlefield) {
+            taps |= ab.tapSelf && ab.cardTargets;
+        }
+        final boolean aura = !taps && c.isAura();
+        if (!taps && !aura) {
+            return;
+        }
+        final List<Card> partners = new ArrayList<>();
+        for (Card p : cards) {
+            if (p.isCreature() && !p.getName().equals(c.getName())) {
+                partners.add(p);
+            }
+        }
+        fillLoopsSaved(table, cfg, c, new ACard(), partners, aura, Long.MAX_VALUE);
     }
 
     /** wu-reads-1107: one planner search ({@link #plan}), within the hard deadline when windowCap is on (unchanged otherwise). */

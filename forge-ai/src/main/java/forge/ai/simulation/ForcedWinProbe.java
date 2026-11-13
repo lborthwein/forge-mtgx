@@ -1100,6 +1100,31 @@ public final class ForcedWinProbe {
         return t;
     }
 
+    /**
+     * searchspeed-1113: the card is outside the width model ({@code t.unmodeled}, as before). With -Dsdcc.readerStats
+     * (measurement; otherwise nothing more) the template also notes why: the reason, the ability's kind (spell,
+     * activated, ...) and its effect type as the engine names it.
+     */
+    private static void unmodeled(final ACard t, final String why, final SpellAbility sa) {
+        t.unmodeled = true;
+        if (ForcedWinCanon.STATS) {
+            if (t.unmodeledWhy == null) {
+                t.unmodeledWhy = new ArrayList<>();
+            }
+            String api = "?";
+            try {
+                api = String.valueOf(sa.getApi());
+                for (SpellAbility sub = sa.getSubAbility(); sub != null && api.length() < 80; sub = sub.getSubAbility()) {
+                    api += "+" + sub.getApi();
+                }
+            } catch (RuntimeException e) {
+                api = "?";
+            }
+            t.unmodeledWhy.add(why + ":" + (sa.isSpell() ? "spell" : sa.isCycling() ? "cycling" : sa.isActivatedAbility() ? "activated" : "other")
+                    + ":" + api);
+        }
+    }
+
     private static void learnInto(ACard t, Game live, Player me, Card card, long seed, Stats st) {
         t.land = card.isLand();
         t.permanent = card.isPermanent();
@@ -1133,11 +1158,11 @@ public final class ForcedWinProbe {
                 t.counter = true;
             }
             if (base == null) {
-                t.unmodeled = true;
+                unmodeled(t, "cost", sa0);
                 continue;
             }
             if (targetsAnything(sa0) && !targetsPlayersOnly(sa0, me)) {
-                t.unmodeled = true;
+                unmodeled(t, "cardTarget", sa0);
             }
             final List<String> variants = new ArrayList<>();
             if (targetsPlayersOnly(sa0, me)) {
@@ -1198,13 +1223,13 @@ public final class ForcedWinProbe {
                 final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
                 objAttach(t, ab, objs, objRun);
                 if (sacCost != null) {
-                    t.unmodeled = true; // as before the key (its cost was outside the model): the engine search may use it
+                    unmodeled(t, "sacCost", sa0); // as before the key (its cost was outside the model): the engine search may use it
                 }
                 ab.cardTargets = v == null && targetsAnything(sa0);
                 ab.handMask = handMask;
                 if (!ab.unplayable && (o.unmapped > 0 || ab.effects.isEmpty() && !t.permanent)) {
                     // solver-gaps-1015: it did something the width model cannot express (Show and Tell)
-                    t.unmodeled = true;
+                    unmodeled(t, "unmappedOrNoEffect", sa0);
                 }
                 if (!ab.unplayable && ab.has(EffKind.LIFE)) {
                     // solver-gaps-1015: the same play at another life total: a fixed change or a share of our life
@@ -1240,7 +1265,7 @@ public final class ForcedWinProbe {
                                 x -> x.isActivatedAbility() && !x.isManaAbility())) {
                     // a non-creature permanent whose entering changes nothing we can see: a static effect the width
                     // model cannot express (Underworld Breach's escape, cost reducers): the engine search may use it
-                    t.unmodeled = true;
+                    unmodeled(t, "staticPermanent", sa0);
                 }
                 for (SpellAbility alt : alts) {
                     final Abil altCost = ForcedWinModel.readCost(alt, AbilKind.SPELL);
@@ -1327,11 +1352,11 @@ public final class ForcedWinProbe {
                 final Abil sacCost = sacObjectCost(sa0, AbilKind.ACTIVATE); // sdcc-probeobj-1111 (null unless probeObjects)
                 final Abil base = sacCost != null ? sacCost : ForcedWinModel.readCost(sa0, AbilKind.ACTIVATE);
                 if (base == null) {
-                    t.unmodeled = true;
+                    unmodeled(t, "cost", sa0);
                     continue;
                 }
                 if (targetsAnything(sa0) && !targetsPlayersOnly(sa0, me)) {
-                    t.unmodeled = true;
+                    unmodeled(t, "cardTarget", sa0);
                 }
                 final List<String> variants = new ArrayList<>();
                 if (targetsPlayersOnly(sa0, me)) {
@@ -1374,7 +1399,7 @@ public final class ForcedWinProbe {
                     final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
                     objAttach(t, ab, objs, objRun);
                     if (sacCost != null) {
-                        t.unmodeled = true; // as before the key (its cost was outside the model)
+                        unmodeled(t, "sacCost", sa0); // as before the key (its cost was outside the model)
                     }
                     ab.cardTargets = v == null && targetsAnything(sa0);
                     ab.handMask = handMask;
@@ -1388,12 +1413,12 @@ public final class ForcedWinProbe {
                         if (o.hostEnd > 0) {
                             ab.selfTo = o.hostEnd;
                         } else {
-                            t.unmodeled = true; // somewhere the plan has no place for
+                            unmodeled(t, "sourceLeaves", sa0); // somewhere the plan has no place for
                         }
                     }
                     if (!ab.unplayable && o.unmapped > 0) {
                         // solver-gaps-1015: an activation the width model cannot express (Sneak Attack)
-                        t.unmodeled = true;
+                        unmodeled(t, "unmapped", sa0);
                     }
                     t.onBattlefield.add(ab);
                 }
