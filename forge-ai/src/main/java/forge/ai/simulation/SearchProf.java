@@ -42,7 +42,7 @@ public final class SearchProf {
         final Thread thread = Thread.currentThread();
         /** The play-out in progress on this thread. */
         int cand = -1, world = -1;
-        long playT0, playCpu0, playSvcN0, playSvcNs0, playCopyNs0, playScreenNs0, playLearnN0;
+        long playT0, playCpu0, playSvcN0, playSvcNs0, playCopyNs0, playScreenNs0, playLearnN0, playBlk0;
         long leafItems;
         long[] lat = new long[256];
         int nLat;
@@ -56,10 +56,25 @@ public final class SearchProf {
     });
     private static final ConcurrentLinkedQueue<long[]> PLAYS = new ConcurrentLinkedQueue<>();
     private static final ThreadMXBean TMX = ManagementFactory.getThreadMXBean();
+    static {
+        if (ON && TMX.isThreadContentionMonitoringSupported()) {
+            TMX.setThreadContentionMonitoringEnabled(true); // time blocked on monitors, per thread
+        }
+    }
+
+    /** This thread's time blocked entering monitors so far, ms (-1 = not supported). */
+    private static long blockedMs() {
+        try {
+            final java.lang.management.ThreadInfo ti = TMX.getThreadInfo(Thread.currentThread().getId());
+            return ti == null ? -1 : ti.getBlockedTime();
+        } catch (RuntimeException e) {
+            return -1;
+        }
+    }
 
     private static volatile Thread decider;
     private static int nesting;
-    private static long t0, gcMs0, gcN0, cpu0;
+    private static long t0, gcMs0, gcN0, cpu0, blk0;
     private static String kind;
     private static JsonObject notes;
     private static long seq;
@@ -117,6 +132,7 @@ public final class SearchProf {
         f.playCopyNs0 = f.acc[COPY];
         f.playScreenNs0 = f.acc[SCREEN] + f.acc[LEARN] + f.acc[LEAFREACH];
         f.playLearnN0 = f.cnt[LEARN];
+        f.playBlk0 = blockedMs();
     }
 
     public static void playEnd(final int steps, final boolean aborted, final boolean ok, final int turn) {
@@ -127,7 +143,7 @@ public final class SearchProf {
         PLAYS.add(new long[] {f.cand, f.world, f.playT0, now, steps, f.cnt[SVC_DECIDE] - f.playSvcN0,
                 f.acc[SVC_DECIDE] - f.playSvcNs0, TMX.getCurrentThreadCpuTime() - f.playCpu0, aborted ? 1 : 0, ok ? 1 : 0,
                 f.acc[SCREEN] + f.acc[LEARN] + f.acc[LEAFREACH] - f.playScreenNs0, f.cnt[LEARN] - f.playLearnN0, turn,
-                f.acc[COPY] - f.playCopyNs0});
+                f.acc[COPY] - f.playCopyNs0, blockedMs() - f.playBlk0});
         f.cand = -1;
         f.world = -1;
     }
@@ -163,6 +179,7 @@ public final class SearchProf {
         gcMs0 = g[0];
         gcN0 = g[1];
         cpu0 = TMX.getCurrentThreadCpuTime();
+        blk0 = blockedMs();
         final Frame f = TL.get();
         f.depth = -1;
         t0 = System.nanoTime();
@@ -196,6 +213,7 @@ public final class SearchProf {
         o.addProperty("wallMs", ms(wall));
         o.addProperty("threads", threads);
         o.addProperty("mainCpuMs", ms(TMX.getCurrentThreadCpuTime() - cpu0));
+        o.addProperty("mainBlockedMs", blockedMs() - blk0);
         final long[] main = new long[N], pool = new long[N], cm = new long[N], cp = new long[N];
         long leafItems = 0;
         int nl = 0;
@@ -263,9 +281,10 @@ public final class SearchProf {
             a.add(p[11]);
             a.add(p[12]);
             a.add(ms(p[13]));
+            a.add(p[14]);
             pa.add(a);
         }
-        // per play-out: cand, world, startMs, endMs, steps, svcRequests, svcWaitMs, cpuMs, aborted, ok, screenMs, learns, endTurn, copyMs
+        // per play-out: cand, world, startMs, endMs, steps, svcRequests, svcWaitMs, cpuMs, aborted, ok, screenMs, learns, endTurn, copyMs, blockedMs
         o.add("plays", pa);
         PLAYS.clear();
         System.err.println("[searchprof] " + o);
