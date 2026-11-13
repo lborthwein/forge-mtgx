@@ -51,7 +51,7 @@ import forge.util.MyRandom;
  * the position the card is first seen in, so a spell with nothing to target there, or a search with nothing to find, is
  * learned as "not played", and which position that is depends on timing. With the key every model is learned in the
  * <b>canonical sandbox</b>: one made-up two-player position per card pool, built by rules that name no card (the pool's
- * cards are ranked by how little their scripts do; each player gets the plainest permanent of each card type in play, the
+ * cards are ranked by how little they change a position for other cards; each player gets the plainest permanent of each card type in play, the
  * next plainest cards of each type in the graveyard and in hand, five basic lands, and our seat's library holds one copy
  * of every pool card, so a search finds a card of each kind the pool has). It never reads a real game: a card is looked
  * up by name only.</p>
@@ -218,18 +218,25 @@ public final class ForcedWinCanon {
         return BeliefSampler.resolve(name);
     }
 
-    /** How much a card's script does: the fewer lines, the plainer the object it makes in the sandbox. */
-    private static int weight(final CardRules r) {
-        int n = r.getOtherPart() != null ? 100 : 0;
-        final ICardFace f = r.getMainPart();
-        for (Iterable<String> it : List.of(f.getKeywords(), f.getAbilities(), f.getTriggers(), f.getStaticAbilities(), f.getReplacements())) {
-            if (it != null) {
-                for (String s : it) {
-                    n += s == null ? 0 : 1;
-                }
+    private static int lines(final Iterable<String> it) {
+        int n = 0;
+        if (it != null) {
+            for (String s : it) {
+                n += s == null ? 0 : 1;
             }
         }
         return n;
+    }
+
+    /**
+     * How much a card would change the sandbox for other cards: the lower, the plainer the object it makes there. A
+     * static ability or a replacement effect (it can change what every other card does while it is in play) counts
+     * 100 a line, a trigger 20, an activated ability or a keyword 1; a card with a second face 1000.
+     */
+    private static int weight(final CardRules r) {
+        final ICardFace f = r.getMainPart();
+        return (r.getOtherPart() != null ? 1000 : 0) + 100 * (lines(f.getStaticAbilities()) + lines(f.getReplacements()))
+                + 20 * lines(f.getTriggers()) + lines(f.getAbilities()) + lines(f.getKeywords());
     }
 
     /** The card-type bucket a pool card is ranked in (null = none: it only sits in our library). */
