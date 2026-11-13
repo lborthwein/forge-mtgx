@@ -306,12 +306,8 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
         final Player me = g.getPlayers().get(0);
         int seen = 0;
         for (Card c : me.getCardsIn(ZoneType.Graveyard)) {
-            for (SpellAbility sa : c.getSpellAbilities()) {
+            for (SpellAbility sa : c.getAllPossibleAbilities(me, true)) { // the graveyard permission's alternatives included
                 if (!sa.isSpell()) {
-                    continue;
-                }
-                sa.setActivatingPlayer(me);
-                if (!sa.canPlay()) {
                     continue;
                 }
                 seen++;
