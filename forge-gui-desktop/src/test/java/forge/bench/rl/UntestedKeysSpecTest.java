@@ -173,8 +173,10 @@ public class UntestedKeysSpecTest {
         final RlSearch.Config f = RlLiveSeat.Spec.parse(SHIP + ",holdDeploy=true,holdDeploy.followLine=true").search;
         Assert.assertTrue(f.holdDeployFollowLine && !f.holdDeployCommit && f.toJson().get("holdDeployFollowLine").getAsBoolean());
         // the bench JSON round trip carries both
-        final RlSearch.Config both = RlSearch.Config.parse(RlLiveSeat.Spec.parse(
-                SHIP + ",holdDeploy=true,holdDeploy.commit=true,holdDeploy.followLine=true").search.toJson());
+        final com.google.gson.JsonObject bj = RlLiveSeat.Spec.parse(
+                SHIP + ",holdDeploy=true,holdDeploy.commit=true,holdDeploy.followLine=true").search.toJson();
+        bj.addProperty("server", "127.0.0.1:1"); // the bench config names its search service
+        final RlSearch.Config both = RlSearch.Config.parse(bj);
         Assert.assertTrue(both.holdDeployCommit && both.holdDeployFollowLine);
         for (String bad : new String[] {"holdDeploy.commit=1", "holdDeploy.followLine=yes", "holdDeploy.commit=TRUE"}) {
             try {
