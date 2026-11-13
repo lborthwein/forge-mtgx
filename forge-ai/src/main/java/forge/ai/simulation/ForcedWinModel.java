@@ -910,8 +910,9 @@ public final class ForcedWinModel {
          * not hold is learned in the canonical sandbox (never in a copy of {@code live}) and kept there for every reader.
          */
         volatile ForcedWinCanon.Table table;
-        /** searchspeed-1113 (measurement, -Dsdcc.readerStats; null otherwise): per template key {reads, decisions, last decision}. */
+        /** searchspeed-1113 (measurement, -Dsdcc.readerStats; null otherwise): per template key, its reads and the decisions that read it. */
         final Map<String, long[]> stat = ForcedWinCanon.STATS ? new HashMap<>() : null;
+        final Map<String, java.util.BitSet> statDecisions = ForcedWinCanon.STATS ? new HashMap<>() : null;
         /** searchspeed-1113 (measurement): the id of the first player this reader read a card for (-1 = none yet). */
         int statOwner = -1;
 
@@ -927,12 +928,8 @@ public final class ForcedWinModel {
                 if (statOwner < 0) {
                     statOwner = me.getId();
                 }
-                final long[] s = stat.computeIfAbsent(key, k -> new long[] {0, 0, -1});
-                s[0]++;
-                if (s[2] != d) {
-                    s[2] = d;
-                    s[1]++;
-                }
+                stat.computeIfAbsent(key, k -> new long[1])[0]++;
+                statDecisions.computeIfAbsent(key, k -> new java.util.BitSet()).set((int) Math.min(d, 1 << 20));
             }
         }
 
