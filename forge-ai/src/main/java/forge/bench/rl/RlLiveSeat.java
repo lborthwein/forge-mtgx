@@ -108,6 +108,8 @@ public final class RlLiveSeat {
                 // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
                 // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
                 "planLoops",
+                // searchspeed-1113 (absent = off): the path of a saved card-model table (ForcedWinSolver.Config.cardTable)
+                "cardTable",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
                 "engineModeChoice"));
@@ -224,7 +226,8 @@ public final class RlLiveSeat {
                     throw new IllegalArgumentException("policySearch: " + k + " is not supported live (plans.solverCfg keys "
                             + String.join("|", LIVE_SOLVER_KEYS) + ")");
                 }
-                if (LIVE_SOLVER_FLAGS.contains(sk) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
+                if ("cardTable".equals(sk) ? v.isEmpty()
+                        : LIVE_SOLVER_FLAGS.contains(sk) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
                     throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want a number, or true|false)");
                 }
                 if (!c.plans.has("solverCfg")) {

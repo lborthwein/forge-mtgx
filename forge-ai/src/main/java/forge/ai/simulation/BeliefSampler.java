@@ -231,6 +231,11 @@ public final class BeliefSampler {
     /** The jar pool without an event pool: not treated as a singleton cube (a practice mirror or a saved deck may repeat cards). */
     public static final boolean LIVE_CUBE_SINGLETON = false;
 
+    /** searchspeed-1113: {@link #readCube} for the card-table generator (another package). */
+    public static byte[] readCubeBytes(String path) throws java.io.IOException {
+        return readCube(path);
+    }
+
     static byte[] readCube(String path) throws java.io.IOException {
         if (path.startsWith("classpath:")) {
             try (java.io.InputStream in = BeliefSampler.class.getResourceAsStream(path.substring("classpath:".length()))) {
