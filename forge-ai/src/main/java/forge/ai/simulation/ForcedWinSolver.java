@@ -4423,7 +4423,7 @@ public final class ForcedWinSolver {
         return lim;
     }
 
-    /** planLoops: the probes of the games in progress, by match (weak), then by seat, card and partner names. */
+    /** planLoops: the probes of the games in progress, by game scope (weak; loopScope), then by seat, card and partner name. */
     private static final java.util.Map<Object, java.util.Map<String, java.util.Set<String>>> LOOP_CACHE =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
@@ -4441,9 +4441,17 @@ public final class ForcedWinSolver {
     /** loop-probe-1113 (tests, reports): sandbox probes run in this JVM. */
     static final java.util.concurrent.atomic.AtomicLong LOOP_PROBES = new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * loop-probe-1113: what a live game and every copy of it share: its rules object (GameCopier gives each copy a new
+     * Match, so the match never joined a copy's probes to the live game's or to another copy's).
+     */
+    private static Object loopScope(final Game g) {
+        return g.getRules() != null ? g.getRules() : LOOP_CACHE;
+    }
+
     /** loop-probe-1113: the caller's deadline for this game's loop probes ({@code nanos} on System.nanoTime; 0 = none). */
     public static void loopDeadline(final Game g, final long nanos) {
-        final Object match = g.getMatch() != null ? g.getMatch() : LOOP_CACHE;
+        final Object match = loopScope(g);
         if (nanos == 0L) {
             LOOP_DEADLINE.remove(match);
         } else {
@@ -4569,7 +4577,7 @@ public final class ForcedWinSolver {
         // readers (the root solver's, the reach's, the choice scorer's) reuse each answer. A probe's time comes out of the
         // caller's budget (loopDeadline): a call takes at most a quarter of what is left; partners it could not probe are
         // not cached and the template is asked again at its next read.
-        final Object match = live.getMatch() != null ? live.getMatch() : LOOP_CACHE;
+        final Object match = loopScope(live);
         final java.util.Map<String, java.util.Set<String>> byKey = LOOP_CACHE.computeIfAbsent(match, x -> new java.util.HashMap<>());
         final String base = me.getId() + "|" + c.getName() + "|" + aura + "|";
         final int probed = partners.size();

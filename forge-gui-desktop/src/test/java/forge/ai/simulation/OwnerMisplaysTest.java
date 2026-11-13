@@ -233,6 +233,10 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
         me.getZone(ZoneType.Library).setCards(lib);
         Assert.assertTrue(screenSolver(me, true).hasEnder(g));
         Assert.assertEquals(ForcedWinSolver.LOOP_PROBES.get() - p1, 0L, "every partner is probed once a game, in either order");
+        // a copy of the game (the card scorer's, the look-ahead's) has its own Match: it still reuses the live game's probes
+        final Game copy = new GameCopier(g, true).makeCopy();
+        Assert.assertTrue(screenSolver(copy.getPlayers().get(0), true).hasEnder(copy));
+        Assert.assertEquals(ForcedWinSolver.LOOP_PROBES.get() - p1, 0L, "a copy probes nothing the live game probed");
     }
 
     /**
