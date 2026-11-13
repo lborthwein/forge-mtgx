@@ -320,6 +320,11 @@ public final class ForcedWinSolver {
          */
         public boolean planLoops = false;
         /**
+         * searchspeed-1113 (cardLock; false = off): the solver's card-model readers read a learned card without the
+         * reader's monitor ({@link ForcedWinModel.Reader#cardLock}). Timing only: no template and no screen changes.
+         */
+        public boolean cardLock = false;
+        /**
          * sdcc-tutorcast-1110 (off by default, and then nothing changes): the width model knows a spell that searches our
          * library for a card and lets us cast it at once without paying its mana cost. The reader's probes observe the
          * effect ({@link ForcedWinModel.EffKind#TUTOR_CAST}: which of our cards the engine offers to cast, one sandbox
@@ -964,6 +969,7 @@ public final class ForcedWinSolver {
             c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.planExpandCap = boolOrLive(get.apply("planExpandCap")); // live-fixes-1107: default forge.liveFixes; // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
+            c.cardLock = "true".equals(get.apply("cardLock")); // searchspeed-1113
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
@@ -1531,6 +1537,10 @@ public final class ForcedWinSolver {
         // work-units-1107: readerPerGame gives this solver its own reader preloaded as the shared one starts
         this.oppReader = cfg.sharedReader && !cfg.planScry ? (cfg.readerPerGame ? load() : sharedOppReader())
                 : new ForcedWinModel.Reader();
+        if (cfg.cardLock) {
+            this.reader.cardLock = true; // searchspeed-1113 (never switched off again: a reader may be shared)
+            this.oppReader.cardLock = true;
+        }
         if (cfg.planScry) {
             this.reader.planScry = true;
             this.oppReader.planScry = true;
