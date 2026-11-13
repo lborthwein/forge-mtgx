@@ -4636,13 +4636,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /**
-     * untested-keys-1113 (holdDeploy.followLine): the decision's deploy-window proof. {@link LookaheadSearch#runHoldPilot}
-     * names the window and runs one pilot play-out; the first hook to reach that window (the pilot's) proves once on its
-     * copy, whose hidden cards are belief samples (the seat's own information), and keeps the line for the decision.
+     * untested-keys-1113 (holdDeploy.followLine): the decision's proofs. {@link LookaheadSearch#runHoldPilot} names the
+     * window (the latest hold window) and runs one pilot play-out a candidate; each pilot's hook proves once at that window
+     * on its copy (hidden cards are belief samples: the seat's own information) and keeps the line under its candidate's
+     * key. Every later play-out of that candidate follows the line from the window. A candidate without a proven line
+     * plays on as before (a hold: the deferred cast).
      */
     private volatile LookaheadSearch.Deploy holdProofWindow;
-    private volatile forge.ai.simulation.ForcedWinSolver.Proposal holdProofLine;
-    private final java.util.concurrent.atomic.AtomicBoolean holdProofArmed = new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile boolean holdPilotPhase;
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> holdProofLines = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Object NO_LINE = new Object();
     final java.util.concurrent.atomic.AtomicLong holdProofs = new java.util.concurrent.atomic.AtomicLong(),
             holdProofsProven = new java.util.concurrent.atomic.AtomicLong(), holdProofMs = new java.util.concurrent.atomic.AtomicLong();
 
@@ -4650,32 +4653,39 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return new LookaheadSearch.HoldPilot() {
             @Override
             public void begin(final LookaheadSearch.Deploy window) {
-                holdProofLine = null;
+                holdProofLines.clear();
                 holdProofWindow = window;
-                holdProofArmed.set(true);
+                holdPilotPhase = true;
             }
 
             @Override
             public int winTurn() {
-                holdProofArmed.set(false); // only the pilot proves
-                final forge.ai.simulation.ForcedWinSolver.Proposal p = holdProofLine;
+                holdPilotPhase = false; // only the pilots prove
                 final LookaheadSearch.Deploy w = holdProofWindow;
-                return p == null || w == null ? 0 : w.turn + Math.max(0, p.winTurn);
+                int t = 0;
+                for (Object o : holdProofLines.values()) {
+                    if (o instanceof forge.ai.simulation.ForcedWinSolver.Proposal && w != null) {
+                        t = Math.max(t, w.turn + Math.max(0, ((forge.ai.simulation.ForcedWinSolver.Proposal) o).winTurn));
+                    }
+                }
+                return t;
+            }
+
+            @Override
+            public void end() {
+                holdPilotPhase = false;
+                holdProofWindow = null;
+                holdProofLines.clear();
             }
         };
     }
 
-    static boolean sameWindow(final LookaheadSearch.Deploy a, final LookaheadSearch.Deploy b) {
-        return a != null && b != null && a.turn == b.turn && a.phase == b.phase;
-    }
-
     /**
-     * untested-keys-1113 (holdDeploy.followLine): the plan hook of a hold candidate's play-out. Silent until the deploy
-     * window (the opponent's turn {@code d.turn}, step {@code d.phase}, empty stack). There the pilot proves (once a
-     * decision); every hold play-out of that window follows the decision's proven line from then on. Without one the
-     * deferred cast is made as before.
+     * untested-keys-1113 (holdDeploy.followLine): the plan hook of a play-out in a decision with a proof window (every
+     * candidate but a plan line). Silent until the window (the opponent's turn {@code w.turn}, step {@code w.phase},
+     * empty stack); there the candidate's pilot proves, and every later play-out of the candidate follows its line.
      */
-    PlayerControllerBridge.PlanHook holdFollowHook(final Player copyMe, final LookaheadSearch.Deploy d,
+    PlayerControllerBridge.PlanHook holdFollowHook(final Player copyMe, final LookaheadSearch.Deploy w,
             final LookaheadSearch.FirstAction first) {
         return new PlayerControllerBridge.PlanHook() {
             PlayerControllerBridge.PlanHook in;
@@ -4686,10 +4696,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (in == null && !tried) {
                     final Game g = copyMe.getGame();
                     final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
-                    if (!ph.isPlayerTurn(copyMe) && ph.getTurn() == d.turn && ph.getPhase() == d.phase && g.getStack().isEmpty()) {
+                    if (!ph.isPlayerTurn(copyMe) && ph.getTurn() == w.turn && ph.getPhase() == w.phase && g.getStack().isEmpty()) {
                         tried = true;
                         holdFollowTried.incrementAndGet();
-                        if (sameWindow(d, holdProofWindow) && holdProofArmed.compareAndSet(true, false)) {
+                        final String key = first.candKey;
+                        if (holdPilotPhase && holdProofLines.putIfAbsent(key, NO_LINE) == null) {
                             final long t0 = System.nanoTime();
                             holdProofs.incrementAndGet();
                             try {
@@ -4700,23 +4711,24 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                                         best = p;
                                     }
                                 }
-                                holdProofLine = best;
                                 if (best != null) {
+                                    holdProofLines.put(key, best);
                                     holdProofsProven.incrementAndGet();
                                 }
                             } catch (RuntimeException e) {
-                                holdProofLine = null;
+                                // no line for this candidate
                             }
                             holdProofMs.addAndGet((System.nanoTime() - t0) / 1_000_000L);
                         }
-                        final forge.ai.simulation.ForcedWinSolver.Proposal line = sameWindow(d, holdProofWindow) ? holdProofLine : null;
-                        if (line != null) {
+                        final Object line = holdProofLines.get(key);
+                        if (line instanceof forge.ai.simulation.ForcedWinSolver.Proposal) {
                             try {
-                                in = PlanSearch.copyLineHook(copyMe, followConfig(), new PlanSearch.LinePlan(line), first,
+                                in = PlanSearch.copyLineHook(copyMe, followConfig(),
+                                        new PlanSearch.LinePlan((forge.ai.simulation.ForcedWinSolver.Proposal) line), first,
                                         lineChoicesForge(), lineKeepOn());
                                 holdFollowAdopted.incrementAndGet();
                             } catch (RuntimeException e) {
-                                in = null; // no line here: the deferred cast as before
+                                in = null; // no line here: play on as before
                             }
                         }
                     }
@@ -5077,8 +5089,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first,
                     lineChoicesForge(), lineKeepOn());
         }
-        if (first.deploy != null && cfg.holdDeployFollowLine) {
-            pc.planHook = holdFollowHook(me, first.deploy, first); // untested-keys-1113 (holdDeploy.followLine)
+        final LookaheadSearch.Deploy proofWindow = holdProofWindow;
+        if (cfg.holdDeployFollowLine && proofWindow != null && pc.planHook == null) {
+            pc.planHook = holdFollowHook(me, proofWindow, first); // untested-keys-1113 (holdDeploy.followLine)
         }
         pc.forcedBlocks = first.block;
         return new LookaheadSearch.PlayoutSeat() {
