@@ -2104,6 +2104,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("partial_worlds", r.partialWorlds);
                 row.addProperty("proven", r.proven);
             }
+            svcRow(row); // eprime-1113 (-Dsdcc.svcCount; off: no field)
             row.addProperty("ms", Math.round(r.ms * 10) / 10.0);
             row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
             row.addProperty("score_ms", Math.round((System.nanoTime() - t0) / 1e5 - r.ms * 10) / 10.0);
@@ -2520,6 +2521,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("partial_worlds", r.partialWorlds);
             row.addProperty("search_ms", Math.round(r.ms * 10) / 10.0);
         }
+        svcRow(row); // eprime-1113 (-Dsdcc.svcCount; off: no field)
         row.addProperty("answer", answer);
         row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
         addRow(row);
@@ -4955,6 +4957,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             public RlWire.Decision decide(final byte[] p) throws IOException {
                 budgetStop(first);
                 try {
+                    if (SVC_COUNT) svcMe.incrementAndGet(); // eprime-1113: request counter
                     return client().decide(p, cfg.playoutSample);
                 } catch (IOException | RuntimeException e) {
                     drop();
@@ -5187,6 +5190,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     budgetStop(first);
                 }
                 try {
+                    if (SVC_COUNT) svcOpp.incrementAndGet(); // eprime-1113: request counter
                     return client().decide(p, cfg.playoutSample);
                 } catch (IOException | RuntimeException e) {
                     drop();
@@ -5221,6 +5225,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return rs.fatal != null ? rs.fatal : rs.voidReason;
             }
         };
+    }
+
+    /**
+     * eprime-1113 (measurement only; -Dsdcc.svcCount, default off and then no field is written): the policy service
+     * requests of our play-out seats ({@code svc_me}) and of the opponent's play-out policy seats ({@code svc_opp}) since
+     * the previous logged decision of this search, written into each decision row.
+     */
+    static final boolean SVC_COUNT = Boolean.getBoolean("sdcc.svcCount");
+    private final java.util.concurrent.atomic.AtomicLong svcMe = new java.util.concurrent.atomic.AtomicLong(),
+            svcOpp = new java.util.concurrent.atomic.AtomicLong();
+    private long svcMeSeen, svcOppSeen;
+
+    private synchronized void svcRow(final JsonObject row) {
+        if (!SVC_COUNT) {
+            return;
+        }
+        final long m = svcMe.get(), o = svcOpp.get();
+        row.addProperty("svc_me", m - svcMeSeen);
+        row.addProperty("svc_opp", o - svcOppSeen);
+        svcMeSeen = m;
+        svcOppSeen = o;
     }
 
     /** S2T: opponent policy seats built (play-outs whose opponent was the policy). */
