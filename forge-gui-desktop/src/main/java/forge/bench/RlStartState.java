@@ -837,7 +837,23 @@ public final class RlStartState {
      */
     private static int payable(final Card c, final Player me) {
         int level = 0;
-        for (SpellAbility sa : c.getAllPossibleAbilities(me, false)) {
+        // the card's own spells and every alternative cost of them: getAllPossibleAbilities alone drops a spell whose
+        // non-mana cost cannot be paid now (Card#getAllPossibleAbilities removes !isPossible()), and that is not this
+        // rule's business
+        final List<SpellAbility> ways = new ArrayList<>(c.getAllPossibleAbilities(me, false));
+        for (SpellAbility sa : c.getSpellAbilities()) {
+            if (sa.isSpell()) {
+                if (!ways.contains(sa)) {
+                    ways.add(sa);
+                }
+                for (SpellAbility alt : forge.game.GameActionUtil.getAlternativeCosts(sa, me, false)) {
+                    if (!ways.contains(alt)) {
+                        ways.add(alt);
+                    }
+                }
+            }
+        }
+        for (SpellAbility sa : ways) {
             if (!sa.isSpell() || sa.isCastFaceDown()) {
                 continue;
             }
