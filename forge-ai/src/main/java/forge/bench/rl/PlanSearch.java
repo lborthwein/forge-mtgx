@@ -110,6 +110,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          */
         public double lineFloor = 0;
         /**
+         * owner-misplays-1113 (0 = off): at a plan point, the look-ahead keeps at least this many ms of its own after the
+         * proposals (solver, engine, samples) spent part of the decision's budget; the decision may then run past the budget
+         * by at most this floor. Off: the look-ahead gets what the proposals left (unchanged).
+         */
+        public long lookFloorMs = 0;
+        /**
          * kill-line-1106 (off by default): at a point with a non-proven solver line, the search scores only the default and
          * the best line, in the same worlds with the same departZ gate, and no plans are sampled. With a lower
          * solverCfg.budgetMs this reserves the rest of the decision for that comparison.
@@ -169,7 +175,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 "setupMs", "setupHorizon", "setupActive", "setupMargin", "setupMinWorlds", "setupMaxLoss", "setupBreadth", "setupFailShare",
                 "samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lineFloorAlways", "lineDuel", "unified", "planX",
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lookFloorMs", "lineFloorAlways", "lineDuel", "unified", "planX",
                 "lineHorizon", "exactActions"));
 
         public static Spec parse(final JsonObject o) {
@@ -198,6 +204,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("replanOnEntry")) s.replanOnEntry = o.get("replanOnEntry").getAsBoolean();
             if (o.has("lineKeep")) s.lineKeep = o.get("lineKeep").getAsBoolean();
             if (o.has("lineFloor")) s.lineFloor = o.get("lineFloor").getAsDouble();
+            if (o.has("lookFloorMs")) s.lookFloorMs = o.get("lookFloorMs").getAsLong();
             if (o.has("lineFloorAlways")) s.lineFloorAlways = o.get("lineFloorAlways").getAsBoolean();
             if (o.has("lineDuel")) s.lineDuel = o.get("lineDuel").getAsBoolean();
             if (o.has("unified")) s.unified = o.get("unified").getAsBoolean();
@@ -217,6 +224,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("setupBreadth")) s.setupBreadth = o.get("setupBreadth").getAsInt();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
+            }
+            if (s.lookFloorMs < 0 || s.lookFloorMs > 60_000) {
+                throw new IllegalArgumentException("plans.lookFloorMs must be 0..60000, not " + s.lookFloorMs);
             }
             if (s.samples < 0 || s.temperature <= 0 || s.maxSteps < 1 || s.maxLines < 0 || s.minProvenWorlds < 1) {
                 throw new IllegalArgumentException("plans: samples >= 0, temperature > 0, maxSteps >= 1, maxLines >= 0, "
@@ -1129,7 +1139,26 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         int horizonTurn;
         /** SETUP: the index in {@link #plans} of the solver's setup line, -1 = none; the decision's verdict on it. */
         int setup = -1;
+        /** owner-misplays-1113: how far plans.lookFloorMs moved the look-ahead's start (0 = not applied), ns. */
+        long lookFloorNs;
         String setupNote;
+    }
+
+    /** owner-misplays-1113 (plans.lookFloorMs; 0 = off): the look-ahead's own minimum after the proposals, ms. */
+    long lookFloorMs() {
+        return spec.lookFloorMs;
+    }
+
+    /**
+     * owner-misplays-1113: the look-ahead's start on the budget clock at a plan point. Unchanged ({@code bt0}) when the
+     * floor is off or the proposals left at least the floor; else moved forward so the look-ahead keeps {@code floorMs}.
+     */
+    static long lookStart(final long bt0, final long now, final long budgetMs, final long floorMs) {
+        if (floorMs <= 0 || budgetMs <= 0) {
+            return bt0;
+        }
+        final long left = bt0 + budgetMs * 1_000_000L - now;
+        return left >= floorMs * 1_000_000L ? bt0 : now + (floorMs - budgetMs) * 1_000_000L;
     }
 
     /** SETUP v2: the menu candidates to search at this stage ({@code breadth}, or plans.setupBreadth with a setup candidate). */

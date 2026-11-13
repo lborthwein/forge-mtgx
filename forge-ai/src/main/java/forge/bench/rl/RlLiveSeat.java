@@ -91,7 +91,7 @@ public final class RlLiveSeat {
         /** sb-live-1018: the {@code plans.<key>} keys live accepts (numbers, or true/false for {@code solver}). */
         public static final java.util.Set<String> LIVE_PLAN_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "samples", "temperature", "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs",
-                "unified", "lineKeep", "planX", "replanOnEntry", "lineChoices"));
+                "unified", "lineKeep", "planX", "replanOnEntry", "lineChoices", "lookFloorMs"));
         /** shipA-on-leakfix-1112: the plan keys above whose value is true or false. */
         private static final java.util.Set<String> LIVE_PLAN_FLAGS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "solver", "unified", "lineKeep", "planX", "replanOnEntry"));
@@ -104,7 +104,13 @@ public final class RlLiveSeat {
                 "engineMoves", "engineNodesPerSearch", "engineRerun", "historyLki", "landEntersProbe", "lineUncapped", "loopMarginal",
                 "offBattlefieldLimits", "planDiscardWall", "planExpandCap", "probeSettle", "readerPerGame", "sourceColorsLive",
                 "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds",
-                "passBlockers"));
+                "passBlockers",
+                // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
+                // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
+                "planLoops",
+                // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
+                // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
+                "engineModeChoice"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -118,7 +124,13 @@ public final class RlLiveSeat {
                 "engineMoves", "engineNodesPerSearch", "engineRerun", "historyLki", "landEntersProbe", "lineUncapped", "loopMarginal",
                 "offBattlefieldLimits", "planDiscardWall", "planExpandCap", "probeSettle", "readerPerGame", "sourceColorsLive",
                 "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds",
-                "passBlockers"));
+                "passBlockers",
+                // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
+                // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
+                "planLoops",
+                // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
+                // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
+                "engineModeChoice"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as

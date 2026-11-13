@@ -331,6 +331,15 @@ public final class ForcedWinSolver {
          */
         public boolean tutorCast = false;
         /**
+         * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
+         * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
+         * line's follower answers the mode ask with it in every verification play-out and in the live game (through
+         * {@link forge.ai.LineAnswers#modes}). Off, a modal spell is played with Forge AI's modes in the search, and
+         * again asked of Forge AI when the line is followed: a kill that needs one mode and no other is outside the
+         * search, and a followed line's modal cast is not bound to what was verified.
+         */
+        public boolean engineModeChoice = false;
+        /**
          * sdcc-tutorcast-1110 (false = off: the reader, its templates and every plan are unchanged). The probes also
          * note where an activated ability leaves its own source once it has resolved (the top of our library, our
          * hand, exile, our graveyard; not as its cost), and the planner moves it there instead of leaving it on the
@@ -957,6 +966,7 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
+            c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.probeObjects = "true".equals(get.apply("probeObjects")); // sdcc-probeobj-1111
             c.planBridge = "true".equals(get.apply("planBridge")); // sdcc-bridge-1111
@@ -1041,6 +1051,7 @@ public final class ForcedWinSolver {
                 + (probeSettle ? " probeSettle" : "")
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
                 + (sourceLeaves ? " sourceLeaves" : "")
                 + (probeObjects ? " probeObjects" : "") // sdcc-probeobj-1111
@@ -3936,6 +3947,7 @@ public final class ForcedWinSolver {
         el.xVariants = cfg.xVariants;
         el.stack = stackWindow;
         el.costChoice = cfg.engineCostChoice;
+        el.modeChoice = cfg.engineModeChoice; // owner-misplays-1113
         if (cfg.engineFocus) {
             el.focus = true; // sdcc-order-1111
             el.focusKillers = engineFocusKillers;
@@ -4411,13 +4423,64 @@ public final class ForcedWinSolver {
         return lim;
     }
 
-    /** planLoops: the probes of the games in progress, by match (weak), then by seat, card and partner names. */
+    /** planLoops: the probes of the games in progress, by game scope (weak; loopScope), then by seat, card and partner name. */
     private static final java.util.Map<Object, java.util.Map<String, java.util.Set<String>>> LOOP_CACHE =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
     /** planLoops: the most partners one permanent is probed with, and one sandbox search's nodes and counted time. */
     static final int LOOP_PARTNERS = 12, LOOP_NODES = 300;
     static final long LOOP_NANOS = 3_000_000_000L;
+
+    /**
+     * loop-probe-1113: by game scope (weak; loopScope), the wall time ({@link System#nanoTime}) until which the loop
+     * probes of the decision or ask in progress may run: a quarter of its budget from its start ({@link #loopDeadline}).
+     */
+    private static final java.util.Map<Object, Long> LOOP_DEADLINE = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    /** loop-probe-1113 (tests, reports): sandbox probes run in this JVM. */
+    static final java.util.concurrent.atomic.AtomicLong LOOP_PROBES = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * loop-probe-1113: what a live game and every copy of it share: its rules object (GameCopier gives each copy a new
+     * Match, so the match never joined a copy's probes to the live game's or to another copy's).
+     */
+    private static Object loopScope(final Game g) {
+        return g.getRules() != null ? g.getRules() : LOOP_CACHE;
+    }
+
+    /**
+     * loop-probe-1113: a decision or ask of this game begins and runs out at {@code nanos} (System.nanoTime): its loop
+     * probes, in the live game and its copies, share a quarter of the time left. 0 = forget the window.
+     */
+    public static void loopDeadline(final Game g, final long nanos) {
+        final Object match = loopScope(g);
+        if (nanos == 0L) {
+            LOOP_DEADLINE.remove(match);
+        } else {
+            final long now = System.nanoTime();
+            LOOP_DEADLINE.put(match, now + Math.max(0L, nanos - now) / 4);
+        }
+    }
+
+    /**
+     * loop-probe-1113: one sandbox probe within {@code end} (wall). TRUE / FALSE = its answer; null = no time for it, or
+     * it was cut short of LOOP_NANOS without a win (not an answer: nothing is cached).
+     */
+    private static Boolean loopProbe(final Config cfg, final Game live, final Player me, final Card c, final Card partner,
+            final boolean aura, final long seed, final long end) {
+        final long now = System.nanoTime();
+        if (now >= end) {
+            return null;
+        }
+        final long budget = Math.min(LOOP_NANOS, end - now);
+        LOOP_PROBES.incrementAndGet();
+        final boolean w = ForcedWinProbe.sandboxWin(live, me, c.getId(), partner == null ? -1 : partner.getId(), aura, loopLimits(cfg),
+                seed, budget);
+        if (w) {
+            return Boolean.TRUE;
+        }
+        // a search that stopped on a budget shorter than the full one did not finish: no answer
+        return budget >= LOOP_NANOS || System.nanoTime() - now < budget - budget / 10 ? Boolean.FALSE : null;
+    }
 
     /**
      * planLoops: the card has an ability of Forge's CopyPermanent effect type, its own or one it grants (an Aura's script
@@ -4511,40 +4574,57 @@ public final class ForcedWinSolver {
                 }
             }
         }
-        // one probe per game, seat, card and partner list: the seat's other readers (the root solver's, the reach's, the
-        // choice scorer's) reuse it. The key holds the partner names in a fixed order, so it does not depend on which
-        // copy of the game asked.
-        final List<String> names = new ArrayList<>();
-        for (Card p : partners) {
-            names.add(p.getName());
-        }
-        java.util.Collections.sort(names);
-        final String key = me.getId() + "|" + c.getName() + "|" + aura + "|" + names;
-        final Object match = live.getMatch() != null ? live.getMatch() : LOOP_CACHE;
+        // loop-probe-1113: one probe per game, seat, card and PARTNER (not per partner list: past LOOP_PARTNERS names the
+        // list depends on the library's order, so every re-dealt or hidden-order copy probed again). The seat's other
+        // readers (the root solver's, the reach's, the choice scorer's) reuse each answer. A probe's time comes out of the
+        // caller's budget (loopDeadline): all the probes of one decision or ask share a quarter of its budget; partners
+        // left unprobed are not cached, and the template is asked again at a later read (at once "no time" until the
+        // next decision opens a new window).
+        final Object match = loopScope(live);
         final java.util.Map<String, java.util.Set<String>> byKey = LOOP_CACHE.computeIfAbsent(match, x -> new java.util.HashMap<>());
+        final String base = me.getId() + "|" + c.getName() + "|" + aura + "|";
         final int probed = partners.size();
+        final long t0 = System.nanoTime();
+        // the window all of this decision's (or ask's) probes share; no caller known yet: one window of LOOP_NANOS
+        final long end = LOOP_DEADLINE.computeIfAbsent(match, x -> t0 + LOOP_NANOS);
+        boolean cut = false;
         synchronized (byKey) {
-            final java.util.Set<String> hit = byKey.get(key);
-            if (hit != null) {
-                t.loopWith.addAll(hit);
-                return;
-            }
             final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getName().hashCode());
-            if (ForcedWinProbe.sandboxWin(live, me, c.getId(), -1, aura, loopLimits(cfg), seed, LOOP_NANOS)) {
+            java.util.Set<String> alone = byKey.get(base);
+            if (alone == null) {
+                final Boolean w = loopProbe(cfg, live, me, c, null, aura, seed, end);
+                if (w == null) {
+                    cut = true;
+                } else {
+                    alone = w ? java.util.Collections.singleton("") : java.util.Collections.emptySet();
+                    byKey.put(base, alone);
+                }
+            }
+            if (alone != null && !alone.isEmpty()) {
                 t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe: wins alone";
-                byKey.put(key, new java.util.TreeSet<>());
                 return;
             }
             partners.sort((x, y) -> x.getName().compareTo(y.getName()));
             for (Card p : partners) {
-                if (ForcedWinProbe.sandboxWin(live, me, c.getId(), p.getId(), aura, loopLimits(cfg), mix(seed, p.getName().hashCode()), LOOP_NANOS)) {
-                    t.loopWith.add(p.getName());
+                java.util.Set<String> hit = byKey.get(base + p.getName());
+                if (hit == null) {
+                    final Boolean w = cut ? null : loopProbe(cfg, live, me, c, p, aura, mix(seed, p.getName().hashCode()), end);
+                    if (w == null) {
+                        cut = true;
+                        continue;
+                    }
+                    hit = w ? java.util.Collections.singleton(p.getName()) : java.util.Collections.emptySet();
+                    byKey.put(base + p.getName(), hit);
                 }
+                t.loopWith.addAll(hit);
             }
-            byKey.put(key, new java.util.TreeSet<>(t.loopWith));
+        }
+        if (cut) {
+            t.loopChecked = false; // asked again at the template's next read, when there is time
         }
         if (RECEIPTS) {
-            receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste);
+            receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste
+                    + (cut ? " cut=true" : "") + " ms=" + (System.nanoTime() - t0) / 1_000_000L);
         }
     }
 
@@ -4803,6 +4883,7 @@ public final class ForcedWinSolver {
         public boolean exhausted, failed;
         public long nanos;
         public String best;
+        // integrate-1110: both lanes added fields here; they are independent, so both sets stay (solver-distill-cc's first)
         /** solver-distill-cc-1109: set when the screen is a {@link #reach} (NaN otherwise). */
         public double reach = Double.NaN;
         /** solver-distill-cc-1109: the {@link #goldfish} value and its earliest line's turn, when one was planned. */
@@ -4817,6 +4898,25 @@ public final class ForcedWinSolver {
         public boolean gfCut;
         /** SETUP: the best line itself (opaque outside this package; {@link #screenSeq} only). */
         Line bestLine;
+        /**
+         * choice-search-1109 (set only when a choice scorer's {@code check} ran on this position; NaN / null otherwise): the
+         * honest win check's p_win over its belief worlds, its label, worlds run, gate and time.
+         */
+        public double pWin = Double.NaN;
+        public String check;
+        public String checkGate;
+        public int checkWorlds = -1;
+        public double checkMs = Double.NaN;
+        /**
+         * choice-search-1109 pass 3 (set only when a choice scorer's relax pass screened this position): the relaxed-planning
+         * distance, the fewest generic relaxations (an extra untapped land of the seat's own; a card drawn from its unknown
+         * library) with which the planner finds a line (-1 = not run, Integer.MAX_VALUE = none within the bound), the share of
+         * the draw samples at that distance with a line, which relaxation, and the screens run.
+         */
+        public int relaxR = -1;
+        public double relaxP = Double.NaN;
+        public String relaxHow;
+        public int relaxScreens;
     }
 
     /**
@@ -5200,6 +5300,18 @@ public final class ForcedWinSolver {
     }
 
     public boolean potential(final Game g, final List<Integer> knownTop, final GoldfishOpts o, final int maxNames,
+            final boolean sig, final long maxNodes) {
+        // integrate-1110: this call's probes (and only they) play a not-started game's sandbox as a started one
+        final boolean prevPreGame = ForcedWinProbe.PRE_GAME.get();
+        ForcedWinProbe.PRE_GAME.set(true);
+        try {
+            return potential0(g, knownTop, o, maxNames, sig, maxNodes);
+        } finally {
+            ForcedWinProbe.PRE_GAME.set(prevPreGame);
+        }
+    }
+
+    private boolean potential0(final Game g, final List<Integer> knownTop, final GoldfishOpts o, final int maxNames,
             final boolean sig, final long maxNodes) {
         try {
             boolean ender = false;
@@ -6819,9 +6931,11 @@ public final class ForcedWinSolver {
      * does. Installed once, at the first line this solver follows; without an active line every answer is null.
      */
     private forge.ai.LineAnswers liveLine;
+    /** owner-misplays-1113 (report only): mode asks of the live seat answered with the followed line's recorded set. */
+    public int lineModeAnswers;
 
     private void liveAnswers() {
-        if (!cfg.tutorCast && !cfg.probeObjects) {
+        if (!cfg.tutorCast && !cfg.probeObjects && !cfg.engineModeChoice) {
             return;
         }
         final PlayerControllerAi pc = PlayerControllerAi.cacOf(me);
@@ -6852,6 +6966,17 @@ public final class ForcedWinSolver {
             public CardCollectionView costCards(final SpellAbility sa, final String part, final CardCollectionView valid,
                     final int amount) {
                 return active == null ? null : active.costCards(sa, valid, amount);
+            }
+
+            @Override
+            public <T> List<T> modes(final SpellAbility sa, final List<T> possible, final int min, final int num) {
+                final List<T> r = active == null ? null : active.modes(sa, possible, min, num, me);
+                if (r != null) {
+                    lineModeAnswers++;
+                    receipt("FORCED_WIN line-modes" + tag() + " turn=" + me.getGame().getPhaseHandler().getTurn() + " card="
+                            + (sa.getHostCard() == null ? "?" : sa.getHostCard().getName()) + " modes=" + r.size() + "/" + possible.size());
+                }
+                return r;
             }
         };
         pc.setLineAnswers(liveLine);
@@ -7020,6 +7145,7 @@ public final class ForcedWinSolver {
             fo.enginePay = cfg.enginePay;
             fo.uncapped = cfg.loopMacro && cfg.loopMacro3; // review #154 S2: its own key
             fo.costLine = cfg.engineCostChoice;
+            fo.modeLine = cfg.engineModeChoice; // owner-misplays-1113
             fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
             fo.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
             fo.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
@@ -7155,6 +7281,26 @@ public final class ForcedWinSolver {
         boolean uncapped;
         /** R3-4 (b), engineCostChoice (false = off): the line's recorded COST answers are replayed (LineAi's CacHook). */
         boolean costLine;
+        /** owner-misplays-1113, engineModeChoice (false = off): the line's recorded MODE answers are replayed. */
+        boolean modeLine;
+
+        /** engineModeChoice: the recorded mode set of the step being cast, for this ask; null = none recorded (not the line's). */
+        <T> List<T> modes(final SpellAbility sa, final List<T> possible, final int min, final int num, final Player me) {
+            if (!modeLine || done || sa == null || possible == null || possible.size() < 2 || sa.getActivatingPlayer() != me) {
+                return null;
+            }
+            final String t = choices.next(ForcedWinChoices.MODE);
+            if (t == null) {
+                return null;
+            }
+            final List<T> r = ForcedWinChoices.applyMode(t, possible, min, num);
+            if (r == null) {
+                choices.misses++;
+            } else {
+                choices.hits++;
+            }
+            return r;
+        }
 
         static final class Next {
             SpellAbility action;
@@ -7367,7 +7513,7 @@ public final class ForcedWinSolver {
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
             floatDone = 0;
-            if (cacLine || costLine) {
+            if (cacLine || costLine || modeLine) {
                 choices = new ForcedWinChoices.Cursor(withFree(st.cacPlayed != null ? st.cacPlayed : st.cac, freeToks));
             }
             n.action = sa;
@@ -7650,6 +7796,18 @@ public final class ForcedWinSolver {
     /** Our seat in a play-out: the line, our counterspells against counters of it, Forge AI for the rest. */
     static final class LineAi extends ForcedWinEngine.GuardedAi {
         Follower f;
+
+        /** owner-misplays-1113 (engineModeChoice): the line's recorded modes for the step being cast, else Forge AI's. */
+        @Override
+        public List<forge.game.spellability.AbilitySub> chooseModeForAbility(SpellAbility sa,
+                List<forge.game.spellability.AbilitySub> possible, int min, int num, boolean allowRepeat) {
+            final List<forge.game.spellability.AbilitySub> r = f == null || allowRepeat ? null : f.modes(sa, possible, min, num, getPlayer());
+            if (r != null) {
+                targetLineModes(r);
+                return r;
+            }
+            return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+        }
         /** kill-line-1106 (verifyReplan; null = off): a fresh line from this world once the line breaks on a later turn. */
         java.util.function.Function<Line, Line> replanner;
         int startTurn;

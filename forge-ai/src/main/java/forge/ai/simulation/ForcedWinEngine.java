@@ -457,6 +457,12 @@ final class ForcedWinEngine {
         /** R3-4 (b) (false = off): an engine move's cost cards branch (COST kind, through MoveAi's own CacHook). */
         boolean costChoice;
         /**
+         * owner-misplays-1113 (false = off): the modes of a modal spell or ability of ours are a choice point of the
+         * move (MODE kind): Forge AI's own set first, then every other legal set as a variant (all of them: a modal
+         * card has few). Without it the search plays a modal spell only with the modes Forge AI would pick.
+         */
+        boolean modeChoice;
+        /**
          * search-bones-1015: our library's known top in the root copy (pile memory); the rest is shuffled there. -1 (the
          * default) keeps the real order.
          */
@@ -805,9 +811,34 @@ final class ForcedWinEngine {
     /** (c) the transposition table: coarse key -> the counter vectors seen. */
     private final java.util.Map<String, List<long[]>> table = new java.util.HashMap<>();
 
+    /**
+     * owner-misplays-1113 (modeChoice only): the modes chosen for the modal items on the stack, "" when there is none.
+     * A move rests with its spell still on the stack, and {@link #coarseKey} does not read the stack, so two variants
+     * of one modal cast that differ only in their modes had one key: the second was pruned as dominated by the first,
+     * before either had resolved. With mode choice points the pending modes are part of the transposition key.
+     */
+    static String stackModes(Game g) {
+        StringBuilder sb = null;
+        for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+            final SpellAbility sa = si.getSpellAbility();
+            if (sa == null || sa.getApi() != forge.game.ability.ApiType.Charm) {
+                continue;
+            }
+            if (sb == null) {
+                sb = new StringBuilder("|m");
+            }
+            sb.append(sa.getHostCard() == null ? "?" : sa.getHostCard().getName()).append(':');
+            for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+                sb.append(sub.getSVarInt("CharmOrder")).append(',');
+            }
+            sb.append(';');
+        }
+        return sb == null ? "" : sb.toString();
+    }
+
     /** (c): true when a seen node dominates this one (it is pruned); else the node is recorded. */
     private boolean seenDominated(Node n) {
-        final String k = coarseKey(n.g, n.me);
+        final String k = lim.modeChoice ? coarseKey(n.g, n.me) + stackModes(n.g) : coarseKey(n.g, n.me);
         final List<long[]> xs = table.computeIfAbsent(k, x -> new ArrayList<>());
         long[] pv0 = n.pv;
         if (lim.focus) {
@@ -4333,8 +4364,8 @@ final class ForcedWinEngine {
             for (int k = 0; k < ranked.size(); k++) {
                 final Step v = (Step) ranked.get(k)[2];
                 final Applied av = (Applied) ranked.get(k)[3];
-                if (k >= lim.cacVariants - 1) {
-                    av.child = null; // dropped by rank: released
+                if (k >= lim.cacVariants - 1 && !ForcedWinChoices.MODE.equals(ForcedWinChoices.kindOf(cands.get((Integer) ranked.get(k)[1])))) {
+                    av.child = null; // dropped by rank: released (owner-misplays-1113: a mode set is never dropped by rank)
                     continue;
                 }
                 moves.add(at++, v);
@@ -4875,7 +4906,7 @@ final class ForcedWinEngine {
                 out.child.diagAid = aid;
                 xk = Integer.toHexString(java.util.Objects.hashCode(out.key)) + (out.child.turn != node.turn ? "t" : "");
                 try {
-                    ck = Integer.toHexString(coarseKey(out.child.g, out.child.me).hashCode());
+                    ck = Integer.toHexString((coarseKey(out.child.g, out.child.me) + (lim.modeChoice ? stackModes(out.child.g) : "")).hashCode());
                 } catch (RuntimeException ex) {
                     ck = "?";
                 }
@@ -4952,6 +4983,11 @@ final class ForcedWinEngine {
                     ai.rec.costOnly = true;
                 }
                 ai.setCacHook(ai.costHook());
+            }
+            if (lim.modeChoice && ai.rec == null) {
+                // owner-misplays-1113: only the kinds with their own switch record (MODE here; COST with costChoice)
+                ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap);
+                ai.rec.costOnly = true;
             }
             // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
             // (bvw-step1-build-1024: none with budget=counter: no wall and no deadline, so per-move maxSteps bounds it)
@@ -5100,6 +5136,37 @@ final class ForcedWinEngine {
                     return def;
                 }
             };
+        }
+
+        /** owner-misplays-1113 (modeChoice): our modal spell's modes are a choice point: forced, or Forge AI's and recorded. */
+        @Override
+        public List<forge.game.spellability.AbilitySub> chooseModeForAbility(SpellAbility sa,
+                List<forge.game.spellability.AbilitySub> possible, int min, int num, boolean allowRepeat) {
+            if (rec == null || !lim.modeChoice || allowRepeat || possible == null || possible.size() < 2 || sa == null
+                    || sa.getActivatingPlayer() != getPlayer()) {
+                return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            }
+            final String t = rec.at(ForcedWinChoices.MODE);
+            if (t != null) {
+                final List<forge.game.spellability.AbilitySub> r = ForcedWinChoices.applyMode(t, possible, min, num);
+                if (r != null) {
+                    rec.played(t);
+                    targetLineModes(r);
+                    return r;
+                }
+                rec.miss = true;
+            }
+            final List<forge.game.spellability.AbilitySub> def = super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            if (def == null || def.isEmpty()) {
+                return def;
+            }
+            final String dt = ForcedWinChoices.modeTok(def, possible);
+            if (rec.forcedPoint()) {
+                rec.played(dt);
+            } else {
+                rec.free(ForcedWinChoices.modes(possible.size(), min, num, dt, rec.cap), dt);
+            }
+            return def;
         }
 
         /** An own-zone pick of ours (LibraryPicks' scope, every pick of the move, not only the first). */

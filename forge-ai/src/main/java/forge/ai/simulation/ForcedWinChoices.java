@@ -44,6 +44,71 @@ final class ForcedWinChoices {
     private ForcedWinChoices() {
     }
 
+    /**
+     * owner-misplays-1113 (engineModeChoice): the modes of a modal spell or ability of ours, by their indices among the
+     * offered ones in the offered order ({@code mode:0;2}). The offered list is the card's own mode order, the same in
+     * every copy. With it a line can need "this mode and no other" (a mode set also fixes the costs that count modes).
+     */
+    static final String MODE = "mode";
+
+    static String modeTok(final List<?> chosen, final List<?> possible) {
+        final List<Integer> ix = new ArrayList<>();
+        for (Object c : chosen) {
+            final int i = possible.indexOf(c);
+            if (i >= 0 && !ix.contains(i)) {
+                ix.add(i);
+            }
+        }
+        Collections.sort(ix);
+        final StringBuilder sb = new StringBuilder(MODE).append(':');
+        for (int k = 0; k < ix.size(); k++) {
+            sb.append(k == 0 ? "" : ";").append(ix.get(k));
+        }
+        return sb.toString();
+    }
+
+    /** Every set of {@code min..num} distinct modes of {@code n}: Forge AI's own first, then the fewest modes first. */
+    static List<String> modes(final int n, final int min, final int num, final String def, final int cap) {
+        final List<String> out = new ArrayList<>();
+        out.add(def);
+        final int lo = Math.max(1, min), hi = Math.min(n, Math.max(lo, num));
+        for (int size = lo; size <= hi; size++) {
+            for (int mask = 1; mask < (1 << Math.min(n, 12)); mask++) {
+                if (Integer.bitCount(mask) != size) {
+                    continue;
+                }
+                final StringBuilder sb = new StringBuilder(MODE).append(':');
+                boolean first = true;
+                for (int i = 0; i < n; i++) {
+                    if ((mask & (1 << i)) != 0) {
+                        sb.append(first ? "" : ";").append(i);
+                        first = false;
+                    }
+                }
+                add(out, sb.toString(), cap);
+            }
+        }
+        return out;
+    }
+
+    /** A mode token's modes among the offered ones (in the offered order), or null when it does not fit this ask. */
+    static <T> List<T> applyMode(final String tok, final List<T> possible, final int min, final int num) {
+        final List<T> out = new ArrayList<>();
+        for (String s : split(payload(tok))) {
+            final int i;
+            try {
+                i = Integer.parseInt(s);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+            if (i < 0 || i >= possible.size() || out.contains(possible.get(i))) {
+                return null;
+            }
+            out.add(possible.get(i));
+        }
+        return out.size() < Math.max(1, min) || out.size() > Math.max(min, num) ? null : out;
+    }
+
     static String kindOf(final String tok) {
         final int i = tok.indexOf(':');
         return i < 0 ? tok : tok.substring(0, i);

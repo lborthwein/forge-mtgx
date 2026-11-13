@@ -24,4 +24,12 @@ public interface LineAnswers {
 
     /** The cards of a cost part of {@code sa} (all of them in {@code valid}, {@code amount} of them), or null. */
     CardCollectionView costCards(SpellAbility sa, String part, CardCollectionView valid, int amount);
+
+    /**
+     * owner-misplays-1113 (the solver's engineModeChoice): the modes of a modal spell or ability the line casts, among
+     * {@code possible} (between {@code min} and {@code num} of them), as the line was verified with; null = not the line's.
+     */
+    default <T> java.util.List<T> modes(SpellAbility sa, java.util.List<T> possible, int min, int num) {
+        return null;
+    }
 }
