@@ -237,7 +237,13 @@ public final class InteractiveHost {
         };
     }
 
-    /** A game's stdout side of its connection, safe beside a parked {@link #inputOf} read. */
+    /**
+     * A game's stdout side of its connection, safe beside a parked {@link #inputOf} read. Lane shared-host-live-1113: a
+     * socket channel is interruptible, so a write from a thread whose interrupt flag is set would close the whole
+     * game's connection (ClosedByInterruptException) where a lone JVM's fd 1 / fd 2 write goes through. The AI-timeout
+     * path cancels its eval thread with {@code future.cancel(true)}, and that thread still prints into its game. So
+     * the flag is held off for the write and put back after it.
+     */
     static OutputStream outputOf(final WritableByteChannel channel) {
         return new OutputStream() {
             @Override
@@ -248,8 +254,15 @@ public final class InteractiveHost {
             @Override
             public void write(final byte[] b, final int off, final int len) throws IOException {
                 final ByteBuffer buffer = ByteBuffer.wrap(b, off, len);
-                while (buffer.hasRemaining()) {
-                    channel.write(buffer);
+                final boolean interrupted = Thread.interrupted();
+                try {
+                    while (buffer.hasRemaining()) {
+                        channel.write(buffer);
+                    }
+                } finally {
+                    if (interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
             }
         };
@@ -298,10 +311,13 @@ public final class InteractiveHost {
             if (broken) {
                 return false;
             }
+            // one write per frame (lane shared-host-live-1113): a thread stopped between writes leaves no half frame
+            final byte[] whole = new byte[len + 2];
+            whole[0] = (byte) kind;
+            System.arraycopy(line, 0, whole, 1, len);
+            whole[len + 1] = '\n';
             try {
-                raw.write(kind);
-                raw.write(line, 0, len);
-                raw.write('\n');
+                raw.write(whole);
                 raw.flush();
                 return true;
             } catch (IOException e) {
