@@ -88,6 +88,21 @@ import forge.game.spellability.SpellAbility;
  */
 public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.SearchHooks, LookaheadSearch.ChoiceExpander {
 
+    /**
+     * searchspeed-1113: the race's named counters on a searched decision's log row, only with the key on ({@code race}
+     * > 0; off: the row is untouched). {@code race} = the key's value; {@code raceStopped} = the candidates stopped
+     * after the race's first stage; {@code racePlayoutsSaved} = the play-out slots never started because of the race
+     * (a slot the budget cut is not one of them). Both 0 for a decision the race did not apply to. The seat's totals
+     * are in the search summary ({@code raceDecisions}, {@code raceStopped}, {@code racePlayoutsSaved}).
+     */
+    public static void raceRow(final JsonObject row, final int race, final LookaheadSearch.GivenResult r) {
+        if (race > 0) {
+            row.addProperty("race", race);
+            row.addProperty("raceStopped", r.raceStopped);
+            row.addProperty("racePlayoutsSaved", r.racePlayoutsSaved);
+        }
+    }
+
     /** The arm's search spec (RlActorBench config key {@code search}). */
     public static final class Config {
         public int worlds = 8;
@@ -2062,6 +2077,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 vw.add(w);
             }
             row.add("values", vw);
+            raceRow(row, cfg.race, r); // searchspeed-1113 (race off: nothing)
             if (cfg.choices > 0) {
                 // S-t: per searched candidate, its macro (-1 = a base candidate), and every macro's schedule
                 final JsonArray mi = new JsonArray();

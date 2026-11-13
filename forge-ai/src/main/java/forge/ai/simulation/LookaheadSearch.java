@@ -2541,6 +2541,12 @@ public final class LookaheadSearch {
         public boolean proven;
         /** S-b: over the budget, the number of worlds every candidate finished in that decided (0 = all, or capped). */
         public int partialWorlds;
+        /**
+         * searchspeed-1113 (race; both 0 without a race in this decision): the candidates the race stopped after its first
+         * stage (not the default), and the play-out slots never started because of the race (not budget cuts; when
+         * every candidate was stopped, the default's later worlds count too).
+         */
+        public int raceStopped, racePlayoutsSaved;
         /** J1 (block-search-1019): the label of the candidate this decision played (the default's unless it departed). */
         public String played;
         /** J1: an {@link AiReplay} mark made this decision play the live choice / named a choice that was not a candidate. */
@@ -3022,6 +3028,8 @@ public final class LookaheadSearch {
             throw new IllegalStateException("S-t: expanding choices needs policy play-outs");
         }
         final GivenResult res = new GivenResult();
+        raceStoppedNow = 0; // searchspeed-1113
+        raceSavedNow = 0;
         decisionForce = forcePlayed;
         forcePlayed = null;
         final java.util.function.IntPredicate bump = testBump;
@@ -3248,6 +3256,8 @@ public final class LookaheadSearch {
         } finally {
             forceFidelity = false;
         }
+        res.raceStopped = raceStoppedNow; // searchspeed-1113 (0 without a race)
+        res.racePlayoutsSaved = raceSavedNow;
         // unified-search-1106 (anytime): which play-outs finished; null = the plain path
         final boolean[][] finished = proof && cfg.anytime ? finishedWorlds(outs, n, k) : null;
         if (finished != null) {
@@ -5082,6 +5092,8 @@ public final class LookaheadSearch {
     // ---- searchspeed-1113: racing with paired worlds (Config.race; all three fields idle unless a race is on)
     private int raceLo = 0, raceHi = Integer.MAX_VALUE;
     private boolean[] raceAlive;
+    /** The decision in progress: candidates the race stopped, slots it never started ({@link GivenResult#raceStopped}). */
+    private int raceStoppedNow, raceSavedNow;
 
     /** Is play-out (c, w) outside the stage being played? Always false without a race. */
     private boolean raceSkip(int c, int w) {
@@ -5102,6 +5114,8 @@ public final class LookaheadSearch {
             raceLo = 0;
             raceHi = race;
             raceAlive = null;
+            raceStoppedNow = 0; // (a fidelity redo plays the race again: the last one counts)
+            raceSavedNow = 0;
             int aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
             stats.raceDecisions++;
             if (aborted > 0 || pastDeadline()) {
@@ -5142,8 +5156,12 @@ public final class LookaheadSearch {
             if (na == 0) {
                 stats.raceStopped++;
                 stats.racePlayoutsSaved += (long) n * (k - race);
+                raceStoppedNow = n - 1;
+                raceSavedNow = n * (k - race);
             } else {
                 stats.racePlayoutsSaved += (long) (n - 1 - na) * (k - race);
+                raceStoppedNow = n - 1 - na;
+                raceSavedNow = (n - 1 - na) * (k - race);
                 raceLo = race;
                 raceHi = k;
                 raceAlive = alive;
@@ -7748,6 +7766,8 @@ public final class LookaheadSearch {
     public GivenResult decideBlocks(Game live, Player me, List<Map<Integer, List<Integer>>> plans, List<String> labels,
             long startNanos) {
         final GivenResult res = new GivenResult();
+        raceStoppedNow = 0; // searchspeed-1113
+        raceSavedNow = 0;
         decisionForce = forcePlayed;
         forcePlayed = null;
         stats.s1On = true;
