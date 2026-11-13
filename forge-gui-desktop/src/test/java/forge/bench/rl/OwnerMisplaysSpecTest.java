@@ -6,10 +6,11 @@ import org.testng.annotations.Test;
 import com.google.gson.JsonObject;
 
 /**
- * owner-misplays-1113: the three keys this branch adds to what the live policy-search string may hold, all absent = off:
+ * owner-misplays-1113: the four keys this branch adds to what the live policy-search string may hold, all absent = off:
  * {@code plans.solverCfg.planLoops} (the planner screens count a copy loop), {@code plans.solverCfg.engineModeChoice}
  * (a modal spell's modes are a choice point of the engine search, bound in the line), {@code choiceScorer.reachDiscards}
- * (the seat's own discards and card costs get the card scorer's reach blend). Configs only: no game, no card database.
+ * (the seat's own discards and card costs get the card scorer's reach blend), {@code choiceScorer.redealOwn} (an
+ * ask whose replay draws from our own library is answered on re-dealt copies, not left to the policy). Configs only: no game, no card database.
  */
 public class OwnerMisplaysSpecTest {
 
@@ -25,6 +26,8 @@ public class OwnerMisplaysSpecTest {
         Assert.assertFalse(solverCfg(SHIP).has("planLoops"));
         Assert.assertFalse(solverCfg(SHIP).has("engineModeChoice"));
         Assert.assertFalse(c.choiceScorer.has("reachDiscards"));
+        Assert.assertFalse(c.choiceScorer.has("redealOwn"));
+        Assert.assertEquals(ChoiceScorer.Config.parse(c.choiceScorer).redealOwn, 0);
         Assert.assertFalse(PlanSearch.Spec.parse(c.plans).solverConfig().planLoops);
         Assert.assertFalse(PlanSearch.Spec.parse(c.plans).solverConfig().engineModeChoice);
     }
@@ -32,11 +35,13 @@ public class OwnerMisplaysSpecTest {
     @Test
     public void eachKeyParsesAndReachesItsConfig() {
         final RlSearch.Config c = RlLiveSeat.Spec.parse(SHIP + ",plans.solverCfg.planLoops=true,plans.solverCfg.engineModeChoice=true,"
-                + "choiceScorer.reachDiscards=true").search;
+                + "choiceScorer.reachDiscards=true,choiceScorer.redealOwn=4").search;
         Assert.assertTrue(PlanSearch.Spec.parse(c.plans).solverConfig().planLoops);
         Assert.assertTrue(PlanSearch.Spec.parse(c.plans).solverConfig().engineModeChoice);
         final ChoiceScorer.Config sc = ChoiceScorer.Config.parse(c.choiceScorer);
         Assert.assertTrue(sc.reachDiscards);
+        Assert.assertEquals(sc.redealOwn, 4);
+        Assert.assertEquals(sc.toJson().get("redealOwn").getAsInt(), 4);
         Assert.assertTrue(sc.families.contains(RlSchema.F_DISCARD_FROM) && sc.families.contains(RlSchema.F_COST_CARDS),
                 "reachDiscards adds the discard and card-cost families: " + sc.families);
     }

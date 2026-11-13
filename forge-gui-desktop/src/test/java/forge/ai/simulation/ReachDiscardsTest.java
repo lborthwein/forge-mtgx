@@ -80,12 +80,29 @@ public class ReachDiscardsTest extends AITest {
     }
 
     static ChoiceScorer scorer(final boolean on) {
+        return scorer(on, 0, null);
+    }
+
+    /**
+     * owner-misplays-1113: {@code redeal} = choiceScorer.redealOwn (0 = off), {@code solverExtra} = more solver keys set
+     * true (null = none).
+     */
+    static ChoiceScorer scorer(final boolean on, final int redeal, final String[] solverExtra) {
         final JsonObject o = JsonParser.parseString(BLOCK).getAsJsonObject();
         if (on) {
             o.addProperty("reachDiscards", true);
         }
+        if (redeal > 0) {
+            o.addProperty("redealOwn", redeal);
+        }
         final ChoiceScorer.Config cfg = ChoiceScorer.Config.parse(o);
-        cfg.solverCfg = ForcedWinSolver.Config.fromProps(SOLVER::get);
+        final Map<String, String> sv = new HashMap<>(SOLVER);
+        if (solverExtra != null) {
+            for (String k : solverExtra) {
+                sv.put(k, "true");
+            }
+        }
+        cfg.solverCfg = ForcedWinSolver.Config.fromProps(sv::get);
         return new ChoiceScorer(cfg, index(), 2, 77L);
     }
 
@@ -205,10 +222,14 @@ public class ReachDiscardsTest extends AITest {
 
     /** Bazaar of Baghdad's discard, posed in the live resolution; {@code on} = the key. */
     private static Ask bazaar(final boolean on, final String lib, final double[] value) {
+        return bazaar(on, 0, lib, value);
+    }
+
+    private static Ask bazaar(final boolean on, final int redeal, final String lib, final double[] value) {
         final Game g = game("Doomsday;Grizzly Bears;Balduvian Bears", "Bazaar of Baghdad;Underground Sea;Watery Grave",
                 "Island;Island;" + lib, "MAIN1");
         final Player me = g.getPlayers().get(0);
-        final ChoiceScorer sc = scorer(on);
+        final ChoiceScorer sc = scorer(on, redeal, null);
         final RlKnowledge know = know(g);
         final Ask[] out = new Ask[1];
         me.dangerouslySetController(new PlayerControllerAi(g, me, me.getController().getLobbyPlayer()) {
@@ -250,8 +271,11 @@ public class ReachDiscardsTest extends AITest {
 
     @Test
     public void aBazaarStyleDiscardKeepsDoomsdayWhenTheGoldfishSeesALineThroughIt() {
-        final Ask a = bazaar(true, KILL, null);
+        // owner-misplays-1113: with the live own-library guard (hideOwnLibrary) the replay of a draw-then-discard is
+        // answered on re-dealt copies (redealOwn); without them the ask is refused (ownHidden: next test)
+        final Ask a = bazaar(true, 4, KILL, null);
         Assert.assertNull(a.s.unsupported, a.dump());
+        Assert.assertEquals(a.s.redeal, 4, a.dump());
         Assert.assertTrue(a.s.reachDiscards);
         ChoiceScorer.Option own = null;
         for (ChoiceScorer.Option o : a.s.options) {
@@ -291,9 +315,19 @@ public class ReachDiscardsTest extends AITest {
     }
 
     @Test
+    public void withTheOwnLibraryGuardAndNoRedealTheDrawThenDiscardIsThePolicys() {
+        // owner-misplays-1113: the ship's guard (sdcc-leak-1111) refuses a replay that drew from our real library; this
+        // is why the reachDiscards key alone never moved a loot's discard in the owner's G16 replays
+        final Ask a = bazaar(true, 0, KILL, null);
+        Assert.assertEquals(a.s.unsupported, "ownHidden", a.dump());
+        Assert.assertNull(a.alt);
+        Assert.assertEquals(a.s.redeal, 0);
+    }
+
+    @Test
     public void withNoLineAnywhereThePolicysDiscardStandsWhateverTheValueSays() {
         // the same ask with no kill in the library; the leaf value prefers the first swap by 0.4 (far above margin)
-        final Ask a = bazaar(true, NOKILL, new double[] {0.3, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7});
+        final Ask a = bazaar(true, 4, NOKILL, new double[] {0.3, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7});
         Assert.assertNull(a.s.unsupported, a.dump());
         Assert.assertTrue(a.s.options.size() > 1, a.dump());
         for (ChoiceScorer.Option o : a.s.options) {
@@ -455,5 +489,70 @@ public class ReachDiscardsTest extends AITest {
         final JsonObject both = JsonParser.parseString(BLOCK).getAsJsonObject();
         both.addProperty("lineOnly", true);
         Assert.assertThrows(IllegalArgumentException.class, () -> ChoiceScorer.Config.parse(both));
+    }
+
+    // ------------------------------------------------------------------ owner-misplays-1113: the owner's G16 discard
+
+    /**
+     * A draw-then-discard of one card from a creature's tap ability (the stand-in for the owner's G16 vehicle loot: the
+     * same ask, a DISCARD_FROM of the seat's own hand after a draw), posed in the live resolution. The policy discards
+     * {@code policy}; the library's top card is drawn. {@code solverExtra}: solver keys set true.
+     */
+    private static Ask loot(final int redeal, final String hand, final String battlefield, final String lib, final String policy,
+            final String[] solverExtra) {
+        final Game g = game(hand, battlefield, lib, "MAIN2");
+        final Player me = g.getPlayers().get(0);
+        final ChoiceScorer sc = scorer(true, redeal, solverExtra);
+        final RlKnowledge know = know(g);
+        final Ask[] out = new Ask[1];
+        me.dangerouslySetController(new PlayerControllerAi(g, me, me.getController().getLobbyPlayer()) {
+            @Override
+            public CardCollection chooseCardsToDiscardFrom(final Player p, final SpellAbility sa,
+                    final CardCollection validCards, final int min, final int max, final CardCollectionView visible) {
+                final RlCandidates.Menu m = RlCandidates.build(g, me, "chooseCardsToDiscardFrom", "discardFrom", body(min, max),
+                        new Object[] {validCards, sa, p});
+                final short[] greedy = steps(validCards, policy);
+                sc.setAskPlayer(p);
+                out[0] = ask(sc, g, me, m, greedy, know, sa, validCards, null);
+                final CardCollection live = new CardCollection();
+                live.add(find(me, ZoneType.Hand, policy));
+                return live;
+            }
+        });
+        SpellAbility draw = null;
+        for (SpellAbility sa : find(me, ZoneType.Battlefield, "Merfolk Looter").getSpellAbilities()) {
+            if (sa.getApi() == forge.game.ability.ApiType.Draw) {
+                draw = sa;
+            }
+        }
+        Assert.assertNotNull(draw, "the loot ability");
+        draw.setActivatingPlayer(me);
+        Assert.assertTrue(((PlayerControllerAi) me.getController()).playChosenSpellAbility(draw), "activate");
+        MyRandom.setRandom(new Random(42));
+        g.getStack().resolveStack();
+        Assert.assertNotNull(out[0], "the discard was asked");
+        return out[0];
+    }
+
+    /** G16's board: the creature in play, one source of the Aura's colour, the land drawn is the second source. */
+    static final String G16_BOARD = "Mountain;Island;Island;Island;Island;Swamp;Pestermite;Baleful Strix;Merfolk Looter";
+    static final String G16_LIB = "Badlands;" + OwnerMisplaysTest.G16_LIB;
+
+    /**
+     * G16 (owner game D066, seat 1, step 48): the policy discarded the Aura (0.643) and kept the land. With the loop screen
+     * (solver planLoops), reachDiscards and the re-deal, the answer moves to discarding the land: keeping the Aura has a
+     * line over the next draws, keeping the land has none. Without the re-deal the ask stays the policy's (ownHidden).
+     */
+    @Test
+    public void g16TheLootKeepsTheAuraWithTheRedeal() {
+        final String[] loops = {"planLoops"};
+        final Ask off = loot(0, "Splinter Twin", G16_BOARD, G16_LIB, "Splinter Twin", loops);
+        Assert.assertEquals(off.s.unsupported, "ownHidden", off.dump());
+        Assert.assertNull(off.alt);
+        final Ask a = loot(4, "Splinter Twin", G16_BOARD, G16_LIB, "Splinter Twin", loops);
+        Assert.assertNull(a.s.unsupported, a.dump());
+        Assert.assertEquals(a.s.redeal, 4);
+        Assert.assertNotNull(a.alt, "the answer moves: " + a.dump());
+        Assert.assertEquals(a.altNames, List.of("Badlands"), "the land is discarded, the Aura kept: " + a.dump());
     }
 }

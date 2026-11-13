@@ -142,11 +142,22 @@ public final class ChoiceScorer {
          * policy's discard stands (the value alone never moves a discard). Other CARDS asks are untouched.
          */
         public boolean reachDiscards = false;
+        /**
+         * owner-misplays-1113 (0 = off, the default, and then nothing changes): an ask whose replay draws from the seat's
+         * own library (the hidden guard's "ownHidden": a loot's discard, a put-back, a cost paid mid-resolution) is not left
+         * to the policy alone. Each option is replayed on this many copies whose own library cards the seat does not know
+         * are re-dealt (a seeded shuffle among their own places; cards whose place it knows stay); the option's value is the
+         * mean over the re-deals and its reach part the mean reach. The re-deal is the seat's own hidden information
+         * sampled, never the real order and never the opponent's cards (their hidden guard is unchanged).
+         */
+        public int redealOwn = 0;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
                 "settleSteps", "margin", "noDecline", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig",
                 // choice-search-1109 (lineOnly, relax), integrate-1110 (reachDiscards): ported by owner-misplays-1113, all off by default
-                "lineOnly", "check", "checkTop", "subsetCap", "relax", "relaxTop", "relaxMs", "relaxDraws", "reachDiscards"));
+                "lineOnly", "check", "checkTop", "subsetCap", "relax", "relaxTop", "relaxMs", "relaxDraws", "reachDiscards",
+                // owner-misplays-1113, off by default
+                "redealOwn"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -226,6 +237,10 @@ public final class ChoiceScorer {
                 throw new IllegalArgumentException("choiceScorer: lineOnly / check together with reachAlpha or seqs is not defined");
             }
             if (o.has("reachDiscards")) c.reachDiscards = o.get("reachDiscards").getAsBoolean();
+            if (o.has("redealOwn")) c.redealOwn = o.get("redealOwn").getAsInt();
+            if (c.redealOwn < 0 || c.redealOwn > 64) {
+                throw new IllegalArgumentException("choiceScorer: redealOwn must be 0..64");
+            }
             if (c.reachDiscards) {
                 // integrate-1110: the blend's own keys must be on; the two families are asked without naming them
                 if (!(c.reachAlpha > 0) || c.screenNodes <= 0) {
@@ -304,6 +319,9 @@ public final class ChoiceScorer {
                 o.addProperty("checkTop", checkTop);
                 o.addProperty("subsetCap", subsetCap);
             }
+            if (redealOwn > 0) {
+                o.addProperty("redealOwn", redealOwn); // owner-misplays-1113: only when on
+            }
             if (relax > 0) {
                 // choice-search-1109 pass 3: written only when on
                 o.addProperty("relax", relax);
@@ -328,6 +346,9 @@ public final class ChoiceScorer {
         public double value = Double.NaN;
         /** Further picks of this resolution Forge AI answered. */
         public int tail;
+        /** owner-misplays-1113 ({@link Config#redealOwn}): the reach parts summed over the re-deals, and their count. */
+        double redealReach;
+        int redealReachN;
         public forge.ai.simulation.ForcedWinSolver.Screen screen;
         /** choice-search-1109 pass 3: this option's first-pass apply time (copy, settle, screen), the relax order. */
         public long passNanos;
@@ -355,6 +376,8 @@ public final class ChoiceScorer {
         public boolean relaxDeparted;
         /** integrate-1110: this ask is one of {@link Config#reachDiscards}'s (a discard of the seat's own, answered by the blend). */
         public boolean reachDiscards;
+        /** owner-misplays-1113: re-deals each option was replayed on (0 = the ask was answered on the real order). */
+        public int redeal;
     }
 
     /** Frames at most for one opening-hand ask. */
@@ -363,6 +386,8 @@ public final class ChoiceScorer {
     private boolean guardSwap = false;
     /** sdcc-leak-1111: the guard's second probe, our own unknown library cards reversed ({@link #swapOwnHidden}). */
     private boolean guardSwapOwn = false;
+    /** owner-misplays-1113: while >= 0, every copy's unknown own library is re-dealt with this seed ({@link #redealOwnHidden}). */
+    private long redealSeed = -1;
     private Object screenReader;
     private int pileSeen = 0;
     /** The chosen pile of the resolution in progress (top first), and the picks already given; null when none. */
@@ -399,6 +424,9 @@ public final class ChoiceScorer {
                 if (guardSwapOwn) {
                     swapOwnHidden(copy, me, k); // sdcc-leak-1111
                 }
+                if (redealSeed >= 0) {
+                    redealOwnHidden(copy, me, k, redealSeed); // owner-misplays-1113
+                }
                 k.attach();
                 final RlFeaturizer f = new RlFeaturizer(index);
                 f.setVersion(obsVersion);
@@ -414,9 +442,12 @@ public final class ChoiceScorer {
                 final RlKnowledge k = ((RlFeaturizer) ctx).knowledge();
                 final int seat = k.seatOf(me);
                 final java.util.Set<Integer> out = new java.util.HashSet<>();
-                for (Card c : me.getCardsIn(ZoneType.Library)) {
-                    if (seat < 0 || !k.knows(seat, c)) {
-                        out.add(c.getId());
+                if (redealSeed < 0) {
+                    // owner-misplays-1113: on a re-dealt copy our library's order is a sample, not the real one
+                    for (Card c : me.getCardsIn(ZoneType.Library)) {
+                        if (seat < 0 || !k.knows(seat, c)) {
+                            out.add(c.getId());
+                        }
                     }
                 }
                 for (Player o : g.getPlayers()) {
@@ -1031,6 +1062,35 @@ public final class ChoiceScorer {
         me.getZone(ZoneType.Library).setCards(out);
     }
 
+    /**
+     * owner-misplays-1113 ({@link Config#redealOwn}): our own library cards whose place the seat does not know, shuffled
+     * among their own positions with {@code seed} (the cards it knows stay). Reads only what the seat may: which cards are
+     * in its library (its decklist minus what it has seen elsewhere), never their real order.
+     */
+    static void redealOwnHidden(final Game g, final Player me, final RlKnowledge k, final long seed) {
+        final int seat = k.seatOf(me);
+        final List<Card> lib = new ArrayList<>(new forge.game.card.CardCollection(me.getCardsIn(ZoneType.Library)));
+        final List<Integer> at = new ArrayList<>();
+        for (int i = 0; i < lib.size(); i++) {
+            if (seat < 0 || !k.knows(seat, lib.get(i))) {
+                at.add(i);
+            }
+        }
+        if (at.size() < 2) {
+            return;
+        }
+        final List<Card> pool = new ArrayList<>();
+        for (int i : at) {
+            pool.add(lib.get(i));
+        }
+        java.util.Collections.shuffle(pool, new java.util.Random(seed));
+        final List<Card> out = new ArrayList<>(lib);
+        for (int j = 0; j < at.size(); j++) {
+            out.set(at.get(j), pool.get(j));
+        }
+        me.getZone(ZoneType.Library).setCards(out);
+    }
+
     /** sdcc-leak-1111: the own-library guard is on with the solver's hideOwnLibrary (and not hiddenOrderLegacy). */
     private boolean ownGuard() {
         return cfg.solverCfg != null && cfg.solverCfg.hideHidden();
@@ -1041,6 +1101,7 @@ public final class ChoiceScorer {
             final RlKnowledge know, final long seed, final SpellAbility askSa) {
         final Scored s = new Scored();
         final long t0 = System.nanoTime();
+        redealSeed = -1;
         if (cfg.relax <= 0) {
             screenReader = null; // one reader per ask: its probes are of this position's copies
         } // choice-search-1109 pass 3: with relax, one reader per game (the solver's readerPerGame; affordances by card)
@@ -1111,6 +1172,10 @@ public final class ChoiceScorer {
             } finally {
                 noCheck = false;
                 guardProbe = false;
+            }
+            if ("ownHidden".equals(s.unsupported) && cfg.redealOwn > 0) {
+                s.unsupported = null; // owner-misplays-1113: answered on re-dealt copies (run)
+                s.redeal = cfg.redealOwn;
             }
             if (s.reachDiscards && s.unsupported != null) {
                 return; // integrate-1110: a discard is never answered as a pile or a sequence
@@ -1425,6 +1490,27 @@ public final class ChoiceScorer {
     private void run(final Game g, final Player me, final List<Integer> picks, final long seed,
             final ChoiceApply.Frames fr, final Option o, final Scored s) {
         final long t = System.nanoTime();
+        if (s.redeal > 0) {
+            // owner-misplays-1113: one replay a re-deal of our unknown library; frames grouped by re-deal (value = mean)
+            try {
+                for (int w = 0; w < s.redeal && o.fail == null; w++) {
+                    redealSeed = forge.ai.simulation.LookaheadSearch.mix(seed, 0x0e1d + w) & Long.MAX_VALUE;
+                    final ChoiceApply.Result r = apply(g, me, picks, seed, fr);
+                    if (r.screen != null && !Double.isNaN(r.screen.reach)) {
+                        o.redealReach += r.screen.reach;
+                        o.redealReachN++;
+                    }
+                    note(r, o, s, w);
+                }
+            } finally {
+                redealSeed = -1;
+            }
+            if (o.screen != null && o.redealReachN > 0) {
+                o.screen.reach = o.redealReach / o.redealReachN;
+            }
+            o.passNanos = System.nanoTime() - t;
+            return;
+        }
         final ChoiceApply.Result r = apply(g, me, picks, seed, fr);
         o.passNanos = System.nanoTime() - t;
         note(r, o, s, 0);
@@ -1850,6 +1936,9 @@ public final class ChoiceScorer {
         }
         if (s.reachDiscards) {
             r.addProperty("reach_discards", true); // integrate-1110
+        }
+        if (s.redeal > 0) {
+            r.addProperty("redeal", s.redeal); // owner-misplays-1113
         }
         if (cfg.relax > 0) {
             r.addProperty("relaxed", s.relaxed);
