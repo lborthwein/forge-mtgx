@@ -139,6 +139,25 @@ public class UntestedKeysSpecTest {
         System.out.println("UNTESTEDKEYS bench spec " + file + " == ship string + " + adds);
     }
 
+    /** lookahead holdDeploy (untested-keys-1113): absent and false give the same search config; true reaches it; bad values refused. */
+    @Test
+    public void holdDeployIsOffUnlessSet() {
+        final RlSearch.Config off = RlLiveSeat.Spec.parse(SHIP).search, f = RlLiveSeat.Spec.parse(SHIP + ",holdDeploy=false").search;
+        Assert.assertFalse(off.holdDeploy);
+        Assert.assertEquals(f.toJson().toString(), off.toJson().toString());
+        Assert.assertFalse(off.toJson().has("holdDeploy"));
+        final RlSearch.Config on = RlLiveSeat.Spec.parse(SHIP + ",holdDeploy=true").search;
+        Assert.assertTrue(on.holdDeploy && on.toJson().get("holdDeploy").getAsBoolean());
+        for (String bad : new String[] {"holdDeploy=1", "holdDeploy=yes", "holdDeploy=TRUE"}) {
+            try {
+                RlLiveSeat.Spec.parse(SHIP + "," + bad);
+                Assert.fail("accepted " + bad);
+            } catch (IllegalArgumentException expected) {
+                // true or false only
+            }
+        }
+    }
+
     @Test
     public void badValuesAndTwiceAreRefused() {
         for (String bad : new String[] {"plans.solverCfg.engineAnyWindow=1", "plans.solverCfg.engineFocus=yes",

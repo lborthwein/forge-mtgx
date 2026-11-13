@@ -16,6 +16,7 @@ import forge.game.card.CardState;
 import forge.game.card.CounterType;
 import forge.game.event.GameEventTurnBegan;
 import forge.game.phase.PhaseHandler;
+import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
 import forge.game.spellability.SpellAbility;
@@ -90,6 +91,18 @@ public final class LookaheadSearch {
          * their end step is never cut by Forge's own ordering.
          */
         public int offTurnBreadth = 0;
+        /**
+         * untested-keys-1113 (holdDeploy; false = off, the default, and then nothing changes): "hold, then deploy". At a
+         * searched priority decision in our main phase or on the opponent's turn (empty stack, pass among the candidates),
+         * every distinct permanent spell on offer that Forge's own timing check lets us cast at instant speed
+         * ({@link SpellAbility#withFlash}) adds candidates "pass now, then cast it at the opponent's beginning of combat"
+         * and "... at their end step" (the windows of their next turn not yet reached). Their play-outs answer PASS at our
+         * priority until the window, cast the card there if it is castable, and are the policy's from then on (policy
+         * play-outs only; same worlds and streams as the other candidates). Played live as a pass.
+         */
+        public boolean holdDeploy = false;
+        /** holdDeploy: at most this many such candidates a decision (in the given list's order). */
+        public int holdDeployMax = 4;
         public int horizonTurns = 2;
         public int maxSteps = 5000;
         public long seed = 0L;
@@ -507,6 +520,10 @@ public final class LookaheadSearch {
             if (offTurnBreadth > 0) {
                 o.addProperty("offTurnBreadth", offTurnBreadth); // endstep-rows-1103: only when on
             }
+            if (holdDeploy) {
+                o.addProperty("holdDeploy", true); // untested-keys-1113: only when on
+                o.addProperty("holdDeployMax", holdDeployMax);
+            }
             o.addProperty("horizonTurns", horizonTurns);
             o.addProperty("maxSteps", maxSteps);
             o.addProperty("seed", seed);
@@ -679,6 +696,8 @@ public final class LookaheadSearch {
         public long departGated;
         /** targetVariants: variant candidates offered; departures to a variant. */
         public long targetVariantCands, targetVariantDepartures;
+        /** untested-keys-1113 (holdDeploy): hold-then-deploy candidates offered, decisions with one, departures to one. */
+        public long holdDeployCands, holdDeployDecisions, holdDeployDepartures;
         /**
          * deadEtb guard (null = off): the mode; dead-ETB candidates met in enumeration (Forge's answer excluded), decisions
          * with at least one, of those dropped (ON), searched decisions whose best candidate was one (SHADOW: departures the
@@ -905,6 +924,11 @@ public final class LookaheadSearch {
             if (targetVariantCands > 0) {
                 o.addProperty("targetVariantCands", targetVariantCands);
                 o.addProperty("targetVariantDepartures", targetVariantDepartures);
+            }
+            if (holdDeployCands > 0) {
+                o.addProperty("holdDeployCands", holdDeployCands);
+                o.addProperty("holdDeployDecisions", holdDeployDecisions);
+                o.addProperty("holdDeployDepartures", holdDeployDepartures);
             }
             if (deadEtbMode != null) {
                 final JsonObject d = new JsonObject();
@@ -1246,6 +1270,26 @@ public final class LookaheadSearch {
     }
 
     /** A candidate, addressable in any copy by the host card's id (ids survive the copy). */
+    /**
+     * untested-keys-1113 (holdDeploy): the deferred cast of a "hold, then deploy" candidate: the card {@code hostId}'s
+     * spell {@code desc}, cast at our first priority in the opponent's turn {@code turn} at step {@code phase} (empty stack).
+     */
+    public static final class Deploy {
+        public final int hostId;
+        public final String desc;
+        public final int turn;
+        public final PhaseType phase;
+        public final String label;
+
+        Deploy(int hostId, String desc, int turn, PhaseType phase, String label) {
+            this.hostId = hostId;
+            this.desc = desc;
+            this.turn = turn;
+            this.phase = phase;
+            this.label = label;
+        }
+    }
+
     static final class Cand {
         final boolean pass;
         final int hostId;
@@ -1271,6 +1315,25 @@ public final class LookaheadSearch {
          * its play-out rewinds the copy to the end of declare attackers and the play-out seat declares it.
          */
         final BlockPlan block;
+        /** untested-keys-1113 (holdDeploy): a pass whose play-out holds until {@link Deploy#phase} and casts there; null otherwise. */
+        Deploy deploy = null;
+
+        /** holdDeploy: {@code pass} (a pass candidate) followed by the deferred cast {@code d}. */
+        Cand(Cand pass, Deploy d) {
+            this.pass = true;
+            this.hostId = -1;
+            this.desc = "";
+            this.land = false;
+            this.isDefault = false;
+            this.label = "pass, then " + d.label + " at their " + d.phase;
+            this.kind = "pass";
+            this.tgt = null;
+            this.schedule = null;
+            this.macro = null;
+            this.plan = null;
+            this.block = null;
+            this.deploy = d;
+        }
 
         /** block-search-1019: a block assignment candidate; {@code label} names it, its blocks are its key. */
         Cand(BlockPlan block, String label, boolean isDefault) {
@@ -1369,7 +1432,8 @@ public final class LookaheadSearch {
                 return "block|" + block.key();
             }
             return (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc + (tgt == null ? "" : "|T:" + tgt))
-                    + (macro == null ? "" : "|M:" + macro);
+                    + (macro == null ? "" : "|M:" + macro)
+                    + (deploy == null ? "" : "|D:" + deploy.hostId + "|" + deploy.desc + "|" + deploy.turn + "|" + deploy.phase);
         }
 
         private static String trim(String s) {
@@ -1519,6 +1583,8 @@ public final class LookaheadSearch {
          * (opaque: {@link LookaheadSearch#applyBlocks}); null = a priority candidate.
          */
         public final Object block;
+        /** untested-keys-1113 (holdDeploy): the deferred cast this pass play-out holds for (null = none). */
+        public final Deploy deploy;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
@@ -1528,6 +1594,7 @@ public final class LookaheadSearch {
             this.schedule = c.schedule;
             this.plan = c.plan;
             this.block = c.block;
+            this.deploy = c.deploy;
         }
 
         /**
@@ -3083,6 +3150,78 @@ public final class LookaheadSearch {
         return res;
     }
 
+    /**
+     * untested-keys-1113 (holdDeploy): the "hold, then deploy" candidates of this decision, after the searched ones. Only
+     * in our main phase or on the opponent's turn, at an empty stack, with pass among the given candidates (the hold is
+     * played live as that pass), and in our own turn only once the land drop is used or no land is in hand (the hold
+     * passes for the rest of the turn). A card qualifies by Forge's timing check alone: a permanent spell on offer that
+     * {@link SpellAbility#withFlash} lets us cast outside our main phase. Windows: the opponent's beginning of combat and
+     * end step of their next turn (on their turn: those not yet reached).
+     */
+    void addHoldDeploy(Game live, Player me, List<SpellAbility> given, List<Cand> all, List<Integer> allAt,
+            List<Cand> cands, List<Integer> at, PhaseHandler ph, boolean onStack) {
+        if (onStack || !live.getStack().isEmpty() || ph.getPhase() == null) {
+            return;
+        }
+        final boolean ours = ph.isPlayerTurn(me);
+        if (ours && !ph.getPhase().isMain()) {
+            return;
+        }
+        if (ours && me.getLandsPlayedThisTurn() == 0) {
+            for (Card c : me.getCardsIn(ZoneType.Hand)) {
+                if (c.isLand()) {
+                    return;
+                }
+            }
+        }
+        int passAt = -1;
+        Cand passCand = null;
+        for (int i = 0; i < all.size(); i++) {
+            if (all.get(i).pass && all.get(i).plan == null && all.get(i).block == null) {
+                passAt = allAt.get(i);
+                passCand = all.get(i);
+                break;
+            }
+        }
+        if (passCand == null) {
+            return;
+        }
+        final int oppTurn = ours ? ph.getTurn() + 1 : ph.getTurn();
+        final List<PhaseType> windows = new ArrayList<>();
+        for (PhaseType w : new PhaseType[] {PhaseType.COMBAT_BEGIN, PhaseType.END_OF_TURN}) {
+            if (ours || w.ordinal() > ph.getPhase().ordinal()) {
+                windows.add(w);
+            }
+        }
+        final Set<Integer> hosts = new HashSet<>();
+        int added = 0;
+        for (int i = 0; i < all.size() && added < cfg.holdDeployMax; i++) {
+            final Cand c = all.get(i);
+            if (c.pass || c.land || c.plan != null || c.block != null || !"cast".equals(c.kind)) {
+                continue;
+            }
+            final SpellAbility sa = given.get(allAt.get(i));
+            final Card host = sa == null ? null : sa.getHostCard();
+            if (host == null || !sa.isSpell() || !host.isPermanent() || host.isLand() || !sa.withFlash(host, me)
+                    || !hosts.add(host.getId())) {
+                continue;
+            }
+            for (PhaseType w : windows) {
+                if (added >= cfg.holdDeployMax) {
+                    break;
+                }
+                final Cand h = new Cand(passCand, new Deploy(host.getId(), sa.getDescription(), oppTurn, w, host.getName()));
+                cands.add(h);
+                at.add(passAt);
+                added++;
+            }
+        }
+        stats.holdDeployCands += added;
+        if (added > 0) {
+            stats.holdDeployDecisions++;
+        }
+    }
+
     private boolean decideGiven0(Game live, Player me, List<SpellAbility> given, int breadth, int index, boolean onStack,
             PhaseHandler ph, int turn, GivenResult res, ChoiceExpander expander) {
         final long decisionSeed = mix(cfg.seed, 0x5eedL + index);
@@ -3106,6 +3245,9 @@ public final class LookaheadSearch {
                 cands.add(new Cand(plans.get(i), pendingPlanLabels.get(i)));
                 at.add(given.size() + i);
             }
+        }
+        if (cfg.holdDeploy && hookPlayout) {
+            addHoldDeploy(live, me, given, all, allAt, cands, at, ph, onStack);
         }
         if (cands.size() < 2) {
             stats.uncontested++;
@@ -3452,6 +3594,9 @@ public final class LookaheadSearch {
                     // S-t: a macro departure (its base action, then its scheduled choice answers)
                     res.chosenMacro = macroOf[best];
                     stats.givenMacroDepartures++;
+                }
+                if (chosen.deploy != null) {
+                    stats.holdDeployDepartures++; // untested-keys-1113: played live as the pass
                 }
                 departuresThisTurn++;
                 departureCounts.put(key, seenN + 1);
