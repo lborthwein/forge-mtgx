@@ -883,8 +883,19 @@ public final class ForcedWinModel {
      * Reads positions, probing each distinct card name once (cached for the reader's lifetime: one seat, one game).
      */
     static final class Reader {
+        /** Learned templates by key; every read and write holds this map's own monitor (state-machines-1113). */
         final Map<String, ACard> templates = new HashMap<>();
+        /** Report only; probes count into a per-call Stats that is added here under this object's monitor ({@link #addStats}). */
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
+        /**
+         * state-machines-1113: one monitor per template key. {@link #card} learns, extends and loop-probes a key's template
+         * under that key's monitor only, so two threads learning different cards no longer wait for each other (the
+         * reader shared by the play-outs' leaf reach held one monitor for every card: 9.7 % of play-out capacity, up to a
+         * third in short combo games, profile 2026-11-13). One thread does exactly what it did under the reader's monitor.
+         * Lock order: key, then {@link #templates} / {@link #probeStats} / the loop cache; nothing under a key monitor
+         * asks this reader for another card.
+         */
+        private final java.util.concurrent.ConcurrentHashMap<String, Object> keyLocks = new java.util.concurrent.ConcurrentHashMap<>();
         long seed = 20261012L;
 
         /**
@@ -1002,8 +1013,10 @@ public final class ForcedWinModel {
         }
 
         /** strong-opp-1020: the learned templates as JSON (card name -> template), for a precomputed cache. */
-        synchronized String exportJson() {
-            return new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(templates);
+        String exportJson() {
+            synchronized (templates) {
+                return new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(templates);
+            }
         }
 
         /**
@@ -1011,17 +1024,28 @@ public final class ForcedWinModel {
          * only on the card (each is learned in a sandbox copy with rich floating mana), so a cache learned once serves
          * every game; it saves the defense's first-call probes (about 0.15 s per new card name).
          */
-        synchronized int preload(String json) {
+        int preload(String json) {
             final java.lang.reflect.Type t = new com.google.gson.reflect.TypeToken<Map<String, ACard>>() { }.getType();
             final Map<String, ACard> m = new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create()
                     .fromJson(json, t);
             int n = 0;
-            for (Map.Entry<String, ACard> e : m.entrySet()) {
-                if (e.getValue() != null && templates.putIfAbsent(e.getKey(), e.getValue()) == null) {
-                    n++;
+            synchronized (templates) {
+                for (Map.Entry<String, ACard> e : m.entrySet()) {
+                    if (e.getValue() != null && templates.putIfAbsent(e.getKey(), e.getValue()) == null) {
+                        n++;
+                    }
                 }
             }
             return n;
+        }
+
+        /** state-machines-1113: a call's probe counts into the reader's report. */
+        void addStats(final ForcedWinProbe.Stats st) {
+            synchronized (probeStats) {
+                probeStats.probes += st.probes;
+                probeStats.failures += st.failures;
+                probeStats.nanos += st.nanos;
+            }
         }
 
         /**
@@ -1030,18 +1054,11 @@ public final class ForcedWinModel {
          */
         volatile boolean hideLibrary;
 
-        /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
-        synchronized ACard card(Game live, Player me, Card c) {
-            final boolean prevHide = ForcedWinProbe.HIDE.get();
-            ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
-            try {
-                return card0(live, me, c);
-            } finally {
-                ForcedWinProbe.HIDE.set(prevHide);
-            }
-        }
-
-        private ACard card0(Game live, Player me, Card c) {
+        /**
+         * search-bones-1015: a reader may be shared by the play-outs' threat checks, (d). state-machines-1113: callers of
+         * one card wait for each other (its key's monitor); callers of different cards do not.
+         */
+        ACard card(Game live, Player me, Card c) {
             // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
             // sdcc-draws-1110: so does a probeSettle reader (its templates hold what the settled sandbox moved)
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
@@ -1049,7 +1066,24 @@ public final class ForcedWinModel {
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
             final String key = (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
                     + (probeSettle ? "settle|" : "") + c.getName();
-            ACard t = templates.get(key);
+            final boolean prevHide = ForcedWinProbe.HIDE.get();
+            ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
+            final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
+            try {
+                synchronized (keyLocks.computeIfAbsent(key, k -> new Object())) {
+                    return card0(live, me, c, key, st);
+                }
+            } finally {
+                ForcedWinProbe.HIDE.set(prevHide);
+                addStats(st);
+            }
+        }
+
+        private ACard card0(Game live, Player me, Card c, String key, ForcedWinProbe.Stats st) {
+            ACard t;
+            synchronized (templates) {
+                t = templates.get(key);
+            }
             if (t == null) {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
@@ -1060,7 +1094,7 @@ public final class ForcedWinModel {
                 ForcedWinProbe.TUTOR_CAST.set(tutorCast);
                 ForcedWinProbe.SOURCE_LEAVES.set(sourceLeaves);
                 try {
-                    t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
+                    t = ForcedWinProbe.learn(live, me, c, seed, st);
                 } finally {
                     ForcedWinProbe.PLAN_SCRY.set(prev);
                     ForcedWinProbe.PROBE_SETTLE.set(prevSettle);
@@ -1069,7 +1103,9 @@ public final class ForcedWinModel {
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                 }
                 if (!forge.ai.AiWork.spent()) {
-                    templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                    synchronized (templates) {
+                        templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                    }
                 }
             } else if (probeObjects && t.hasObj && !forge.ai.AiWork.spent()) {
                 // sdcc-probeobj-1111: the template was learned at the card's first sight; objects of ours that are in play
@@ -1078,7 +1114,7 @@ public final class ForcedWinModel {
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
                 ForcedWinProbe.PROBE_OBJECTS.set(true);
                 try {
-                    ForcedWinProbe.extendObjects(t, live, me, c, seed, probeStats);
+                    ForcedWinProbe.extendObjects(t, live, me, c, seed, st);
                 } catch (RuntimeException | StackOverflowError e) {
                     t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "object probe failed: " + e;
                 } finally {
@@ -1244,6 +1280,17 @@ public final class ForcedWinModel {
             };
         }
 
+        /** state-machines-1113: one land-entry sandbox, its probe counted into the report ({@link #addStats}). */
+        private int[] landProbe(final Game live, final Player me, final Card c, final List<Card> added,
+                final List<Card> toHand, final List<Card> gone, final long seed) {
+            final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
+            try {
+                return ForcedWinProbe.landEntry(live, me, c, added, toHand, gone, seed, st);
+            } finally {
+                addStats(st);
+            }
+        }
+
         private static Card card(final Game live, final Map<Integer, Card> byId, final int id) {
             if (!byId.containsKey(id)) {
                 byId.put(id, live.findById(id));
@@ -1270,7 +1317,7 @@ public final class ForcedWinModel {
                 known.byKey.put(key, here);
             }
             if (here == null) {
-                here = ForcedWinProbe.landEntry(live, me, c, null, null, null, seed0, probeStats);
+                here = landProbe(live, me, c, null, null, null, seed0);
                 landProbes++;
                 if (here != null && (here[0] != 0) != land.entersTapped) {
                     landDiffers++;
@@ -1333,7 +1380,7 @@ public final class ForcedWinModel {
                     return atPosition;
                 }
                 known.contexts++;
-                there = ForcedWinProbe.landEntry(live, me, c, added, toHand, gone, ForcedWinSolver.mix(seed0, ctx.hashCode()), probeStats);
+                there = landProbe(live, me, c, added, toHand, gone, ForcedWinSolver.mix(seed0, ctx.hashCode()));
                 landContexts++;
                 if (there != null && there[0] != here[0]) {
                     landContextDiffers++;
