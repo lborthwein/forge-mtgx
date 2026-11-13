@@ -1816,6 +1816,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             order.add(0);
         }
         order.addAll(rest);
+        if (forge.ai.simulation.SearchProf.ON) {
+            // searchspeed-1113 (measurement only): the root priors of the given candidates, in the search's order
+            final StringBuilder sp = new StringBuilder();
+            for (int ch : order) {
+                sp.append(sp.length() == 0 ? "" : ",").append(Math.round(by.get(ch)[0] * 1e4) / 1e4);
+            }
+            forge.ai.simulation.SearchProf.note("priors", sp.toString());
+            forge.ai.simulation.SearchProf.note("valueObs", sc.valueObs);
+        }
         final List<SpellAbility> given = new ArrayList<>(order.size());
         for (int ch : order) {
             given.add(ch == 0 ? null : menuObjs.get(ch - 1));
