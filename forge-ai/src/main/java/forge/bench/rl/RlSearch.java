@@ -1223,6 +1223,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.stack = true;
         }
         this.ls = new LookaheadSearch(lc);
+        if (cfg.holdDeploy && cfg.holdDeployFollowLine) {
+            ls.holdPilot = holdPilot(); // untested-keys-1113 (holdDeploy.followLine)
+        }
         ls.setHooks(this, "value".equals(cfg.leaf), "policy".equals(cfg.playout));
         this.choiceFams = cfg.choices > 0 ? (cfg.choiceFamilySet != null ? cfg.choiceFamilySet
                 : ChoiceWindow.parseFamilies(cfg.choiceFamilies)) : null;
@@ -3739,6 +3742,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("hold_commit_drops", holdCommitDrops);
             o.addProperty("hold_follow_tried", holdFollowTried.get());
             o.addProperty("hold_follow_adopted", holdFollowAdopted.get());
+            o.addProperty("hold_proofs", holdProofs.get());
+            o.addProperty("hold_proofs_proven", holdProofsProven.get());
+            o.addProperty("hold_proof_ms", holdProofMs.get());
         }
         if (ls.getStats().trueFairNamingRefusals > 0) {
             // review #130 S3-3: only when a true-world re-play was refused, so every other summary is unchanged
@@ -4645,7 +4651,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     final java.util.concurrent.atomic.AtomicLong holdFollowTried = new java.util.concurrent.atomic.AtomicLong(),
             holdFollowAdopted = new java.util.concurrent.atomic.AtomicLong();
 
-    /** The seat's own solver config with the end-step engine keys on and a capped budget (1.5 s; engine 1.2 s). */
+    /** The seat's own solver config (its own budget: plans.solverCfg) with the end-step engine keys on. */
     forge.ai.simulation.ForcedWinSolver.Config holdFollowConfig() {
         forge.ai.simulation.ForcedWinSolver.Config c = holdFollowCfg;
         if (c == null) {
@@ -4654,8 +4660,6 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             for (String k : new String[] {"engineAnyWindow", "engineEndStepOpen", "enginePassBudget"}) {
                 sc.addProperty(k, "true");
             }
-            sc.addProperty("budgetMs", "1500");
-            sc.addProperty("engineMs", "1200");
             p.add("solverCfg", sc);
             c = PlanSearch.Spec.parse(p).solverConfig();
             holdFollowCfg = c;
@@ -4664,9 +4668,44 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /**
+     * untested-keys-1113 (holdDeploy.followLine): the decision's deploy-window proof. {@link LookaheadSearch#runHoldPilot}
+     * names the window and runs one pilot play-out; the first hook to reach that window (the pilot's) proves once on its
+     * copy, whose hidden cards are belief samples (the seat's own information), and keeps the line for the decision.
+     */
+    private volatile LookaheadSearch.Deploy holdProofWindow;
+    private volatile forge.ai.simulation.ForcedWinSolver.Proposal holdProofLine;
+    private final java.util.concurrent.atomic.AtomicBoolean holdProofArmed = new java.util.concurrent.atomic.AtomicBoolean();
+    final java.util.concurrent.atomic.AtomicLong holdProofs = new java.util.concurrent.atomic.AtomicLong(),
+            holdProofsProven = new java.util.concurrent.atomic.AtomicLong(), holdProofMs = new java.util.concurrent.atomic.AtomicLong();
+
+    LookaheadSearch.HoldPilot holdPilot() {
+        return new LookaheadSearch.HoldPilot() {
+            @Override
+            public void begin(final LookaheadSearch.Deploy window) {
+                holdProofLine = null;
+                holdProofWindow = window;
+                holdProofArmed.set(true);
+            }
+
+            @Override
+            public int winTurn() {
+                holdProofArmed.set(false); // only the pilot proves
+                final forge.ai.simulation.ForcedWinSolver.Proposal p = holdProofLine;
+                final LookaheadSearch.Deploy w = holdProofWindow;
+                return p == null || w == null ? 0 : w.turn + Math.max(0, p.winTurn);
+            }
+        };
+    }
+
+    static boolean sameWindow(final LookaheadSearch.Deploy a, final LookaheadSearch.Deploy b) {
+        return a != null && b != null && a.turn == b.turn && a.phase == b.phase;
+    }
+
+    /**
      * untested-keys-1113 (holdDeploy.followLine): the plan hook of a hold candidate's play-out. Silent until the deploy
-     * window (the opponent's turn {@code d.turn}, step {@code d.phase}, empty stack); there it runs the follow solver once
-     * on the copy and, given a proven line, follows it from then on (every hook ask goes to the line's follower).
+     * window (the opponent's turn {@code d.turn}, step {@code d.phase}, empty stack). There the pilot proves (once a
+     * decision); every hold play-out of that window follows the decision's proven line from then on. Without one the
+     * deferred cast is made as before.
      */
     PlayerControllerBridge.PlanHook holdFollowHook(final Player copyMe, final LookaheadSearch.Deploy d,
             final LookaheadSearch.FirstAction first) {
@@ -4682,20 +4721,35 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     if (!ph.isPlayerTurn(copyMe) && ph.getTurn() == d.turn && ph.getPhase() == d.phase && g.getStack().isEmpty()) {
                         tried = true;
                         holdFollowTried.incrementAndGet();
-                        try {
-                            forge.ai.simulation.ForcedWinSolver.Proposal best = null;
-                            for (forge.ai.simulation.ForcedWinSolver.Proposal p : new forge.ai.simulation.ForcedWinSolver(copyMe, holdFollowConfig()).propose(g)) {
-                                if (p.proven(1) && (best == null || p.pBelief > best.pBelief)) {
-                                    best = p;
+                        if (sameWindow(d, holdProofWindow) && holdProofArmed.compareAndSet(true, false)) {
+                            final long t0 = System.nanoTime();
+                            holdProofs.incrementAndGet();
+                            try {
+                                forge.ai.simulation.ForcedWinSolver.Proposal best = null;
+                                for (forge.ai.simulation.ForcedWinSolver.Proposal p
+                                        : new forge.ai.simulation.ForcedWinSolver(copyMe, holdFollowConfig()).propose(g)) {
+                                    if (p.proven(1) && (best == null || p.winTurn < best.winTurn)) {
+                                        best = p;
+                                    }
                                 }
+                                holdProofLine = best;
+                                if (best != null) {
+                                    holdProofsProven.incrementAndGet();
+                                }
+                            } catch (RuntimeException e) {
+                                holdProofLine = null;
                             }
-                            if (best != null) {
-                                in = PlanSearch.copyLineHook(copyMe, followConfig(), new PlanSearch.LinePlan(best), first,
+                            holdProofMs.addAndGet((System.nanoTime() - t0) / 1_000_000L);
+                        }
+                        final forge.ai.simulation.ForcedWinSolver.Proposal line = sameWindow(d, holdProofWindow) ? holdProofLine : null;
+                        if (line != null) {
+                            try {
+                                in = PlanSearch.copyLineHook(copyMe, followConfig(), new PlanSearch.LinePlan(line), first,
                                         lineChoicesForge(), lineKeepOn());
                                 holdFollowAdopted.incrementAndGet();
+                            } catch (RuntimeException e) {
+                                in = null; // no line here: the deferred cast as before
                             }
-                        } catch (RuntimeException e) {
-                            in = null; // no line: the deferred cast as before
                         }
                     }
                 }

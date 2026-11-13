@@ -698,6 +698,8 @@ public final class LookaheadSearch {
         public long targetVariantCands, targetVariantDepartures;
         /** untested-keys-1113 (holdDeploy): hold-then-deploy candidates offered, decisions with one, departures to one. */
         public long holdDeployCands, holdDeployDecisions, holdDeployDepartures;
+        /** untested-keys-1113 (holdDeploy.followLine): pilot play-outs run, of those with a proven line, their wall ms. */
+        public long holdPilots, holdPilotProven, holdPilotMs;
         /**
          * deadEtb guard (null = off): the mode; dead-ETB candidates met in enumeration (Forge's answer excluded), decisions
          * with at least one, of those dropped (ON), searched decisions whose best candidate was one (SHADOW: departures the
@@ -929,6 +931,11 @@ public final class LookaheadSearch {
                 o.addProperty("holdDeployCands", holdDeployCands);
                 o.addProperty("holdDeployDecisions", holdDeployDecisions);
                 o.addProperty("holdDeployDepartures", holdDeployDepartures);
+            }
+            if (holdPilots > 0) {
+                o.addProperty("holdPilots", holdPilots);
+                o.addProperty("holdPilotProven", holdPilotProven);
+                o.addProperty("holdPilotMs", holdPilotMs);
             }
             if (deadEtbMode != null) {
                 final JsonObject d = new JsonObject();
@@ -2084,7 +2091,7 @@ public final class LookaheadSearch {
      * was cut (a straggler) keeps seeing its own stop, never the next decision's budget.
      */
     public static final class Budget {
-        final long deadline;
+        volatile long deadline;
         private volatile boolean stopped = false;
         /** Set by the decision thread when the wall cut its wait (read after the decision). */
         volatile boolean wallCut = false;
@@ -2103,6 +2110,11 @@ public final class LookaheadSearch {
 
         void stop() {
             stopped = true;
+        }
+
+        /** untested-keys-1113 (holdDeploy.followLine): move the deadline by work done outside the look-ahead (the pilot's proof). */
+        void extend(long nanos) {
+            deadline += Math.max(0L, nanos);
         }
     }
 
@@ -2682,6 +2694,63 @@ public final class LookaheadSearch {
      */
     private volatile int planHorizonTurn = 0;
 
+    /**
+     * untested-keys-1113 (holdDeploy.followLine; null = off, the default): the decision's deploy-window proof. Before the
+     * play-outs, one pilot play-out of the hold with the latest window (world 0's copy, the batch's own preparation) runs
+     * to that window, where the seat's hook proves a line once and keeps it for every hold play-out of the decision. A
+     * proven line moves every play-out's end past its win turn (as plans.lineHorizon), so the hold is scored by the line's
+     * outcome and its alternatives by the same leaf in the same worlds; the pilot's time moves the decision's deadline.
+     */
+    public interface HoldPilot {
+        /** Decision thread, before the pilot: a new decision (the last decision's line is dropped). */
+        void begin(Deploy window);
+
+        /** Decision thread, after the pilot: the absolute turn the proven line wins in, 0 = no line. */
+        int winTurn();
+    }
+
+    public volatile HoldPilot holdPilot;
+
+    /** Set when the pilot moved planHorizonTurn (cleared with the decision). */
+    private volatile boolean holdHorizonSet = false;
+
+    void runHoldPilot(final Game live, final Player me, final List<Cand> cands, final long decisionSeed) {
+        Cand hold = null;
+        for (Cand c : cands) {
+            if (c.deploy != null && (hold == null || c.deploy.turn > hold.deploy.turn
+                    || c.deploy.turn == hold.deploy.turn && c.deploy.phase.compareTo(hold.deploy.phase) > 0)) {
+                hold = c;
+            }
+        }
+        if (hold == null) {
+            return;
+        }
+        final HoldPilot hp = holdPilot;
+        final long t0 = System.nanoTime();
+        hp.begin(hold.deploy);
+        stats.holdPilots++;
+        try {
+            play(prepare(live, me, hold, null, mix(decisionSeed, 1000), cfg.resample, null), null);
+        } catch (RuntimeException e) {
+            System.err.println("[lookahead] hold pilot failed: " + e);
+        }
+        final int win = hp.winTurn();
+        if (win > 0) {
+            stats.holdPilotProven++;
+            planHorizonTurn = Math.max(planHorizonTurn, win + 1);
+            holdHorizonSet = true;
+        }
+        final long ns = System.nanoTime() - t0;
+        final Budget b = budget;
+        if (b != null) {
+            b.extend(ns);
+        }
+        stats.holdPilotMs += ns / 1_000_000L;
+        if (EXPLAIN) {
+            System.err.println("[lookahead] hold pilot " + hold.label + ": win turn " + win + ", " + ns / 1_000_000L + " ms");
+        }
+    }
+
     public void setPlanHorizonTurn(int turn) {
         this.planHorizonTurn = turn;
     }
@@ -3131,6 +3200,10 @@ public final class LookaheadSearch {
             }
         } finally {
             budget = null;
+            if (holdHorizonSet) {
+                planHorizonTurn = 0; // untested-keys-1113: the pilot's horizon ends with the decision
+                holdHorizonSet = false;
+            }
             if (b != null && b.wallCut) {
                 res.wall = true;
             }
@@ -3250,6 +3323,9 @@ public final class LookaheadSearch {
         }
         if (cfg.holdDeploy && hookPlayout) {
             addHoldDeploy(live, me, given, all, allAt, cands, at, ph, onStack);
+            if (holdPilot != null) {
+                runHoldPilot(live, me, cands, decisionSeed);
+            }
         }
         if (cands.size() < 2) {
             stats.uncontested++;
