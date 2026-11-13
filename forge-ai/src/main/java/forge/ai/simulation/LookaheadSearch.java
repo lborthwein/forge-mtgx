@@ -6695,20 +6695,56 @@ public final class LookaheadSearch {
         final Player me;
         final Map<Integer, int[]> recs = new java.util.LinkedHashMap<>();
         final Set<Integer> seen = new HashSet<>();
+        /** Our triggers from a tracked card: "turn phase: target kinds" (who: opp-untapped-creature-canAttack, ...). */
+        final List<String> trig = new ArrayList<>();
+        /** Our life at the first step seen of each turn. */
+        final Map<Integer, Integer> life = new TreeMap<>();
+        /** Opponent creatures attacking in each turn (count at declare). */
+        final Map<Integer, Integer> attackers = new TreeMap<>();
 
         AnswerWatch(Game g, Player me) {
             this.g = g;
             this.me = me;
         }
 
+        static String kind(Card t, Player me) {
+            final boolean ours = t.getController() == me;
+            String k = (ours ? "own-" : "opp-") + (t.isTapped() ? "tapped-" : "untapped-");
+            if (t.isCreature()) {
+                k += "creature" + (!ours && !t.isTapped() && !t.hasSickness() ? "-canAttack" : "") + "(" + t.getNetPower() + ")";
+            } else if (t.isLand()) {
+                k += "land";
+            } else {
+                k += "other";
+            }
+            return k;
+        }
+
         void step() {
             final int turn = g.getPhaseHandler().getTurn();
+            life.putIfAbsent(turn, me.getLife());
+            if (g.getPhaseHandler().inCombat() && !g.getPhaseHandler().isPlayerTurn(me) && g.getCombat() != null) {
+                attackers.merge(turn, g.getCombat().getAttackers().size(), Math::max);
+            }
             for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
                 if (!seen.add(si.getId())) {
                     continue;
                 }
                 final Player act = si.getActivatingPlayer();
                 final Card src = si.getSourceCard();
+                if (act == me && si.isTrigger() && src != null && recs.containsKey(src.getId())) {
+                    final StringBuilder tb = new StringBuilder().append(turn).append(' ').append(g.getPhaseHandler().getPhase())
+                            .append(g.getPhaseHandler().isPlayerTurn(me) ? " own" : " their").append(':');
+                    final SpellAbility tsa = si.getSpellAbility();
+                    if (tsa != null) {
+                        for (forge.game.spellability.TargetChoices tc : tsa.getAllTargetChoices()) {
+                            for (Card t : tc.getTargetCards()) {
+                                tb.append(' ').append(kind(t, me));
+                            }
+                        }
+                    }
+                    trig.add(tb.toString());
+                }
                 if (act == me) {
                     if (si.isSpell() && src != null && src.isPermanent() && !src.isLand() && !recs.containsKey(src.getId())) {
                         Player opp = null;
@@ -6785,7 +6821,10 @@ public final class LookaheadSearch {
                         .append(r[8]).append('}');
                 first = false;
             }
-            System.err.println(b.append("]}"));
+            b.append("],\"trig\":").append(new com.google.gson.Gson().toJson(trig)).append(",\"life\":")
+                    .append(new com.google.gson.Gson().toJson(life)).append(",\"lifeEnd\":").append(me.getLife())
+                    .append(",\"attackers\":").append(new com.google.gson.Gson().toJson(attackers));
+            System.err.println(b.append("}"));
         }
     }
 
