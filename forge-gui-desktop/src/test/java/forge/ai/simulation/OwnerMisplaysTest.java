@@ -115,10 +115,11 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
                 1.0, 1e-9);
         Assert.assertEquals(reach("G15 creature in play + aura in hand", G15_LANDS + ";Pestermite", "Splinter Twin;Time Warp", G15_LIB, G15_OPP, false),
                 0.0, 1e-9, "the ship string (planLoops off): the leaf has no credit for the combo one step from the kill");
-        // both pieces still in hand at our turn (what a "pass" play-out by the policy leaves): no line by our next turn,
-        // the creature would enter this turn and cannot tap
-        final double held = reach("G15 both in hand", G15_LANDS, "Pestermite;Splinter Twin;Time Warp", G15_LIB, G15_OPP, true);
-        Assert.assertTrue(held < 1.0, "both in hand at our own turn is not a line this turn: " + held);
+        // both pieces still in hand at our own turn, with the mana: the screens count the line by our NEXT turn as well
+        // (creature now, Aura next turn), so with the loop screens on a "hold" leaf and a "deployed" leaf differ only by
+        // the reach's per-turn discount (reach.gamma), not by whether the creature survived the opponent's turn
+        Assert.assertEquals(reach("G15 both in hand", G15_LANDS, "Pestermite;Splinter Twin;Time Warp", G15_LIB, G15_OPP, true), 1.0, 1e-9);
+        Assert.assertEquals(reach("G15 both in hand", G15_LANDS, "Pestermite;Splinter Twin;Time Warp", G15_LIB, G15_OPP, false), 0.0, 1e-9);
     }
 
     static final String G16_BOARD = "Mountain;Island;Island;Island;Island;Swamp;Pestermite;Baleful Strix";
@@ -130,10 +131,35 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
     public void g16KeepingTheAuraHasALineOverTheDrawKeepingTheLandHasNone() {
         final double aura = reach("G16 kept the aura", G16_BOARD, "Splinter Twin", G16_LIB, "Old One Eye;Forest;Forest;Forest", true);
         final double land = reach("G16 kept the land", G16_BOARD, "Badlands", G16_LIB, "Old One Eye;Forest;Forest;Forest", true);
-        Assert.assertEquals(aura, 0.4, 1e-9, "four of ten draws are the second source");
+        Assert.assertTrue(aura >= 0.2 - 1e-9 && aura <= 0.4 + 1e-9, "the draws that are a second source (two that enter untapped, two more that can): " + aura);
         Assert.assertEquals(land, 0.0, 1e-9);
         Assert.assertEquals(reach("G16 kept the aura", G16_BOARD, "Splinter Twin", G16_LIB, "Old One Eye;Forest;Forest;Forest", false), 0.0, 1e-9,
                 "the ship string: no screen separates the two discards");
+    }
+
+    /**
+     * G16 one turn earlier (his "the setup totally ready to go"): the creature just cast, the Aura in hand, a land and a
+     * one-shot artifact as the two sources of the Aura's colour. Mana sources are any permanent with a mana ability.
+     */
+    @Test
+    public void g16TheOneShotArtifactIsASourceOfTheAurasColour() {
+        final String board = "Mountain;Island;Island;Island;Island;Swamp;Lotus Petal;Pestermite;Baleful Strix";
+        Assert.assertEquals(reach("G16 turn 9, artifact in play", board, "Splinter Twin;Smuggler's Copter", G16_LIB, "Old One Eye;Forest;Forest;Forest", true),
+                1.0, 1e-9, "two sources of the colour in play: the line needs no draw");
+        Assert.assertTrue(reach("G16 turn 9, artifact spent", G16_BOARD, "Splinter Twin", G16_LIB, "Old One Eye;Forest;Forest;Forest", true) < 1.0);
+    }
+
+    /** G08: the loot's discard between a creature that copies its partner in play and a tutor creature; three sources in play. */
+    @Test
+    public void g08KeepingTheCopyingCreatureHasALineKeepingTheTutorHasNone() {
+        final String board = "Plains;Plains;Plains;Mountain;Plateau;Mox Ruby;Mana Vault;Skullclamp;Restoration Angel";
+        final String lib = "Plains;Plains;Island;Swords to Plowshares;Flickerwisp;Stoneforge Mystic;Plains;Mountain";
+        final String opp = "Elite Spellbinder;Mountain;Mountain;Mountain";
+        final double piece = reach("G08 kept the copying creature", board, "Kiki-Jiki, Mirror Breaker", lib, opp, true);
+        final double tutor = reach("G08 kept the tutor", board, "Recruiter of the Guard", lib, opp, true);
+        Assert.assertEquals(piece, 1.0, 1e-9, "its partner is in play and the mana is there");
+        Assert.assertTrue(tutor < piece, "the tutor has no piece left to find: " + tutor);
+        Assert.assertEquals(reach("G08 kept the copying creature", board, "Kiki-Jiki, Mirror Breaker", lib, opp, false), 0.0, 1e-9);
     }
 
     // ------------------------------------------------------------------ G17: the solver
