@@ -48,12 +48,12 @@ public final class SearchProf {
         int nLat;
     }
 
+    private static final CopyOnWriteArrayList<Frame> FRAMES = new CopyOnWriteArrayList<>();
     private static final ThreadLocal<Frame> TL = ThreadLocal.withInitial(() -> {
         final Frame f = new Frame();
         FRAMES.add(f);
         return f;
     });
-    private static final CopyOnWriteArrayList<Frame> FRAMES = new CopyOnWriteArrayList<>();
     private static final ConcurrentLinkedQueue<long[]> PLAYS = new ConcurrentLinkedQueue<>();
     private static final ThreadMXBean TMX = ManagementFactory.getThreadMXBean();
 
