@@ -54,8 +54,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * stderr and config-derived state ({@link ScopedSlot}). Forge's pooled threads (the game pool, the delayed pool, the
  * EDT) carry the submitting game's state ({@link GameContext#wrap}).</p>
  *
- * <p><b>Not hosted:</b> a "Continue from here" rebuild (its AI wall clock switch is process-wide) and a tape
- * replay/resume (its tape file is in the launch spec): the mtgx host gives those their own JVM as before.</p>
+ * <p><b>Not hosted:</b> a "Continue from here" rebuild (its AI wall clock switch is process-wide), an AI tape (a replay
+ * or resume reads ONE tape file named in the launch spec, so every hosted game would replay it) and an offline review
+ * (a journal replay): the mtgx host gives those their own JVM as before, and the host refuses to start with any of them
+ * ({@link #notHosted}).</p>
  */
 public final class InteractiveHost {
     static final String PROTOCOL = "mtgx-forge-host/1";
@@ -77,8 +79,9 @@ public final class InteractiveHost {
         HOST_ERR = new PrintStream(realErr, true, StandardCharsets.UTF_8);
         System.setOut(routed);
         System.setErr(routed);
-        if (System.getProperty("forge.interactive.continuation") != null) {
-            System.err.println("[forge.host] a continuation rebuild is never hosted");
+        final String notHosted = notHosted();
+        if (notHosted != null) {
+            System.err.println("[forge.host] " + notHosted);
             System.exit(2);
         }
         final String socket = System.getProperty("forge.interactive.host.socket");
@@ -129,6 +132,25 @@ public final class InteractiveHost {
             game.setDaemon(true);
             game.start();
         }
+    }
+
+    /**
+     * Why this JVM's launch spec cannot host games, or null. state-machines-1113 (survey M1/M10): the class comment always
+     * excluded tape and review modes, but only the continuation was refused; a host started with
+     * {@code -Dforge.interactive.aiTape=forced:<file>} would have replayed that one tape into every game it served.
+     */
+    static String notHosted() {
+        if (System.getProperty("forge.interactive.continuation") != null) {
+            return "a continuation rebuild is never hosted";
+        }
+        final String tape = System.getProperty("forge.interactive.aiTape");
+        if (tape != null && !tape.isBlank() && !"off".equals(tape)) {
+            return "an AI tape (forge.interactive.aiTape) is never hosted";
+        }
+        if (InteractiveReview.spec() != null) {
+            return "an offline review (forge.interactive.review) is never hosted";
+        }
+        return null;
     }
 
     private static void exitWhenStdinCloses() {

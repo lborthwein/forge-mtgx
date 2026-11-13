@@ -34,6 +34,7 @@ import forge.player.PlayerControllerHuman;
 import forge.trackable.TrackableCollection;
 import forge.util.BuildInfo;
 import forge.util.MyRandom;
+import forge.util.StateMachine;
 
 import java.io.BufferedReader;
 import java.io.FileDescriptor;
@@ -59,6 +60,62 @@ public final class InteractiveMain {
             "4ec5f1a2c32fa90ecb983a72b9eb47aa5c5d7676";
 
     private InteractiveMain() {
+    }
+
+    /**
+     * state-machines-1113 (survey M1): one game's session, from its config line to its exit status, as an explicit
+     * machine. Traced on stderr under {@code -Dforge.state.trace=session}; the key is the config's session id
+     * ({@code -} before it is read). It decides nothing: {@link #runSession}'s straight-line code, its frames and its
+     * exit codes are unchanged.
+     */
+    enum SessionPhase {
+        /** Reading the config line. */
+        BOOT,
+        /** A warm spare (or a hosted game): the model is initialized; the config line has not arrived. */
+        PREWARM_IDLE,
+        /** The config is read and valid; nothing is on the wire yet. */
+        CONFIG,
+        /** An AI-vs-AI watch table ({@link InteractiveWatch}) plays the rest. */
+        WATCH,
+        /** hello is on the wire (every seat's, at a table); Forge is being initialized and the game built. */
+        HELLO,
+        /** Forge's game thread was started; the game is played. */
+        RUNNING,
+        /** The game thread returned: the final state and the terminal are being written. */
+        ENDING,
+        /** The terminal went out (exit 0), or a spare was never configured. */
+        ENDED,
+        /** A boot fatal (exit 2), a fatal, or no terminal (exit 1). */
+        FAILED
+    }
+
+    static final StateMachine<SessionPhase> SESSION = StateMachine.builder("session", SessionPhase.class)
+            .edge(SessionPhase.BOOT, SessionPhase.PREWARM_IDLE, SessionPhase.CONFIG, SessionPhase.FAILED)
+            .edge(SessionPhase.PREWARM_IDLE, SessionPhase.CONFIG, SessionPhase.ENDED, SessionPhase.FAILED)
+            .edge(SessionPhase.CONFIG, SessionPhase.WATCH, SessionPhase.HELLO, SessionPhase.FAILED)
+            .edge(SessionPhase.WATCH, SessionPhase.ENDED, SessionPhase.FAILED)
+            .edge(SessionPhase.HELLO, SessionPhase.RUNNING, SessionPhase.FAILED)
+            .edge(SessionPhase.RUNNING, SessionPhase.ENDING, SessionPhase.FAILED)
+            .edge(SessionPhase.ENDING, SessionPhase.ENDED, SessionPhase.FAILED)
+            .doc("one interactive game session (InteractiveMain.runSession / runTable), config line to exit status")
+            .build();
+
+    /** The {@link #SESSION} trace key: the config's session id once read. */
+    private static final class SessionKey {
+        private volatile String session = "-";
+
+        @Override
+        public String toString() {
+            return session;
+        }
+    }
+
+    /** The session's last step: ENDED when the game completed normally, else FAILED (unless already terminal). */
+    private static void endSession(final StateMachine.Cell<SessionPhase> phase, final boolean completedNormally,
+                                   final String why) {
+        if (!phase.is(SessionPhase.ENDED) && !phase.is(SessionPhase.FAILED)) {
+            phase.go(completedNormally ? SessionPhase.ENDED : SessionPhase.FAILED, why);
+        }
     }
 
     public static void main(final String[] args) {
@@ -90,16 +147,23 @@ public final class InteractiveMain {
      * quietly, as an unused spare's does).
      */
     static int runSession(final BufferedReader input, final PrintStream protocolOut, final boolean prewarm) {
+        final SessionKey sessionKey = new SessionKey();
+        final StateMachine.Cell<SessionPhase> phase = SESSION.cell(sessionKey, SessionPhase.BOOT);
+        if (prewarm) {
+            phase.go(SessionPhase.PREWARM_IDLE, "model initialized");
+        }
         final String configLine;
         try {
             configLine = input.readLine();
             if (prewarm && configLine == null) {
                 // a warm spare the host never used (stdin closed): nothing to report
+                phase.go(SessionPhase.ENDED, "spare never configured");
                 return 0;
             }
         } catch (Exception e) {
             InteractiveProtocol.writeBootFatal(protocolOut, "unknown", "invalid_config",
                     "could not read config: " + e.getMessage());
+            phase.go(SessionPhase.FAILED, "config unreadable");
             return 2;
         }
 
@@ -119,15 +183,23 @@ public final class InteractiveMain {
         } catch (InteractiveProtocol.ProtocolException e) {
             InteractiveProtocol.writeBootFatal(protocolOut,
                     InteractiveProtocol.bestEffortSession(configLine), e.code(), e.getMessage());
+            phase.go(SessionPhase.FAILED, "boot fatal " + e.code());
             return 2;
         }
+        sessionKey.session = config.session();
+        phase.go(SessionPhase.CONFIG, config.isWatch() ? "watch" : config.isTable() ? "table" : "one seat");
 
         if (config.isWatch()) {
             // lane forge-bot-tables-1011: an AI-vs-AI watch table; stdin is not read again
-            return InteractiveWatch.run(config, protocolOut) ? 0 : 1;
+            phase.go(SessionPhase.WATCH, "watch table");
+            final boolean watched = InteractiveWatch.run(config, protocolOut);
+            endSession(phase, watched, watched ? "watch ended" : "watch failed");
+            return watched ? 0 : 1;
         }
         if (config.isTable()) {
-            return runTable(config, input, protocolOut) ? 0 : 1;
+            final boolean played = runTable(config, input, protocolOut, phase);
+            endSession(phase, played, played ? "terminal sent" : "no terminal");
+            return played ? 0 : 1;
         }
 
         // lane forge-continue-1011 (off unless -Dforge.interactive.continuation=rebuild): this game is a "Continue from
@@ -138,6 +210,7 @@ public final class InteractiveMain {
             rebuild = InteractiveContinuation.requested();
         } catch (InteractiveProtocol.ProtocolException e) {
             InteractiveProtocol.writeBootFatal(protocolOut, config.session(), e.code(), e.getMessage());
+            phase.go(SessionPhase.FAILED, "boot fatal " + e.code());
             return 2;
         }
         if (rebuild) {
@@ -151,8 +224,10 @@ public final class InteractiveMain {
                     config.humanSeat(), config.seed(), rebuild ? InteractiveContinuation.helloExtras() : null);
         } catch (InteractiveProtocol.ProtocolException e) {
             channel.fatal(e.code(), e.getMessage(), null, "hello", null);
+            phase.go(SessionPhase.FAILED, "hello failed");
             return 2;
         }
+        phase.go(SessionPhase.HELLO, rebuild ? "hello sent (rebuild)" : "hello sent");
 
         // lane shared-engine-1103: this game's puzzle and AI tape (were statics; one game per call either way)
         final InteractivePuzzle.Spec puzzle = PUZZLE.get();
@@ -265,6 +340,7 @@ public final class InteractiveMain {
             final Runnable puzzleHook = puzzleLines == null ? null
                     : InteractivePuzzle.hook(InteractivePuzzle.position(puzzle, puzzleLines, config.humanSeat()), game);
             final forge.ai.AiTape gameTape = tape;
+            phase.go(SessionPhase.RUNNING, "game thread started");
             game.getAction().invoke(() -> {
                 try {
                     if (gameTape != null) {
@@ -295,6 +371,7 @@ public final class InteractiveMain {
             } catch (CompletionException ignored) {
                 // engineFailure already emitted the only allowed fatal message.
             }
+            phase.go(SessionPhase.ENDING, gui.hasFailed() ? "game thread ended (failed)" : "game thread ended");
             if (policy != null) {
                 // lane live-sc-1009: the seat's end line and its connections close before the terminal goes out (the host
                 // may stop the JVM as soon as it has the terminal)
@@ -343,6 +420,7 @@ public final class InteractiveMain {
                 review.finish();
             }
         }
+        endSession(phase, completedNormally, completedNormally ? "terminal sent" : "no terminal");
         // Forge initializes Swing/FModel threads that can outlive a completed match.
         // This executable owns exactly one game, so terminate only after the final wire
         // message has been flushed and the interactive GUI has been closed.
@@ -359,7 +437,7 @@ public final class InteractiveMain {
      * <p>The one-seat path above is untouched: a config without {@code humanSeats} never gets here.</p>
      */
     private static boolean runTable(final InteractiveProtocol.Config config, final BufferedReader input,
-                                    final PrintStream protocolOut) {
+                                    final PrintStream protocolOut, final StateMachine.Cell<SessionPhase> phase) {
         final InteractiveProtocol.SeatDemux demux = new InteractiveProtocol.SeatDemux(input, config.humanSeats());
         final List<InteractiveProtocol.Channel> channels =
                 InteractiveProtocol.Channel.table(demux, protocolOut, config.session(), config.humanSeats());
@@ -371,6 +449,7 @@ public final class InteractiveMain {
             channels.get(0).fatal(e.code(), e.getMessage(), null, "hello", null);
             return false;
         }
+        phase.go(SessionPhase.HELLO, "hello sent (" + channels.size() + " seats)");
 
         final InteractiveGuiGame.Table table = new InteractiveGuiGame.Table();
         final List<InteractiveGuiGame> guis = new ArrayList<>();
@@ -440,6 +519,7 @@ public final class InteractiveMain {
 
             final CompletableFuture<Void> gameFinished = new CompletableFuture<>();
             final Runnable frameHook = frameHook(config.frame(), game);
+            phase.go(SessionPhase.RUNNING, "game thread started");
             game.getAction().invoke(() -> {
                 try {
                     match.startGame(game, frameHook);
@@ -458,6 +538,7 @@ public final class InteractiveMain {
             } catch (CompletionException ignored) {
                 // engineFailure already emitted the table's fatal.
             }
+            phase.go(SessionPhase.ENDING, "game thread ended");
 
             if (guis.stream().noneMatch(InteractiveGuiGame::hasFailed)) {
                 for (InteractiveGuiGame gui : guis) {
