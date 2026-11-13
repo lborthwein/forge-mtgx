@@ -189,6 +189,27 @@ public class UntestedKeysSpecTest {
     }
 
     @Test
+    public void opponentKeyIsForgeUnlessSet() {
+        // untested-keys-1113: the live "opponent" key; absent or "forge" = the config unchanged
+        final RlSearch.Config off = RlLiveSeat.Spec.parse(SHIP).search;
+        final RlSearch.Config forge = RlLiveSeat.Spec.parse(SHIP + ",opponent=forge").search;
+        Assert.assertEquals(off.opponent, "forge");
+        Assert.assertEquals(off.toJson().toString(), forge.toJson().toString());
+        Assert.assertFalse(off.toJson().has("opponent"));
+        final RlSearch.Config pol = RlLiveSeat.Spec.parse(SHIP + ",opponent=policy").search;
+        Assert.assertEquals(pol.opponent, "policy");
+        Assert.assertEquals(pol.toJson().get("opponent").getAsString(), "policy");
+        for (String bad : new String[] {"opponent=Policy", "opponent=ai", "opponent="}) {
+            try {
+                RlLiveSeat.Spec.parse(SHIP + "," + bad);
+                Assert.fail("accepted " + bad);
+            } catch (IllegalArgumentException expected) {
+                // forge or policy only
+            }
+        }
+    }
+
+    @Test
     public void badValuesAndTwiceAreRefused() {
         for (String bad : new String[] {"plans.solverCfg.engineAnyWindow=1", "plans.solverCfg.engineFocus=yes",
                 "plans.solverCfg.engineLoopCreditCap=true", "plans.solverCfg.engineLoopCreditCap=-3",

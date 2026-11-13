@@ -357,6 +357,14 @@ public final class RlLiveSeat {
                             c.holdDeployFollowLine = Boolean.parseBoolean(v);
                         }
                         break;
+                    // untested-keys-1113: the play-out opponent (absent = "forge", Forge AI, as before; "policy" = the
+                    // same policy seat as ours on its own observation, needs playout=policy)
+                    case "opponent":
+                        if (!"forge".equals(v) && !"policy".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: opponent=" + v + " (want forge or policy)");
+                        }
+                        c.opponent = v;
+                        break;
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
                     case "connectTimeoutMs": c.connectTimeoutMs = Integer.parseInt(v); break;
