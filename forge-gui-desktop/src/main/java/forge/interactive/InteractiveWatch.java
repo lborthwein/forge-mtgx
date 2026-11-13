@@ -117,8 +117,11 @@ final class InteractiveWatch {
             // policy seats connect before the game's random stream is seeded, as a human game's policy seat does
             for (int seat = 0; seat < 2; seat++) {
                 if ("policy".equals(config.seatAi().get(seat)) && !"forced".equals(tapeMode)) {
-                    policy[seat] = RlLiveSeat.connect(InteractiveMain.policySpec(),
-                            "bot-" + config.session() + "-s" + seat);
+                    // owner-review-1113 (lane solver-distill-cc; unset = every table today): one seat's own policy spec
+                    // (-Dforge.interactive.policySearch.seat<N>), so a recorded watch game can seat two checkpoints
+                    final String seatSpec = System.getProperty("forge.interactive.policySearch.seat" + seat);
+                    policy[seat] = RlLiveSeat.connect(seatSpec == null || seatSpec.isBlank()
+                            ? InteractiveMain.policySpec() : seatSpec, "bot-" + config.session() + "-s" + seat);
                 }
             }
             final Prepared prepared = prepare(config, policy);
