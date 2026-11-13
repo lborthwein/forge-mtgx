@@ -1747,6 +1747,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (sb != null && sb.planPoint(g, menuObjs)) {
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
             stage = sb.propose(g, me, m, menuObjs, t0, bt0);
+            forge.ai.simulation.SearchProf.note("proposeMs", (System.nanoTime() - t0) / 1e6); // searchspeed-1113 (off: nothing)
             if (stage.hook) {
                 // J1: a proven line taken at once; live must have taken one here too
                 final forge.ai.simulation.AiReplay.Mark mk = mark();
@@ -1809,6 +1810,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             r = ls.decideGiven(g, me, given, cfg.breadth);
         }
         tookForce(r);
+        if (forge.ai.simulation.SearchProf.ON) {
+            // searchspeed-1113 (measurement only): the search's own result on the profile line
+            forge.ai.simulation.SearchProf.note("outcome", r.outcome);
+            forge.ai.simulation.SearchProf.note("cands", r.givenIndex.length);
+            forge.ai.simulation.SearchProf.note("worlds", r.worlds);
+            forge.ai.simulation.SearchProf.note("chosen", r.chosen);
+            forge.ai.simulation.SearchProf.note("partial", r.partialWorlds);
+            forge.ai.simulation.SearchProf.note("wallCut", r.wall ? 1 : 0);
+            forge.ai.simulation.SearchProf.note("plan", stage != null ? 1 : 0);
+            forge.ai.simulation.SearchProf.note("plans", stage != null && stage.plans != null ? stage.plans.size() : 0);
+            forge.ai.simulation.SearchProf.note("searchMs", r.ms);
+            forge.ai.simulation.SearchProf.note("cpuMs", r.cpuMs);
+            forge.ai.simulation.SearchProf.note("givenIndex", java.util.Arrays.toString(r.givenIndex));
+            forge.ai.simulation.SearchProf.note("values", java.util.Arrays.deepToString(r.values));
+        }
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
         if (r.givenIndex.length > 0) {
