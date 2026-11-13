@@ -4,7 +4,6 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import forge.game.Game;
-import forge.game.card.Card;
 import forge.game.player.Player;
 import forge.game.zone.ZoneType;
 
@@ -31,8 +30,8 @@ public class OwnerMisplaysFollowTest extends forge.ai.AITest {
         Assert.assertEquals(opp.getLife(), 16);
         ForcedWinSolverTest.play(g, 7);
         final java.util.List<String> cast = new java.util.ArrayList<>();
-        for (Card c : g.getStack().getSpellsCastThisTurn()) {
-            cast.add(c.getName());
+        for (forge.game.spellability.SpellAbility sa : g.getStack().getSpellsCastThisTurn()) {
+            cast.add(sa.getHostCard() == null ? "?" : sa.getHostCard().getName());
         }
         System.out.println("OWNERMISPLAYS follow: over=" + g.isGameOver() + " turn=" + g.getPhaseHandler().getTurn() + " opp life=" + opp.getLife()
                 + " our life=" + me.getLife() + " cast this turn=" + cast + " hand=" + me.getCardsIn(ZoneType.Hand) + " exile="
