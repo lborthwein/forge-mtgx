@@ -87,6 +87,9 @@ public final class ForcedWinCanon {
 
     private static final List<Object[]> READERS = new ArrayList<>();
     private static boolean hooked;
+    /** The registry holds its readers for the JVM's life (measurement runs only): no more than this many. */
+    private static final int MAX_READERS = 20_000;
+    private static int dropped;
 
     /** Called by every new reader when {@link #DUMP} is set. */
     static void register(final ForcedWinModel.Reader r) {
@@ -103,6 +106,10 @@ public final class ForcedWinCanon {
             }
         }
         synchronized (READERS) {
+            if (READERS.size() >= MAX_READERS) {
+                dropped++;
+                return;
+            }
             READERS.add(new Object[] {r, role});
             if (!hooked) {
                 hooked = true;
@@ -133,6 +140,13 @@ public final class ForcedWinCanon {
                     copy = new TreeMap<>(r.templates);
                 }
                 for (Map.Entry<String, ACard> t : copy.entrySet()) {
+                    if (r.stat != null) {
+                        synchronized (r.stat) {
+                            if (!r.stat.containsKey(t.getKey())) {
+                                continue; // with read counts on: a template nobody read (a preloaded list) is left out
+                            }
+                        }
+                    }
                     final String body;
                     synchronized (t.getValue()) {
                         body = GSON.toJson(t.getValue().instance(0));
@@ -143,10 +157,17 @@ public final class ForcedWinCanon {
                     }
                     final JsonObject k = new JsonObject();
                     k.addProperty("t", h);
-                    final long[] s = r.stat == null ? null : r.stat.get(t.getKey());
-                    if (s != null) {
-                        k.addProperty("reads", s[0]);
-                        k.addProperty("decisions", s[1]);
+                    if (r.stat != null) {
+                        synchronized (r.stat) {
+                            final long[] s = r.stat.get(t.getKey());
+                            final java.util.BitSet ds = r.statDecisions.get(t.getKey());
+                            if (s != null && ds != null) {
+                                k.addProperty("reads", s[0]);
+                                final JsonArray da = new JsonArray();
+                                ds.stream().forEach(da::add);
+                                k.add("decisions", da);
+                            }
+                        }
                     }
                     keys.add(t.getKey(), k);
                 }
@@ -161,6 +182,8 @@ public final class ForcedWinCanon {
                 }
             }
             out.addProperty("decisions", DECISION.get());
+            out.addProperty("readersMade", all.size());
+            out.addProperty("readersDropped", dropped);
             out.add("readers", readers);
             out.add("templates", bodies);
             Files.createDirectories(Paths.get(DUMP));

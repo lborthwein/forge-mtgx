@@ -58,6 +58,26 @@ public class CardTableTest extends AITest {
     }
 
     @Test
+    public void theCanonicalSandboxGivesATargetedSpellSomethingToActOn() {
+        final ForcedWinCanon.Table tb = generated(POOL);
+        final ForcedWinCanon.Base b = tb.base();
+        System.err.println("CANON FRAME\n" + b.frame);
+        for (Player p : b.g.getPlayers()) {
+            Assert.assertTrue(p.getCreaturesInPlay().size() >= 1, "a creature in play for " + p);
+            Assert.assertTrue(p.getCardsIn(ZoneType.Graveyard).size() >= 3, "graveyard of " + p);
+            Assert.assertTrue(p.getCardsIn(ZoneType.Hand).size() >= 3, "hand of " + p);
+            Assert.assertTrue(p.getLandsInPlay().size() >= 5, "lands of " + p);
+        }
+        Assert.assertEquals(b.me.getCardsIn(ZoneType.Library).size(), b.pool.size());
+        for (String name : new String[] {"Swords to Plowshares", "Lightning Bolt", "Demonic Tutor", "Oblivion Ring"}) {
+            final ACard a = tb.entries.get(name).card;
+            System.err.println("CANON " + name + " " + shape(a));
+            Assert.assertFalse(a.fromHand.isEmpty(), name);
+            Assert.assertFalse(a.fromHand.get(0).unplayable, name + ": played in the canonical sandbox");
+        }
+    }
+
+    @Test
     public void theKeyIsOffByDefault() {
         Assert.assertNull(ForcedWinSolver.Config.fromProps(k -> null).cardTable);
         Assert.assertEquals(ForcedWinSolver.Config.fromProps(k -> "cardTable".equals(k) ? "/x/t.json" : null).cardTable, "/x/t.json");
