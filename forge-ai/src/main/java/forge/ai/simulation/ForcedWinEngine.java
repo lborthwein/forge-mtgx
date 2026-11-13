@@ -811,9 +811,34 @@ final class ForcedWinEngine {
     /** (c) the transposition table: coarse key -> the counter vectors seen. */
     private final java.util.Map<String, List<long[]>> table = new java.util.HashMap<>();
 
+    /**
+     * owner-misplays-1113 (modeChoice only): the modes chosen for the modal items on the stack, "" when there is none.
+     * A move rests with its spell still on the stack, and {@link #coarseKey} does not read the stack, so two variants
+     * of one modal cast that differ only in their modes had one key: the second was pruned as dominated by the first,
+     * before either had resolved. With mode choice points the pending modes are part of the transposition key.
+     */
+    static String stackModes(Game g) {
+        StringBuilder sb = null;
+        for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+            final SpellAbility sa = si.getSpellAbility();
+            if (sa == null || sa.getApi() != forge.game.ability.ApiType.Charm) {
+                continue;
+            }
+            if (sb == null) {
+                sb = new StringBuilder("|m");
+            }
+            sb.append(sa.getHostCard() == null ? "?" : sa.getHostCard().getName()).append(':');
+            for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+                sb.append(sub.getSVarInt("CharmOrder")).append(',');
+            }
+            sb.append(';');
+        }
+        return sb == null ? "" : sb.toString();
+    }
+
     /** (c): true when a seen node dominates this one (it is pruned); else the node is recorded. */
     private boolean seenDominated(Node n) {
-        final String k = coarseKey(n.g, n.me);
+        final String k = lim.modeChoice ? coarseKey(n.g, n.me) + stackModes(n.g) : coarseKey(n.g, n.me);
         final List<long[]> xs = table.computeIfAbsent(k, x -> new ArrayList<>());
         long[] pv0 = n.pv;
         if (lim.focus) {
