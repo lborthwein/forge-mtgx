@@ -1068,6 +1068,19 @@ public final class ForcedWinProbe {
 
     /** Learn the template of {@code liveCard} (a card the seat owns, in any zone). Never throws. */
     static ACard learn(Game live, Player liveMe, Card liveCard, long seed, Stats st) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return learnP(live, liveMe, liveCard, seed, st);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.LEARN);
+        try {
+            return learnP(live, liveMe, liveCard, seed, st);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #learn} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private static ACard learnP(Game live, Player liveMe, Card liveCard, long seed, Stats st) {
         final ACard t = new ACard();
         t.id = liveCard.getId();
         t.name = liveCard.getName();

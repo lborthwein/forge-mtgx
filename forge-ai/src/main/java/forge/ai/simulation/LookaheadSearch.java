@@ -2913,6 +2913,19 @@ public final class LookaheadSearch {
      * turn without failing.
      */
     public boolean[] recordPlans(Game live, Player me, List<Object> recorders, int knownTop, long deadlineNanos) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return recordPlansP(live, me, recorders, knownTop, deadlineNanos);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.PLANREC);
+        try {
+            return recordPlansP(live, me, recorders, knownTop, deadlineNanos);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #recordPlans} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private boolean[] recordPlansP(Game live, Player me, List<Object> recorders, int knownTop, long deadlineNanos) {
         final int n = recorders.size();
         final boolean[] done = new boolean[n];
         if (n == 0 || !hookPlayout) {
@@ -4858,6 +4871,7 @@ public final class LookaheadSearch {
                         continue;
                     }
                     tasks.add(() -> {
+                        SearchProf.ctx(cc, ww); // searchspeed-1113 (off: nothing)
                         Rollout r = play(prep[cc][ww], null);
                         prep[cc][ww] = null;
                         record(values, outs, ok, cc, ww, r, cands.get(cc), sealed);
@@ -5016,6 +5030,19 @@ public final class LookaheadSearch {
      * it reads. Before the wall (and always without a budget, or without a pool) it is the plain wait and returns true.
      */
     private boolean runAll(List<Runnable> tasks, Budget wall) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return runAllP(tasks, wall);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.WAIT);
+        try {
+            return runAllP(tasks, wall);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #runAll} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private boolean runAllP(List<Runnable> tasks, Budget wall) {
         if (pool == null) {
             for (Runnable r : tasks) {
                 r.run();
@@ -6438,6 +6465,19 @@ public final class LookaheadSearch {
      * its replay (A8T audit 39/48, all on the loaded host).
      */
     Prepared prepare(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, TrajPoint carried) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return prepareP(live, liveMe, c, defSa, worldSeed, resample, carried);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.PREP);
+        try {
+            return prepareP(live, liveMe, c, defSa, worldSeed, resample, carried);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #prepare} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Prepared prepareP(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, TrajPoint carried) {
         final Prepared p = new Prepared();
         p.budget = budget;
         final Random prev = MyRandom.getThreadRandom();
@@ -6573,6 +6613,27 @@ public final class LookaheadSearch {
      * candidate's value (verify mode: is only recorded).
      */
     Rollout play(Prepared p, Boolean wantFp, WorldMemo memo, int cand) {
+        if (!SearchProf.ON) {
+            return playP(p, wantFp, memo, cand);
+        }
+        SearchProf.playBegin();
+        Rollout pr = null;
+        try {
+            pr = playP(p, wantFp, memo, cand);
+            return pr;
+        } finally {
+            int pt = -1;
+            try {
+                pt = p.g == null ? -1 : p.g.getPhaseHandler().getTurn();
+            } catch (RuntimeException e) {
+                pt = -1;
+            }
+            SearchProf.playEnd(pr == null ? -1 : pr.steps, pr != null && pr.aborted, pr != null && pr.ok, pt);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #play} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Rollout playP(Prepared p, Boolean wantFp, WorldMemo memo, int cand) {
         final Rollout r = new Rollout();
         r.trajectory = p.trajectory;
         if (p.failed) {
