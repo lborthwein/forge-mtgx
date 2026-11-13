@@ -129,7 +129,15 @@ final class AiTapePlays {
         }
         final boolean nm = o.has("nm") && o.get("nm").getAsBoolean();
         final int sid0 = o.has("sid") && o.getAsJsonArray("sid").size() > 0 ? o.getAsJsonArray("sid").get(0).getAsInt() : -1;
-        final List<SpellAbility> found = IdScope.detached(AiTape.DECODE_BASE, () -> find(host, seat, d, oc, nm));
+        final List<SpellAbility> plain = IdScope.detached(AiTape.DECODE_BASE, () -> find(host, seat, d, oc, nm, false));
+        // sdcc-replay-sample-1113: a seat's menu is the card's abilities AND each one's alternative-cost variants
+        // (ComputerUtilAbility.getOriginalAndAltCostAbilities: Forge AI's menu and the bench bridge's). A variant an
+        // effect grants (a card cast from exile or a graveyard "by" its grant) is itself among the card's abilities, and
+        // its alternative-cost variant is the same grant applied again: a play the record names by that doubled
+        // description. So when nothing the card offers has the record's description, those variants are looked at too
+        // (only then: every replay that found its play before finds the same one).
+        final List<SpellAbility> found = !plain.isEmpty() || onIdShift == null ? plain
+                : IdScope.detached(AiTape.DECODE_BASE, () -> find(host, seat, d, oc, nm, true));
         if (found.isEmpty()) {
             throw new IllegalStateException("card " + hostId + " offers no ability like the record's (" + d + ")");
         }
@@ -314,12 +322,20 @@ final class AiTapePlays {
         }
     }
 
-    private static List<SpellAbility> find(final Card host, final Player seat, final String d, final List<String> oc, final boolean nm) {
+    /** {@code alts}: also each offered ability's alternative-cost variants (see {@link #decode}). */
+    private static List<SpellAbility> find(final Card host, final Player seat, final String d, final List<String> oc, final boolean nm,
+            final boolean alts) {
         final List<SpellAbility> out = new ArrayList<>();
         final List<SpellAbility> candidates = new ArrayList<>();
         for (SpellAbility base : host.getAllPossibleAbilities(seat, false)) {
             base.setActivatingPlayer(seat);
             candidates.addAll(GameActionUtil.getAdditionalCostSpell(base));
+            if (alts) {
+                for (SpellAbility alt : GameActionUtil.getAlternativeCosts(base, seat, false)) {
+                    alt.setActivatingPlayer(seat);
+                    candidates.addAll(GameActionUtil.getAdditionalCostSpell(alt));
+                }
+            }
         }
         for (SpellAbility base : host.getSpellAbilities()) {
             if (!candidates.contains(base)) {
