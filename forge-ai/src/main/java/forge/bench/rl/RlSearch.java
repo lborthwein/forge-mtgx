@@ -1634,6 +1634,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** svcmemo-1114: the body of {@link #decide}, unchanged (the wrapper only opens and drops the decision's memo). */
     private int decideM(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return decideP(g, me, m, frame, greedy, menuObjs);
+        }
+        forge.ai.simulation.SearchProf.begin("priority", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        try {
+            return decideP(g, me, m, frame, greedy, menuObjs);
+        } finally {
+            forge.ai.simulation.SearchProf.end(cfg.threads);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #decide} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private int decideP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
+            final List<SpellAbility> menuObjs) {
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
@@ -2999,6 +3013,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** svcmemo-1114: the body of {@link #decideChoice}, unchanged (the wrapper only opens and drops the decision's memo). */
     private short[] decideChoiceM(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return decideChoiceP(g, me, m, frame, greedy, objs);
+        }
+        forge.ai.simulation.SearchProf.begin("choice", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        try {
+            return decideChoiceP(g, me, m, frame, greedy, objs);
+        } finally {
+            forge.ai.simulation.SearchProf.end(cfg.threads);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #decideChoice} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private short[] decideChoiceP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
@@ -3164,6 +3192,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** svcmemo-1114: the body of {@link #decideBlocks}, unchanged (the wrapper only opens and drops the decision's memo). */
     private short[] decideBlocksM(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return decideBlocksP(g, me, m, frame, greedy, objs);
+        }
+        forge.ai.simulation.SearchProf.begin("blocks", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        try {
+            return decideBlocksP(g, me, m, frame, greedy, objs);
+        } finally {
+            forge.ai.simulation.SearchProf.end(cfg.threads);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #decideBlocks} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private short[] decideBlocksP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
@@ -4368,6 +4410,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public double[] leafReach(final Object copyCtx, final Game g, final Player me) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return leafReachP(copyCtx, g, me);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.LEAFREACH);
+        try {
+            return leafReachP(copyCtx, g, me);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #leafReach} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private double[] leafReachP(final Object copyCtx, final Game g, final Player me) {
         if (cfg.reach == null) {
             return null;
         }

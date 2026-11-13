@@ -2817,6 +2817,19 @@ public final class ForcedWinSolver {
      * an empty stack, the position's no-line cache, the engine search once per turn in main phase 1). Never throws.
      */
     public List<Proposal> propose(Game live) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return proposeP(live);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.PROPOSE);
+        try {
+            return proposeP(live);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #propose} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private List<Proposal> proposeP(Game live) {
         final List<Proposal> out = new ArrayList<>();
         lastCap = null; // rollout-budget-1101
         final PhaseHandler ph = live.getPhaseHandler();
@@ -2867,6 +2880,19 @@ public final class ForcedWinSolver {
 
     /** As above, on the given known top (tests). */
     public Proposal setup(final Game live, final List<Integer> knownTop, final GoldfishOpts o) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return setupP(live, knownTop, o);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SCREEN);
+        try {
+            return setupP(live, knownTop, o);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #setup} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Proposal setupP(final Game live, final List<Integer> knownTop, final GoldfishOpts o) {
         try {
             final PhaseHandler ph = live.getPhaseHandler();
             if (lineActive() || !live.getStack().isEmpty()
@@ -3284,6 +3310,19 @@ public final class ForcedWinSolver {
      * come, else no opinion. Never throws.
      */
     public Decision defend(Game live) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return defendP(live);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.DEFEND);
+        try {
+            return defendP(live);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #defend} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Decision defendP(Game live) {
         try {
             if (live.getStack().isEmpty() || !cfg.defense) {
                 return Decision.NONE;
@@ -4978,6 +5017,19 @@ public final class ForcedWinSolver {
      * given (top first). No game copies, no opponent: a screen, never a proof. Never throws.
      */
     public Screen screen(final Game g, final List<Integer> knownTop, final int nodes, final long ms) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return screenP(g, knownTop, nodes, ms);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SCREEN);
+        try {
+            return screenP(g, knownTop, nodes, ms);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #screen} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Screen screenP(final Game g, final List<Integer> knownTop, final int nodes, final long ms) {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
@@ -5083,6 +5135,19 @@ public final class ForcedWinSolver {
 
     /** {@link #reach} with its knobs ({@link ReachOpts}). */
     public Reach reach(final Game g, final List<Integer> knownTop, final ReachOpts o) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return reachP(g, knownTop, o);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SCREEN);
+        try {
+            return reachP(g, knownTop, o);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #reach} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Reach reachP(final Game g, final List<Integer> knownTop, final ReachOpts o) {
         final Reach out = new Reach();
         final long t0 = forge.game.WorkClock.nanoTime();
         final int nameNodes = o.nameNodes < 0 ? o.nodes : o.nameNodes;
@@ -5228,6 +5293,19 @@ public final class ForcedWinSolver {
      * library is never read. Optimistic, as a goldfish is: no opponent. No card or combo knowledge.
      */
     public Goldfish goldfish(final Game g, final List<Integer> knownTop, final GoldfishOpts o) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return goldfishP(g, knownTop, o);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SCREEN);
+        try {
+            return goldfishP(g, knownTop, o);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #goldfish} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Goldfish goldfishP(final Game g, final List<Integer> knownTop, final GoldfishOpts o) {
         final Goldfish out = new Goldfish();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
