@@ -360,6 +360,15 @@ public final class ForcedWinCanon {
 
     /** Build the canonical position of {@code pool} (names; unresolvable ones are left out). Never reads a real game. */
     static Base build(final List<String> pool) {
+        return build(pool, false);
+    }
+
+    /**
+     * As above; {@code lean}: the same position with a library of twenty basic lands instead of the pool (no card by
+     * name: {@link #withCard} puts each asked card there for its call). For the loop probes, an engine search that
+     * copies the game at every node: with the pool in the library a probe did not finish inside its budget.
+     */
+    static Base build(final List<String> pool, final boolean lean) {
         return scoped(SEED, () -> {
             final Base b = new Base();
             final List<String> names = new ArrayList<>();
@@ -394,6 +403,14 @@ public final class ForcedWinCanon {
             game.getPhaseHandler().onStackResolved();
             b.g = game;
             b.me = game.getPlayers().get(0);
+            if (lean) {
+                for (int i = 0; i < 4; i++) {
+                    for (String n : BeliefSampler.basics()) {
+                        b.me.getZone(ZoneType.Library).add(Card.fromPaperCard(paper(n), b.me));
+                    }
+                }
+                return b;
+            }
             for (String n : names) {
                 final Card c = Card.fromPaperCard(paper(n), b.me);
                 b.me.getZone(ZoneType.Library).add(c);
@@ -588,6 +605,18 @@ public final class ForcedWinCanon {
             }
         }
 
+        private Base lean;
+
+        /** The loop probes' position ({@link #build(List, boolean)}, lean). */
+        Base leanBase() {
+            synchronized (LOCK) {
+                if (lean == null) {
+                    lean = build(pool, true);
+                }
+                return lean;
+            }
+        }
+
         /** The saved model of {@code key} for the card {@code c}, or null (none, or its script is not the one it was learned from). */
         ACard get(final String key, final Card c) {
             final Entry e = entries.get(key);
@@ -657,7 +686,7 @@ public final class ForcedWinCanon {
                 if (have != null) {
                     return have;
                 }
-                final Base b = base();
+                final Base b = leanBase();
                 final long t0 = System.nanoTime();
                 final long seed = ForcedWinSolver.mix(SEED, loopKey(c, partner, fromHand, tag).hashCode());
                 final Boolean w = scoped(seed, () -> withCard(b, c, cc -> partner == null
