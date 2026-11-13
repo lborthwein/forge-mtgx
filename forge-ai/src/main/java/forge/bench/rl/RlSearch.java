@@ -1322,10 +1322,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     // ------------------------------------------------------------------------------------------------ service
 
+    /** sdcc-svcbatch-1113: the next service a new connection goes to (only read when `server` names several). */
+    private final java.util.concurrent.atomic.AtomicInteger serverTurn = new java.util.concurrent.atomic.AtomicInteger();
+
     private RlSearchClient client() throws IOException {
         RlSearchClient c = client.get();
         if (c == null) {
-            c = new RlSearchClient(cfg.server, cfg.connectTimeoutMs, cfg.readTimeoutMs);
+            // sdcc-svcbatch-1113: `server` may name several services of the same policy, host:port|host:port (one = as
+            // before). Each thread keeps one connection; the threads are dealt to the services in turn, so the play-outs'
+            // requests are computed by several services at once. The same requests and answers.
+            String server = cfg.server;
+            if (server != null && server.indexOf('|') >= 0) {
+                final String[] all = server.split("\\|");
+                server = all[Math.floorMod(serverTurn.getAndIncrement(), all.length)];
+            }
+            c = new RlSearchClient(server, cfg.connectTimeoutMs, cfg.readTimeoutMs);
             final JsonObject h = new JsonObject();
             h.addProperty("proto", RlSearchClient.PROTO);
             h.addProperty("schema_sha", schemaSha(obsVersion));
