@@ -1030,8 +1030,40 @@ public final class ForcedWinModel {
          */
         volatile boolean hideLibrary;
 
+        /**
+         * searchspeed-1113 (solver key cardLock; false = off, and then every lookup takes the reader's monitor as before):
+         * a card whose template is already learned is read without the reader's monitor. The play-out threads of one
+         * search share a reader at the leaves; with the one monitor, every lookup of every card waits while another
+         * thread learns a new card in its sandbox. Learning, object probes and loop probes still take the monitor, one at a
+         * time and in the same code as before, so what a template holds does not depend on this key; a template is
+         * published and later changed only under its own lock, which the lock-free read takes too.
+         */
+        volatile boolean cardLock;
+
+        private String templateKey(Card c) {
+            return (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
+                    + (probeSettle ? "settle|" : "") + c.getName();
+        }
+
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
-        synchronized ACard card(Game live, Player me, Card c) {
+        ACard card(Game live, Player me, Card c) {
+            if (cardLock) {
+                final ACard t;
+                synchronized (templates) {
+                    t = templates.get(templateKey(c));
+                }
+                if (t != null && !(probeObjects && t.hasObj)) {
+                    synchronized (t) {
+                        if (loopProbe == null || t.loopChecked) {
+                            return t.instance(c.getId());
+                        }
+                    }
+                }
+            }
+            return cardLocked(live, me, c);
+        }
+
+        private synchronized ACard cardLocked(Game live, Player me, Card c) {
             final boolean prevHide = ForcedWinProbe.HIDE.get();
             ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
             try {
@@ -1047,9 +1079,11 @@ public final class ForcedWinModel {
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
             // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
-            final String key = (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
-                    + (probeSettle ? "settle|" : "") + c.getName();
-            ACard t = templates.get(key);
+            final String key = templateKey(c);
+            ACard t;
+            synchronized (templates) {
+                t = templates.get(key);
+            }
             if (t == null) {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
@@ -1069,7 +1103,9 @@ public final class ForcedWinModel {
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                 }
                 if (!forge.ai.AiWork.spent()) {
-                    templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                    synchronized (templates) {
+                        templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                    }
                 }
             } else if (probeObjects && t.hasObj && !forge.ai.AiWork.spent()) {
                 // sdcc-probeobj-1111: the template was learned at the card's first sight; objects of ours that are in play
@@ -1078,7 +1114,9 @@ public final class ForcedWinModel {
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
                 ForcedWinProbe.PROBE_OBJECTS.set(true);
                 try {
-                    ForcedWinProbe.extendObjects(t, live, me, c, seed, probeStats);
+                    synchronized (t) {
+                        ForcedWinProbe.extendObjects(t, live, me, c, seed, probeStats);
+                    }
                 } catch (RuntimeException | StackOverflowError e) {
                     t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "object probe failed: " + e;
                 } finally {
@@ -1086,15 +1124,18 @@ public final class ForcedWinModel {
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                 }
             }
-            if (loopProbe != null && !t.loopChecked) {
-                t.loopChecked = true; // once per template, whatever it finds
-                try {
-                    loopProbe.fill(live, me, c, t);
-                } catch (RuntimeException | StackOverflowError e) {
-                    t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe failed: " + e;
+            synchronized (t) {
+                // searchspeed-1113: the template's own lock (uncontended unless cardLock reads it from another thread)
+                if (loopProbe != null && !t.loopChecked) {
+                    t.loopChecked = true; // once per template, whatever it finds
+                    try {
+                        loopProbe.fill(live, me, c, t);
+                    } catch (RuntimeException | StackOverflowError e) {
+                        t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe failed: " + e;
+                    }
                 }
+                return t.instance(c.getId());
             }
-            return t.instance(c.getId());
         }
 
         /** labeller-v2 (c): observe scry / surveil as SCRY / SURVEIL effects (false = v1). */
