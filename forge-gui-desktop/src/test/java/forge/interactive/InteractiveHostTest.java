@@ -48,10 +48,11 @@ public class InteractiveHostTest {
         assertNull(InteractiveHost.notHosted(), "an ordinary launch spec is hosted");
         for (String[] spec : new String[][] {
                 {"forge.interactive.continuation", "rebuild", "continuation"},
-                {"forge.interactive.aiTape", "forced:/tmp/tape.jsonl", "AI tape"},
-                {"forge.interactive.aiTape", "record", "AI tape"},
-                {"forge.interactive.aiTape", "resume:/tmp/tape.jsonl", "AI tape"},
-                {"forge.interactive.review", "/tmp/review.json", "review"}}) {
+                {"forge.interactive.aiTape", "forced:/tmp/tape.jsonl", "AI tape replay"},
+                {"forge.interactive.aiTape", "resume:/tmp/tape.jsonl", "AI tape replay"},
+                {"forge.interactive.aiTape", "restore:/tmp/tape.jsonl", "AI tape replay"},
+                {"forge.interactive.review", "/tmp/review.json", "review"},
+                {"forge.interactive.aiReplay", "/tmp/ai.jsonl", "AI replay"}}) {
             final String was = System.getProperty(spec[0]);
             System.setProperty(spec[0], spec[1]);
             try {
@@ -66,9 +67,12 @@ public class InteractiveHostTest {
             }
         }
         final String was = System.getProperty("forge.interactive.aiTape");
-        System.setProperty("forge.interactive.aiTape", "off");
         try {
+            System.setProperty("forge.interactive.aiTape", "off");
             assertNull(InteractiveHost.notHosted(), "aiTape=off is no tape");
+            // the live server and the identity gate host games that RECORD their AI seat: each writes its own stderr
+            System.setProperty("forge.interactive.aiTape", "record");
+            assertNull(InteractiveHost.notHosted(), "a tape record is hosted");
         } finally {
             if (was == null) {
                 System.clearProperty("forge.interactive.aiTape");
