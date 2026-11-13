@@ -331,6 +331,15 @@ public final class ForcedWinSolver {
          */
         public boolean tutorCast = false;
         /**
+         * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
+         * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
+         * line's follower answers the mode ask with it in every verification play-out and in the live game (through
+         * {@link forge.ai.LineAnswers#modes}). Off, a modal spell is played with Forge AI's modes in the search, and
+         * again asked of Forge AI when the line is followed: a kill that needs one mode and no other is outside the
+         * search, and a followed line's modal cast is not bound to what was verified.
+         */
+        public boolean engineModeChoice = false;
+        /**
          * sdcc-tutorcast-1110 (false = off: the reader, its templates and every plan are unchanged). The probes also
          * note where an activated ability leaves its own source once it has resolved (the top of our library, our
          * hand, exile, our graveyard; not as its cost), and the planner moves it there instead of leaving it on the
@@ -957,6 +966,7 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
+            c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.probeObjects = "true".equals(get.apply("probeObjects")); // sdcc-probeobj-1111
             c.planBridge = "true".equals(get.apply("planBridge")); // sdcc-bridge-1111
@@ -1041,6 +1051,7 @@ public final class ForcedWinSolver {
                 + (probeSettle ? " probeSettle" : "")
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
                 + (sourceLeaves ? " sourceLeaves" : "")
                 + (probeObjects ? " probeObjects" : "") // sdcc-probeobj-1111
@@ -3936,6 +3947,7 @@ public final class ForcedWinSolver {
         el.xVariants = cfg.xVariants;
         el.stack = stackWindow;
         el.costChoice = cfg.engineCostChoice;
+        el.modeChoice = cfg.engineModeChoice; // owner-misplays-1113
         if (cfg.engineFocus) {
             el.focus = true; // sdcc-order-1111
             el.focusKillers = engineFocusKillers;
@@ -6851,9 +6863,11 @@ public final class ForcedWinSolver {
      * does. Installed once, at the first line this solver follows; without an active line every answer is null.
      */
     private forge.ai.LineAnswers liveLine;
+    /** owner-misplays-1113 (report only): mode asks of the live seat answered with the followed line's recorded set. */
+    public int lineModeAnswers;
 
     private void liveAnswers() {
-        if (!cfg.tutorCast && !cfg.probeObjects) {
+        if (!cfg.tutorCast && !cfg.probeObjects && !cfg.engineModeChoice) {
             return;
         }
         final PlayerControllerAi pc = PlayerControllerAi.cacOf(me);
@@ -6884,6 +6898,17 @@ public final class ForcedWinSolver {
             public CardCollectionView costCards(final SpellAbility sa, final String part, final CardCollectionView valid,
                     final int amount) {
                 return active == null ? null : active.costCards(sa, valid, amount);
+            }
+
+            @Override
+            public <T> List<T> modes(final SpellAbility sa, final List<T> possible, final int min, final int num) {
+                final List<T> r = active == null ? null : active.modes(sa, possible, min, num, me);
+                if (r != null) {
+                    lineModeAnswers++;
+                    receipt("FORCED_WIN line-modes" + tag() + " turn=" + me.getGame().getPhaseHandler().getTurn() + " card="
+                            + (sa.getHostCard() == null ? "?" : sa.getHostCard().getName()) + " modes=" + r.size() + "/" + possible.size());
+                }
+                return r;
             }
         };
         pc.setLineAnswers(liveLine);
@@ -7052,6 +7077,7 @@ public final class ForcedWinSolver {
             fo.enginePay = cfg.enginePay;
             fo.uncapped = cfg.loopMacro && cfg.loopMacro3; // review #154 S2: its own key
             fo.costLine = cfg.engineCostChoice;
+            fo.modeLine = cfg.engineModeChoice; // owner-misplays-1113
             fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
             fo.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
             fo.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
@@ -7187,6 +7213,26 @@ public final class ForcedWinSolver {
         boolean uncapped;
         /** R3-4 (b), engineCostChoice (false = off): the line's recorded COST answers are replayed (LineAi's CacHook). */
         boolean costLine;
+        /** owner-misplays-1113, engineModeChoice (false = off): the line's recorded MODE answers are replayed. */
+        boolean modeLine;
+
+        /** engineModeChoice: the recorded mode set of the step being cast, for this ask; null = none recorded (not the line's). */
+        <T> List<T> modes(final SpellAbility sa, final List<T> possible, final int min, final int num, final Player me) {
+            if (!modeLine || done || sa == null || possible == null || possible.size() < 2 || sa.getActivatingPlayer() != me) {
+                return null;
+            }
+            final String t = choices.next(ForcedWinChoices.MODE);
+            if (t == null) {
+                return null;
+            }
+            final List<T> r = ForcedWinChoices.applyMode(t, possible, min, num);
+            if (r == null) {
+                choices.misses++;
+            } else {
+                choices.hits++;
+            }
+            return r;
+        }
 
         static final class Next {
             SpellAbility action;
@@ -7399,7 +7445,7 @@ public final class ForcedWinSolver {
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
             floatDone = 0;
-            if (cacLine || costLine) {
+            if (cacLine || costLine || modeLine) {
                 choices = new ForcedWinChoices.Cursor(withFree(st.cacPlayed != null ? st.cacPlayed : st.cac, freeToks));
             }
             n.action = sa;
@@ -7682,6 +7728,14 @@ public final class ForcedWinSolver {
     /** Our seat in a play-out: the line, our counterspells against counters of it, Forge AI for the rest. */
     static final class LineAi extends ForcedWinEngine.GuardedAi {
         Follower f;
+
+        /** owner-misplays-1113 (engineModeChoice): the line's recorded modes for the step being cast, else Forge AI's. */
+        @Override
+        public List<forge.game.spellability.AbilitySub> chooseModeForAbility(SpellAbility sa,
+                List<forge.game.spellability.AbilitySub> possible, int min, int num, boolean allowRepeat) {
+            final List<forge.game.spellability.AbilitySub> r = f == null || allowRepeat ? null : f.modes(sa, possible, min, num, getPlayer());
+            return r != null ? r : super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+        }
         /** kill-line-1106 (verifyReplan; null = off): a fresh line from this world once the line breaks on a later turn. */
         java.util.function.Function<Line, Line> replanner;
         int startTurn;

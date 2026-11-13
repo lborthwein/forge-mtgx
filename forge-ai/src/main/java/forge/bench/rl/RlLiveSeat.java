@@ -107,7 +107,10 @@ public final class RlLiveSeat {
                 "passBlockers",
                 // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
                 // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
-                "planLoops"));
+                "planLoops",
+                // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
+                // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
+                "engineModeChoice"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -124,7 +127,10 @@ public final class RlLiveSeat {
                 "passBlockers",
                 // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
                 // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
-                "planLoops"));
+                "planLoops",
+                // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
+                // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
+                "engineModeChoice"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as

@@ -275,4 +275,23 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
             }
         }
     }
+
+    /**
+     * G17 with the modes of a modal spell as a choice point of the engine search (solver key engineModeChoice): after the
+     * recast spell resolved the kill is ritual, ritual, the modal spell with its drain mode ALONE (a second mode would
+     * cost the finisher as its additional discard), the finisher. A wide budget: the question is whether the line is in
+     * the search space, not how fast this host is. Without the key the same search finds nothing.
+     */
+    @Test
+    public void g17WithModeChoicePointsTheKillAfterTheRecastSpellIsProven() {
+        final java.util.List<String> played = java.util.Arrays.asList("Dark Ritual", "Cabal Ritual", "Yawgmoth's Will");
+        final String wide = "budgetMs=90000,engineMs=60000,evalReserveMs=20000";
+        final ForcedWinSolver.Proposal off = propose("G17 after the recast spell, wide", g17(played), wide);
+        final ForcedWinSolver.Proposal on = propose("G17 after the recast spell, wide", g17(played), wide + ",engineModeChoice=true");
+        Assert.assertTrue(on != null && on.pUnopposed >= 1.0, "with mode choice points the engine finds the kill");
+        Assert.assertTrue(String.valueOf(on.text).contains("Collective Brutality") && String.valueOf(on.text).contains("Tendrils of Agony"),
+                "the line casts the modal spell and the finisher: " + on.text);
+        Assert.assertEquals(on.winTurn, 0, "this turn");
+        Assert.assertTrue(off == null || off.pBelief < 1.0 || off.winTurn > 0, "without the key no proven kill this turn (the ship string)");
+    }
 }

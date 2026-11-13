@@ -457,6 +457,12 @@ final class ForcedWinEngine {
         /** R3-4 (b) (false = off): an engine move's cost cards branch (COST kind, through MoveAi's own CacHook). */
         boolean costChoice;
         /**
+         * owner-misplays-1113 (false = off): the modes of a modal spell or ability of ours are a choice point of the
+         * move (MODE kind): Forge AI's own set first, then every other legal set as a variant (all of them: a modal
+         * card has few). Without it the search plays a modal spell only with the modes Forge AI would pick.
+         */
+        boolean modeChoice;
+        /**
          * search-bones-1015: our library's known top in the root copy (pile memory); the rest is shuffled there. -1 (the
          * default) keeps the real order.
          */
@@ -4333,8 +4339,8 @@ final class ForcedWinEngine {
             for (int k = 0; k < ranked.size(); k++) {
                 final Step v = (Step) ranked.get(k)[2];
                 final Applied av = (Applied) ranked.get(k)[3];
-                if (k >= lim.cacVariants - 1) {
-                    av.child = null; // dropped by rank: released
+                if (k >= lim.cacVariants - 1 && !ForcedWinChoices.MODE.equals(ForcedWinChoices.kindOf(cands.get((Integer) ranked.get(k)[1])))) {
+                    av.child = null; // dropped by rank: released (owner-misplays-1113: a mode set is never dropped by rank)
                     continue;
                 }
                 moves.add(at++, v);
@@ -4953,6 +4959,11 @@ final class ForcedWinEngine {
                 }
                 ai.setCacHook(ai.costHook());
             }
+            if (lim.modeChoice && ai.rec == null) {
+                // owner-misplays-1113: only the kinds with their own switch record (MODE here; COST with costChoice)
+                ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap);
+                ai.rec.costOnly = true;
+            }
             // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
             // (bvw-step1-build-1024: none with budget=counter: no wall and no deadline, so per-move maxSteps bounds it)
             final long wall = lim.wall != 0 ? lim.wall : deadline == Long.MAX_VALUE ? 0L : deadline;
@@ -5100,6 +5111,36 @@ final class ForcedWinEngine {
                     return def;
                 }
             };
+        }
+
+        /** owner-misplays-1113 (modeChoice): our modal spell's modes are a choice point: forced, or Forge AI's and recorded. */
+        @Override
+        public List<forge.game.spellability.AbilitySub> chooseModeForAbility(SpellAbility sa,
+                List<forge.game.spellability.AbilitySub> possible, int min, int num, boolean allowRepeat) {
+            if (rec == null || !lim.modeChoice || allowRepeat || possible == null || possible.size() < 2 || sa == null
+                    || sa.getActivatingPlayer() != getPlayer()) {
+                return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            }
+            final String t = rec.at(ForcedWinChoices.MODE);
+            if (t != null) {
+                final List<forge.game.spellability.AbilitySub> r = ForcedWinChoices.applyMode(t, possible, min, num);
+                if (r != null) {
+                    rec.played(t);
+                    return r;
+                }
+                rec.miss = true;
+            }
+            final List<forge.game.spellability.AbilitySub> def = super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            if (def == null || def.isEmpty()) {
+                return def;
+            }
+            final String dt = ForcedWinChoices.modeTok(def, possible);
+            if (rec.forcedPoint()) {
+                rec.played(dt);
+            } else {
+                rec.free(ForcedWinChoices.modes(possible.size(), min, num, dt, rec.cap), dt);
+            }
+            return def;
         }
 
         /** An own-zone pick of ours (LibraryPicks' scope, every pick of the move, not only the first). */

@@ -1582,6 +1582,13 @@ public class PlayerControllerAi extends PlayerController {
     }
 
     private List<AbilitySub> chooseModeForAbilityAi(SpellAbility sa, List<AbilitySub> possible, int min, int num, boolean allowRepeat) {
+        if (lineAnswers != null && !allowRepeat) {
+            // owner-misplays-1113 (null answers = no line, or not the line's cast: as before): the followed line's modes
+            final List<AbilitySub> line = lineAnswers.modes(sa, possible, min, num);
+            if (line != null) {
+                return line;
+            }
+        }
         List<AbilitySub> result = brains.chooseModeForAbility(sa, possible, min, num, allowRepeat);
         if (result != null) {
             return result;
