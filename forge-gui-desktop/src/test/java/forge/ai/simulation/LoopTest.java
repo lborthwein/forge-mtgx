@@ -63,6 +63,51 @@ public class LoopTest extends forge.ai.AITest {
         return r;
     }
 
+    private static ForcedWinSolver.Goldfish vista(final String fetched, final boolean landsEach) {
+        // the owner's NA05 turn-9 ask (Prismatic Vista: a Mountain, a Plains, or nothing), as the position after each
+        // answer: the loop needs RRR for Kiki-Jiki; red sources in play are Mox Ruby's (in hand) and the fetched land's
+        final String lib = "Mountain;Plains;Mountain;Plains;Mountain;Plains;Plateau;Mountain";
+        final String frame = ForcedWinSolverTest.frame(KIKI + ";Restoration Angel;Mox Ruby", "Strip Mine;Plains;Plains;Plains;" + fetched,
+                20, "", "", 20, "human").replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + lib);
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = solver(me, true);
+        final ForcedWinSolver.GoldfishOpts o = new ForcedWinSolver.GoldfishOpts();
+        o.horizon = 5;
+        o.active = 3;
+        o.nodes = 1500;
+        o.ms = -1L;
+        o.seed = 7L;
+        o.gamma = 0.8;
+        o.lambda = 0.6;
+        o.maxNodes = 20000;
+        o.landsEach = landsEach;
+        final ForcedWinSolver.Goldfish r = s.goldfish(g, s.knownTop(g), o);
+        System.out.println("LOOP vista each=" + landsEach + " fetched=" + fetched + " g=" + r.g + " turn=" + r.bestTurn + " screens="
+                + r.screens + " nodes=" + r.nodes + " | " + r.best);
+        Assert.assertFalse(r.failed);
+        Assert.assertFalse(r.cut);
+        return r;
+    }
+
+    /**
+     * gf-land-count-1113 (GoldfishOpts.landsEach, off by default): the fetch-land ask of the owner's replay NA05. As it was,
+     * a Mountain, a Plains and keeping the fetch land all have the same goldfish value (the granted lands make red in
+     * every case), so the reach part cannot tell the answers apart. With the discount paid per granted land the Mountain
+     * (one red source short: one granted land) stays where it was and the Plains (two short) drops.
+     */
+    @Test
+    public void theFetchLandsColourCountsWithTheLandCount() {
+        final double off = vista("Mountain", false).g;
+        Assert.assertEquals(off, 0.6 * 0.8, 1e-9, "next turn, with granted land");
+        Assert.assertEquals(vista("Plains", false).g, off, 1e-9, "off: the colour of the fetched land adds nothing");
+        Assert.assertEquals(vista("Prismatic Vista", false).g, off, 1e-9, "off: nor does fetching at all");
+        final ForcedWinSolver.Goldfish mountain = vista("Mountain", true), plains = vista("Plains", true);
+        Assert.assertEquals(mountain.g, off, 1e-9, "one granted land: unchanged");
+        Assert.assertEquals(plains.g, 0.6 * 0.6 * 0.8, 1e-9, "two granted lands");
+        Assert.assertTrue(mountain.g > plains.g);
+    }
+
     @Test
     public void bothInPlayIsALine() {
         final String lib = "Mountain;Mountain;Mountain;Mountain";

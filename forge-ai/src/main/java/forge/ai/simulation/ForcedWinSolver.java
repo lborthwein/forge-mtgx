@@ -5152,6 +5152,15 @@ public final class ForcedWinSolver {
          */
         public boolean lands = true;
         public double lambda = 0.6;
+        /**
+         * gf-land-count-1113 (off by default, and then nothing changes): {@link #lambda} is paid once for EVERY granted
+         * land a line needs, not once a line. With the single factor a seat one coloured source short and a seat three
+         * short score alike (the granted lands make every colour the library's lands make), so a real land in hand or in
+         * play, or the colour a fetched land has, adds nothing. When the screen with every grant finds a line that plays
+         * granted lands, the same window is screened again with 1, 2, ... fewer than it played; a line's value is
+         * gamma^turn x lambda^(granted lands it plays) and the best of these screens counts. No card knowledge.
+         */
+        public boolean landsEach = false;
         /** Sampled orders of our unknown library as the later turns' draws (0 = none; the relaxation needs none). */
         public int samples = 0;
         /** Sampled cards past the one per later turn (what this line's own draw spells would find). */
@@ -5260,11 +5269,39 @@ public final class ForcedWinSolver {
                     }
                     if (sc.lines > 0) {
                         best = sc.score;
-                        allDirect &= sc.scoreDirect && nexts.isEmpty();
-                        if (out.bestTurn < 0 || sc.bestTurn < out.bestTurn) {
-                            out.bestTurn = sc.bestTurn;
-                            out.best = sc.best;
-                            out.bestLine = o.samples > 0 ? null : sc.bestLine;
+                        Screen won = sc;
+                        if (o.landsEach && !sc.scoreDirect) {
+                            // gf-land-count-1113: lambda per granted land the line plays; fewer grants may do, later or not
+                            final int played = grantedLands(sc.bestLine);
+                            best = Math.pow(o.gamma, Math.max(0, sc.bestTurn)) * Math.pow(o.lambda, Math.max(1, played));
+                            for (int fewer = 1; fewer < played; fewer++) {
+                                if (o.maxNodes > 0 && out.nodes >= o.maxNodes) {
+                                    out.cut = true;
+                                    break;
+                                }
+                                final Screen s2 = screenSeq(g, top, nexts, grant, fewer, o.nodes, o.ms, o.window, Math.min(h, j + w),
+                                        j, o.gamma, o.lambda);
+                                out.screens++;
+                                out.nodes += s2.nodes;
+                                if (s2.exhausted) {
+                                    out.capped++;
+                                }
+                                if (s2.failed || s2.lines == 0) {
+                                    continue;
+                                }
+                                final double v2 = Math.pow(o.gamma, Math.max(0, s2.bestTurn))
+                                        * Math.pow(o.lambda, s2.scoreDirect ? 0 : Math.max(1, grantedLands(s2.bestLine)));
+                                if (v2 > best) {
+                                    best = v2;
+                                    won = s2;
+                                }
+                            }
+                        }
+                        allDirect &= won.scoreDirect && nexts.isEmpty();
+                        if (out.bestTurn < 0 || won.bestTurn < out.bestTurn) {
+                            out.bestTurn = won.bestTurn;
+                            out.best = won.best;
+                            out.bestLine = o.samples > 0 ? null : won.bestLine;
                         }
                         break; // the earliest window with a line
                     }
@@ -5465,6 +5502,20 @@ public final class ForcedWinSolver {
             }
         }
         return false;
+    }
+
+    /** gf-land-count-1113: the granted lands a line plays (its land drops of granted copies). */
+    private static int grantedLands(final Line l) {
+        if (l == null) {
+            return 0;
+        }
+        final java.util.Set<Integer> ids = new java.util.HashSet<>();
+        for (ForcedWinPlanner.Step st : l.steps) {
+            if (st.hostId >= GRANT_ID && st.kind == AbilKind.LAND) {
+                ids.add(st.hostId);
+            }
+        }
+        return ids.size();
     }
 
     /** GOLDFISH: the ids of granted copies start here (above any game's card ids). */

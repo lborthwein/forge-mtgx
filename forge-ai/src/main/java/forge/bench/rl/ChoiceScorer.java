@@ -79,6 +79,8 @@ public final class ChoiceScorer {
         public double gfGamma = 0.8, gfLambda = 0.6;
         /** The land-drop relaxation, and one ask's node allowance for its options' goldfish (shared evenly; 0 = none). */
         public boolean gfLands = true;
+        /** gf-land-count-1113 (off by default): the goldfish's land discount is paid per granted land (GoldfishOpts.landsEach). */
+        public boolean gfLandsEach = false;
         public long gfAskNodes = 120_000;
         /**
          * solver-distill-cc-1109 (0 = off, the default): a CARDS ask whose resolution asks again (put-backs: Brainstorm and
@@ -171,7 +173,9 @@ public final class ChoiceScorer {
                 // owner-misplays-1113, off by default
                 "redealOwn",
                 // discard-guard-1113, off by default
-                "departScored", "departFloor"));
+                "departScored", "departFloor",
+                // gf-land-count-1113, off by default
+                "gfLandsEach"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -218,6 +222,7 @@ public final class ChoiceScorer {
             if (o.has("gfActive")) c.gfActive = o.get("gfActive").getAsInt();
             if (o.has("gfLambda")) c.gfLambda = o.get("gfLambda").getAsDouble();
             if (o.has("gfLands")) c.gfLands = o.get("gfLands").getAsBoolean();
+            if (o.has("gfLandsEach")) c.gfLandsEach = o.get("gfLandsEach").getAsBoolean();
             if (o.has("gfAskNodes")) c.gfAskNodes = o.get("gfAskNodes").getAsLong();
             if (o.has("seqs")) c.seqs = o.get("seqs").getAsInt();
             if (o.has("guard")) c.guard = o.get("guard").getAsBoolean();
@@ -317,6 +322,9 @@ public final class ChoiceScorer {
                     o.addProperty("gfActive", gfActive);
                     o.addProperty("gfLambda", gfLambda);
                     o.addProperty("gfLands", gfLands);
+                    if (gfLandsEach) {
+                        o.addProperty("gfLandsEach", true); // gf-land-count-1113: only when on
+                    }
                     o.addProperty("gfAskNodes", gfAskNodes);
                 }
                 if (reachDiscards) {
@@ -558,6 +566,7 @@ public final class ChoiceScorer {
                         go.active = cfg.gfActive;
                         go.lambda = cfg.gfLambda;
                         go.lands = cfg.gfLands;
+                        go.landsEach = cfg.gfLandsEach;
                         go.maxNodes = cfg.gfAskNodes <= 0 ? 0 : Math.max(cfg.gfNodes, cfg.gfAskNodes / Math.max(1, s.menuOptions));
                         go.seed = uid * 0x9E3779B97F4A7C15L + g.getPhaseHandler().getTurn() * 64L
                                 + g.getPhaseHandler().getPhase().ordinal();

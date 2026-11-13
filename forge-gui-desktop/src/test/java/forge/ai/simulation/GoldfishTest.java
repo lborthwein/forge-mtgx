@@ -108,6 +108,26 @@ public class GoldfishTest extends forge.ai.AITest {
         Assert.assertEquals(sampled.bestTurn, 3);
     }
 
+    /**
+     * gf-land-count-1113 (GoldfishOpts.landsEach, off by default): Doomsday (BBB) in hand with three, two, one and no black
+     * source in play. Off: the single discount, so only the turn tells them apart. On: lambda for every granted land the
+     * line needs; a seat that needs none more than before keeps its value.
+     */
+    @Test
+    public void theLandDiscountPerGrantedLand() {
+        final String lib = "Gush;Thassa's Oracle;Swamp;Swamp;Swamp;Swamp;Swamp;Swamp;Swamp;Swamp;Swamp;Swamp;Island;Island";
+        final String[] bf = {"Underground Sea;Watery Grave;Swamp", "Underground Sea;Watery Grave;Island", "Underground Sea;Island;Island",
+            "Island;Island;Island"};
+        final double[] off = {0.48, 0.48, 0.384, 0.3072};
+        final double[] on = {0.48, 0.48, 0.6 * 0.6 * 0.64, 0.6 * 0.6 * 0.6 * 0.512};
+        for (int i = 0; i < bf.length; i++) {
+            final ForcedWinSolver.GoldfishOpts o = opts(5, 3, true, 0, 1500);
+            Assert.assertEquals(fish(bf[i], "Doomsday", lib, false, o).g, off[i], 1e-9, "off: " + bf[i]);
+            o.landsEach = true;
+            Assert.assertEquals(fish(bf[i], "Doomsday", lib, false, o).g, on[i], 1e-9, "on: " + bf[i]);
+        }
+    }
+
     /** The rest of a 40-card Doomsday list below a tutored top card (a turn-one tutor: one land in play, five cards in hand). */
     static final String DECK = "Bayou;Bazaar of Baghdad;Botanical Sanctum;Brain Freeze;Brainstorm;Cabal Ritual;Chromatic Star;"
             + "Consider;Dark Ritual;Echo of Eons;Gush;Island;Island;Island;Jace, the Mind Sculptor;Jace, Vryn's Prodigy;"

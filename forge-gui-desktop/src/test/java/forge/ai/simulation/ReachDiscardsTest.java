@@ -79,6 +79,9 @@ public class ReachDiscardsTest extends AITest {
         return CardIndex.of(sb.toString().getBytes(StandardCharsets.UTF_8));
     }
 
+    /** gf-land-count-1113: the next scorers are built with choiceScorer.gfLandsEach (a test switch). */
+    private static boolean landsEach = false;
+
     static ChoiceScorer scorer(final boolean on) {
         return scorer(on, 0, null);
     }
@@ -94,6 +97,9 @@ public class ReachDiscardsTest extends AITest {
         }
         if (redeal > 0) {
             o.addProperty("redealOwn", redeal);
+        }
+        if (landsEach) {
+            o.addProperty("gfLandsEach", true);
         }
         final ChoiceScorer.Config cfg = ChoiceScorer.Config.parse(o);
         final Map<String, String> sv = new HashMap<>(SOLVER);
@@ -554,5 +560,27 @@ public class ReachDiscardsTest extends AITest {
         Assert.assertEquals(a.s.redeal, 4);
         Assert.assertNotNull(a.alt, "the answer moves: " + a.dump());
         Assert.assertEquals(a.altNames, List.of("Badlands"), "the land is discarded, the Aura kept: " + a.dump());
+    }
+
+    /**
+     * gf-land-count-1113 (choiceScorer.gfLandsEach, off by default: absent from the config). G16's loot with the discount
+     * paid per granted land: the same answer. Keeping the Aura is one red source short (one granted land, as before);
+     * keeping the land has no line. The key cannot make this ask keep both: one card must go.
+     */
+    @Test
+    public void g16TheLootIsTheSameWithTheLandCount() {
+        Assert.assertFalse(scorer(true, 4, null).config().toJson().toString().contains("gfLandsEach"));
+        final String[] loops = {"planLoops"};
+        final Ask off = loot(4, "Splinter Twin", G16_BOARD, G16_LIB, "Splinter Twin", loops);
+        landsEach = true;
+        try {
+            Assert.assertTrue(scorer(true, 4, null).config().toJson().toString().contains("\"gfLandsEach\":true"));
+            final Ask a = loot(4, "Splinter Twin", G16_BOARD, G16_LIB, "Splinter Twin", loops);
+            Assert.assertNull(a.s.unsupported, a.dump());
+            Assert.assertEquals(a.altNames, List.of("Badlands"), "the land is discarded, the Aura kept: " + a.dump());
+            Assert.assertEquals(a.altNames, off.altNames);
+        } finally {
+            landsEach = false;
+        }
     }
 }
