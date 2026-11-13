@@ -225,7 +225,14 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
         Assert.assertTrue(screenSolver(me, true).hasEnder(g), "the same answer from the kept probes");
         final long again = ForcedWinSolver.LOOP_PROBES.get() - p0 - first;
         System.out.println("OWNERMISPLAYS loop probe: first reader " + first + " probes, second reader (library reversed) " + again);
-        Assert.assertEquals(again, 0L, "no probe is run twice for a partner");
+        // 16 creature names, 12 partners a call: the reversed order brings up to 4 names not probed before, none twice
+        Assert.assertTrue(again <= 4, "only partners not probed before: " + again);
+        final long p1 = ForcedWinSolver.LOOP_PROBES.get();
+        Assert.assertTrue(screenSolver(me, true).hasEnder(g));
+        java.util.Collections.reverse(lib);
+        me.getZone(ZoneType.Library).setCards(lib);
+        Assert.assertTrue(screenSolver(me, true).hasEnder(g));
+        Assert.assertEquals(ForcedWinSolver.LOOP_PROBES.get() - p1, 0L, "every partner is probed once a game, in either order");
     }
 
     /**
