@@ -124,7 +124,10 @@ final class InteractiveWatch {
                             ? InteractiveMain.policySpec() : seatSpec, "bot-" + config.session() + "-s" + seat);
                 }
             }
-            final Prepared prepared = prepare(config, policy);
+            // owner-review-1113 (lane solver-distill-cc; unset = every table today): a position start, as the training
+            // bench's (-Dforge.interactive.watchStart=<file>: a JSON object with the bench GAME message's "start_state")
+            final forge.bench.RlStartState start = watchStart(config.seed());
+            final Prepared prepared = prepare(config, policy, start != null);
             final Match match = prepared.match();
             final Game game = prepared.game();
             final List<RegisteredPlayer> registered = prepared.registered();
@@ -149,7 +152,12 @@ final class InteractiveWatch {
                     for (forge.ai.AiTape t : tapes()) {
                         t.bindGameThread(Thread.currentThread());
                     }
-                    match.startGame(game);
+                    if (start != null) {
+                        match.startGame(game, start.hook(game));
+                        System.err.println("[watch-start] " + start.started());
+                    } else {
+                        match.startGame(game);
+                    }
                     gameFinished.complete(null);
                 } catch (WatchAbort aborted) {
                     gameFinished.complete(null);
@@ -227,9 +235,29 @@ final class InteractiveWatch {
 
     static Prepared prepare(final InteractiveProtocol.Config config, final RlLiveSeat[] policy)
             throws InteractiveProtocol.ProtocolException {
+        return prepare(config, policy, false);
+    }
+
+    /** owner-review-1113: the watch table's position start, or null (the property is unset: every table today). */
+    private static forge.bench.RlStartState watchStart(final long seed) {
+        final String f = System.getProperty("forge.interactive.watchStart");
+        if (f == null || f.isBlank()) {
+            return null;
+        }
+        try {
+            final String text = java.nio.file.Files.readString(Path.of(f), java.nio.charset.StandardCharsets.UTF_8);
+            return forge.bench.RlStartState.of(com.google.gson.JsonParser.parseString(text).getAsJsonObject(), seed);
+        } catch (java.io.IOException e) {
+            throw new IllegalArgumentException("forge.interactive.watchStart: " + e);
+        }
+    }
+
+    /** {@code positionStart}: a Puzzle-type game (the engine asks no mulligan; the start hook deals the zones), as the bench's. */
+    static Prepared prepare(final InteractiveProtocol.Config config, final RlLiveSeat[] policy, final boolean positionStart)
+            throws InteractiveProtocol.ProtocolException {
         InteractiveMain.seedGameRandom(TAPE_RNG.get() != null ? TAPE_RNG.get() : new Random(config.seed()));
         final List<RegisteredPlayer> registered = createPlayers(config, policy);
-        final GameRules rules = new GameRules(GameType.Constructed);
+        final GameRules rules = new GameRules(positionStart ? GameType.Puzzle : GameType.Constructed);
         rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
         rules.setGamesPerMatch(1);
         rules.setAISideboardingEnabled(false);
