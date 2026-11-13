@@ -3015,8 +3015,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (alt != null && s.chosen != null && s.chosen.pileIds != null) {
             sc.adoptPile(g, s.chosen);
         }
+        // gf-land-count-1113 (measurement only; off unless -Dsdcc.gfLandsEachShadow and the key itself is off): the same ask
+        // answered again by a second scorer with choiceScorer.gfLandsEach, on the same values; its answer is only logged
+        JsonObject landsEachShadow = null;
+        if (GF_LANDS_EACH_SHADOW && scored && !sc.config().gfLandsEach && (cfg.decisionLog != null || rowsWanted || CHOICE_LOG)) {
+            landsEachShadow = landsEachShadow(g, me, m, greedy, seed, objs, s, v, alt);
+        }
         if (cfg.decisionLog != null || rowsWanted || CHOICE_LOG) {
             final JsonObject row = sc.row(s, src);
+            if (landsEachShadow != null) {
+                row.add("lands_each", landsEachShadow);
+            }
             row.addProperty("game_uid", Long.toUnsignedString(uid));
             row.addProperty("dec_idx", frame.decIdx);
             row.addProperty("turn", g.getPhaseHandler().getTurn());
@@ -4161,6 +4170,56 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     static final boolean REACH_LOG = Boolean.getBoolean("sdcc.reachLog");
     /** discard-guard-1113 (diagnostics; off unless set): every card-scorer ask's row on stderr. */
     static final boolean CHOICE_LOG = Boolean.getBoolean("sdcc.choiceLog");
+    /** gf-land-count-1113: log what choiceScorer.gfLandsEach would answer at each scored ask (measurement only). */
+    static final boolean GF_LANDS_EACH_SHADOW = Boolean.getBoolean("sdcc.gfLandsEachShadow");
+    private ChoiceScorer shadowScorer;
+
+    /**
+     * gf-land-count-1113: the ask enumerated again by a scorer that differs only by gfLandsEach, chosen on the live ask's
+     * values when the two scorers made the same frames (else no verdict). Never changes the live answer; never throws.
+     */
+    private JsonObject landsEachShadow(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy,
+            final long seed, final Object objs, final ChoiceScorer.Scored live, final double[] v, final short[] liveAlt) {
+        final JsonObject out = new JsonObject();
+        try {
+            if (shadowScorer == null) {
+                final JsonObject c = cfg.choiceScorer.deepCopy();
+                c.addProperty("gfLandsEach", true);
+                shadowScorer = new ChoiceScorer(ChoiceScorer.Config.parse(c), index, obsVersion, uid);
+            }
+            final ChoiceScorer sh = shadowScorer;
+            sh.setCostPart(costPartOf(objs));
+            sh.setAskPlayer(askPlayer(objs));
+            final ChoiceScorer.Scored s2 = sh.enumerate(g, me, m, greedy, liveKnow, seed, sh.mechAsk(m) ? askSa(objs) : null);
+            if (s2.unsupported != null || sh.payloads(s2).size() != v.length || s2.options.size() != live.options.size()) {
+                out.addProperty("verdict", "not-comparable");
+                return out;
+            }
+            final short[] alt2 = sh.choose(s2, v, greedy);
+            int reachChanged = 0;
+            for (int i = 0; i < s2.options.size(); i++) {
+                final ChoiceScorer.Option a = live.options.get(i), b = s2.options.get(i);
+                final double ra = a.screen == null ? Double.NaN : a.screen.reach, rb = b.screen == null ? Double.NaN : b.screen.reach;
+                if (Double.compare(ra, rb) != 0) {
+                    reachChanged++;
+                }
+            }
+            final boolean same = java.util.Arrays.equals(liveAlt, alt2);
+            out.addProperty("verdict", same ? "same" : "changed");
+            out.addProperty("options_reach_changed", reachChanged);
+            out.addProperty("departed", alt2 != null);
+            if (!same && s2.chosen != null) {
+                out.addProperty("chosen", s2.chosen.label);
+            }
+            if (s2.held != null) {
+                out.addProperty("held", s2.held);
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            out.addProperty("verdict", "failed");
+            out.addProperty("why", String.valueOf(e));
+        }
+        return out;
+    }
 
     @Override
     public double reachPart(final double[] r) {
