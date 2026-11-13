@@ -301,4 +301,48 @@ public class LookaheadGivenTest extends SimulationTest {
             s.shutdown();
         }
     }
+
+    /**
+     * searchspeed-1113 (race): a raced decision's log row carries the three race fields, and the slots the race did not
+     * start plus the slots played are every slot (no budget here, so nothing else is unplayed). Race off: no field.
+     */
+    @Test
+    public void racedDecisionAccountsForEverySlot() {
+        Game game = board();
+        Player a = game.getPlayers().get(0);
+        LookaheadSearch.Config c = config();
+        c.worlds = 4;
+        c.race = 2;
+        c.anytime = true;
+        LookaheadSearch s = new LookaheadSearch(c);
+        s.setHooks(new Hooks(game.getPhaseHandler().getTurn() + 2), true, false);
+        try {
+            LookaheadSearch.GivenResult r = s.decideGivenPlans(game, a, given(a), 3, null, null, 0, 0L, null, null);
+            AssertJUnit.assertEquals(1, s.getStats().raceDecisions);
+            final int n = r.values.length, k = 4;
+            AssertJUnit.assertTrue("candidates " + n, n >= 2);
+            int played = 0;
+            for (double[] row : r.values) {
+                AssertJUnit.assertEquals(k, row.length);
+                for (double x : row) {
+                    played += Double.isInfinite(x) ? 0 : 1;
+                }
+            }
+            AssertJUnit.assertEquals(n * k, played + r.racePlayoutsSaved);
+            AssertJUnit.assertTrue(r.raceStopped >= 0 && r.raceStopped <= n - 1);
+            // every stopped candidate saves its later worlds; with every candidate stopped the default's are saved too
+            AssertJUnit.assertEquals((r.raceStopped + (r.raceStopped == n - 1 ? 1 : 0)) * (k - c.race), r.racePlayoutsSaved);
+            AssertJUnit.assertEquals(r.racePlayoutsSaved, s.getStats().racePlayoutsSaved);
+            final com.google.gson.JsonObject on = new com.google.gson.JsonObject();
+            forge.bench.rl.RlSearch.raceRow(on, c.race, r);
+            AssertJUnit.assertEquals(c.race, on.get("race").getAsInt());
+            AssertJUnit.assertEquals(r.raceStopped, on.get("raceStopped").getAsInt());
+            AssertJUnit.assertEquals(r.racePlayoutsSaved, on.get("racePlayoutsSaved").getAsInt());
+            final com.google.gson.JsonObject off = new com.google.gson.JsonObject();
+            forge.bench.rl.RlSearch.raceRow(off, 0, r);
+            AssertJUnit.assertEquals(0, off.size());
+        } finally {
+            s.shutdown();
+        }
+    }
 }
