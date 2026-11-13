@@ -359,6 +359,14 @@ public final class RlLiveSeat {
                         break;
                     // untested-keys-1113: the play-out opponent (absent = "forge", Forge AI, as before; "policy" = the
                     // same policy seat as ours on its own observation, needs playout=policy)
+                    // untested-keys-1113: the search worlds deal the opponent's hidden cards from DeckBelief (absent = off,
+                    // the seat as before; needs the live belief, which the seat always sets)
+                    case "beliefDeck":
+                        if (!"true".equals(v) && !"false".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: beliefDeck=" + v + " (want true or false)");
+                        }
+                        c.beliefDeck = Boolean.parseBoolean(v);
+                        break;
                     case "opponent":
                         if (!"forge".equals(v) && !"policy".equals(v)) {
                             throw new IllegalArgumentException("policySearch: opponent=" + v + " (want forge or policy)");
