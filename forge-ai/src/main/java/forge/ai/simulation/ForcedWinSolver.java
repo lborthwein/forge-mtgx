@@ -4921,6 +4921,18 @@ public final class ForcedWinSolver {
         return new ForcedWinModel.Reader();
     }
 
+    /** searchspeed-1113 (measurement): a shared reader's templates as JSON, and how many it holds. */
+    public static String readerJson(final Object reader) {
+        return ((ForcedWinModel.Reader) reader).exportJson();
+    }
+
+    public static int readerSize(final Object reader) {
+        final ForcedWinModel.Reader r = (ForcedWinModel.Reader) reader;
+        synchronized (r.templates) {
+            return r.templates.size();
+        }
+    }
+
     /** choice-scorer-1106: a solver over a shared reader ({@link #newSharedReader}). */
     public static ForcedWinSolver withReader(final Player me, final Config cfg, final Object reader) {
         return new ForcedWinSolver(me, cfg, (ForcedWinModel.Reader) reader);
