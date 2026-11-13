@@ -135,6 +135,8 @@ public final class LookaheadSearch {
          * the root's value. With every world finished this chooses exactly as the plain gate.
          */
         public boolean anytime = false;
+        /** searchspeed-1113 (0 = off): racing with paired worlds after this many (RlSearch.Config.race). */
+        public int race = 0;
         /**
          * Target variants (lane forge-ai-misplays-0928; 0 = off, the default: candidates unchanged). Up to this many
          * extra candidates per decision: a single-target spell or ability among the candidates played with a target
@@ -752,6 +754,8 @@ public final class LookaheadSearch {
         public long capped, rolloutsAborted;
         /** search-bones-1015 (S-b): decisions over the budget decided on the worlds every candidate finished in. */
         public long partialDecisions;
+        /** searchspeed-1113 (race): raced decisions, those that ended after the first stage, play-outs not played. */
+        public long raceDecisions, raceStopped, racePlayoutsSaved;
         /**
          * Hard wall (lane sc-wallguard-1009): searched decisions whose wait for their play-outs the wall cut short
          * (budget + {@link #WALL_GRACE_MS}), and the play-outs still running at the cut (told to stop; their results are
@@ -1019,6 +1023,12 @@ public final class LookaheadSearch {
             if (partialDecisions > 0) {
                 // search-bones-1015: only when S-b decided a capped search on its finished worlds
                 o.addProperty("partialDecisions", partialDecisions);
+            }
+            if (raceDecisions > 0) {
+                // searchspeed-1113: only when a race ran
+                o.addProperty("raceDecisions", raceDecisions);
+                o.addProperty("raceStopped", raceStopped);
+                o.addProperty("racePlayoutsSaved", racePlayoutsSaved);
             }
             o.addProperty("attackDecisions", attackDecisions);
             o.addProperty("attackSearched", attackSearched);
@@ -3161,7 +3171,10 @@ public final class LookaheadSearch {
                 labelChoices = null;
                 labelTargets = null;
                 macroOf = null;
-                if (expander == null) {
+                if (expander == null && cfg.race > 0 && cfg.race < k && proof && cfg.anytime && hookLeaf && !cfg.leafOpp
+                        && !cfg.reuse && !cfg.dedup && !cfg.dedupVerify && cfg.copyFidelity != 2 && labelSink == null) {
+                    aborted = playRace(live, me, cands, decisionSeed, values, outs, ok, k); // searchspeed-1113
+                } else if (expander == null) {
                     aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
                 } else {
                     // S-t: the base candidates first (their world-0 play-outs record the choice asks), then the macros
@@ -4804,6 +4817,9 @@ public final class LookaheadSearch {
             final Carried cw = carried[w];
             any |= cw != null;
             for (int c = 0; c < n; c++) {
+                if (raceSkip(c, w)) {
+                    continue; // searchspeed-1113: not this stage's play-out
+                }
                 if (pastDeadline()) {
                     break prepare;
                 }
@@ -4865,6 +4881,9 @@ public final class LookaheadSearch {
             } else {
                 for (int c = 0; c < n; c++) {
                     final int ww = w, cc = c;
+                    if (raceSkip(cc, ww)) {
+                        continue; // searchspeed-1113: not this stage's play-out (its slot is left as it is)
+                    }
                     if (prep[cc][ww] == null) {
                         // A reused value, or (budget) a play-out that never started.
                         record(values, outs, ok, cc, ww, outs[cc][ww] != null ? outs[cc][ww] : aborted(), cands.get(cc));
@@ -4900,7 +4919,7 @@ public final class LookaheadSearch {
                     sealed[0] = true;
                     for (int c = 0; c < n; c++) {
                         for (int w = 0; w < k; w++) {
-                            if (outs[c][w] == null) {
+                            if (outs[c][w] == null && !raceSkip(c, w)) {
                                 record(values, outs, ok, c, w, aborted(), cands.get(c));
                             }
                         }
@@ -5008,6 +5027,91 @@ public final class LookaheadSearch {
             }
         }
         runAll(tasks);
+    }
+
+    // ---- searchspeed-1113: racing with paired worlds (Config.race; all three fields idle unless a race is on)
+    private int raceLo = 0, raceHi = Integer.MAX_VALUE;
+    private boolean[] raceAlive;
+
+    /** Is play-out (c, w) outside the stage being played? Always false without a race. */
+    private boolean raceSkip(int c, int w) {
+        return w < raceLo || w >= raceHi || raceAlive != null && !raceAlive[c];
+    }
+
+    /**
+     * Racing: every candidate in worlds [0, race); then the default and every candidate whose mean paired gain over the
+     * default in those worlds is above 0 (or that won one of them outright) in worlds [race, k), with the same world
+     * seeds as an unraced search. A slot never played stays null (not finished: the anytime rule compares each candidate
+     * on the worlds it has, and a candidate with no gain is never chosen). Stage 1's values are read through the value
+     * leaf once more than an unraced search does.
+     */
+    private int playRace(Game live, Player me, List<Cand> cands, long decisionSeed, double[][] values, Rollout[][] outs,
+            boolean[] ok, int k) {
+        final int n = cands.size(), race = cfg.race;
+        try {
+            raceLo = 0;
+            raceHi = race;
+            raceAlive = null;
+            int aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+            stats.raceDecisions++;
+            if (aborted > 0 || pastDeadline()) {
+                return aborted;
+            }
+            final double[][] v1 = new double[n][];
+            for (int c = 0; c < n; c++) {
+                v1[c] = values[c].clone();
+            }
+            final long fb = stats.leafFallbacks;
+            valueLeaves(v1, outs, ok.clone(), k);
+            final boolean[] alive = new boolean[n];
+            alive[0] = true;
+            int na = 0;
+            if (stats.leafFallbacks == fb) {
+                for (int c = 1; c < n; c++) {
+                    double sum = 0;
+                    int cnt = 0;
+                    boolean won = false;
+                    for (int w = 0; w < race; w++) {
+                        final Rollout rc = outs[c][w], r0 = outs[0][w];
+                        if (rc == null || !rc.ok || rc.aborted) {
+                            continue;
+                        }
+                        won |= rc.pTerminal == 1.0;
+                        if (r0 != null && r0.ok && !r0.aborted) {
+                            sum += v1[c][w] - v1[0][w];
+                            cnt++;
+                        }
+                    }
+                    alive[c] = won || cnt > 0 && sum / cnt > 0;
+                    na += alive[c] ? 1 : 0;
+                }
+            } else {
+                java.util.Arrays.fill(alive, true); // no stage-1 values: every candidate gets every world, as unraced
+                na = n - 1;
+            }
+            if (na == 0) {
+                stats.raceStopped++;
+                stats.racePlayoutsSaved += (long) n * (k - race);
+            } else {
+                stats.racePlayoutsSaved += (long) (n - 1 - na) * (k - race);
+                raceLo = race;
+                raceHi = k;
+                raceAlive = alive;
+                aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+            }
+            for (int c = 0; c < n; c++) {
+                for (int w = 0; w < k; w++) {
+                    if (outs[c][w] == null) {
+                        values[c][w] = Double.NEGATIVE_INFINITY; // never played: as a play-out the budget stopped
+                    }
+                }
+            }
+            return aborted;
+        } finally {
+            raceLo = 0;
+            raceHi = Integer.MAX_VALUE;
+            raceAlive = null;
+        }
     }
 
     private static Rollout aborted() {
