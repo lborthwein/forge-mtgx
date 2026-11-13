@@ -177,6 +177,16 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode crewNoop = AiFixes.Mode.OFF;
         /**
+         * Dead alternative-cost guard (lane evoke-empty-board-1111, owner report 2026-11-12T03:09Z; off|shadow|on, OFF by
+         * default: candidates and decisions unchanged). A spell whose cost spends cards beyond itself (evoke, whose body is
+         * sacrificed as it enters; a cost that exiles or discards a card from hand) is not a departure candidate when the
+         * effect those cards pay for buys nothing on this board ({@link #deadAltCost}: Forge's AI declines every such effect
+         * as an optional trigger). The value leaf scored an evoked damage elemental above a land on turn 1 against an empty
+         * board in all 8 worlds (+0.06 mean), two cards spent for nothing. ON drops it as deadEtb drops a dead-ETB
+         * permanent; SHADOW counts; Forge's own answer is never dropped.
+         */
+        public AiFixes.Mode deadAltCost = AiFixes.Mode.OFF;
+        /**
          * Dud-cast guard (lane live-ai-quality-1030, owner 2026-10-30; off|shadow|on, OFF by default: nothing runs and every
          * decision is unchanged). Before the live seat commits a non-permanent spell or a non-mana activated ability (Forge's
          * answer or a departure), {@link DudCast} resolves it in {@link #dudWorlds} belief-redrawn copies; when no copy's state
@@ -538,6 +548,9 @@ public final class LookaheadSearch {
             if (crewNoop != AiFixes.Mode.OFF) {
                 o.addProperty("crewNoop", crewNoop.key());
             }
+            if (deadAltCost != AiFixes.Mode.OFF) {
+                o.addProperty("deadAltCost", deadAltCost.key());
+            }
             if (dudCast != AiFixes.Mode.OFF) {
                 o.addProperty("dudCast", dudCast.key());
                 o.addProperty("dudWorlds", dudWorlds);
@@ -679,6 +692,9 @@ public final class LookaheadSearch {
         /** crewNoop guard (null = off): the same counters as deadEtb, for Crew activations that cannot matter this turn. */
         public String crewNoopMode;
         public long crewNoopCands, crewNoopDecisions, crewNoopDropped, crewNoopShadowBest, crewNoopForge;
+        /** deadAltCost guard (null = off): the same counters as deadEtb, for card-spending casts that buy nothing. */
+        public String deadAltCostMode;
+        public long deadAltCostCands, deadAltCostDecisions, deadAltCostDropped, deadAltCostShadowBest, deadAltCostForge;
         /** dudCast guard (null = off): answers checked, duds found, vetoed (re-asked), passed, unknown; time; dud cards. */
         public String dudCastMode;
         public long dudChecks, dudFound, dudVetoed, dudPassed, dudUnknown, dudNanos;
@@ -919,6 +935,16 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", crewNoopShadowBest);
                 d.addProperty("forgeAnswer", crewNoopForge);
                 o.add("crewNoop", d);
+            }
+            if (deadAltCostMode != null) {
+                final JsonObject d = new JsonObject();
+                d.addProperty("mode", deadAltCostMode);
+                d.addProperty("cands", deadAltCostCands);
+                d.addProperty("decisions", deadAltCostDecisions);
+                d.addProperty("dropped", deadAltCostDropped);
+                d.addProperty("shadowBest", deadAltCostShadowBest);
+                d.addProperty("forgeAnswer", deadAltCostForge);
+                o.add("deadAltCost", d);
             }
             if (dudCastMode != null) {
                 JsonObject d = new JsonObject();
@@ -1422,6 +1448,8 @@ public final class LookaheadSearch {
     final Set<String> zeroXKeys = new HashSet<>();
     /** crewNoop SHADOW: keys of the last enumeration's no-op Crew candidates (kept in the list); tests read it. */
     final Set<String> crewNoopKeys = new HashSet<>();
+    /** deadAltCost SHADOW: keys of the last enumeration's dead alternative-cost candidates (kept); tests read it. */
+    final Set<String> deadAltCostKeys = new HashSet<>();
     private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
@@ -1800,6 +1828,9 @@ public final class LookaheadSearch {
         }
         if (cfg.crewNoop != AiFixes.Mode.OFF) {
             stats.crewNoopMode = cfg.crewNoop.key();
+        }
+        if (cfg.deadAltCost != AiFixes.Mode.OFF) {
+            stats.deadAltCostMode = cfg.deadAltCost.key();
         }
         if (cfg.dudCast != AiFixes.Mode.OFF) {
             stats.dudCastMode = cfg.dudCast.key();
@@ -2217,6 +2248,9 @@ public final class LookaheadSearch {
         if (cfg.crewNoop == AiFixes.Mode.SHADOW && best != 0 && crewNoopKeys.contains(cands.get(best).key())) {
             stats.crewNoopShadowBest++;
         }
+        if (cfg.deadAltCost == AiFixes.Mode.SHADOW && best != 0 && deadAltCostKeys.contains(cands.get(best).key())) {
+            stats.deadAltCostShadowBest++;
+        }
         if (cfg.copyEot != AiFixes.Mode.OFF) {
             final int[] u;
             synchronized (live) {
@@ -2354,6 +2388,9 @@ public final class LookaheadSearch {
                 }
                 if (cfg.crewNoop == AiFixes.Mode.SHADOW && crewNoopKeys.contains(cands.get(c).key())) {
                     co.addProperty("crewNoop", true);
+                }
+                if (cfg.deadAltCost == AiFixes.Mode.SHADOW && deadAltCostKeys.contains(cands.get(c).key())) {
+                    co.addProperty("deadAltCost", true);
                 }
                 final JsonArray vs = new JsonArray();
                 final JsonArray ds = new JsonArray();
@@ -3365,6 +3402,9 @@ public final class LookaheadSearch {
         if (cfg.crewNoop == AiFixes.Mode.SHADOW && best != 0 && crewNoopKeys.contains(cands.get(best).key())) {
             stats.crewNoopShadowBest++;
         }
+        if (cfg.deadAltCost == AiFixes.Mode.SHADOW && best != 0 && deadAltCostKeys.contains(cands.get(best).key())) {
+            stats.deadAltCostShadowBest++;
+        }
         final java.util.function.IntUnaryOperator to = testOverride;
         final java.util.function.IntSupplier lineOf = explainLine;
         if (to != null && lineOf != null) {
@@ -3513,7 +3553,8 @@ public final class LookaheadSearch {
         final boolean guard = cfg.deadEtb != AiFixes.Mode.OFF;
         final boolean zguard = cfg.zeroX != AiFixes.Mode.OFF;
         final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
-        if (!guard && !zguard && !cguard) {
+        final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
+        if (!guard && !zguard && !cguard && !aguard) {
             for (int i = 0; i < all.size() && out.size() < breadth; i++) {
                 out.add(all.get(i));
                 outAt.add(allAt.get(i));
@@ -3523,13 +3564,14 @@ public final class LookaheadSearch {
         deadEtbKeys.clear();
         zeroXKeys.clear();
         crewNoopKeys.clear();
+        deadAltCostKeys.clear();
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 7)));
         final Object prevAiCache1 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds = forge.util.IdScope.capture();
         forge.util.IdScope.open();
-        int deadHere = 0, zeroHere = 0, crewHere = 0;
+        int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0;
         final List<Cand> o = new ArrayList<>();
         final List<Integer> oAt = new ArrayList<>();
         try {
@@ -3546,6 +3588,7 @@ public final class LookaheadSearch {
                 final boolean dead = guard && sa != null && deadEtbPermanent(sa, me);
                 final boolean zero = zguard && sa != null && zeroXSpell(sa, me);
                 final boolean crew = cguard && sa != null && crewNoop(sa, me);
+                final boolean alt = aguard && sa != null && deadAltCost(sa, me);
                 if (i == 0) {
                     // the default is never dropped (as Forge's answer in enumerate)
                     if (dead) {
@@ -3556,6 +3599,9 @@ public final class LookaheadSearch {
                     }
                     if (crew) {
                         stats.crewNoopForge++;
+                    }
+                    if (alt) {
+                        stats.deadAltCostForge++;
                     }
                 } else {
                     if (dead) {
@@ -3585,6 +3631,15 @@ public final class LookaheadSearch {
                         }
                         crewNoopKeys.add(c.key());
                     }
+                    if (alt) {
+                        altHere++;
+                        stats.deadAltCostCands++;
+                        if (cfg.deadAltCost == AiFixes.Mode.ON) {
+                            stats.deadAltCostDropped++;
+                            continue;
+                        }
+                        deadAltCostKeys.add(c.key());
+                    }
                 }
                 o.add(c);
                 oAt.add(allAt.get(i));
@@ -3597,6 +3652,9 @@ public final class LookaheadSearch {
             }
             if (crewHere > 0) {
                 stats.crewNoopDecisions++;
+            }
+            if (altHere > 0) {
+                stats.deadAltCostDecisions++;
             }
         } catch (RuntimeException e) {
             o.clear();
@@ -3929,6 +3987,9 @@ public final class LookaheadSearch {
                 }
                 if (cfg.zeroX == AiFixes.Mode.SHADOW && zeroXKeys.contains(cd.key())) {
                     co.addProperty("zeroX", true);
+                }
+                if (cfg.deadAltCost == AiFixes.Mode.SHADOW && deadAltCostKeys.contains(cd.key())) {
+                    co.addProperty("deadAltCost", true);
                 }
                 ca.add(co);
             }
@@ -5177,7 +5238,17 @@ public final class LookaheadSearch {
             final boolean guard = cfg.deadEtb != AiFixes.Mode.OFF;
             final boolean zguard = cfg.zeroX != AiFixes.Mode.OFF;
             final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
-            int deadHere = 0, zeroHere = 0, crewHere = 0;
+            final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
+            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0;
+            if (aguard) {
+                deadAltCostKeys.clear();
+                if (defSa != null) {
+                    final SpellAbility d = locate(g, me, out.get(0));
+                    if (d != null && deadAltCost(d, me)) {
+                        stats.deadAltCostForge++;
+                    }
+                }
+            }
             if (cguard) {
                 crewNoopKeys.clear();
                 if (defSa != null) {
@@ -5246,6 +5317,16 @@ public final class LookaheadSearch {
                     }
                     crewNoopKeys.add(c.key());
                 }
+                if (aguard && !seen.contains(c.key()) && deadAltCost(sa, me)) {
+                    altHere++;
+                    stats.deadAltCostCands++;
+                    if (cfg.deadAltCost == AiFixes.Mode.ON) {
+                        seen.add(c.key());
+                        stats.deadAltCostDropped++;
+                        continue;
+                    }
+                    deadAltCostKeys.add(c.key());
+                }
                 if (seen.add(c.key())) {
                     out.add(c);
                 }
@@ -5258,6 +5339,9 @@ public final class LookaheadSearch {
             }
             if (crewHere > 0) {
                 stats.crewNoopDecisions++;
+            }
+            if (altHere > 0) {
+                stats.deadAltCostDecisions++;
             }
             if (pv != null) {
                 priorView(pv, g, me, legal, seen);
@@ -5858,6 +5942,107 @@ public final class LookaheadSearch {
             }
         }
         return ((PlayerControllerAi) me.getController()).getAi().canPlaySa(x) != AiPlayDecision.WillPlay;
+    }
+
+    /**
+     * deadAltCost guard: true for a spell whose cost spends cards beyond the spell itself, cast where the effect those cards
+     * pay for buys nothing on this board. The costs: evoke (the body is sacrificed as it enters, so the cast is worth only
+     * its enters-the-battlefield triggers) and any cost that exiles or discards a card from hand. The effect: for an evoked
+     * permanent, each of its own enters-the-battlefield triggers (ChangesZone to the battlefield, ValidCard Card.Self; the
+     * evoke keyword's own sacrifice trigger is the cost and is skipped); for
+     * an instant or sorcery, the spell's own ability. Each is asked of Forge's AI as an optional trigger without its cost
+     * ({@code doTriggerNoCostWithSubs} on a copy), which weighs the targets this board offers: damage or removal with no
+     * opposing target, or with only the caster's own, is declined. Dead when every such effect uses targeting and is
+     * declined. Not dead: a permanent that keeps its body (cast without evoke); an evoked permanent with no such trigger or
+     * one this check cannot read (another ValidCard, an unmet condition, an origin other than hand or stack); an effect
+     * without targeting; anything that throws. Reads only: copies are asked, under a fixed thread random that is restored.
+     */
+    /** deadAltCost: the ValidCard of the trigger the evoke keyword adds (CardFactoryUtil): sacrifice it if evoked. */
+    static final String EVOKE_SACRIFICE = "Card.Self+evoked";
+
+    static boolean deadAltCost(SpellAbility sa, Player me) {
+        if (sa == null || !sa.isSpell() || sa.isLandAbility()) {
+            return false;
+        }
+        final Card host = sa.getHostCard();
+        if (host == null) {
+            return false;
+        }
+        final boolean evoke = sa.isEvoke();
+        if (!evoke && !spendsHandCard(sa)) {
+            return false;
+        }
+        final CardState state = sa.getCardState() != null ? sa.getCardState() : host.getCurrentState();
+        final Random prev = MyRandom.getThreadRandom();
+        MyRandom.setThreadRandom(new Random(0x1111_0312L));
+        try {
+            if (!state.getType().isPermanent()) {
+                return effectDeclined(sa.copy(me), me);
+            }
+            if (!evoke) {
+                return false;
+            }
+            final Game game = me.getGame();
+            int declined = 0;
+            for (final Trigger tr : state.getTriggers()) {
+                if (tr.getMode() != TriggerType.ChangesZone || !ZoneType.Battlefield.toString().equals(tr.getParam("Destination"))) {
+                    continue;
+                }
+                final String valid = tr.getParam("ValidCard");
+                if (valid == null || !valid.contains("Self")) {
+                    continue;
+                }
+                if (EVOKE_SACRIFICE.equals(valid)) {
+                    continue; // the evoke keyword's own sacrifice: part of the cost, not an effect it buys
+                }
+                if (!"Card.Self".equals(valid) || tr.hasParam("Origin") && !"Any".equals(tr.getParam("Origin"))
+                        && !"Hand".equals(tr.getParam("Origin")) && !"Stack".equals(tr.getParam("Origin"))) {
+                    return false;
+                }
+                if (!tr.requirementsCheck(game)) {
+                    return false;
+                }
+                final SpellAbility ex = tr.ensureAbility();
+                if (ex == null || !effectDeclined(ex.copy(me), me)) {
+                    return false;
+                }
+                declined++;
+            }
+            return declined > 0;
+        } catch (RuntimeException e) {
+            return false;
+        } finally {
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /** deadAltCost: the spell's pay cost exiles or discards a card from hand (a card spent beyond the spell itself). */
+    static boolean spendsHandCard(SpellAbility sa) {
+        final forge.game.cost.Cost cost = sa.getPayCosts();
+        if (cost == null) {
+            return false;
+        }
+        for (final forge.game.cost.CostPart p : cost.getCostParts()) {
+            if (p instanceof forge.game.cost.CostDiscard) {
+                return true;
+            }
+            if (p instanceof forge.game.cost.CostExile && ((forge.game.cost.CostExile) p).getFrom().contains(ZoneType.Hand)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * deadAltCost: Forge's AI declines this effect (a copy) as an optional trigger without its cost. An effect without
+     * targeting is never declined here (its value is not a target this board must offer).
+     */
+    static boolean effectDeclined(SpellAbility ab, Player me) {
+        if (ab == null || !ab.usesTargeting() || ab.getApi() == null) {
+            return false;
+        }
+        ab.setActivatingPlayer(me);
+        return !forge.ai.SpellApiToAi.Converter.get(ab).doTriggerNoCostWithSubs(me, ab, false).willingToPlay();
     }
 
     /**

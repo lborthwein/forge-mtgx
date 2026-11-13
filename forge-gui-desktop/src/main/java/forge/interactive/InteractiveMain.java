@@ -987,6 +987,7 @@ public final class InteractiveMain {
                 case "deadEtb": c.deadEtb = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "zeroX": c.zeroX = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "crewNoop": c.crewNoop = forge.ai.AiFixes.Mode.parse(p[1]); break;
+                case "deadAltCost": c.deadAltCost = forge.ai.AiFixes.Mode.parse(p[1]); break; // evoke-empty-board-1111
                 case "dudCast": c.dudCast = forge.ai.AiFixes.Mode.parse(p[1]); break; // live-ai-quality-1030
                 case "dudWorlds": c.dudWorlds = Integer.parseInt(p[1].trim()); break;
                 // order-memory-1102 (absent = off): the worlds keep the library positions the seat knows (InfoStates)
