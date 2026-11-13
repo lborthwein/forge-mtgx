@@ -205,6 +205,21 @@ public class CardTableTest extends AITest {
             n += ForcedWinCanon.generateLoops(tb, cfg, "", name);
         }
         Assert.assertTrue(n > 0, "the pool holds cards that copy a permanent: " + tb.loops.keySet());
+        // the pairs that go infinite are found in the canonical sandbox, and the ones that do not are saved as such
+        int wins = 0;
+        final StringBuilder all = new StringBuilder();
+        for (java.util.Map.Entry<String, String[]> e : tb.loops.entrySet()) {
+            all.append(e.getKey()).append('=').append(e.getValue()[1]).append(' ');
+            wins += Boolean.parseBoolean(e.getValue()[1]) ? 1 : 0;
+            if (e.getKey().endsWith("Kiki-Jiki, Mirror Breaker|false|Deceiver Exarch") || e.getKey().endsWith("Splinter Twin|true|Deceiver Exarch")) {
+                Assert.assertEquals(e.getValue()[1], "true", e.getKey());
+            }
+            if (e.getKey().endsWith("|Grizzly Bears")) {
+                Assert.assertEquals(e.getValue()[1], "false", e.getKey());
+            }
+        }
+        System.err.println("LOOPS " + all);
+        Assert.assertTrue(wins >= 2, "loop pairs found: " + all);
         final Path p = saved(tb);
         try {
             ForcedWinCanon.forgetForTest();
