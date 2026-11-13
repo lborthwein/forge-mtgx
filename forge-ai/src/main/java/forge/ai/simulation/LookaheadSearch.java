@@ -3211,6 +3211,17 @@ public final class LookaheadSearch {
         boolean searched = false;
         try {
             searched = decideGiven0(live, me, given, Math.max(1, breadth), index, onStack, ph, turn, res, expander);
+            final int tw = Integer.getInteger("sdcc.answerProbe.true", 0);
+            if (ANSWER_PROBE && tw > 0 && hookPlayout && cfg.opponentPolicy && lastCandidates != null
+                    && PROBE_TRUE_DONE.compareAndSet(false, true)) {
+                // answer probe (measurement only): every candidate of this decision again in tw TRUE worlds (both real hands)
+                budget = null;
+                for (int c = 0; c < lastCandidates.size(); c++) {
+                    System.err.println("[answerprobe-true] decision " + index + " cand " + c + " " + lastCandidates.get(c).label);
+                    final Replay rp = replayCandidate(live, me, c, 7770 + c, 0, tw, WORLD_TRUE, 0, 0);
+                    System.err.println("[answerprobe-true] cand " + c + " why=" + rp.why + " values=" + Arrays.toString(rp.values));
+                }
+            }
         } catch (RuntimeException e) {
             stats.departFallback++;
             res.chosen = 0;
@@ -6624,6 +6635,160 @@ public final class LookaheadSearch {
         }
     }
 
+    /** untested-keys-1113 answer probe (measurement only, not lane code): -Dsdcc.answerProbe=true. */
+    static final boolean ANSWER_PROBE = Boolean.getBoolean("sdcc.answerProbe");
+    static final java.util.concurrent.atomic.AtomicBoolean PROBE_TRUE_DONE = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** The ability API of a script line ("A:SP$ Destroy | ..." -> "Destroy"), or null. */
+    static String probeApi(final String line) {
+        int i = line.indexOf("SP$");
+        if (i < 0) {
+            return null;
+        }
+        final String rest = line.substring(i + 3).trim();
+        final int j = rest.indexOf('|');
+        return (j < 0 ? rest : rest.substring(0, j)).trim();
+    }
+
+    /** As the answers measurement: a counter or a permanent-removal spell castable at instant speed, by Forge rules. */
+    static boolean probeInstantAnswer(final forge.card.CardRules r) {
+        if (r == null) {
+            return false;
+        }
+        final List<forge.card.ICardFace> faces = new ArrayList<>();
+        faces.add(r.getMainPart());
+        if (r.getOtherPart() != null) {
+            faces.add(r.getOtherPart());
+        }
+        for (forge.card.ICardFace f : faces) {
+            boolean flash = false;
+            for (String k : f.getKeywords()) {
+                flash |= k.startsWith("Flash");
+            }
+            if (!(f.getType().isInstant() || flash)) {
+                continue;
+            }
+            for (String a : f.getAbilities()) {
+                final String api = a.contains("SP$") ? probeApi(a) : null;
+                if (api == null) {
+                    continue;
+                }
+                if (api.equals("Counter") || api.equals("Destroy") || api.equals("Sacrifice") || api.equals("Fight")
+                        || (api.startsWith("ChangeZone") && a.contains("Origin$ Battlefield"))
+                        || (api.equals("DealDamage") && (a.contains("Creature") || a.contains("Any")))
+                        || (api.equals("Pump") && a.contains("NumDef$ -"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Answer probe: per play-out, each of our nonland permanent spells: the opponent's open mana at the cast (untapped
+     * mana producers), whether its hand held an instant-speed answer (any / castable by cmc within the open mana), the
+     * turn an opponent stack item targeted it, the turn it left (countered or left the battlefield), opponent stack items
+     * after the cast.
+     */
+    static final class AnswerWatch {
+        final Game g;
+        final Player me;
+        final Map<Integer, int[]> recs = new java.util.LinkedHashMap<>();
+        final Set<Integer> seen = new HashSet<>();
+
+        AnswerWatch(Game g, Player me) {
+            this.g = g;
+            this.me = me;
+        }
+
+        void step() {
+            final int turn = g.getPhaseHandler().getTurn();
+            for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+                if (!seen.add(si.getId())) {
+                    continue;
+                }
+                final Player act = si.getActivatingPlayer();
+                final Card src = si.getSourceCard();
+                if (act == me) {
+                    if (si.isSpell() && src != null && src.isPermanent() && !src.isLand() && !recs.containsKey(src.getId())) {
+                        Player opp = null;
+                        for (Player o : g.getPlayers()) {
+                            if (o != me) {
+                                opp = o;
+                            }
+                        }
+                        int open = 0, ans = 0, aff = 0;
+                        if (opp != null) {
+                            for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+                                if (!c.isTapped() && !c.getManaAbilities().isEmpty()) {
+                                    open++;
+                                }
+                            }
+                            for (Card c : opp.getCardsIn(ZoneType.Hand)) {
+                                if (probeInstantAnswer(c.getRules())) {
+                                    ans++;
+                                    if (c.getCMC() <= open) {
+                                        aff++;
+                                    }
+                                }
+                            }
+                        }
+                        recs.put(src.getId(), new int[] {turn, open, ans, aff, -1, -1, 0, 0,
+                                g.getPhaseHandler().isPlayerTurn(me) ? 1 : 0});
+                    }
+                } else if (act != null) {
+                    for (int[] r : recs.values()) {
+                        if (r[5] < 0) {
+                            r[7]++;
+                        }
+                    }
+                    final SpellAbility sa = si.getSpellAbility();
+                    if (sa != null) {
+                        for (forge.game.spellability.TargetChoices tc : sa.getAllTargetChoices()) {
+                            for (Card t : tc.getTargetCards()) {
+                                final int[] r = recs.get(t.getId());
+                                if (r != null && r[4] < 0) {
+                                    r[4] = turn;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (Map.Entry<Integer, int[]> e : recs.entrySet()) {
+                final int[] r = e.getValue();
+                if (r[5] >= 0) {
+                    continue;
+                }
+                final Card c = g.findById(e.getKey());
+                final ZoneType z = c == null || c.getZone() == null ? null : c.getZone().getZoneType();
+                if (z == ZoneType.Battlefield) {
+                    r[6] = 1;
+                } else if (z != ZoneType.Stack) {
+                    r[5] = turn;
+                }
+            }
+        }
+
+        void print(int mode, String cand, long seed, boolean over) {
+            final StringBuilder b = new StringBuilder("[answerprobe] {\"mode\":").append(mode).append(",\"cand\":")
+                    .append(new com.google.gson.JsonPrimitive(cand)).append(",\"seed\":").append(seed).append(",\"over\":")
+                    .append(over).append(",\"end\":").append(g.getPhaseHandler().getTurn()).append(",\"recs\":[");
+            boolean first = true;
+            for (Map.Entry<Integer, int[]> e : recs.entrySet()) {
+                final int[] r = e.getValue();
+                final Card c = g.findById(e.getKey());
+                b.append(first ? "" : ",").append("{\"card\":").append(new com.google.gson.JsonPrimitive(c == null ? "?" : c.getName()))
+                        .append(",\"turn\":").append(r[0]).append(",\"open\":").append(r[1]).append(",\"handAns\":").append(r[2])
+                        .append(",\"handAff\":").append(r[3]).append(",\"targeted\":").append(r[4]).append(",\"gone\":")
+                        .append(r[5]).append(",\"bf\":").append(r[6]).append(",\"oppItems\":").append(r[7]).append(",\"own\":")
+                        .append(r[8]).append('}');
+                first = false;
+            }
+            System.err.println(b.append("]}"));
+        }
+    }
+
     public static final class TurnWatch {
         final int turn;
         volatile boolean reached = false;
@@ -6914,6 +7079,10 @@ public final class LookaheadSearch {
             if (probe != null) {
                 probe.watch = watch;
             }
+            final AnswerWatch aw = ANSWER_PROBE ? new AnswerWatch(g, me) : null;
+            if (aw != null) {
+                aw.step();
+            }
             long b = System.nanoTime();
             int steps = 0;
             int extra = 0;
@@ -6951,6 +7120,9 @@ public final class LookaheadSearch {
                 }
                 ph.mainLoopStep();
                 steps++;
+                if (aw != null) {
+                    aw.step();
+                }
                 if (probe != null && watch.reached) {
                     extra++;
                 }
@@ -6988,6 +7160,9 @@ public final class LookaheadSearch {
             r.rolloutNanos = System.nanoTime() - b;
             r.steps = steps;
             r.totalSteps = steps + (hit == null ? 0 : hit.remaining);
+            if (aw != null) {
+                aw.print(worldMode, p.firstAction == null ? "" : p.firstAction.candKey, p.playoutSeed, g.isGameOver());
+            }
             if (!r.aborted && seat != null && p.budget != null && p.budget.over() && seat.failure() != null) {
                 // sc-wallguard-1009: a policy seat that failed past the deadline (it stops at its next service request
                 // once the budget is out, ending its copy) was stopped by the budget: the decision is capped, as for a
