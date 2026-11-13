@@ -64,4 +64,28 @@ public class OwnerMisplaysSpecTest {
             // "reachDiscards needs reachAlpha and the planner screen"
         }
     }
+
+    @Test
+    public void theLookFloorIsOffByDefaultParsesLiveAndMovesTheStartOnlyWhenTheProposalsLeftLess() {
+        final RlSearch.Config off = RlLiveSeat.Spec.parse(SHIP).search;
+        Assert.assertEquals(PlanSearch.Spec.parse(off.plans).lookFloorMs, 0L);
+        final RlSearch.Config on = RlLiveSeat.Spec.parse(SHIP + ",plans.lookFloorMs=4000").search;
+        Assert.assertEquals(PlanSearch.Spec.parse(on.plans).lookFloorMs, 4000L);
+        try {
+            RlLiveSeat.Spec.parse(SHIP + ",plans.lookFloorMs=-1");
+            Assert.fail("accepted a negative floor");
+        } catch (IllegalArgumentException expected) {
+            // 0..60000
+        }
+        final long ms = 1_000_000L;
+        // off, or the proposals left more than the floor: the start is the decision's
+        Assert.assertEquals(PlanSearch.lookStart(100 * ms, 2_100 * ms, 8000, 0), 100 * ms);
+        Assert.assertEquals(PlanSearch.lookStart(100 * ms, 2_100 * ms, 8000, 4000), 100 * ms);
+        // the proposals used 4.6 s of 8 s: 3.4 s left, the floor of 4 s moves the start 0.6 s on
+        final long lt0 = PlanSearch.lookStart(100 * ms, 4_700 * ms, 8000, 4000);
+        Assert.assertEquals(lt0, 700 * ms);
+        Assert.assertEquals(lt0 + 8000 * ms - 4_700 * ms, 4000 * ms, "the look-ahead keeps exactly the floor");
+        // no budget: unchanged
+        Assert.assertEquals(PlanSearch.lookStart(100 * ms, 9_000 * ms, 0, 4000), 100 * ms);
+    }
 }

@@ -1758,7 +1758,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (stage != null && stage.horizonTurn > 0) {
                 ls.setPlanHorizonTurn(stage.horizonTurn); // line-adoption-1107 (plans.lineHorizon); cleared by the decision
             }
-            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth), stage.plans, stage.labels, kt, bt0, sb.threat, ex)
+            // owner-misplays-1113 (plans.lookFloorMs; off = bt0): the look-ahead keeps a floor after the proposals
+            final long lt0 = stage != null ? PlanSearch.lookStart(bt0, budgetStart(System.nanoTime()),
+                    forge.ai.WallClock.budgetMs(cfg.budgetMs), sb.lookFloorMs()) : bt0;
+            if (lt0 != bt0) {
+                stage.lookFloorNs = lt0 - bt0;
+                System.err.println("[plan-look-floor] turn=" + g.getPhaseHandler().getTurn() + " phase="
+                        + g.getPhaseHandler().getPhase() + " addedMs=" + (lt0 - bt0) / 1_000_000L);
+            }
+            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth), stage.plans, stage.labels, kt, lt0, sb.threat, ex)
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander

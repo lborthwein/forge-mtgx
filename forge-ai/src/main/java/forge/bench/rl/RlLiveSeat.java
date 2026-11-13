@@ -91,7 +91,7 @@ public final class RlLiveSeat {
         /** sb-live-1018: the {@code plans.<key>} keys live accepts (numbers, or true/false for {@code solver}). */
         public static final java.util.Set<String> LIVE_PLAN_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "samples", "temperature", "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs",
-                "unified", "lineKeep", "planX", "replanOnEntry", "lineChoices"));
+                "unified", "lineKeep", "planX", "replanOnEntry", "lineChoices", "lookFloorMs"));
         /** shipA-on-leakfix-1112: the plan keys above whose value is true or false. */
         private static final java.util.Set<String> LIVE_PLAN_FLAGS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "solver", "unified", "lineKeep", "planX", "replanOnEntry"));
