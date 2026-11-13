@@ -1075,7 +1075,9 @@ public final class ForcedWinModel {
                 }
             } finally {
                 ForcedWinProbe.HIDE.set(prevHide);
-                addStats(st);
+                if (st.probes != 0 || st.failures != 0 || st.nanos != 0) {
+                    addStats(st); // a cached template probed nothing: no shared stats monitor on that hot path
+                }
             }
         }
 

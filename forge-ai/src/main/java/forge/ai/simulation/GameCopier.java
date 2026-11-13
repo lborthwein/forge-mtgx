@@ -1147,8 +1147,9 @@ public class GameCopier {
             }
         }
         copyExtraTurns(newGame);
-        // review #156 S1-1: temporary controllers with their timestamps (Threaten's "lose control" removes its own)
-        for (Card c : origGame.getCardsIn(ZoneType.Battlefield)) {
+        // review #156 S1-1: temporary controllers with their timestamps (Threaten's "lose control" removes its own);
+        // with copyPhased on, a phased-out permanent keeps its temporary controller too (flag off: the same cards)
+        for (Card c : cardsToCopy(ZoneType.Battlefield)) {
             final Card nc = cardMap.get(c);
             if (nc != null && c.hasTempControllers()) {
                 nc.copyControllersFrom(c, p -> {

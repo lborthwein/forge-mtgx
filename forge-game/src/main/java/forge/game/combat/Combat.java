@@ -117,7 +117,11 @@ public class Combat {
         if (forge.game.EngineFixes.copyCombatStep()) { // mtgx state-machines-1113 (off by default)
             legacyOrderCombatants = combat.legacyOrderCombatants;
             for (Card c : combat.combatantsThatDealtFirstStrikeDamage.get()) {
-                combatantsThatDealtFirstStrikeDamage.get().add(map.map(c));
+                // the record is cleared only after regular damage: a first striker that has left combat since (died,
+                // phased out) deals no more damage and may have no copy at all, so it is not carried
+                if (combat.isAttacking(c) || combat.isBlocking(c)) {
+                    combatantsThatDealtFirstStrikeDamage.get().add(map.map(c));
+                }
             }
         }
 

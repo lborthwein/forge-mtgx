@@ -150,4 +150,19 @@ public class CopyFidelityTest extends SimulationTest {
         AssertJUnit.assertEquals("White Knight", knight.getName());
         AssertJUnit.assertSame(copy, knight.getGame());
     }
+
+    @Test
+    public void combatStepOnSkipsAFirstStrikerThatLeftCombat() throws ReflectiveOperationException {
+        // review 11-13 S2: the knight struck first, then phased out (so it left combat). The copy leaves phased-out
+        // permanents out (copyPhased off), so carrying its record entry would fail to map and abort the copy
+        EngineFixes.setCopyFidelityForTest(true, false, false);
+        final Game live = afterFirstStrikeDamage();
+        live.getPhaseHandler().getCombat().dealAssignedDamage(); // as the step does: the assigned-damage table empties
+        final Card knight = named(live.getCardsIn(ZoneType.Battlefield), "White Knight");
+        knight.phase(false);
+        AssertJUnit.assertTrue(knight.isPhasedOut());
+        AssertJUnit.assertEquals("the live record still names it", 1, firstStruck(live.getPhaseHandler().getCombat()).size());
+        final Game copy = new GameCopier(live, true).makeCopy();
+        AssertJUnit.assertTrue(firstStruck(copy.getPhaseHandler().getCombat()).isEmpty());
+    }
 }
