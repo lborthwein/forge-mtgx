@@ -117,7 +117,13 @@ public class CardLockTest extends AITest {
         if (failure.get() != null) {
             throw new AssertionError("concurrent read failed", failure.get());
         }
-        Assert.assertEquals(JsonParser.parseString(keyed.exportJson()), JsonParser.parseString(serial.exportJson()));
+        // the same templates (a template's own id is the id of the copy that was read first: the threads read in their own
+        // orders, and every reader hands out instances with the asked card's id)
+        Assert.assertEquals(keyed.templates.keySet(), serial.templates.keySet());
+        for (String k : serial.templates.keySet()) {
+            Assert.assertEquals(JsonParser.parseString(shape(keyed.templates.get(k).instance(0))),
+                    JsonParser.parseString(shape(serial.templates.get(k).instance(0))), k);
+        }
         // each card was learned once, as in the serial reader
         Assert.assertEquals(keyed.probeStats.probes, serial.probeStats.probes);
     }
