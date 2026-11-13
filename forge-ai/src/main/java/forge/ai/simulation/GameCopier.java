@@ -440,6 +440,19 @@ public class GameCopier {
         return makeCopy(null, null);
     }
     public Game makeCopy(PhaseType advanceToPhase, Player aiPlayer) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return makeCopyP(advanceToPhase, aiPlayer);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.COPY);
+        try {
+            return makeCopyP(advanceToPhase, aiPlayer);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #makeCopy} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Game makeCopyP(PhaseType advanceToPhase, Player aiPlayer) {
         // Every trait and cost cloned for the copy gets its own mutable collections, so the copy can run on
         // another thread than the original (forge.game.IndependentCopies).
         forge.game.IndependentCopies.enter();

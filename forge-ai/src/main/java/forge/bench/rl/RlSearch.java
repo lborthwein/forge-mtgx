@@ -166,6 +166,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * game's seed instead of the per-run game uid (the service seeds a sample by uid, seat and dec_idx).
          */
         public boolean blockSampleSeed = false;
+        /**
+         * searchspeed-1113 (race; 0 = off, and then nothing changes): racing with paired worlds. Every candidate is played
+         * out in the first {@code race} worlds; only a candidate whose mean paired gain over the policy's answer there is
+         * above 0 (or that won a world outright) gets the remaining worlds, with the policy's answer. No such candidate:
+         * the search ends with the policy's answer. Needs anytime (a candidate with fewer worlds is then compared on the
+         * worlds it has).
+         */
+        public int race = 0;
         public double workScale = 1.0;
         public long workWallMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
@@ -439,7 +447,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "beliefDeckHeld", "beliefDeckInclusion", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "holdDeploy", "holdDeployCommit", "holdDeployFollowLine", "workUnits", "workScale", "workWallMs",
-                "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
+                "blockSampleSeed", "race", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
 
@@ -512,6 +520,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("budgetMs")) c.budgetMs = o.get("budgetMs").getAsLong();
             if (o.has("workUnits")) c.workUnits = o.get("workUnits").getAsBoolean(); // work-units-1107
             if (o.has("blockSampleSeed")) c.blockSampleSeed = o.get("blockSampleSeed").getAsBoolean();
+            if (o.has("race")) c.race = o.get("race").getAsInt();
             if (o.has("workScale")) c.workScale = o.get("workScale").getAsDouble();
             if (o.has("workWallMs")) c.workWallMs = o.get("workWallMs").getAsLong();
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
@@ -777,6 +786,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (blockSampleSeed) {
                 o.addProperty("blockSampleSeed", true); // work-units-1107: only when on
+            }
+            if (race > 0) {
+                o.addProperty("race", race); // searchspeed-1113: only when on
             }
             if (workUnits) {
                 // work-units-1107: only when on, so every other spec's JSON is unchanged
@@ -1185,6 +1197,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.departZ = cfg.departZ;
         lc.anytime = cfg.anytime;
         lc.holdDeploy = cfg.holdDeploy;
+        lc.race = cfg.race; // searchspeed-1113 (0 = off)
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
@@ -1603,6 +1616,36 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return decideP(g, me, m, frame, greedy, menuObjs);
+        }
+        forge.ai.simulation.SearchProf.begin("priority", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        try {
+            return decideP(g, me, m, frame, greedy, menuObjs);
+        } finally {
+            forge.ai.simulation.SearchProf.end(cfg.threads);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #decide} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private int decideP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
+            final List<SpellAbility> menuObjs) {
+        if (WARM_READERS > 0 && !warmed) {
+            // searchspeed-1113 (test hosts, -Dsdcc.warmReaders=N; default 0 = off): before this seat's first searched
+            // priority, the reach readers learn the cards of N belief worlds, off the decision's clock
+            warmed = true;
+            try {
+                if (cfg.reach != null) {
+                    reachCfg();
+                }
+                final double ms = ls.warmLeaves(g, me, WARM_READERS);
+                dumpReaders("warm");
+                System.err.println("[warm-readers] seat=" + me.getId() + " worlds=" + WARM_READERS + " ms=" + Math.round(ms)
+                        + " templates=" + readerSizes());
+            } catch (RuntimeException e) {
+                System.err.println("[warm-readers] failed: " + e);
+            }
+        }
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
@@ -1681,6 +1724,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        if (cfg.budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+        }
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
         try {
@@ -1769,6 +1815,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             order.add(0);
         }
         order.addAll(rest);
+        if (forge.ai.simulation.SearchProf.ON) {
+            // searchspeed-1113 (measurement only): the root priors of the given candidates, in the search's order
+            final StringBuilder sp = new StringBuilder();
+            for (int ch : order) {
+                sp.append(sp.length() == 0 ? "" : ",").append(Math.round(by.get(ch)[0] * 1e4) / 1e4);
+            }
+            forge.ai.simulation.SearchProf.note("priors", sp.toString());
+            forge.ai.simulation.SearchProf.note("valueObs", sc.valueObs);
+        }
         final List<SpellAbility> given = new ArrayList<>(order.size());
         for (int ch : order) {
             given.add(ch == 0 ? null : menuObjs.get(ch - 1));
@@ -1778,6 +1833,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (sb != null && sb.planPoint(g, menuObjs)) {
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
             stage = sb.propose(g, me, m, menuObjs, t0, bt0);
+            forge.ai.simulation.SearchProf.note("proposeMs", (System.nanoTime() - t0) / 1e6); // searchspeed-1113 (off: nothing)
             if (stage.hook) {
                 // J1: a proven line taken at once; live must have taken one here too
                 final forge.ai.simulation.AiReplay.Mark mk = mark();
@@ -1843,6 +1899,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (cfg.holdDeployCommit && r.deploy != null && "departed".equals(r.outcome) && g.getPhaseHandler().isPlayerTurn(me)) {
             holdCommitTurn = g.getPhaseHandler().getTurn(); // untested-keys-1113: the hold binds for the rest of our turn
             holdCommits++;
+        }
+        if (forge.ai.simulation.SearchProf.ON) {
+            // searchspeed-1113 (measurement only): the search's own result on the profile line
+            forge.ai.simulation.SearchProf.note("outcome", r.outcome);
+            forge.ai.simulation.SearchProf.note("cands", r.givenIndex.length);
+            forge.ai.simulation.SearchProf.note("worlds", r.worlds);
+            forge.ai.simulation.SearchProf.note("chosen", r.chosen);
+            forge.ai.simulation.SearchProf.note("partial", r.partialWorlds);
+            forge.ai.simulation.SearchProf.note("wallCut", r.wall ? 1 : 0);
+            forge.ai.simulation.SearchProf.note("plan", stage != null ? 1 : 0);
+            forge.ai.simulation.SearchProf.note("plans", stage != null && stage.plans != null ? stage.plans.size() : 0);
+            forge.ai.simulation.SearchProf.note("searchMs", r.ms);
+            forge.ai.simulation.SearchProf.note("cpuMs", r.cpuMs);
+            forge.ai.simulation.SearchProf.note("givenIndex", java.util.Arrays.toString(r.givenIndex));
+            forge.ai.simulation.SearchProf.note("values", java.util.Arrays.deepToString(r.values));
         }
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
@@ -2374,6 +2445,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final int greedy, final List<SpellAbility> menuObjs, final PlanSearch sb) {
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0);
+        if (cfg.budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+        }
         if (cfg.valueSink != null && m.C() >= 2) {
             try {
                 final JsonObject h = new JsonObject();
@@ -2945,6 +3019,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public short[] decideChoice(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return decideChoiceP(g, me, m, frame, greedy, objs);
+        }
+        forge.ai.simulation.SearchProf.begin("choice", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        try {
+            return decideChoiceP(g, me, m, frame, greedy, objs);
+        } finally {
+            forge.ai.simulation.SearchProf.end(cfg.threads);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #decideChoice} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private short[] decideChoiceP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
@@ -3021,6 +3109,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
+        if (sc.config().budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + sc.config().budgetMs * 1_000_000L); // loop-probe-1113
+        }
         if (sc.pileActive(g)) {
             return sc.pileAnswer(g, m);
         }
@@ -3049,7 +3140,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         short[] alt = v == null ? null : sc.choose(s, v, greedy);
-        if (alt == null && v != null && sc.config().relax > 0) {
+        if (alt == null && v != null && sc.config().relax > 0 && s.held == null) { // discard-guard-1113: a held departure stays held
             alt = sc.relax(g, me, m, greedy, liveKnow, seed, s); // choice-search-1109 pass 3 (off unless relax > 0)
         }
         final boolean scored = v != null;
@@ -3059,7 +3150,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (alt != null && s.chosen != null && s.chosen.pileIds != null) {
             sc.adoptPile(g, s.chosen);
         }
-        if (cfg.decisionLog != null || rowsWanted) {
+        if (cfg.decisionLog != null || rowsWanted || CHOICE_LOG) {
             final JsonObject row = sc.row(s, src);
             row.addProperty("game_uid", Long.toUnsignedString(uid));
             row.addProperty("dec_idx", frame.decIdx);
@@ -3070,7 +3161,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("scored", scored);
             row.addProperty("departed", alt != null);
             row.addProperty("total_ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
-            addRow(row);
+            if (CHOICE_LOG) {
+                System.err.println("[choice-scorer] " + row); // discard-guard-1113 (diagnostics; off unless -Dsdcc.choiceLog)
+            }
+            if (cfg.decisionLog != null || rowsWanted) {
+                addRow(row);
+            }
         }
         return alt;
     }
@@ -3088,6 +3184,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      */
     @Override
     public short[] decideBlocks(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return decideBlocksP(g, me, m, frame, greedy, objs);
+        }
+        forge.ai.simulation.SearchProf.begin("blocks", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        try {
+            return decideBlocksP(g, me, m, frame, greedy, objs);
+        } finally {
+            forge.ai.simulation.SearchProf.end(cfg.threads);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #decideBlocks} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private short[] decideBlocksP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
@@ -3111,6 +3221,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        if (cfg.budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+        }
         blockAsks++;
         lastProposeMs = -1;
         if (m.family != RlSchema.F_BLOCK || greedy == null || greedy.length != m.S() || m.S() == 0
@@ -3856,6 +3969,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * records to {@code cfg.labelSink} as one gzip member (r3-distill-1010).
      */
     public void flushLog() {
+        dumpReaders("end"); // searchspeed-1113 (off unless -Dsdcc.readerDump)
         if (cfg.valueSink != null && !valueRecs.isEmpty()) {
             final String path = cfg.valueSink.replace("{actor}", actorId == null ? "actor" : actorId)
                     .replace("{pid}", String.valueOf(ProcessHandle.current().pid()));
@@ -4203,6 +4317,35 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** owner-misplays-1113: log the reach gate and every leaf's reach (diagnosis only; never read to decide). */
     static final boolean REACH_LOG = Boolean.getBoolean("sdcc.reachLog");
+    /** searchspeed-1113 (test hosts): warm-up worlds before a seat's first decision; a directory for the readers' templates. */
+    static final int WARM_READERS = Integer.getInteger("sdcc.warmReaders", 0);
+    static final String READER_DUMP = System.getProperty("sdcc.readerDump");
+    private boolean warmed;
+
+    private String readerSizes() {
+        final StringBuilder sb = new StringBuilder();
+        reachReaders.forEach((id, r) -> sb.append(sb.length() == 0 ? "" : ",").append(id).append(':')
+                .append(forge.ai.simulation.ForcedWinSolver.readerSize(r)));
+        return sb.toString();
+    }
+
+    /** -Dsdcc.readerDump=DIR (measurement only): the reach readers' templates as JSON, one file per reader and tag. */
+    private void dumpReaders(final String tag) {
+        if (READER_DUMP == null) {
+            return;
+        }
+        reachReaders.forEach((id, r) -> {
+            try {
+                java.nio.file.Files.createDirectories(java.nio.file.Paths.get(READER_DUMP));
+                java.nio.file.Files.write(java.nio.file.Paths.get(READER_DUMP, "reader-" + System.identityHashCode(this) + "-p" + id + "-" + tag + ".json"),
+                        forge.ai.simulation.ForcedWinSolver.readerJson(r).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } catch (java.io.IOException | RuntimeException e) {
+                System.err.println("[reader-dump] failed: " + e);
+            }
+        });
+    }
+    /** discard-guard-1113 (diagnostics; off unless set): every card-scorer ask's row on stderr. */
+    static final boolean CHOICE_LOG = Boolean.getBoolean("sdcc.choiceLog");
 
     @Override
     public double reachPart(final double[] r) {
@@ -4271,6 +4414,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public double[] leafReach(final Object copyCtx, final Game g, final Player me) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return leafReachP(copyCtx, g, me);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.LEAFREACH);
+        try {
+            return leafReachP(copyCtx, g, me);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #leafReach} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private double[] leafReachP(final Object copyCtx, final Game g, final Player me) {
         if (cfg.reach == null) {
             return null;
         }

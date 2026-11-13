@@ -2827,6 +2827,19 @@ public final class ForcedWinSolver {
      * an empty stack, the position's no-line cache, the engine search once per turn in main phase 1). Never throws.
      */
     public List<Proposal> propose(Game live) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return proposeP(live);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.PROPOSE);
+        try {
+            return proposeP(live);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #propose} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private List<Proposal> proposeP(Game live) {
         final List<Proposal> out = new ArrayList<>();
         lastCap = null; // rollout-budget-1101
         final PhaseHandler ph = live.getPhaseHandler();
@@ -2877,6 +2890,19 @@ public final class ForcedWinSolver {
 
     /** As above, on the given known top (tests). */
     public Proposal setup(final Game live, final List<Integer> knownTop, final GoldfishOpts o) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return setupP(live, knownTop, o);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SCREEN);
+        try {
+            return setupP(live, knownTop, o);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #setup} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Proposal setupP(final Game live, final List<Integer> knownTop, final GoldfishOpts o) {
         try {
             final PhaseHandler ph = live.getPhaseHandler();
             if (lineActive() || !live.getStack().isEmpty()
@@ -3272,6 +3298,19 @@ public final class ForcedWinSolver {
      * come, else no opinion. Never throws.
      */
     public Decision defend(Game live) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return defendP(live);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.DEFEND);
+        try {
+            return defendP(live);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #defend} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Decision defendP(Game live) {
         try {
             if (live.getStack().isEmpty() || !cfg.defense) {
                 return Decision.NONE;
@@ -4451,13 +4490,64 @@ public final class ForcedWinSolver {
         return lim;
     }
 
-    /** planLoops: the probes of the games in progress, by match (weak), then by seat, card and partner names. */
+    /** planLoops: the probes of the games in progress, by game scope (weak; loopScope), then by seat, card and partner name. */
     private static final java.util.Map<Object, java.util.Map<String, java.util.Set<String>>> LOOP_CACHE =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
     /** planLoops: the most partners one permanent is probed with, and one sandbox search's nodes and counted time. */
     static final int LOOP_PARTNERS = 12, LOOP_NODES = 300;
     static final long LOOP_NANOS = 3_000_000_000L;
+
+    /**
+     * loop-probe-1113: by game scope (weak; loopScope), the wall time ({@link System#nanoTime}) until which the loop
+     * probes of the decision or ask in progress may run: a quarter of its budget from its start ({@link #loopDeadline}).
+     */
+    private static final java.util.Map<Object, Long> LOOP_DEADLINE = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    /** loop-probe-1113 (tests, reports): sandbox probes run in this JVM. */
+    static final java.util.concurrent.atomic.AtomicLong LOOP_PROBES = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * loop-probe-1113: what a live game and every copy of it share: its rules object (GameCopier gives each copy a new
+     * Match, so the match never joined a copy's probes to the live game's or to another copy's).
+     */
+    private static Object loopScope(final Game g) {
+        return g.getRules() != null ? g.getRules() : LOOP_CACHE;
+    }
+
+    /**
+     * loop-probe-1113: a decision or ask of this game begins and runs out at {@code nanos} (System.nanoTime): its loop
+     * probes, in the live game and its copies, share a quarter of the time left. 0 = forget the window.
+     */
+    public static void loopDeadline(final Game g, final long nanos) {
+        final Object match = loopScope(g);
+        if (nanos == 0L) {
+            LOOP_DEADLINE.remove(match);
+        } else {
+            final long now = System.nanoTime();
+            LOOP_DEADLINE.put(match, now + Math.max(0L, nanos - now) / 4);
+        }
+    }
+
+    /**
+     * loop-probe-1113: one sandbox probe within {@code end} (wall). TRUE / FALSE = its answer; null = no time for it, or
+     * it was cut short of LOOP_NANOS without a win (not an answer: nothing is cached).
+     */
+    private static Boolean loopProbe(final Config cfg, final Game live, final Player me, final Card c, final Card partner,
+            final boolean aura, final long seed, final long end) {
+        final long now = System.nanoTime();
+        if (now >= end) {
+            return null;
+        }
+        final long budget = Math.min(LOOP_NANOS, end - now);
+        LOOP_PROBES.incrementAndGet();
+        final boolean w = ForcedWinProbe.sandboxWin(live, me, c.getId(), partner == null ? -1 : partner.getId(), aura, loopLimits(cfg),
+                seed, budget);
+        if (w) {
+            return Boolean.TRUE;
+        }
+        // a search that stopped on a budget shorter than the full one did not finish: no answer
+        return budget >= LOOP_NANOS || System.nanoTime() - now < budget - budget / 10 ? Boolean.FALSE : null;
+    }
 
     /**
      * planLoops: the card has an ability of Forge's CopyPermanent effect type, its own or one it grants (an Aura's script
@@ -4551,40 +4641,57 @@ public final class ForcedWinSolver {
                 }
             }
         }
-        // one probe per game, seat, card and partner list: the seat's other readers (the root solver's, the reach's, the
-        // choice scorer's) reuse it. The key holds the partner names in a fixed order, so it does not depend on which
-        // copy of the game asked.
-        final List<String> names = new ArrayList<>();
-        for (Card p : partners) {
-            names.add(p.getName());
-        }
-        java.util.Collections.sort(names);
-        final String key = me.getId() + "|" + c.getName() + "|" + aura + "|" + names;
-        final Object match = live.getMatch() != null ? live.getMatch() : LOOP_CACHE;
+        // loop-probe-1113: one probe per game, seat, card and PARTNER (not per partner list: past LOOP_PARTNERS names the
+        // list depends on the library's order, so every re-dealt or hidden-order copy probed again). The seat's other
+        // readers (the root solver's, the reach's, the choice scorer's) reuse each answer. A probe's time comes out of the
+        // caller's budget (loopDeadline): all the probes of one decision or ask share a quarter of its budget; partners
+        // left unprobed are not cached, and the template is asked again at a later read (at once "no time" until the
+        // next decision opens a new window).
+        final Object match = loopScope(live);
         final java.util.Map<String, java.util.Set<String>> byKey = LOOP_CACHE.computeIfAbsent(match, x -> new java.util.HashMap<>());
+        final String base = me.getId() + "|" + c.getName() + "|" + aura + "|";
         final int probed = partners.size();
+        final long t0 = System.nanoTime();
+        // the window all of this decision's (or ask's) probes share; no caller known yet: one window of LOOP_NANOS
+        final long end = LOOP_DEADLINE.computeIfAbsent(match, x -> t0 + LOOP_NANOS);
+        boolean cut = false;
         synchronized (byKey) {
-            final java.util.Set<String> hit = byKey.get(key);
-            if (hit != null) {
-                t.loopWith.addAll(hit);
-                return;
-            }
             final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getName().hashCode());
-            if (ForcedWinProbe.sandboxWin(live, me, c.getId(), -1, aura, loopLimits(cfg), seed, LOOP_NANOS)) {
+            java.util.Set<String> alone = byKey.get(base);
+            if (alone == null) {
+                final Boolean w = loopProbe(cfg, live, me, c, null, aura, seed, end);
+                if (w == null) {
+                    cut = true;
+                } else {
+                    alone = w ? java.util.Collections.singleton("") : java.util.Collections.emptySet();
+                    byKey.put(base, alone);
+                }
+            }
+            if (alone != null && !alone.isEmpty()) {
                 t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe: wins alone";
-                byKey.put(key, new java.util.TreeSet<>());
                 return;
             }
             partners.sort((x, y) -> x.getName().compareTo(y.getName()));
             for (Card p : partners) {
-                if (ForcedWinProbe.sandboxWin(live, me, c.getId(), p.getId(), aura, loopLimits(cfg), mix(seed, p.getName().hashCode()), LOOP_NANOS)) {
-                    t.loopWith.add(p.getName());
+                java.util.Set<String> hit = byKey.get(base + p.getName());
+                if (hit == null) {
+                    final Boolean w = cut ? null : loopProbe(cfg, live, me, c, p, aura, mix(seed, p.getName().hashCode()), end);
+                    if (w == null) {
+                        cut = true;
+                        continue;
+                    }
+                    hit = w ? java.util.Collections.singleton(p.getName()) : java.util.Collections.emptySet();
+                    byKey.put(base + p.getName(), hit);
                 }
+                t.loopWith.addAll(hit);
             }
-            byKey.put(key, new java.util.TreeSet<>(t.loopWith));
+        }
+        if (cut) {
+            t.loopChecked = false; // asked again at the template's next read, when there is time
         }
         if (RECEIPTS) {
-            receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste);
+            receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste
+                    + (cut ? " cut=true" : "") + " ms=" + (System.nanoTime() - t0) / 1_000_000L);
         }
     }
 
@@ -4832,6 +4939,18 @@ public final class ForcedWinSolver {
         return new ForcedWinModel.Reader();
     }
 
+    /** searchspeed-1113 (measurement): a shared reader's templates as JSON, and how many it holds. */
+    public static String readerJson(final Object reader) {
+        return ((ForcedWinModel.Reader) reader).exportJson();
+    }
+
+    public static int readerSize(final Object reader) {
+        final ForcedWinModel.Reader r = (ForcedWinModel.Reader) reader;
+        synchronized (r.templates) {
+            return r.templates.size();
+        }
+    }
+
     /** choice-scorer-1106: a solver over a shared reader ({@link #newSharedReader}). */
     public static ForcedWinSolver withReader(final Player me, final Config cfg, final Object reader) {
         return new ForcedWinSolver(me, cfg, (ForcedWinModel.Reader) reader);
@@ -4884,6 +5003,19 @@ public final class ForcedWinSolver {
      * given (top first). No game copies, no opponent: a screen, never a proof. Never throws.
      */
     public Screen screen(final Game g, final List<Integer> knownTop, final int nodes, final long ms) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return screenP(g, knownTop, nodes, ms);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SCREEN);
+        try {
+            return screenP(g, knownTop, nodes, ms);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #screen} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Screen screenP(final Game g, final List<Integer> knownTop, final int nodes, final long ms) {
         final Screen s = new Screen();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {
@@ -4989,6 +5121,19 @@ public final class ForcedWinSolver {
 
     /** {@link #reach} with its knobs ({@link ReachOpts}). */
     public Reach reach(final Game g, final List<Integer> knownTop, final ReachOpts o) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return reachP(g, knownTop, o);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SCREEN);
+        try {
+            return reachP(g, knownTop, o);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #reach} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Reach reachP(final Game g, final List<Integer> knownTop, final ReachOpts o) {
         final Reach out = new Reach();
         final long t0 = forge.game.WorkClock.nanoTime();
         final int nameNodes = o.nameNodes < 0 ? o.nodes : o.nameNodes;
@@ -5134,6 +5279,19 @@ public final class ForcedWinSolver {
      * library is never read. Optimistic, as a goldfish is: no opponent. No card or combo knowledge.
      */
     public Goldfish goldfish(final Game g, final List<Integer> knownTop, final GoldfishOpts o) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return goldfishP(g, knownTop, o);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SCREEN);
+        try {
+            return goldfishP(g, knownTop, o);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #goldfish} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Goldfish goldfishP(final Game g, final List<Integer> knownTop, final GoldfishOpts o) {
         final Goldfish out = new Goldfish();
         final long t0 = forge.game.WorkClock.nanoTime();
         try {

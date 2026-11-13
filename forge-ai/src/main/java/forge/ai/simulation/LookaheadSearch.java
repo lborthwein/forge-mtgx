@@ -148,6 +148,8 @@ public final class LookaheadSearch {
          * the root's value. With every world finished this chooses exactly as the plain gate.
          */
         public boolean anytime = false;
+        /** searchspeed-1113 (0 = off): racing with paired worlds after this many (RlSearch.Config.race). */
+        public int race = 0;
         /**
          * Target variants (lane forge-ai-misplays-0928; 0 = off, the default: candidates unchanged). Up to this many
          * extra candidates per decision: a single-target spell or ability among the candidates played with a target
@@ -783,6 +785,8 @@ public final class LookaheadSearch {
         public long capped, rolloutsAborted;
         /** search-bones-1015 (S-b): decisions over the budget decided on the worlds every candidate finished in. */
         public long partialDecisions;
+        /** searchspeed-1113 (race): raced decisions, those that ended after the first stage, play-outs not played. */
+        public long raceDecisions, raceStopped, racePlayoutsSaved;
         /**
          * Hard wall (lane sc-wallguard-1009): searched decisions whose wait for their play-outs the wall cut short
          * (budget + {@link #WALL_GRACE_MS}), and the play-outs still running at the cut (told to stop; their results are
@@ -1060,6 +1064,12 @@ public final class LookaheadSearch {
             if (partialDecisions > 0) {
                 // search-bones-1015: only when S-b decided a capped search on its finished worlds
                 o.addProperty("partialDecisions", partialDecisions);
+            }
+            if (raceDecisions > 0) {
+                // searchspeed-1113: only when a race ran
+                o.addProperty("raceDecisions", raceDecisions);
+                o.addProperty("raceStopped", raceStopped);
+                o.addProperty("racePlayoutsSaved", racePlayoutsSaved);
             }
             o.addProperty("attackDecisions", attackDecisions);
             o.addProperty("attackSearched", attackSearched);
@@ -3082,6 +3092,19 @@ public final class LookaheadSearch {
      * turn without failing.
      */
     public boolean[] recordPlans(Game live, Player me, List<Object> recorders, int knownTop, long deadlineNanos) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return recordPlansP(live, me, recorders, knownTop, deadlineNanos);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.PLANREC);
+        try {
+            return recordPlansP(live, me, recorders, knownTop, deadlineNanos);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #recordPlans} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private boolean[] recordPlansP(Game live, Player me, List<Object> recorders, int knownTop, long deadlineNanos) {
         final int n = recorders.size();
         final boolean[] done = new boolean[n];
         if (n == 0 || !hookPlayout) {
@@ -3403,7 +3426,10 @@ public final class LookaheadSearch {
                 labelChoices = null;
                 labelTargets = null;
                 macroOf = null;
-                if (expander == null) {
+                if (expander == null && cfg.race > 0 && cfg.race < k && proof && cfg.anytime && hookLeaf && !cfg.leafOpp
+                        && !cfg.reuse && !cfg.dedup && !cfg.dedupVerify && cfg.copyFidelity != 2 && labelSink == null) {
+                    aborted = playRace(live, me, cands, decisionSeed, values, outs, ok, k); // searchspeed-1113
+                } else if (expander == null) {
                     aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
                 } else {
                     // S-t: the base candidates first (their world-0 play-outs record the choice asks), then the macros
@@ -5050,6 +5076,9 @@ public final class LookaheadSearch {
             final Carried cw = carried[w];
             any |= cw != null;
             for (int c = 0; c < n; c++) {
+                if (raceSkip(c, w)) {
+                    continue; // searchspeed-1113: not this stage's play-out
+                }
                 if (pastDeadline()) {
                     break prepare;
                 }
@@ -5111,12 +5140,16 @@ public final class LookaheadSearch {
             } else {
                 for (int c = 0; c < n; c++) {
                     final int ww = w, cc = c;
+                    if (raceSkip(cc, ww)) {
+                        continue; // searchspeed-1113: not this stage's play-out (its slot is left as it is)
+                    }
                     if (prep[cc][ww] == null) {
                         // A reused value, or (budget) a play-out that never started.
                         record(values, outs, ok, cc, ww, outs[cc][ww] != null ? outs[cc][ww] : aborted(), cands.get(cc));
                         continue;
                     }
                     tasks.add(() -> {
+                        SearchProf.ctx(cc, ww); // searchspeed-1113 (off: nothing)
                         Rollout r = play(prep[cc][ww], null);
                         prep[cc][ww] = null;
                         record(values, outs, ok, cc, ww, r, cands.get(cc), sealed);
@@ -5145,7 +5178,7 @@ public final class LookaheadSearch {
                     sealed[0] = true;
                     for (int c = 0; c < n; c++) {
                         for (int w = 0; w < k; w++) {
-                            if (outs[c][w] == null) {
+                            if (outs[c][w] == null && !raceSkip(c, w)) {
                                 record(values, outs, ok, c, w, aborted(), cands.get(c));
                             }
                         }
@@ -5255,6 +5288,141 @@ public final class LookaheadSearch {
         runAll(tasks);
     }
 
+    /**
+     * searchspeed-1113 (test hosts; RlSearch reads -Dsdcc.warmReaders, default off): {@code n} belief-world copies of the
+     * live position, the hooks' leaf reach read on each, on the pool. Nothing is returned or kept here: the card models
+     * the screens learn stay in the hooks' readers, as after {@code n} leaves of a search. For a JVM resumed at a recorded
+     * position, whose readers are empty where a live game's have learned the cards in earlier turns. Outside any
+     * decision's budget. Returns the wall time, ms.
+     */
+    public double warmLeaves(Game live, Player me, int n) {
+        final long t0 = System.nanoTime();
+        if (!hookLeaf || n <= 0) {
+            return 0.0;
+        }
+        final Cand pass = new Cand((SpellAbility) null, false);
+        final List<Runnable> tasks = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            final Prepared p;
+            try {
+                p = prepare(live, me, pass, null, mix(0x3A77C0DEL, i), cfg.resample, null);
+            } catch (RuntimeException | StackOverflowError e) {
+                continue;
+            }
+            if (p.failed || p.g == null) {
+                continue;
+            }
+            tasks.add(() -> {
+                final Random prev = MyRandom.getThreadRandom();
+                final Object prevIds = forge.util.IdScope.capture();
+                final Object prevCache = AiCache.captureScope();
+                MyRandom.setThreadRandom(p.rnd);
+                AiCache.installScope(p.cache);
+                forge.util.IdScope.install(p.ids);
+                try {
+                    hooks.leafReach(p.hookCtx, p.g, p.me);
+                } catch (RuntimeException | StackOverflowError e) {
+                    // a warm-up read that fails learns nothing
+                } finally {
+                    AiCache.installScope(prevCache);
+                    forge.util.IdScope.install(prevIds);
+                    MyRandom.setThreadRandom(prev);
+                }
+            });
+        }
+        try {
+            runAll(tasks);
+        } catch (RuntimeException e) {
+            System.err.println("[lookahead] warm-up failed: " + e);
+        }
+        return (System.nanoTime() - t0) / 1e6;
+    }
+
+    // ---- searchspeed-1113: racing with paired worlds (Config.race; all three fields idle unless a race is on)
+    private int raceLo = 0, raceHi = Integer.MAX_VALUE;
+    private boolean[] raceAlive;
+
+    /** Is play-out (c, w) outside the stage being played? Always false without a race. */
+    private boolean raceSkip(int c, int w) {
+        return w < raceLo || w >= raceHi || raceAlive != null && !raceAlive[c];
+    }
+
+    /**
+     * Racing: every candidate in worlds [0, race); then the default and every candidate whose mean paired gain over the
+     * default in those worlds is above 0 (or that won one of them outright) in worlds [race, k), with the same world
+     * seeds as an unraced search. A slot never played stays null (not finished: the anytime rule compares each candidate
+     * on the worlds it has, and a candidate with no gain is never chosen). Stage 1's values are read through the value
+     * leaf once more than an unraced search does.
+     */
+    private int playRace(Game live, Player me, List<Cand> cands, long decisionSeed, double[][] values, Rollout[][] outs,
+            boolean[] ok, int k) {
+        final int n = cands.size(), race = cfg.race;
+        try {
+            raceLo = 0;
+            raceHi = race;
+            raceAlive = null;
+            int aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+            stats.raceDecisions++;
+            if (aborted > 0 || pastDeadline()) {
+                return aborted;
+            }
+            final double[][] v1 = new double[n][];
+            for (int c = 0; c < n; c++) {
+                v1[c] = values[c].clone();
+            }
+            final long fb = stats.leafFallbacks;
+            valueLeaves(v1, outs, ok.clone(), k);
+            final boolean[] alive = new boolean[n];
+            alive[0] = true;
+            int na = 0;
+            if (stats.leafFallbacks == fb) {
+                for (int c = 1; c < n; c++) {
+                    double sum = 0;
+                    int cnt = 0;
+                    boolean won = false;
+                    for (int w = 0; w < race; w++) {
+                        final Rollout rc = outs[c][w], r0 = outs[0][w];
+                        if (rc == null || !rc.ok || rc.aborted) {
+                            continue;
+                        }
+                        won |= rc.pTerminal == 1.0;
+                        if (r0 != null && r0.ok && !r0.aborted) {
+                            sum += v1[c][w] - v1[0][w];
+                            cnt++;
+                        }
+                    }
+                    alive[c] = won || cnt > 0 && sum / cnt > 0;
+                    na += alive[c] ? 1 : 0;
+                }
+            } else {
+                java.util.Arrays.fill(alive, true); // no stage-1 values: every candidate gets every world, as unraced
+                na = n - 1;
+            }
+            if (na == 0) {
+                stats.raceStopped++;
+                stats.racePlayoutsSaved += (long) n * (k - race);
+            } else {
+                stats.racePlayoutsSaved += (long) (n - 1 - na) * (k - race);
+                raceLo = race;
+                raceHi = k;
+                raceAlive = alive;
+                aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+            }
+            for (int c = 0; c < n; c++) {
+                for (int w = 0; w < k; w++) {
+                    if (outs[c][w] == null) {
+                        values[c][w] = Double.NEGATIVE_INFINITY; // never played: as a play-out the budget stopped
+                    }
+                }
+            }
+            return aborted;
+        } finally {
+            raceLo = 0;
+            raceHi = Integer.MAX_VALUE;
+            raceAlive = null;
+        }
+    }
+
     private static Rollout aborted() {
         final Rollout r = new Rollout();
         r.ok = false;
@@ -5275,6 +5443,19 @@ public final class LookaheadSearch {
      * it reads. Before the wall (and always without a budget, or without a pool) it is the plain wait and returns true.
      */
     private boolean runAll(List<Runnable> tasks, Budget wall) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return runAllP(tasks, wall);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.WAIT);
+        try {
+            return runAllP(tasks, wall);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #runAll} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private boolean runAllP(List<Runnable> tasks, Budget wall) {
         if (pool == null) {
             for (Runnable r : tasks) {
                 r.run();
@@ -6710,6 +6891,19 @@ public final class LookaheadSearch {
      * its replay (A8T audit 39/48, all on the loaded host).
      */
     Prepared prepare(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, TrajPoint carried) {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return prepareP(live, liveMe, c, defSa, worldSeed, resample, carried);
+        }
+        forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.PREP);
+        try {
+            return prepareP(live, liveMe, c, defSa, worldSeed, resample, carried);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #prepare} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Prepared prepareP(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, TrajPoint carried) {
         final Prepared p = new Prepared();
         p.budget = budget;
         final Random prev = MyRandom.getThreadRandom();
@@ -6845,6 +7039,27 @@ public final class LookaheadSearch {
      * candidate's value (verify mode: is only recorded).
      */
     Rollout play(Prepared p, Boolean wantFp, WorldMemo memo, int cand) {
+        if (!SearchProf.ON) {
+            return playP(p, wantFp, memo, cand);
+        }
+        SearchProf.playBegin();
+        Rollout pr = null;
+        try {
+            pr = playP(p, wantFp, memo, cand);
+            return pr;
+        } finally {
+            int pt = -1;
+            try {
+                pt = p.g == null ? -1 : p.g.getPhaseHandler().getTurn();
+            } catch (RuntimeException e) {
+                pt = -1;
+            }
+            SearchProf.playEnd(pr == null ? -1 : pr.steps, pr != null && pr.aborted, pr != null && pr.ok, pt);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #play} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Rollout playP(Prepared p, Boolean wantFp, WorldMemo memo, int cand) {
         final Rollout r = new Rollout();
         r.trajectory = p.trajectory;
         if (p.failed) {

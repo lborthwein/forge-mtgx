@@ -151,13 +151,27 @@ public final class ChoiceScorer {
          * sampled, never the real order and never the opponent's cards (their hidden guard is unchanged).
          */
         public int redealOwn = 0;
+        /**
+         * discard-guard-1113 (0 = off, the default): no departure from the policy's answer at an ask where an option has
+         * no score. 1: when the ask ran over its budget (an option dropped unscored). 2: also when any option failed in
+         * its copy or the menu was cut by the cap. The policy's own answer is always scored first; with the guard the
+         * scorer only departs when it compared the whole menu. The ask's row says {@code held=unscored}.
+         */
+        public int departScored = 0;
+        /**
+         * discard-guard-1113 (0 = off, the default): no departure when the option the scorer would play has a value under
+         * this floor (a position with nothing to choose between: differences there are noise). {@code held=floor}.
+         */
+        public double departFloor = 0.0;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
                 "settleSteps", "margin", "noDecline", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig",
                 // choice-search-1109 (lineOnly, relax), integrate-1110 (reachDiscards): ported by owner-misplays-1113, all off by default
                 "lineOnly", "check", "checkTop", "subsetCap", "relax", "relaxTop", "relaxMs", "relaxDraws", "reachDiscards",
                 // owner-misplays-1113, off by default
-                "redealOwn"));
+                "redealOwn",
+                // discard-guard-1113, off by default
+                "departScored", "departFloor"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -241,6 +255,11 @@ public final class ChoiceScorer {
             if (c.redealOwn < 0 || c.redealOwn > 64) {
                 throw new IllegalArgumentException("choiceScorer: redealOwn must be 0..64");
             }
+            if (o.has("departScored")) c.departScored = o.get("departScored").getAsInt();
+            if (o.has("departFloor")) c.departFloor = o.get("departFloor").getAsDouble();
+            if (c.departScored < 0 || c.departScored > 2 || !(c.departFloor >= 0 && c.departFloor <= 1)) {
+                throw new IllegalArgumentException("choiceScorer: departScored must be 0..2, departFloor 0..1");
+            }
             if (c.reachDiscards) {
                 // integrate-1110: the blend's own keys must be on; the two families are asked without naming them
                 if (!(c.reachAlpha > 0) || c.screenNodes <= 0) {
@@ -322,6 +341,12 @@ public final class ChoiceScorer {
             if (redealOwn > 0) {
                 o.addProperty("redealOwn", redealOwn); // owner-misplays-1113: only when on
             }
+            if (departScored > 0) {
+                o.addProperty("departScored", departScored); // discard-guard-1113: only when on
+            }
+            if (departFloor > 0) {
+                o.addProperty("departFloor", departFloor);
+            }
             if (relax > 0) {
                 // choice-search-1109 pass 3: written only when on
                 o.addProperty("relax", relax);
@@ -378,6 +403,8 @@ public final class ChoiceScorer {
         public boolean reachDiscards;
         /** owner-misplays-1113: re-deals each option was replayed on (0 = the ask was answered on the real order). */
         public int redeal;
+        /** discard-guard-1113: why a departure was held back ({@code unscored}, {@code floor}), null = none was. */
+        public String held;
     }
 
     /** Frames at most for one opening-hand ask. */
@@ -1712,6 +1739,43 @@ public final class ChoiceScorer {
      * groups of each group's best. Returns the steps to play instead of {@code greedy}, or null to keep it.
      */
     public short[] choose(final Scored s, final double[] v, final short[] greedy) {
+        final short[] alt = choose0(s, v, greedy);
+        return alt == null ? null : guardDeparture(s, alt);
+    }
+
+    /**
+     * discard-guard-1113 ({@link Config#departScored}, {@link Config#departFloor}; both off: {@code alt} as it is): a
+     * departure stands only when every option was scored and the option played is worth at least the floor. Held back,
+     * the policy's own answer is played (null) and is {@link Scored#chosen}.
+     */
+    short[] guardDeparture(final Scored s, final short[] alt) {
+        if (cfg.departScored <= 0 && !(cfg.departFloor > 0)) {
+            return alt;
+        }
+        Option own = null;
+        boolean budget = s.overBudget, unscored = s.cut > 0;
+        for (Option o : s.options) {
+            if (o.policy) {
+                own = o;
+            }
+            if (Double.isNaN(o.value)) {
+                unscored = true;
+                budget |= "budget".equals(o.fail);
+            }
+        }
+        if (cfg.departScored >= 2 ? budget || unscored : cfg.departScored == 1 && budget) {
+            s.held = "unscored";
+        } else if (cfg.departFloor > 0 && s.chosen != null && !(s.chosen.value >= cfg.departFloor)) {
+            s.held = "floor";
+        }
+        if (s.held == null) {
+            return alt;
+        }
+        s.chosen = own;
+        return null;
+    }
+
+    private short[] choose0(final Scored s, final double[] v, final short[] greedy) {
         int at = 0;
         Option best = null;
         Option own = null;
@@ -1871,6 +1935,9 @@ public final class ChoiceScorer {
         r.addProperty("run_ms", Math.round(s.runNanos / 1e4) / 100.0);
         r.addProperty("feat_ms", Math.round(s.featNanos / 1e4) / 100.0);
         r.addProperty("over_budget", s.overBudget);
+        if (s.held != null) {
+            r.addProperty("held", s.held); // discard-guard-1113
+        }
         if (s.unsupported != null) {
             r.addProperty("unsupported", s.unsupported);
         }
