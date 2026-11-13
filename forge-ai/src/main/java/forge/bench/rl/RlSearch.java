@@ -1548,6 +1548,26 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         rows.add(row);
     }
 
+    /**
+     * owner-review-1113 (lane solver-distill-cc; property unset = never, and nothing changes): while the file named by
+     * {@code -Dforge.interactive.watchForceFlag} exists and holds this seat's index, the policy service's own answers
+     * stand for this seat: no look-ahead, no plan, no proven line, no card scorer, no block search. A measurement proxy
+     * in front of the service then plays the line a reviewer named; when it deletes the file the seat is itself again.
+     */
+    private static final String FORCE_FLAG = System.getProperty("forge.interactive.watchForceFlag");
+
+    private boolean forceHold() {
+        if (FORCE_FLAG == null || FORCE_FLAG.isBlank() || actorId == null) {
+            return false;
+        }
+        try {
+            final java.nio.file.Path p = java.nio.file.Paths.get(FORCE_FLAG);
+            return java.nio.file.Files.exists(p) && actorId.endsWith("-s" + java.nio.file.Files.readString(p).trim());
+        } catch (java.io.IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
@@ -1565,6 +1585,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** searchspeed-1113: the body of {@link #decide} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
     private int decideP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
+        if (forceHold()) {
+            return -1;
+        }
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
@@ -2102,6 +2125,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** The asks the spec answers by itself (the mulligan rules and the choice scorer), whatever exploration does. */
     private boolean scorerAsk(final int family) {
+        if (forceHold()) {
+            return false;
+        }
         if ((cfg.alwaysKeep || cfg.mullValue != null || cfg.mullKeep != null || cfg.keepGate && cfg.reach != null)
                 && family == RlSchema.F_MULLIGAN) {
             return true;
@@ -2881,6 +2907,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public boolean choiceAsk(final int family) {
+        if (forceHold()) {
+            return false;
+        }
         if (exploreFamily(family)) {
             return true;
         }
@@ -3082,6 +3111,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** searchspeed-1113: the body of {@link #decideBlocks} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
     private short[] decideBlocksP(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final short[] greedy, final Object objs) {
+        if (forceHold()) {
+            return null;
+        }
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
