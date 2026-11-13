@@ -195,6 +195,19 @@ public final class RlSearchClient implements Closeable {
     }
 
     public Scores score(final byte[] decidePayload) throws IOException {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return scoreP(decidePayload);
+        }
+        final long spT = System.nanoTime(); forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SVC_SCORE);
+        try {
+            return scoreP(decidePayload);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #score} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private Scores scoreP(final byte[] decidePayload) throws IOException {
         final long t = System.nanoTime();
         send(T_SCORE, 0, decidePayload);
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107 (no clock = no-op)
@@ -205,6 +218,19 @@ public final class RlSearchClient implements Closeable {
     }
 
     public RlWire.Decision decide(final byte[] decidePayload, final boolean sample) throws IOException {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return decideP(decidePayload, sample);
+        }
+        final long spT = System.nanoTime(); forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SVC_DECIDE);
+        try {
+            return decideP(decidePayload, sample);
+        } finally {
+            forge.ai.simulation.SearchProf.exit(); forge.ai.simulation.SearchProf.latency(System.nanoTime() - spT);
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #decide} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private RlWire.Decision decideP(final byte[] decidePayload, final boolean sample) throws IOException {
         final long t = System.nanoTime();
         send(RlWire.T_DECIDE, sample ? FLAG_SAMPLE : 0, decidePayload);
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107 (no clock = no-op)
@@ -224,6 +250,19 @@ public final class RlSearchClient implements Closeable {
      * before; a bigger one is split (see the class comment). One call whatever the frames.
      */
     public float[] values(final List<byte[]> decidePayloads) throws IOException {
+        if (!forge.ai.simulation.SearchProf.ON) {
+            return valuesP(decidePayloads);
+        }
+        forge.ai.simulation.SearchProf.leafItems(decidePayloads.size()); forge.ai.simulation.SearchProf.enter(forge.ai.simulation.SearchProf.SVC_LEAVES);
+        try {
+            return valuesP(decidePayloads);
+        } finally {
+            forge.ai.simulation.SearchProf.exit();
+        }
+    }
+
+    /** searchspeed-1113: the body of {@link #values} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
+    private float[] valuesP(final List<byte[]> decidePayloads) throws IOException {
         final long t = System.nanoTime();
         final float[] v;
         final long bytes = leavesBytes(decidePayloads, 0, decidePayloads.size());
