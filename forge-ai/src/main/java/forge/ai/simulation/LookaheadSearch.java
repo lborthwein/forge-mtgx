@@ -3210,6 +3210,9 @@ public final class LookaheadSearch {
         budget = b;
         boolean searched = false;
         try {
+            if (ANSWER_PROBE) {
+                System.err.println("[answerprobe-real] " + index + " " + Arrays.toString(AnswerWatch.handState(live, me)));
+            }
             searched = decideGiven0(live, me, given, Math.max(1, breadth), index, onStack, ph, turn, res, expander);
             final int tw = Integer.getInteger("sdcc.answerProbe.true", 0);
             if (ANSWER_PROBE && tw > 0 && hookPlayout && cfg.opponentPolicy && lastCandidates != null
@@ -6702,9 +6705,37 @@ public final class LookaheadSearch {
         /** Opponent creatures attacking in each turn (count at declare). */
         final Map<Integer, Integer> attackers = new TreeMap<>();
 
+        /** The world's opponent at the play-out's start: {open, answers in hand, affordable answers}. */
+        final int[] root;
+
         AnswerWatch(Game g, Player me) {
             this.g = g;
             this.me = me;
+            this.root = handState(g, me);
+        }
+
+        static int[] handState(Game g, Player me) {
+            int open = 0, ans = 0, aff = 0;
+            for (Player opp : g.getPlayers()) {
+                if (opp == me) {
+                    continue;
+                }
+                for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+                    if (!c.isTapped() && !c.getManaAbilities().isEmpty()) {
+                        open++;
+                    }
+                }
+                for (Card c : opp.getCardsIn(ZoneType.Hand)) {
+                    if (probeInstantAnswer(c.getRules())) {
+                        ans++;
+                        if (c.getCMC() <= open) {
+                            aff++;
+                        }
+                    }
+                }
+            }
+            return new int[] {open, ans, aff, g.getRegisteredPlayers().indexOf(me), g.getPhaseHandler().getTurn(),
+                    g.getPhaseHandler().isPlayerTurn(me) ? 1 : 0};
         }
 
         static String kind(Card t, Player me) {
@@ -6807,7 +6838,7 @@ public final class LookaheadSearch {
         }
 
         void print(int mode, String cand, long seed, boolean over) {
-            final StringBuilder b = new StringBuilder("[answerprobe] {\"mode\":").append(mode).append(",\"cand\":")
+            final StringBuilder b = new StringBuilder("[answerprobe] {\"root\":").append(Arrays.toString(root)).append(",\"mode\":").append(mode).append(",\"cand\":")
                     .append(new com.google.gson.JsonPrimitive(cand)).append(",\"seed\":").append(seed).append(",\"over\":")
                     .append(over).append(",\"end\":").append(g.getPhaseHandler().getTurn()).append(",\"recs\":[");
             boolean first = true;

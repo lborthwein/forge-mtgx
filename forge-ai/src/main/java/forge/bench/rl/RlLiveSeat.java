@@ -359,6 +359,9 @@ public final class RlLiveSeat {
                         break;
                     // untested-keys-1113: the play-out opponent (absent = "forge", Forge AI, as before; "policy" = the
                     // same policy seat as ours on its own observation, needs playout=policy)
+                    case "beliefDeck": // answer probe branch only (measurement): the search worlds' DeckBelief
+                        c.beliefDeck = Boolean.parseBoolean(v);
+                        break;
                     case "opponent":
                         if (!"forge".equals(v) && !"policy".equals(v)) {
                             throw new IllegalArgumentException("policySearch: opponent=" + v + " (want forge or policy)");
