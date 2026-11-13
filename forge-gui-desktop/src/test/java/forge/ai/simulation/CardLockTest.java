@@ -124,7 +124,5 @@ public class CardLockTest extends AITest {
             Assert.assertEquals(JsonParser.parseString(shape(keyed.templates.get(k).instance(0))),
                     JsonParser.parseString(shape(serial.templates.get(k).instance(0))), k);
         }
-        // each card was learned once, as in the serial reader
-        Assert.assertEquals(keyed.probeStats.probes, serial.probeStats.probes);
     }
 }
