@@ -108,6 +108,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String deadEtb = "off", zeroX = "off", crewNoop = "off", departMedian = "off";
         /** evoke-empty-board-1111: the look-ahead's deadAltCost guard (off|shadow|on; written to JSON only when not off). */
         public String deadAltCost = "off";
+        /** low-value-gap-1113 / noop-target-1113: the look-ahead's keys of the same names (all off; JSON only when on). */
+        public double lowFloor = 0.0, lowGap = 0.0;
+        public boolean noopTarget = false;
         public boolean stack = false;
         /** Also search pass (second, after the default), as K8's candidate set does, whatever its prior. */
         public boolean includePass = false;
@@ -409,7 +412,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
-                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "departMedian", "stack", "server", "readTimeoutMs",
+                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "lowFloor", "lowGap", "noopTarget", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
@@ -474,6 +477,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("zeroX")) c.zeroX = o.get("zeroX").getAsString();
             if (o.has("crewNoop")) c.crewNoop = o.get("crewNoop").getAsString();
             if (o.has("deadAltCost")) c.deadAltCost = o.get("deadAltCost").getAsString();
+            if (o.has("lowFloor")) c.lowFloor = o.get("lowFloor").getAsDouble();
+            if (o.has("lowGap")) c.lowGap = o.get("lowGap").getAsDouble();
+            if (o.has("noopTarget")) c.noopTarget = o.get("noopTarget").getAsBoolean();
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
             if (o.has("includePass")) c.includePass = o.get("includePass").getAsBoolean();
@@ -702,6 +708,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             AiFixes.Mode.parse(crewNoop);
             AiFixes.Mode.parse(deadAltCost);
             AiFixes.Mode.parse(departMedian);
+            if (lowFloor < 0 || lowFloor > 1 || lowGap < 0 || lowGap > 1 || (lowGap > 0) != (lowFloor > 0)) {
+                throw new IllegalArgumentException("search.lowFloor / lowGap: both in 0..1, and set together"); // low-value-gap-1113
+            }
         }
 
         public JsonObject toJson() {
@@ -722,6 +731,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("crewNoop", crewNoop);
             if (!"off".equals(deadAltCost)) {
                 o.addProperty("deadAltCost", deadAltCost);
+            }
+            if (lowGap > 0) {
+                o.addProperty("lowFloor", lowFloor); // low-value-gap-1113: only when on
+                o.addProperty("lowGap", lowGap);
+            }
+            if (noopTarget) {
+                o.addProperty("noopTarget", true); // noop-target-1113: only when on
             }
             o.addProperty("departMedian", departMedian);
             o.addProperty("stack", stack);
@@ -1143,6 +1159,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
         lc.crewNoop = AiFixes.Mode.parse(cfg.crewNoop);
         lc.deadAltCost = AiFixes.Mode.parse(cfg.deadAltCost);
+        lc.lowFloor = cfg.lowFloor;
+        lc.lowGap = cfg.lowGap;
+        lc.noopTarget = cfg.noopTarget;
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
         lc.budgetMs = cfg.budgetMs;

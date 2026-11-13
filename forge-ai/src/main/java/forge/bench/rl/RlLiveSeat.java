@@ -320,6 +320,9 @@ public final class RlLiveSeat {
                     case "zeroX": c.zeroX = v; break;
                     case "crewNoop": c.crewNoop = v; break;
                     case "deadAltCost": c.deadAltCost = v; break; // evoke-empty-board-1111 (live default off)
+                    case "lowFloor": c.lowFloor = Double.parseDouble(v); break; // low-value-gap-1113 (live default off)
+                    case "lowGap": c.lowGap = Double.parseDouble(v); break;
+                    case "noopTarget": c.noopTarget = Boolean.parseBoolean(v); break; // noop-target-1113 (live default off)
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
                     case "connectTimeoutMs": c.connectTimeoutMs = Integer.parseInt(v); break;

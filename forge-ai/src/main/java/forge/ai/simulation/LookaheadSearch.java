@@ -122,6 +122,25 @@ public final class LookaheadSearch {
         /** A departure must beat Forge's answer's EV by more than this. */
         public double margin = 0.0;
         /**
+         * low-value-gap-1113 (both 0 = off, the default: decisions unchanged). A candidate whose own value is under
+         * {@code lowFloor} may replace the default only when it beats the default's value by at least {@code lowGap}. The
+         * departZ test passes any gap, however small, when the worlds agree; in a position the search itself reads as
+         * lost that spends cards on differences of a thousandth. Above the floor nothing changes.
+         */
+        public double lowFloor = 0.0;
+        public double lowGap = 0.0;
+        /**
+         * noop-target-1113 (off by default): a given candidate other than the default whose single target makes every
+         * effect of the spell a no-op by the spell's own resolution condition (a rules check on the ability's condition
+         * with that target, as the game will check it on resolution) is dropped; the next candidate takes its slot.
+         */
+        public boolean noopTarget = false;
+
+        /** low-value-gap-1113: the gain a candidate of value {@code ev} needs over the default. */
+        double gainNeeded(double ev) {
+            return lowGap > 0 && ev < lowFloor ? Math.max(margin, lowGap) : margin;
+        }
+        /**
          * Departure confidence (lane forge-ai-misplays-0928; 0 = off, the default: decisions unchanged). A candidate may
          * replace Forge's answer only if its mean paired difference to Forge's answer over the K worlds (common random
          * numbers) exceeds departZ standard errors of that difference. Keeps the prior (Forge's answer) when the
@@ -533,6 +552,13 @@ public final class LookaheadSearch {
                 o.addProperty("reuseShadowFresh", true);
             }
             o.addProperty("margin", margin);
+            if (lowGap > 0) {
+                o.addProperty("lowFloor", lowFloor); // low-value-gap-1113: only when on
+                o.addProperty("lowGap", lowGap);
+            }
+            if (noopTarget) {
+                o.addProperty("noopTarget", true); // noop-target-1113: only when on
+            }
             if (targetVariants > 0) {
                 o.addProperty("targetVariants", targetVariants);
             }
@@ -694,6 +720,8 @@ public final class LookaheadSearch {
         public long crewNoopCands, crewNoopDecisions, crewNoopDropped, crewNoopShadowBest, crewNoopForge;
         /** deadAltCost guard (null = off): the same counters as deadEtb, for card-spending casts that buy nothing. */
         public String deadAltCostMode;
+        /** low-value-gap-1113 / noop-target-1113 (written only when their keys are on): candidates held back / dropped. */
+        public long lowGapHeld, noopTargetDropped;
         public long deadAltCostCands, deadAltCostDecisions, deadAltCostDropped, deadAltCostShadowBest, deadAltCostForge;
         /** dudCast guard (null = off): answers checked, duds found, vetoed (re-asked), passed, unknown; time; dud cards. */
         public String dudCastMode;
@@ -945,6 +973,12 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", deadAltCostShadowBest);
                 d.addProperty("forgeAnswer", deadAltCostForge);
                 o.add("deadAltCost", d);
+            }
+            if (lowGapHeld > 0) {
+                o.addProperty("lowGapHeld", lowGapHeld);
+            }
+            if (noopTargetDropped > 0) {
+                o.addProperty("noopTargetDropped", noopTargetDropped);
             }
             if (dudCastMode != null) {
                 JsonObject d = new JsonObject();
@@ -3380,7 +3414,7 @@ public final class LookaheadSearch {
         final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick
                 : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP,
                         hooks.reachDepart() > 0 && reachPart != null && reachPart.length == n ? reachPart : null,
-                        hooks.reachDepart(), stats)
+                        hooks.reachDepart(), stats, cfg.lowFloor, cfg.lowGap)
                 : argmax(values, okArg, n, k);
         reachPart = null; // this decision's only
         int best = plainBest;
@@ -3554,7 +3588,8 @@ public final class LookaheadSearch {
         final boolean zguard = cfg.zeroX != AiFixes.Mode.OFF;
         final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
         final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
-        if (!guard && !zguard && !cguard && !aguard) {
+        final boolean nguard = cfg.noopTarget; // noop-target-1113
+        if (!guard && !zguard && !cguard && !aguard && !nguard) {
             for (int i = 0; i < all.size() && out.size() < breadth; i++) {
                 out.add(all.get(i));
                 outAt.add(allAt.get(i));
@@ -3589,6 +3624,10 @@ public final class LookaheadSearch {
                 final boolean zero = zguard && sa != null && zeroXSpell(sa, me);
                 final boolean crew = cguard && sa != null && crewNoop(sa, me);
                 final boolean alt = aguard && sa != null && deadAltCost(sa, me);
+                if (i != 0 && nguard && sa != null && noopTarget(sa, me, c.tgt)) {
+                    stats.noopTargetDropped++;
+                    continue;
+                }
                 if (i == 0) {
                     // the default is never dropped (as Forge's answer in enumerate)
                     if (dead) {
@@ -4594,6 +4633,12 @@ public final class LookaheadSearch {
     /** {@link #chooseAnytime} with the reach departure rule ({@code rp}: each candidate's reach part per world, or null). */
     static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP,
             double[][] rp, double depart, Stats st) {
+        return chooseAnytime(v, f, ok, n, k, z, margin, rootP, rp, depart, st, 0.0, 0.0);
+    }
+
+    /** {@link #chooseAnytime} with the low-value gap (low-value-gap-1113: {@code lowGap} 0 = off). */
+    static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP,
+            double[][] rp, double depart, Stats st, double lowFloor, double lowGap) {
         double defSum = 0;
         int defN = 0;
         for (int w = 0; w < k; w++) {
@@ -4664,6 +4709,21 @@ public final class LookaheadSearch {
                     byReach = true;
                 }
             }
+            if (lowGap > 0 && mean[c] < lowGap) {
+                // low-value-gap-1113: the candidate's own value, over the worlds it finished
+                double cs = 0;
+                for (int w = 0; w < k; w++) {
+                    if (f[c][w]) {
+                        cs += v[c][w];
+                    }
+                }
+                if (cs / kc[c] < lowFloor) {
+                    if (st != null) {
+                        st.lowGapHeld++;
+                    }
+                    continue;
+                }
+            }
             if (mean[c] > bestGain) {
                 best = c;
                 bestGain = mean[c];
@@ -4692,6 +4752,10 @@ public final class LookaheadSearch {
         for (int c = 1; c < n; c++) {
             if (cfg.departZ > 0 && ok[c] && !confident(values, c, k, cfg.departZ)) {
                 stats.departGated++;
+                continue;
+            }
+            if (cfg.lowGap > 0 && ev[c] < cfg.lowFloor && ev[c] - ev[0] < cfg.lowGap) {
+                stats.lowGapHeld++; // low-value-gap-1113
                 continue;
             }
             if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
@@ -4730,6 +4794,10 @@ public final class LookaheadSearch {
             }
             if (ok[c] && !(medianDiff(values, c, k) > 0)) {
                 stats.departMedianGated++;
+                continue;
+            }
+            if (cfg.lowGap > 0 && ev[c] < cfg.lowFloor && ev[c] - ev[0] < cfg.lowGap) {
+                stats.lowGapHeld++; // low-value-gap-1113
                 continue;
             }
             if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
@@ -5910,6 +5978,35 @@ public final class LookaheadSearch {
      * X = 0, e.g. Chalice of the Void), and one that still targets at X = 0 (Unexpectedly Absent). Runs in the
      * enumeration copy only (the checks set X on that copy's ability).
      */
+    /**
+     * noop-target-1113: with {@code tgt} (a candidate's single target, "C<card id>") as its target, is every ability of
+     * this spell's chain conditioned and its condition unmet now? Then the spell resolves and does nothing. The condition
+     * is the card script's own resolution condition, evaluated by the game's rules code on a copy of the ability; no card
+     * names. False when there is no such target, an ability has no condition, or anything cannot be evaluated.
+     */
+    static boolean noopTarget(SpellAbility sa, Player me, String tgt) {
+        if (sa == null || tgt == null || tgt.length() < 2 || tgt.charAt(0) != 'C' || !sa.usesTargeting()) {
+            return false;
+        }
+        try {
+            final Card t = me.getGame().findById(Integer.parseInt(tgt.substring(1)));
+            if (t == null) {
+                return false;
+            }
+            final SpellAbility x = sa.copy(me);
+            x.resetTargets();
+            x.getTargets().add(t);
+            for (SpellAbility s = x; s != null; s = s.getSubAbility()) {
+                if (s.getConditions() == null || s.getConditions().areMet(s)) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     static boolean zeroXSpell(SpellAbility sa, Player me) {
         if (sa == null || !sa.isSpell() || sa.isLandAbility() || !sa.costHasManaX()) {
             return false;
