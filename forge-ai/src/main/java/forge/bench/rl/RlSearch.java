@@ -2996,7 +2996,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (alt != null && s.chosen != null && s.chosen.pileIds != null) {
             sc.adoptPile(g, s.chosen);
         }
-        if (cfg.decisionLog != null || rowsWanted) {
+        if (cfg.decisionLog != null || rowsWanted || CHOICE_LOG) {
             final JsonObject row = sc.row(s, src);
             row.addProperty("game_uid", Long.toUnsignedString(uid));
             row.addProperty("dec_idx", frame.decIdx);
@@ -3007,7 +3007,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("scored", scored);
             row.addProperty("departed", alt != null);
             row.addProperty("total_ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
-            addRow(row);
+            if (CHOICE_LOG) {
+                System.err.println("[choice-scorer] " + row); // discard-guard-1113 (diagnostics; off unless -Dsdcc.choiceLog)
+            }
+            if (cfg.decisionLog != null || rowsWanted) {
+                addRow(row);
+            }
         }
         return alt;
     }
@@ -4124,6 +4129,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** owner-misplays-1113: log the reach gate and every leaf's reach (diagnosis only; never read to decide). */
     static final boolean REACH_LOG = Boolean.getBoolean("sdcc.reachLog");
+    /** discard-guard-1113 (diagnostics; off unless set): every card-scorer ask's row on stderr. */
+    static final boolean CHOICE_LOG = Boolean.getBoolean("sdcc.choiceLog");
 
     @Override
     public double reachPart(final double[] r) {
