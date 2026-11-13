@@ -4432,6 +4432,47 @@ public final class ForcedWinSolver {
     static final long LOOP_NANOS = 3_000_000_000L;
 
     /**
+     * loop-probe-1113: by match (weak), the wall time ({@link System#nanoTime}) at which the decision or ask in progress
+     * runs out; the loop probes take their time from what is left. None set: a probe is bounded by LOOP_NANOS alone.
+     */
+    private static final java.util.Map<Object, Long> LOOP_DEADLINE = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    /** loop-probe-1113: what one fillLoops call may always spend, even past the caller's deadline. */
+    static long LOOP_MIN_NANOS = 250_000_000L;
+    /** loop-probe-1113 (tests, reports): sandbox probes run in this JVM. */
+    static final java.util.concurrent.atomic.AtomicLong LOOP_PROBES = new java.util.concurrent.atomic.AtomicLong();
+
+    /** loop-probe-1113: the caller's deadline for this game's loop probes ({@code nanos} on System.nanoTime; 0 = none). */
+    public static void loopDeadline(final Game g, final long nanos) {
+        final Object match = g.getMatch() != null ? g.getMatch() : LOOP_CACHE;
+        if (nanos == 0L) {
+            LOOP_DEADLINE.remove(match);
+        } else {
+            LOOP_DEADLINE.put(match, nanos);
+        }
+    }
+
+    /**
+     * loop-probe-1113: one sandbox probe within {@code end} (wall). TRUE / FALSE = its answer; null = no time for it, or
+     * it was cut short of LOOP_NANOS without a win (not an answer: nothing is cached).
+     */
+    private static Boolean loopProbe(final Config cfg, final Game live, final Player me, final Card c, final Card partner,
+            final boolean aura, final long seed, final long end) {
+        final long now = System.nanoTime();
+        if (now >= end) {
+            return null;
+        }
+        final long budget = Math.min(LOOP_NANOS, end - now);
+        LOOP_PROBES.incrementAndGet();
+        final boolean w = ForcedWinProbe.sandboxWin(live, me, c.getId(), partner == null ? -1 : partner.getId(), aura, loopLimits(cfg),
+                seed, budget);
+        if (w) {
+            return Boolean.TRUE;
+        }
+        // a search that stopped on a budget shorter than the full one did not finish: no answer
+        return budget >= LOOP_NANOS || System.nanoTime() - now < budget - budget / 10 ? Boolean.FALSE : null;
+    }
+
+    /**
      * planLoops: the card has an ability of Forge's CopyPermanent effect type, its own or one it grants (an Aura's script
      * variable). The probe is a sandbox search per partner; without this filter every permanent with a tap ability that
      * targets a card (a creature that gives protection, say) would pay for it.
@@ -4523,40 +4564,56 @@ public final class ForcedWinSolver {
                 }
             }
         }
-        // one probe per game, seat, card and partner list: the seat's other readers (the root solver's, the reach's, the
-        // choice scorer's) reuse it. The key holds the partner names in a fixed order, so it does not depend on which
-        // copy of the game asked.
-        final List<String> names = new ArrayList<>();
-        for (Card p : partners) {
-            names.add(p.getName());
-        }
-        java.util.Collections.sort(names);
-        final String key = me.getId() + "|" + c.getName() + "|" + aura + "|" + names;
+        // loop-probe-1113: one probe per game, seat, card and PARTNER (not per partner list: past LOOP_PARTNERS names the
+        // list depends on the library's order, so every re-dealt or hidden-order copy probed again). The seat's other
+        // readers (the root solver's, the reach's, the choice scorer's) reuse each answer. A probe's time comes out of the
+        // caller's budget (loopDeadline): a call takes at most a quarter of what is left; partners it could not probe are
+        // not cached and the template is asked again at its next read.
         final Object match = live.getMatch() != null ? live.getMatch() : LOOP_CACHE;
         final java.util.Map<String, java.util.Set<String>> byKey = LOOP_CACHE.computeIfAbsent(match, x -> new java.util.HashMap<>());
+        final String base = me.getId() + "|" + c.getName() + "|" + aura + "|";
         final int probed = partners.size();
+        final Long dl = LOOP_DEADLINE.get(match);
+        final long t0 = System.nanoTime();
+        final long end = dl == null ? Long.MAX_VALUE : t0 + Math.max(LOOP_MIN_NANOS, (dl - t0) / 4);
+        boolean cut = false;
         synchronized (byKey) {
-            final java.util.Set<String> hit = byKey.get(key);
-            if (hit != null) {
-                t.loopWith.addAll(hit);
-                return;
-            }
             final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getName().hashCode());
-            if (ForcedWinProbe.sandboxWin(live, me, c.getId(), -1, aura, loopLimits(cfg), seed, LOOP_NANOS)) {
+            java.util.Set<String> alone = byKey.get(base);
+            if (alone == null) {
+                final Boolean w = loopProbe(cfg, live, me, c, null, aura, seed, end);
+                if (w == null) {
+                    cut = true;
+                } else {
+                    alone = w ? java.util.Collections.singleton("") : java.util.Collections.emptySet();
+                    byKey.put(base, alone);
+                }
+            }
+            if (alone != null && !alone.isEmpty()) {
                 t.note = (t.note.isEmpty() ? "" : t.note + "; ") + "loop probe: wins alone";
-                byKey.put(key, new java.util.TreeSet<>());
                 return;
             }
             partners.sort((x, y) -> x.getName().compareTo(y.getName()));
             for (Card p : partners) {
-                if (ForcedWinProbe.sandboxWin(live, me, c.getId(), p.getId(), aura, loopLimits(cfg), mix(seed, p.getName().hashCode()), LOOP_NANOS)) {
-                    t.loopWith.add(p.getName());
+                java.util.Set<String> hit = byKey.get(base + p.getName());
+                if (hit == null) {
+                    final Boolean w = cut ? null : loopProbe(cfg, live, me, c, p, aura, mix(seed, p.getName().hashCode()), end);
+                    if (w == null) {
+                        cut = true;
+                        continue;
+                    }
+                    hit = w ? java.util.Collections.singleton(p.getName()) : java.util.Collections.emptySet();
+                    byKey.put(base + p.getName(), hit);
                 }
+                t.loopWith.addAll(hit);
             }
-            byKey.put(key, new java.util.TreeSet<>(t.loopWith));
+        }
+        if (cut) {
+            t.loopChecked = false; // asked again at the template's next read, when there is time
         }
         if (RECEIPTS) {
-            receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste);
+            receipt("FORCED_WIN loop-probe " + c.getName() + " partners=" + t.loopWith + " probed=" + probed + " haste=" + t.loopHaste
+                    + (cut ? " cut=true" : "") + " ms=" + (System.nanoTime() - t0) / 1_000_000L);
         }
     }
 

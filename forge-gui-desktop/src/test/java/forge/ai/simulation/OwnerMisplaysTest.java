@@ -196,6 +196,62 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
         Assert.assertEquals(reach("G08 kept the copying creature", board, "Kiki-Jiki, Mirror Breaker", lib, opp, false), 0.0, 1e-9);
     }
 
+    /** loop-probe-1113: a copier in play with its untapper, and more creature names in the library than one call probes. */
+    private static Game loopGame(final String copierPartner, final String library) {
+        final String frame = ForcedWinSolverTest.frame("", "Mountain;Mountain;Mountain;Mountain;Mountain;Kiki-Jiki, Mirror Breaker;" + copierPartner,
+                9, "", "Forest;Forest", 18, "human").replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + library);
+        return ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
+    }
+
+    static final String MANY = "Grizzly Bears;Balduvian Bears;Runeclaw Bear;Elvish Mystic;Llanowar Elves;Savannah Lions;Goblin Piker;"
+            + "Hill Giant;Craw Wurm;Gray Ogre;Scathe Zombies;Wall of Wood;Pearled Unicorn;Mons's Goblin Raiders;Merfolk of the Pearl Trident";
+
+    /**
+     * loop-probe-1113 (G09's cost: the probe ran again inside a card-scorer ask, 12 partners, and took the ask's budget):
+     * the answers are kept per partner, so a second reader on the same game with the library in another order (a re-dealt
+     * copy; the old key was the first 12 names in zone order) probes nothing again.
+     */
+    @Test
+    public void theLoopProbeIsNotRunAgainWhenTheLibraryOrderChanges() {
+        final Game g = loopGame("Pestermite", MANY);
+        final Player me = g.getPlayers().get(0);
+        final long p0 = ForcedWinSolver.LOOP_PROBES.get();
+        Assert.assertTrue(screenSolver(me, true).hasEnder(g), "the copier and its untapper are a loop");
+        final long first = ForcedWinSolver.LOOP_PROBES.get() - p0;
+        Assert.assertTrue(first > 0, "the first reader probes");
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        java.util.Collections.reverse(lib);
+        me.getZone(ZoneType.Library).setCards(lib);
+        Assert.assertTrue(screenSolver(me, true).hasEnder(g), "the same answer from the kept probes");
+        final long again = ForcedWinSolver.LOOP_PROBES.get() - p0 - first;
+        System.out.println("OWNERMISPLAYS loop probe: first reader " + first + " probes, second reader (library reversed) " + again);
+        Assert.assertEquals(again, 0L, "no probe is run twice for a partner");
+    }
+
+    /**
+     * loop-probe-1113: the probes take their time from the caller's budget. With the caller's deadline passed and no
+     * minimum, nothing is probed and nothing is recorded as "no loop": the same reader asks again once there is time.
+     */
+    @Test
+    public void theLoopProbeWaitsWhenTheCallerHasNoTimeAndAsksAgainLater() {
+        final Game g = loopGame("Deceiver Exarch", MANY.replace("Grizzly Bears", "Zodiac Monkey"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = screenSolver(me, true);
+        final long min = ForcedWinSolver.LOOP_MIN_NANOS;
+        try {
+            ForcedWinSolver.LOOP_MIN_NANOS = 0L;
+            ForcedWinSolver.loopDeadline(g, System.nanoTime() - 1L);
+            final long p0 = ForcedWinSolver.LOOP_PROBES.get();
+            Assert.assertFalse(s.hasEnder(g), "no time: no probe, so no loop known yet");
+            Assert.assertEquals(ForcedWinSolver.LOOP_PROBES.get() - p0, 0L);
+            ForcedWinSolver.loopDeadline(g, 0L);
+            Assert.assertTrue(s.hasEnder(g), "asked again with time: the loop is found");
+        } finally {
+            ForcedWinSolver.LOOP_MIN_NANOS = min;
+            ForcedWinSolver.loopDeadline(g, 0L);
+        }
+    }
+
     // ------------------------------------------------------------------ G17: the solver
 
     static final String G17_FRAME = "[state]\nturn=7\nactiveplayer=human\nactivephase=MAIN2\nhumanlife=18\nailife=16\n"

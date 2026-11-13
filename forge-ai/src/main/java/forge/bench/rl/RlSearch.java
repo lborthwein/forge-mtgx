@@ -1624,6 +1624,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        if (cfg.budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+        }
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
         try {
@@ -2958,6 +2961,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
+        if (sc.config().budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + sc.config().budgetMs * 1_000_000L); // loop-probe-1113
+        }
         if (sc.pileActive(g)) {
             return sc.pileAnswer(g, m);
         }
