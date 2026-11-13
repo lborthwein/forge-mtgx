@@ -294,4 +294,34 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
         Assert.assertEquals(on.winTurn, 0, "this turn");
         Assert.assertTrue(off == null || off.pBelief < 1.0 || off.winTurn > 0, "without the key no proven kill this turn (the ship string)");
     }
+
+    /**
+     * The live build's deadAltCost guard (8b4838874b9) at G17's cast: the modal spell's extra card is chosen with its modes,
+     * after the cast is a candidate, so the candidate's pay cost spends no hand card and the guard does not drop it (it can
+     * neither cause nor prevent the G17 loss). Every option the live engine offers for it is checked.
+     */
+    @Test
+    public void g17DeadAltCostDoesNotTouchTheModalCast() {
+        final Game g = g17(java.util.Arrays.asList("Dark Ritual", "Cabal Ritual", "Yawgmoth's Will"));
+        final Player me = g.getPlayers().get(0);
+        int seen = 0;
+        for (Card c : me.getCardsIn(ZoneType.Graveyard)) {
+            for (SpellAbility sa : c.getSpellAbilities()) {
+                if (!sa.isSpell()) {
+                    continue;
+                }
+                sa.setActivatingPlayer(me);
+                if (!sa.canPlay()) {
+                    continue;
+                }
+                seen++;
+                System.out.println("OWNERMISPLAYS deadAltCost " + c.getName() + " spendsHandCard=" + LookaheadSearch.spendsHandCard(sa)
+                        + " dead=" + LookaheadSearch.deadAltCost(sa, me));
+                if (c.getName().equals("Collective Brutality")) {
+                    Assert.assertFalse(LookaheadSearch.deadAltCost(sa, me), "the modal cast is not a dead alternative cost");
+                }
+            }
+        }
+        Assert.assertTrue(seen > 0, "a cast from the graveyard is offered after the recast spell");
+    }
 }
