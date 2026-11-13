@@ -4107,7 +4107,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (!reachOn) {
             reachGateOff++;
         }
+        if (REACH_LOG) {
+            // owner-misplays-1113: diagnosis only (-Dsdcc.reachLog=true; off by default, nothing decided from it)
+            System.err.println("[reach-gate] turn=" + g.getPhaseHandler().getTurn() + " phase=" + g.getPhaseHandler().getPhase()
+                    + " open=" + reachOn + " checks=" + reachGateChecks + " ender=" + rc.gateEnder);
+        }
     }
+
+    /** owner-misplays-1113: log the reach gate and every leaf's reach (diagnosis only; never read to decide). */
+    static final boolean REACH_LOG = Boolean.getBoolean("sdcc.reachLog");
 
     @Override
     public double reachPart(final double[] r) {
@@ -4191,6 +4199,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
             out[0] = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
             addCost(out, r);
+            if (REACH_LOG) {
+                System.err.println("[reach-leaf] turn=" + g.getPhaseHandler().getTurn() + " phase=" + g.getPhaseHandler().getPhase()
+                        + " active=" + (g.getPhaseHandler().getPlayerTurn() == me ? "me" : "opp") + " reach=" + out[0] + " failed=" + r.failed
+                        + " bf=" + me.getCardsIn(forge.game.zone.ZoneType.Battlefield).size() + " hand=" + me.getCardsIn(forge.game.zone.ZoneType.Hand));
+            }
             if (rc.leafGf || rc.leafGfs > 0) {
                 leafTeacher(rc, k, g, me, out);
             }
