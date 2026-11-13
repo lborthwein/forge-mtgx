@@ -99,6 +99,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public double departZ = 1.645;
         /** unified-search-1106 (off by default): {@link LookaheadSearch.Config#anytime}. */
         public boolean anytime = false;
+        /** untested-keys-1113 (off by default): {@link LookaheadSearch.Config#holdDeploy}, "hold, then deploy" candidates. */
+        public boolean holdDeploy = false;
         public double margin = 0.0;
         /** static | value */
         public String leaf = "static";
@@ -415,7 +417,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
+                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "holdDeploy", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
@@ -448,6 +450,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("leafExtraSteps")) c.leafExtraSteps = o.get("leafExtraSteps").getAsInt();
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
             if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
+            if (o.has("holdDeploy")) c.holdDeploy = o.get("holdDeploy").getAsBoolean();
             if (o.has("provenOnly")) c.provenOnly = o.get("provenOnly").getAsBoolean();
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
             if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
@@ -722,6 +725,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("crewNoop", crewNoop);
             if (!"off".equals(deadAltCost)) {
                 o.addProperty("deadAltCost", deadAltCost);
+            }
+            if (holdDeploy) {
+                o.addProperty("holdDeploy", true); // untested-keys-1113: only when on
             }
             o.addProperty("departMedian", departMedian);
             o.addProperty("stack", stack);
@@ -1138,6 +1144,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.threads = cfg.threads;
         lc.departZ = cfg.departZ;
         lc.anytime = cfg.anytime;
+        lc.holdDeploy = cfg.holdDeploy;
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
@@ -3657,6 +3664,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // sc-wallguard-1009: only when the budget stopped a play-out seat, so an unbudgeted summary is unchanged
             o.addProperty("playout_budget_stops", budgetStops.get());
         }
+        if (holdDeployCast.get() + holdDeployMissed.get() > 0) {
+            // untested-keys-1113 (holdDeploy): only when a hold play-out ran, so every other summary is unchanged
+            o.addProperty("hold_deploy_cast", holdDeployCast.get());
+            o.addProperty("hold_deploy_missed", holdDeployMissed.get());
+        }
         if (ls.getStats().trueFairNamingRefusals > 0) {
             // review #130 S3-3: only when a true-world re-play was refused, so every other summary is unchanged
             o.addProperty("true_fair_naming_refusals", ls.getStats().trueFairNamingRefusals);
@@ -4517,6 +4529,59 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /** untested-keys-1113 (holdDeploy): deferred casts made / windows that passed without the card on offer. */
+    final java.util.concurrent.atomic.AtomicLong holdDeployCast = new java.util.concurrent.atomic.AtomicLong(),
+            holdDeployMissed = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * untested-keys-1113 (holdDeploy): the play-out seat of a "hold, then deploy" candidate. Its first ask is the pass
+     * (forced first action); after it, PASS at every priority of this seat until the opponent's turn {@code d.turn}
+     * reaches step {@code d.phase} with an empty stack; there the deferred spell (same card and description) if it is on
+     * offer. From then on (cast, not on offer, or the window passed) the policy decides every ask.
+     */
+    RlSeat.PlanCursor deployCursor(final LookaheadSearch.Deploy d) {
+        return new RlSeat.PlanCursor() {
+            boolean done = false;
+
+            @Override
+            public int choose(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs) {
+                if (done) {
+                    return -1;
+                }
+                final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+                final boolean ours = ph.isPlayerTurn(p);
+                final int t = ph.getTurn();
+                if (t > d.turn || ours && t == d.turn || !ours && t == d.turn && ph.getPhase() != null
+                        && ph.getPhase().ordinal() > d.phase.ordinal()) {
+                    done = true; // past the window (an extra turn of ours counts as past it)
+                    holdDeployMissed.incrementAndGet();
+                    return -1;
+                }
+                if (!ours && t == d.turn && ph.getPhase() == d.phase && g.getStack().isEmpty()) {
+                    for (int i = 0; i < m.C(); i++) {
+                        final int ch = m.cands.get(i).kind <= 0 ? -1 : choiceOf(m, i);
+                        if (ch > 0 && ch <= objs.size()) {
+                            final SpellAbility sa = objs.get(ch - 1);
+                            if (sa != null && sa.isSpell() && sa.getHostCard() != null && sa.getHostCard().getId() == d.hostId
+                                    && d.desc.equals(sa.getDescription())) {
+                                done = true;
+                                holdDeployCast.incrementAndGet();
+                                return i;
+                            }
+                        }
+                    }
+                }
+                // the hold: pass until the window
+                for (int i = 0; i < m.C(); i++) {
+                    if (m.cands.get(i).kind > 0 && choiceOf(m, i) == 0) {
+                        return i;
+                    }
+                }
+                return -1;
+            }
+        };
+    }
+
     /** step3-playout-fixes-1028: every entry of {@code match} is an exact match (not the loose may-play path). */
     static boolean looseMatchExact(final List<Integer> match, final RlCandidates.Menu m, final List<SpellAbility> objs,
             final LookaheadSearch.FirstAction first) {
@@ -4626,6 +4691,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             rs.priorityTrace = rec;
         } else if (first.plan instanceof PlanSearch.PolicyPlan) {
             rs.planCursor = new PlanSearch.Cursor((PlanSearch.PolicyPlan) first.plan, first, 0);
+        } else if (first.deploy != null) {
+            rs.planCursor = deployCursor(first.deploy);
         }
         if (!planned) rs.playoutFirst = new RlSeat.PlayoutFirst() {
             @Override

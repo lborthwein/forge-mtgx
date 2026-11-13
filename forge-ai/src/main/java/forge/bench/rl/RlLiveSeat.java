@@ -339,6 +339,13 @@ public final class RlLiveSeat {
                     case "zeroX": c.zeroX = v; break;
                     case "crewNoop": c.crewNoop = v; break;
                     case "deadAltCost": c.deadAltCost = v; break; // evoke-empty-board-1111 (live default off)
+                    // untested-keys-1113: "hold, then deploy" candidates (absent = off: the seat byte for byte as before)
+                    case "holdDeploy":
+                        if (!"true".equals(v) && !"false".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: holdDeploy=" + v + " (want true or false)");
+                        }
+                        c.holdDeploy = Boolean.parseBoolean(v);
+                        break;
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
                     case "connectTimeoutMs": c.connectTimeoutMs = Integer.parseInt(v); break;
