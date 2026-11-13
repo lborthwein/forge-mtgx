@@ -531,6 +531,9 @@ public final class RlStartState {
     private static final int MAX_LEAVES = 50000;
 
     /** The engine's verdict on one deal: 2 = every cast card payable now, 1 = their coloured pips are, 0 = not. */
+    /** At most this many combinations of fetch-land targets are judged for one deal. */
+    private static final int FETCH_COMBOS = 8;
+
     private static final class Verdict {
         int level = 2;
         String card;
@@ -732,7 +735,6 @@ public final class RlStartState {
      */
     private Verdict judge(final Game game, final Deal[] deal, final List<Card> lands, final List<Card> castCards,
             final boolean handLands) {
-        final Verdict v = new Verdict();
         final Deal x = deal[seat].copy();
         x.fill(lands);
         if (handLands) {
@@ -752,7 +754,12 @@ public final class RlStartState {
             }
         }
         final int needed = neededColours(castCards);
-        for (Card f : new ArrayList<>(x.bf)) {
+        // every fetch land in play: the kinds of land it can fetch from what is left in the library (one per set of the
+        // colours that matter); every combination is judged (at most FETCH_COMBOS) and the best verdict counts, so a
+        // fetch land is never judged as the wrong one of its two lands
+        final List<Card> fetchers = new ArrayList<>();
+        final List<List<Card>> options = new ArrayList<>();
+        for (Card f : x.bf) {
             if (!f.isLand() || mask(f, null, true, null) != 0) {
                 continue;
             }
@@ -760,24 +767,71 @@ public final class RlStartState {
             if (fetch == null) {
                 continue;
             }
-            Card bestT = null;
-            int bestN = -1;
+            final List<Card> opts = new ArrayList<>();
+            final List<Integer> seen = new ArrayList<>();
             for (Card t : x.lib()) {
                 if (t.isLand() && fetches(f, fetch, t)) {
-                    final int k = Integer.bitCount(mask(t, null, true, null) & needed);
-                    if (k > bestN) {
-                        bestN = k;
-                        bestT = t;
+                    final int m = mask(t, null, true, null) & needed;
+                    if (!seen.contains(m)) {
+                        seen.add(m);
+                        opts.add(t);
                     }
                 }
             }
-            if (bestT != null) {
-                removeSame(x.top, bestT);
-                removeSame(x.pool, bestT);
-                x.bf.set(x.bf.indexOf(f), bestT);
-                x.grave.add(f);
+            if (!opts.isEmpty()) {
+                opts.sort((a, b) -> Integer.bitCount(mask(b, null, true, null) & needed)
+                        - Integer.bitCount(mask(a, null, true, null) & needed));
+                fetchers.add(f);
+                options.add(opts);
             }
         }
+        Verdict best = null;
+        final int[] at = new int[fetchers.size()];
+        for (int n = 0; n < FETCH_COMBOS; n++) {
+            final Deal y = x.copy();
+            for (int i = 0; i < fetchers.size(); i++) {
+                final String want = options.get(i).get(at[i]).getName();
+                Card t = null;
+                for (Card c : y.lib()) {
+                    if (c.isLand() && c.getName().equals(want)) {
+                        t = c;
+                        break;
+                    }
+                }
+                if (t == null) {
+                    continue; // an earlier fetch land of this combination took the last one
+                }
+                removeSame(y.top, t);
+                removeSame(y.pool, t);
+                for (int k = 0; k < y.bf.size(); k++) {
+                    if (y.bf.get(k) == fetchers.get(i)) {
+                        y.bf.set(k, t);
+                    }
+                }
+                y.grave.add(fetchers.get(i));
+            }
+            final Verdict v = judgeDeal(game, deal, y, castCards);
+            if (best == null || v.level > best.level) {
+                best = v;
+            }
+            if (best.level == 2) {
+                break;
+            }
+            int i = 0;
+            while (i < at.length && ++at[i] == options.get(i).size()) {
+                at[i] = 0;
+                i++;
+            }
+            if (i == at.length) {
+                break;
+            }
+        }
+        return best;
+    }
+
+    /** One judged deal {@code x} of the assembled seat (fetch lands already resolved): see {@link #judge}. */
+    private Verdict judgeDeal(final Game game, final Deal[] deal, final Deal x, final List<Card> castCards) {
+        final Verdict v = new Verdict();
         final String[] zt = new String[2];
         zt[seat] = zoneText(seat, x);
         zt[1 - seat] = zoneText(1 - seat, deal[1 - seat]);
