@@ -530,6 +530,11 @@ public final class ForcedWinModel {
         boolean loopFromHand;
         /** sdcc-probeobj-1111: an ability of it holds an {@link ObjNeed} (false unless a probeObjects reader learned it). */
         boolean hasObj;
+        /**
+         * searchspeed-1113 (measurement, -Dsdcc.readerStats; empty otherwise): why the probe marked the card unmodeled,
+         * one "reason:ability kind:effect type" entry per ability that did.
+         */
+        List<String> unmodeledWhy;
 
         ACard instance(int newId) {
             final ACard a = new ACard();
@@ -561,6 +566,7 @@ public final class ForcedWinModel {
             a.loopHaste = loopHaste;
             a.loopFromHand = loopFromHand;
             a.hasObj = hasObj;
+            a.unmodeledWhy = unmodeledWhy;
             return a;
         }
 
@@ -888,6 +894,54 @@ public final class ForcedWinModel {
         long seed = 20261012L;
 
         /**
+         * searchspeed-1113 (solver key cardTable; null = off, and then nothing changes): the JVM's saved card models
+         * ({@link ForcedWinCanon.Table}). A card this reader has not read yet is taken from the table; one the table does
+         * not hold is learned in the canonical sandbox (never in a copy of {@code live}) and kept there for every reader.
+         */
+        volatile ForcedWinCanon.Table table;
+        /** searchspeed-1113 (measurement, -Dsdcc.readerStats; null otherwise): per template key {reads, decisions, last decision}. */
+        final Map<String, long[]> stat = ForcedWinCanon.STATS ? new HashMap<>() : null;
+        /** searchspeed-1113 (measurement): the id of the first player this reader read a card for (-1 = none yet). */
+        int statOwner = -1;
+
+        {
+            if (ForcedWinCanon.DUMP != null) {
+                ForcedWinCanon.register(this); // searchspeed-1113 (measurement only)
+            }
+        }
+
+        private void noteRead(final String key, final Player me) {
+            final long d = ForcedWinCanon.DECISION.get();
+            synchronized (stat) {
+                if (statOwner < 0) {
+                    statOwner = me.getId();
+                }
+                final long[] s = stat.computeIfAbsent(key, k -> new long[] {0, 0, -1});
+                s[0]++;
+                if (s[2] != d) {
+                    s[2] = d;
+                    s[1]++;
+                }
+            }
+        }
+
+        /** searchspeed-1113 (cardTable): this reader's own copy of the table's model of {@code c}, or null (none there). */
+        private ACard adopt(final String key, final Card c) {
+            final ForcedWinCanon.Table tb = table;
+            final ACard saved = tb == null || probeObjects ? null : tb.get(key, c);
+            if (saved == null) {
+                return null;
+            }
+            final ACard mine = saved.instance(saved.id); // a reader changes its templates (loop probe, notes): never the table's
+            mine.loopChecked = false;
+            mine.loopWith.clear();
+            synchronized (templates) {
+                final ACard first = templates.putIfAbsent(key, mine);
+                return first != null ? first : mine;
+            }
+        }
+
+        /**
          * blockers-1109 (ledger row 81): can {@code c} (ours, on the battlefield) block at the opponent's next
          * declare-blockers step? Engine rules only: a creature the engine lets block (keywords and static abilities, read
          * as for next turn: CombatUtil.canBlock(c, true)); a tapped one only if it untaps in the opponent's untap step
@@ -1056,6 +1110,9 @@ public final class ForcedWinModel {
                 t = templates.get(key);
             }
             if (t == null) {
+                t = adopt(key, c); // searchspeed-1113 (cardTable; null without the key)
+            }
+            if (t == null) {
                 if (Thread.holdsLock(this) || LEARNING.get()[0] > 0) {
                     // nested (inside a loop probe or another learn of this thread): the monitor path. A thread never waits
                     // for a card's lock while it holds the monitor or another card's lock, so the locks cannot cycle.
@@ -1083,6 +1140,9 @@ public final class ForcedWinModel {
             }
             synchronized (t) {
                 if (loopProbe == null || t.loopChecked) {
+                    if (stat != null) {
+                        noteRead(key, me);
+                    }
                     return t.instance(c.getId());
                 }
             }
@@ -1118,7 +1178,10 @@ public final class ForcedWinModel {
             ForcedWinProbe.TUTOR_CAST.set(tutorCast);
             ForcedWinProbe.SOURCE_LEAVES.set(sourceLeaves);
             try {
-                t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
+                final ForcedWinCanon.Table tb = probeObjects ? null : table;
+                final ACard canon = tb == null ? null : tb.learn(key, c, probeStats); // searchspeed-1113 (cardTable)
+                // (null with the key too for a card that has no paper card, a token: learned from the position, as before)
+                t = canon != null ? canon.instance(canon.id) : ForcedWinProbe.learn(live, me, c, seed, probeStats);
             } finally {
                 ForcedWinProbe.PLAN_SCRY.set(prev);
                 ForcedWinProbe.PROBE_SETTLE.set(prevSettle);
@@ -1147,11 +1210,17 @@ public final class ForcedWinModel {
             // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
             final String key = templateKey(c);
+            if (stat != null) {
+                noteRead(key, me);
+            }
             ACard t = have;
             if (t == null) {
                 synchronized (templates) {
                     t = templates.get(key);
                 }
+            }
+            if (t == null) {
+                t = adopt(key, c); // searchspeed-1113 (cardTable; null without the key)
             }
             if (have != null) {
                 // searchspeed-1113 (cardLock): the template is in hand; only its loop probe is owed
