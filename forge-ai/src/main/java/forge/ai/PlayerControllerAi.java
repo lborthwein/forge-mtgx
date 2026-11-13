@@ -1581,11 +1581,27 @@ public class PlayerControllerAi extends PlayerController {
         return dp(Kind.SELECT, "chooseModeForAbility", sa, possible, min, num, () -> chooseModeForAbilityAi(sa, possible, min, num, allowRepeat), sa, possible, min, num, allowRepeat);
     }
 
+    /**
+     * owner-misplays-1113 (reached only with a line's or a search's own mode set): Forge AI chooses a modal spell's
+     * targets while it chooses the modes, so modes put in from outside have none yet. Each such mode that targets and
+     * has no valid target gets Forge AI's (mandatory) choice here, the same call in the search, in a verification
+     * play-out and in the live game.
+     */
+    public void targetLineModes(final List<AbilitySub> modes) {
+        for (AbilitySub sub : modes) {
+            if (sub.usesTargeting() && !sub.isTargetNumberValid()) {
+                sub.setActivatingPlayer(player);
+                brains.doTrigger(sub, true);
+            }
+        }
+    }
+
     private List<AbilitySub> chooseModeForAbilityAi(SpellAbility sa, List<AbilitySub> possible, int min, int num, boolean allowRepeat) {
         if (lineAnswers != null && !allowRepeat) {
             // owner-misplays-1113 (null answers = no line, or not the line's cast: as before): the followed line's modes
             final List<AbilitySub> line = lineAnswers.modes(sa, possible, min, num);
             if (line != null) {
+                targetLineModes(line);
                 return line;
             }
         }

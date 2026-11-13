@@ -7734,7 +7734,11 @@ public final class ForcedWinSolver {
         public List<forge.game.spellability.AbilitySub> chooseModeForAbility(SpellAbility sa,
                 List<forge.game.spellability.AbilitySub> possible, int min, int num, boolean allowRepeat) {
             final List<forge.game.spellability.AbilitySub> r = f == null || allowRepeat ? null : f.modes(sa, possible, min, num, getPlayer());
-            return r != null ? r : super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            if (r != null) {
+                targetLineModes(r);
+                return r;
+            }
+            return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
         }
         /** kill-line-1106 (verifyReplan; null = off): a fresh line from this world once the line breaks on a later turn. */
         java.util.function.Function<Line, Line> replanner;

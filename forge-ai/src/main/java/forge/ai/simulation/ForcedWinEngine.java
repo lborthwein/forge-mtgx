@@ -4906,7 +4906,7 @@ final class ForcedWinEngine {
                 out.child.diagAid = aid;
                 xk = Integer.toHexString(java.util.Objects.hashCode(out.key)) + (out.child.turn != node.turn ? "t" : "");
                 try {
-                    ck = Integer.toHexString(coarseKey(out.child.g, out.child.me).hashCode());
+                    ck = Integer.toHexString((coarseKey(out.child.g, out.child.me) + (lim.modeChoice ? stackModes(out.child.g) : "")).hashCode());
                 } catch (RuntimeException ex) {
                     ck = "?";
                 }
@@ -5151,6 +5151,7 @@ final class ForcedWinEngine {
                 final List<forge.game.spellability.AbilitySub> r = ForcedWinChoices.applyMode(t, possible, min, num);
                 if (r != null) {
                     rec.played(t);
+                    targetLineModes(r);
                     return r;
                 }
                 rec.miss = true;
