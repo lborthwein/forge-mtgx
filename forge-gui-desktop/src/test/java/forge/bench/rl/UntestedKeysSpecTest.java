@@ -230,6 +230,36 @@ public class UntestedKeysSpecTest {
     }
 
     @Test
+    public void beliefDeckHeldAndInclusionAreOffUnlessSet() {
+        // untested-keys-1113: the live keys beliefDeckHeld / beliefDeckInclusion; absent or false = the config unchanged
+        final RlSearch.Config on0 = RlLiveSeat.Spec.parse(SHIP + ",beliefDeck=true").search;
+        final RlSearch.Config f = RlLiveSeat.Spec.parse(SHIP + ",beliefDeck=true,beliefDeckInclusion=false").search;
+        Assert.assertNull(on0.beliefDeckHeld);
+        Assert.assertFalse(on0.beliefDeckInclusion);
+        Assert.assertEquals(on0.toJson().toString(), f.toJson().toString());
+        Assert.assertFalse(on0.toJson().has("beliefDeckHeld") || on0.toJson().has("beliefDeckInclusion"));
+        final RlSearch.Config on = RlLiveSeat.Spec.parse(SHIP + ",beliefDeck=true,beliefDeckHeld=1/1.25/1.5,beliefDeckInclusion=true").search;
+        Assert.assertTrue(java.util.Arrays.equals(on.beliefDeckHeld, new double[] {1, 1.25, 1.5}));
+        Assert.assertTrue(on.beliefDeckInclusion);
+        Assert.assertEquals(on.toJson().get("beliefDeckHeld").getAsString(), "1/1.25/1.5");
+        // the bench JSON round trip carries both
+        final JsonObject bj = on.toJson();
+        bj.addProperty("server", "127.0.0.1:1");
+        final RlSearch.Config back = RlSearch.Config.parse(bj);
+        Assert.assertTrue(java.util.Arrays.equals(back.beliefDeckHeld, new double[] {1, 1.25, 1.5}));
+        Assert.assertTrue(back.beliefDeckInclusion);
+        for (String bad : new String[] {"beliefDeckInclusion=true", "beliefDeckHeld=1/1.25/1.5", "beliefDeck=true,beliefDeckInclusion=1",
+                "beliefDeck=true,beliefDeckHeld=2/1/1", "beliefDeck=true,beliefDeckHeld=1/1"}) {
+            try {
+                RlLiveSeat.Spec.parse(SHIP + "," + bad);
+                Assert.fail("accepted " + bad);
+            } catch (IllegalArgumentException expected) {
+                // needs beliefDeck=true; true/false; three positive non-decreasing factors
+            }
+        }
+    }
+
+    @Test
     public void badValuesAndTwiceAreRefused() {
         for (String bad : new String[] {"plans.solverCfg.engineAnyWindow=1", "plans.solverCfg.engineFocus=yes",
                 "plans.solverCfg.engineLoopCreditCap=true", "plans.solverCfg.engineLoopCreditCap=-3",

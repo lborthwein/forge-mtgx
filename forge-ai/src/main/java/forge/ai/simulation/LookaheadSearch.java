@@ -424,6 +424,10 @@ public final class LookaheadSearch {
          * what they declined to do) instead of the uniform or decision belief. Spec key {@code beliefDeck}.
          */
         public boolean beliefDeck = false;
+        /** untested-keys-1113 (null = off): {@link DeckBelief.Params#held}, with beliefDeck. Spec key {@code beliefDeckHeld}. */
+        public double[] beliefDeckHeld = null;
+        /** untested-keys-1113 (false = off): {@link DeckBelief.Params#inclusion} from the jar's table, with beliefDeck. */
+        public boolean beliefDeckInclusion = false;
 
         // ---- bvw-step2-fork-1027 (S2T, the symmetric teacher; every field off by default, and then nothing changes)
         /**
@@ -646,6 +650,12 @@ public final class LookaheadSearch {
                 }
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
+                if (beliefDeckHeld != null) {
+                    o.addProperty("beliefDeckHeld", DeckBelief.heldString(beliefDeckHeld)); // untested-keys-1113: only when on
+                }
+                if (beliefDeckInclusion) {
+                    o.addProperty("beliefDeckInclusion", true); // untested-keys-1113: only when on
                 }
                 if (codraft()) {
                     o.addProperty("beliefPriorGain", beliefPriorGain); // bvw-step2-fork-1027: only with codraft
@@ -8902,7 +8912,7 @@ public final class LookaheadSearch {
         if (cfg.beliefPlayerStatics) g.stalePlayerStatics = true;
         if (beliefCube != null && !cfg.beliefShadow && cfg.beliefDeck) {
             // deck-belief-1105: the opponents' hidden cards from the deck posterior, then our own library as before
-            redrawOpponentsDeck(live, liveMe, g, me, rng, DECK_PARAMS);
+            redrawOpponentsDeck(live, liveMe, g, me, rng, searchDeckParams());
             ownLibrary(live, liveMe, me, rng);
         } else if (beliefCube != null && !cfg.beliefShadow && cfg.deck()) {
             // belief-n11-1030: the learned deck model over the cards they showed in this game, then our own library
@@ -9025,6 +9035,22 @@ public final class LookaheadSearch {
      */
     /** deck-belief-1105: the search worlds' deck-belief parameters (the model defaults). */
     private static final DeckBelief.Params DECK_PARAMS = new DeckBelief.Params();
+    private volatile DeckBelief.Params searchDeckParams;
+
+    /** The search worlds' deck-belief parameters: the defaults, plus the held-mana term and inclusion prior when set. */
+    DeckBelief.Params searchDeckParams() {
+        if (cfg.beliefDeckHeld == null && !cfg.beliefDeckInclusion) {
+            return DECK_PARAMS;
+        }
+        DeckBelief.Params p = searchDeckParams;
+        if (p == null) {
+            p = new DeckBelief.Params();
+            p.held = cfg.beliefDeckHeld == null ? null : cfg.beliefDeckHeld.clone();
+            p.inclusion = cfg.beliefDeckInclusion ? DeckBelief.Inclusion.live() : null;
+            searchDeckParams = p;
+        }
+        return p;
+    }
 
     public ForcedWinSolver.Redraw opponentRedrawDeck(final DeckBelief.Params p) {
         if (beliefCube == null || cfg.beliefShadow) {

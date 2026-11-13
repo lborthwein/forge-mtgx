@@ -273,4 +273,135 @@ public class DeckBeliefTest extends SimulationTest {
         lsRef.shutdown();
         forge.util.IdScope.close();
     }
+
+    // ---- untested-keys-1113: the held-mana term and the deck-inclusion prior (both off by default)
+
+    private static JsonObject portFixture() throws IOException {
+        try (java.io.InputStream in = DeckBeliefTest.class.getResourceAsStream("/forge/ai/simulation/deckbelief-port-1113.json")) {
+            AssertJUnit.assertNotNull("the port fixture (planner-fixes/untested-keys/answers/portfixture.py)", in);
+            return com.google.gson.JsonParser.parseString(new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+        }
+    }
+
+    /** The Python port (heldmana.py, the offline fit) and DeckBelief.handWeight agree on 60 random cube cards and evidence. */
+    @Test
+    public void heldTermMatchesTheOfflinePort() throws IOException {
+        final JsonObject fx = portFixture();
+        final DeckBelief.Params p = new DeckBelief.Params();
+        p.held = new double[] {1, 1.25, 1.5};
+        int n = 0, moved = 0;
+        for (com.google.gson.JsonElement el : fx.getAsJsonArray("handWeight")) {
+            final JsonObject r = el.getAsJsonObject();
+            final DeckBelief.Evidence e = new DeckBelief.Evidence();
+            e.offTurn = r.get("offTurn").getAsBoolean();
+            e.openMana = r.get("openMana").getAsInt();
+            e.openColors = (byte) r.get("openColors").getAsInt();
+            e.noLandLastTurn = r.get("noLandLastTurn").getAsBoolean();
+            final PaperCard pc = BeliefSampler.resolve(r.get("name").getAsString());
+            AssertJUnit.assertNotNull(r.get("name").getAsString(), pc);
+            AssertJUnit.assertEquals(r.toString(), r.get("weight").getAsDouble(), DeckBelief.handWeight(pc, e, p), 1e-9);
+            final double w0 = DeckBelief.handWeight(pc, e, new DeckBelief.Params());
+            moved += w0 != DeckBelief.handWeight(pc, e, p) ? 1 : 0;
+            n++;
+        }
+        AssertJUnit.assertEquals(60, n);
+        AssertJUnit.assertTrue("the term moves some instant-speed cards: " + moved, moved > 0);
+    }
+
+    @Test
+    public void heldTermWeighsCastableInstantsOffTurnOnly() {
+        final DeckBelief.Params p = new DeckBelief.Params();
+        p.held = DeckBelief.parseHeld("1/1.25/1.5");
+        final DeckBelief.Evidence e = new DeckBelief.Evidence();
+        e.offTurn = true;
+        e.openColors = MagicColor.BLUE;
+        e.openMana = 2;
+        AssertJUnit.assertEquals(1.25, DeckBelief.handWeight(paper("Counterspell"), e, p)); // castable with 2 held
+        e.openMana = 4;
+        AssertJUnit.assertEquals(1.5, DeckBelief.handWeight(paper("Counterspell"), e, p)); // h 3+
+        e.openMana = 1;
+        AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Counterspell"), e, p)); // not castable with 1
+        AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Unsummon"), e, p)); // h = 1: factor 1
+        e.openMana = 3;
+        e.openColors = MagicColor.RED;
+        AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Counterspell"), e, p)); // off-colour for the held mana
+        AssertJUnit.assertEquals(1.5, DeckBelief.handWeight(paper("Lightning Bolt"), e, p));
+        e.offTurn = false;
+        AssertJUnit.assertEquals(1.0, DeckBelief.handWeight(paper("Lightning Bolt"), e, p)); // its own turn: no evidence
+        AssertJUnit.assertEquals("1/1.25/1.5", DeckBelief.heldString(p.held));
+        for (String bad : new String[] {"1/1.25", "1/0.5/1.5", "0/1/1", "a/b/c", "1/1/Infinity", "1/1/NaN", "1,1.25,1.5"}) {
+            try {
+                DeckBelief.parseHeld(bad);
+                AssertJUnit.fail("accepted " + bad);
+            } catch (IllegalArgumentException expected) {
+                // three positive, non-decreasing factors
+            }
+        }
+    }
+
+    /** The jar's inclusion table is the pinned one, and its rates are the offline fit's (30 fixture rows). */
+    @Test
+    public void inclusionTableIsPinnedAndMatchesTheOfflineRates() throws IOException {
+        final DeckBelief.Inclusion t = DeckBelief.Inclusion.live();
+        AssertJUnit.assertTrue(t.sha256, t.sha256.startsWith(DeckBelief.Inclusion.LIVE_SHA256));
+        for (com.google.gson.JsonElement el : portFixture().getAsJsonArray("rates")) {
+            final JsonObject r = el.getAsJsonObject();
+            AssertJUnit.assertEquals(r.toString(), r.get("rate").getAsDouble(),
+                    t.rate(r.get("name").getAsString(), (byte) r.get("colors").getAsInt()), 1e-9);
+        }
+    }
+
+    /** With the inclusion prior, a world deals the cards decks of its colours play more often; off, the deal is unchanged. */
+    @Test
+    public void inclusionPriorShiftsTheDealAndOffIsUnchanged() throws IOException {
+        final DeckBelief.Inclusion t = DeckBelief.Inclusion.live();
+        final List<String> pool = new ArrayList<>(t.global.keySet());
+        java.util.Collections.sort(pool);
+        final DeckBelief.Evidence e = new DeckBelief.Evidence();
+        e.shown = (byte) (MagicColor.BLUE | MagicColor.RED);
+        e.offTurn = true;
+        final DeckBelief.Params off = new DeckBelief.Params(), on = new DeckBelief.Params();
+        on.inclusion = t;
+        final DeckBelief.Params heldOnly = new DeckBelief.Params();
+        heldOnly.held = new double[] {1, 1, 1}; // factor 1 everywhere: the same deal as off
+        double rOn = 0, rOff = 0;
+        for (long s = 0; s < 200; s++) {
+            final DeckBelief.Deal a = DeckBelief.deal(pool, BeliefSampler::resolve, e, 5, 30, off, new Random(s));
+            final DeckBelief.Deal b = DeckBelief.deal(pool, BeliefSampler::resolve, e, 5, 30, on, new Random(s));
+            final DeckBelief.Deal c = DeckBelief.deal(pool, BeliefSampler::resolve, e, 5, 30, heldOnly, new Random(s));
+            AssertJUnit.assertEquals(a.hand, c.hand);
+            AssertJUnit.assertEquals(a.library, c.library);
+            for (String n : a.hand) rOff += t.rate(n, a.colors);
+            for (String n : b.hand) rOn += t.rate(n, b.colors);
+        }
+        System.out.println("untested-keys-1113 mean inclusion rate of dealt hand cards: off " + rOff / 1000 + " on " + rOn / 1000);
+        AssertJUnit.assertTrue("on " + rOn + " off " + rOff, rOn > 1.2 * rOff);
+    }
+
+    /** LookaheadSearch: the two keys off = the default params object; on = the term and the jar's table. */
+    @Test
+    public void searchParamsFollowTheKeys() throws Exception {
+        String cube = cubeFile();
+        forge.util.IdScope.open();
+        LookaheadSearch.Config c0 = cfg(cube);
+        c0.beliefDeck = true;
+        LookaheadSearch l0 = new LookaheadSearch(c0);
+        DeckBelief.Params p0 = l0.searchDeckParams();
+        AssertJUnit.assertNull(p0.held);
+        AssertJUnit.assertNull(p0.inclusion);
+        AssertJUnit.assertFalse(c0.toJson().has("beliefDeckHeld") || c0.toJson().has("beliefDeckInclusion"));
+        LookaheadSearch.Config c1 = cfg(cube);
+        c1.beliefDeck = true;
+        c1.beliefDeckHeld = new double[] {1, 1.25, 1.5};
+        c1.beliefDeckInclusion = true;
+        LookaheadSearch l1 = new LookaheadSearch(c1);
+        DeckBelief.Params p1 = l1.searchDeckParams();
+        AssertJUnit.assertEquals(1.5, p1.held[2]);
+        AssertJUnit.assertSame(DeckBelief.Inclusion.live(), p1.inclusion);
+        AssertJUnit.assertEquals("1/1.25/1.5", c1.toJson().get("beliefDeckHeld").getAsString());
+        AssertJUnit.assertTrue(c1.toJson().get("beliefDeckInclusion").getAsBoolean());
+        l0.shutdown();
+        l1.shutdown();
+        forge.util.IdScope.close();
+    }
 }

@@ -367,6 +367,17 @@ public final class RlLiveSeat {
                         }
                         c.beliefDeck = Boolean.parseBoolean(v);
                         break;
+                    // untested-keys-1113: the deck belief's held-mana term ("a/b/c", factors for h = 1, 2, 3+) and the
+                    // deck-inclusion prior (true|false); absent = off, the seat as before; both need beliefDeck=true
+                    case "beliefDeckHeld":
+                        c.beliefDeckHeld = forge.ai.simulation.DeckBelief.parseHeld(v);
+                        break;
+                    case "beliefDeckInclusion":
+                        if (!"true".equals(v) && !"false".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: beliefDeckInclusion=" + v + " (want true or false)");
+                        }
+                        c.beliefDeckInclusion = Boolean.parseBoolean(v);
+                        break;
                     case "opponent":
                         if (!"forge".equals(v) && !"policy".equals(v)) {
                             throw new IllegalArgumentException("policySearch: opponent=" + v + " (want forge or policy)");

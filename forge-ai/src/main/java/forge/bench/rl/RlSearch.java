@@ -287,6 +287,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * cards from {@link forge.ai.simulation.DeckBelief} ({@link LookaheadSearch.Config#beliefDeck}); needs a belief.
          */
         public boolean beliefDeck = false;
+        /**
+         * untested-keys-1113 (null = off, the default, and then absent from the JSON): the held-mana term of the deck
+         * belief, factors for h = 1, 2, 3+ ({@link forge.ai.simulation.DeckBelief.Params#held}); needs beliefDeck.
+         */
+        public double[] beliefDeckHeld = null;
+        /** untested-keys-1113 (false = off, the default, and then absent from the JSON): the deck-inclusion prior; needs beliefDeck. */
+        public boolean beliefDeckInclusion = false;
         /** choice-scorer-1106 (null = off, the default, and then absent from the JSON): {@link ChoiceScorer.Config}. */
         public JsonObject choiceScorer = null;
         /** solver-distill-cc-1109 (REACH; null = off, the default, and then nothing changes): {@link ReachCfg}. */
@@ -429,7 +436,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "beliefDeckHeld", "beliefDeckInclusion", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "holdDeploy", "holdDeployCommit", "holdDeployFollowLine", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
@@ -597,6 +604,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     c.beliefDeckModel = bd.getAsString();
                 }
             }
+            if (o.has("beliefDeckHeld")) c.beliefDeckHeld = forge.ai.simulation.DeckBelief.parseHeld(o.get("beliefDeckHeld").getAsString());
+            if (o.has("beliefDeckInclusion")) c.beliefDeckInclusion = o.get("beliefDeckInclusion").getAsBoolean();
             if (o.has("opponent")) c.opponent = o.get("opponent").getAsString();
             if (o.has("leafSym")) c.leafSym = o.get("leafSym").getAsBoolean();
             if (o.has("beliefPrior") && !o.get("beliefPrior").isJsonNull()) c.beliefPrior = o.get("beliefPrior").getAsString();
@@ -690,6 +699,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (!"deck".equals(belief) && (beliefDeckModel != null || beliefDeckSha256 != null)) {
                 throw new IllegalArgumentException("search.beliefDeck is for belief=deck only");
+            }
+            if ((beliefDeckHeld != null || beliefDeckInclusion) && !beliefDeck) {
+                throw new IllegalArgumentException("search.beliefDeckHeld / beliefDeckInclusion need beliefDeck=true"); // untested-keys-1113
             }
             if (!"forge".equals(opponent) && !"policy".equals(opponent)) {
                 throw new IllegalArgumentException("search.opponent must be forge or policy, not " + opponent);
@@ -860,6 +872,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("beliefSingleton", beliefSingleton);
                 if (beliefDeck) {
                     o.addProperty("beliefDeck", true); // deck-belief-1105: only when on
+                }
+                if (beliefDeckHeld != null) {
+                    o.addProperty("beliefDeckHeld", forge.ai.simulation.DeckBelief.heldString(beliefDeckHeld)); // untested-keys-1113
+                }
+                if (beliefDeckInclusion) {
+                    o.addProperty("beliefDeckInclusion", true); // untested-keys-1113: only when on
                 }
                 if ("codraft".equals(belief)) {
                     // bvw-step2-fork-1027: only with codraft
@@ -1203,6 +1221,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefPool = cfg.beliefPool;
             lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
             lc.beliefDeck = cfg.beliefDeck; // deck-belief-1105 (off by default)
+            lc.beliefDeckHeld = cfg.beliefDeckHeld; // untested-keys-1113 (off by default)
+            lc.beliefDeckInclusion = cfg.beliefDeckInclusion; // untested-keys-1113 (off by default)
             if ("codraft".equals(cfg.belief)) {
                 // bvw-step2-fork-1027 (S2T): the co-draft deck prior, its table pinned by sha256
                 lc.beliefPriorTable = PlanSearch.loadSynPinned(cfg.beliefPrior, cfg.beliefPriorSha256);
