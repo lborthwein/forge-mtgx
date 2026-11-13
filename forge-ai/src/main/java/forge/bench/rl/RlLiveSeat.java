@@ -340,6 +340,10 @@ public final class RlLiveSeat {
                     case "stack": c.stack = flagKey(k, v); break;
                     case "blockSampleSeed": c.blockSampleSeed = flagKey(k, v); break;
                     case "infoAttach": c.infoAttach = flagKey(k, v); break;
+                    // owner-review-1113 (lane solver-distill-cc; absent = off, the seat byte for byte as before): the training
+                    // actor's shape for RECORDED WATCH GAMES on a test host: the policy decides, only a proven solver line
+                    // is taken (RlSearch cfg.provenOnly). Never part of a live string: the play host's validator refuses it.
+                    case "provenOnly": c.provenOnly = flagKey(k, v); break;
                     default:
                         if (k.startsWith("choiceScorer.")) {
                             c.choiceScorer = objKey(c.choiceScorer, k, k.substring("choiceScorer.".length()), v);
