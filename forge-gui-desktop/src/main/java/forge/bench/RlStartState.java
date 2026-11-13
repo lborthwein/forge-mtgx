@@ -27,7 +27,6 @@ import forge.game.card.Card;
 import forge.game.cost.Cost;
 import forge.game.cost.CostExile;
 import forge.game.cost.CostPart;
-import forge.game.cost.CostPartMana;
 import forge.game.cost.CostSacrifice;
 import forge.game.cost.CostTap;
 import forge.game.mana.ManaCostBeingPaid;
@@ -832,7 +831,10 @@ public final class RlStartState {
         return v;
     }
 
-    /** 2: some way of casting the card is payable now; 1: the coloured part of some way's mana cost is; 0: neither. */
+    /**
+     * 2: the mana cost of some way of casting the card is payable now; 1: its coloured part is; 0: neither. Non-mana
+     * cost parts are not asked.
+     */
     private static int payable(final Card c, final Player me) {
         int level = 0;
         for (SpellAbility sa : c.getAllPossibleAbilities(me, false)) {
@@ -844,15 +846,8 @@ public final class RlStartState {
             if (cost == null) {
                 return 2;
             }
-            boolean others = true;
-            for (CostPart part : cost.getCostParts()) {
-                if (!(part instanceof CostPartMana) && !part.canPay(sa, me, false)) {
-                    others = false;
-                }
-            }
-            if (!others) {
-                continue;
-            }
+            // only the MANA part is this rule's business: an additional cost (sacrifice an artifact, exile a card, pay
+            // life) is the route's, met or not by the position itself
             if (ComputerUtilMana.canPayManaCost(cost, sa, me, 0, false)) {
                 return 2;
             }

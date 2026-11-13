@@ -56,7 +56,7 @@ public class RlStartCastTest {
         deck(m, "c05-none", "17 Island\n1 Doomsday\n22 Ornithopter\n");
         deck(m, "c06-ritual", "17 Island\n1 Doomsday\n22 Dark Ritual\n");
         deck(m, "c07-fetch", "3 Swamp\n14 Polluted Delta\n1 Doomsday\n22 Ornithopter\n");
-        deck(m, "c08-petal", "17 Island\n1 Lotus Petal\n1 Vampiric Tutor\n21 Ornithopter\n");
+        deck(m, "c08-petal", "17 Island\n1 Lotus Petal\n1 Vampiric Tutor\n1 Tinker\n20 Ornithopter\n");
         RlActorBenchTest.manifest(bank, "cast13", "train", m);
         pairs = RlFakeRun.pairs(bank);
         Assert.assertEquals(pairs.size(), PODS.size());
@@ -253,6 +253,15 @@ public class RlStartCastTest {
         Assert.assertTrue(p.get("applied").getAsBoolean(), p.toString());
         Assert.assertEquals(p.getAsJsonObject("cast").get("lands").getAsString(), "dealt", p.toString());
         Assert.assertEquals(p.getAsJsonObject("cast").get("check").getAsString(), "now", p.toString());
+    }
+
+    @Test
+    public void anAdditionalCostIsNotTheRulesBusiness() throws Exception {
+        // a spell whose additional cost (sacrifice an artifact) cannot be met in the position: the mana is there, dealt
+        final JsonObject st = started(play("c08-petal", 2, spec(Arrays.asList("Tinker"), Arrays.asList("auto"), 4,
+                Arrays.asList("Tinker"))));
+        Assert.assertTrue(st.get("applied").getAsBoolean(), st.toString());
+        Assert.assertEquals(st.getAsJsonObject("cast").get("check").getAsString(), "now", st.toString());
     }
 
     @Test
