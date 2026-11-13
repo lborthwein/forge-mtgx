@@ -346,6 +346,17 @@ public final class RlLiveSeat {
                         }
                         c.holdDeploy = Boolean.parseBoolean(v);
                         break;
+                    case "holdDeploy.commit":
+                    case "holdDeploy.followLine":
+                        if (!"true".equals(v) && !"false".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want true or false)");
+                        }
+                        if (k.endsWith("commit")) {
+                            c.holdDeployCommit = Boolean.parseBoolean(v);
+                        } else {
+                            c.holdDeployFollowLine = Boolean.parseBoolean(v);
+                        }
+                        break;
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
                     case "connectTimeoutMs": c.connectTimeoutMs = Integer.parseInt(v); break;

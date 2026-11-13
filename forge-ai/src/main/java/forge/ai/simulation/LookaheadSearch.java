@@ -2585,6 +2585,8 @@ public final class LookaheadSearch {
          */
         public int[] macro = new int[0];
         public int chosenMacro = -1;
+        /** untested-keys-1113 (holdDeploy): the deferred cast of the hold candidate this decision departed to; null otherwise. */
+        public Deploy deploy;
         /** Lane sc-wallguard-1009: the hard wall cut this decision's wait for its play-outs (outcome "capped"). */
         public boolean wall;
         /**
@@ -3597,6 +3599,7 @@ public final class LookaheadSearch {
                 }
                 if (chosen.deploy != null) {
                     stats.holdDeployDepartures++; // untested-keys-1113: played live as the pass
+                    res.deploy = chosen.deploy;
                 }
                 departuresThisTurn++;
                 departureCounts.put(key, seenN + 1);

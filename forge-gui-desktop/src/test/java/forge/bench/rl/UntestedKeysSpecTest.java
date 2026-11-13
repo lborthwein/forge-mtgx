@@ -159,6 +159,34 @@ public class UntestedKeysSpecTest {
     }
 
     @Test
+    public void holdDeploySubKeysAreOffUnlessSet() {
+        // untested-keys-1113: holdDeploy.commit / holdDeploy.followLine, each read separately; off = the config unchanged
+        final RlSearch.Config hd = RlLiveSeat.Spec.parse(SHIP + ",holdDeploy=true").search;
+        final RlSearch.Config hdOff = RlLiveSeat.Spec.parse(SHIP + ",holdDeploy=true,holdDeploy.commit=false,holdDeploy.followLine=false").search;
+        Assert.assertFalse(hd.holdDeployCommit || hd.holdDeployFollowLine);
+        Assert.assertEquals(hd.toJson().toString(), hdOff.toJson().toString());
+        Assert.assertFalse(hd.toJson().has("holdDeployCommit") || hd.toJson().has("holdDeployFollowLine"));
+        final RlSearch.Config off = RlLiveSeat.Spec.parse(SHIP).search;
+        Assert.assertFalse(off.toJson().has("holdDeployCommit") || off.toJson().has("holdDeployFollowLine"));
+        final RlSearch.Config c = RlLiveSeat.Spec.parse(SHIP + ",holdDeploy=true,holdDeploy.commit=true").search;
+        Assert.assertTrue(c.holdDeployCommit && !c.holdDeployFollowLine && c.toJson().get("holdDeployCommit").getAsBoolean());
+        final RlSearch.Config f = RlLiveSeat.Spec.parse(SHIP + ",holdDeploy=true,holdDeploy.followLine=true").search;
+        Assert.assertTrue(f.holdDeployFollowLine && !f.holdDeployCommit && f.toJson().get("holdDeployFollowLine").getAsBoolean());
+        // the bench JSON round trip carries both
+        final RlSearch.Config both = RlSearch.Config.parse(RlLiveSeat.Spec.parse(
+                SHIP + ",holdDeploy=true,holdDeploy.commit=true,holdDeploy.followLine=true").search.toJson());
+        Assert.assertTrue(both.holdDeployCommit && both.holdDeployFollowLine);
+        for (String bad : new String[] {"holdDeploy.commit=1", "holdDeploy.followLine=yes", "holdDeploy.commit=TRUE"}) {
+            try {
+                RlLiveSeat.Spec.parse(SHIP + "," + bad);
+                Assert.fail("accepted " + bad);
+            } catch (IllegalArgumentException expected) {
+                // true or false only
+            }
+        }
+    }
+
+    @Test
     public void badValuesAndTwiceAreRefused() {
         for (String bad : new String[] {"plans.solverCfg.engineAnyWindow=1", "plans.solverCfg.engineFocus=yes",
                 "plans.solverCfg.engineLoopCreditCap=true", "plans.solverCfg.engineLoopCreditCap=-3",
