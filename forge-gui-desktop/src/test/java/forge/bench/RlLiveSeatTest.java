@@ -369,6 +369,14 @@ public class RlLiveSeatTest {
                     .collect(java.util.stream.Collectors.toList())) {
                 final com.google.gson.JsonObject d = com.google.gson.JsonParser.parseString(
                         l.substring("[lookahead-decision] ".length())).getAsJsonObject();
+                // state-machines-1113: every searched decision carries its phase times (DecisionClock)
+                Assert.assertTrue(d.has("ms"), "phase times: " + l);
+                final com.google.gson.JsonObject ph = d.getAsJsonObject("ms");
+                Assert.assertTrue(ph.has("score") && ph.has("given") && ph.has("total"), "score, given, total: " + l);
+                Assert.assertTrue(ph.get("given").getAsDouble() >= d.get("searchMs").getAsDouble() - 0.2,
+                        "the given phase holds the decision's search: " + l);
+                Assert.assertTrue(ph.get("score").getAsDouble() + ph.get("given").getAsDouble()
+                        <= ph.get("total").getAsDouble() + 0.2, "the phases fit in the total: " + l);
                 if (d.get("capped").getAsBoolean()) {
                     capped++;
                     final double ms = d.get("searchMs").getAsDouble();

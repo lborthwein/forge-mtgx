@@ -102,7 +102,7 @@ public class RlAiReplayTest {
         final List<String> out = new ArrayList<>();
         for (JsonObject l : lines) {
             final JsonObject c = l.deepCopy();
-            for (String k : new String[] {"searchMs", "cpuMs", "scoreMs", "proposeMs", "forced", "forcedMiss"}) {
+            for (String k : new String[] {"searchMs", "cpuMs", "scoreMs", "proposeMs", "ms", "forced", "forcedMiss"}) {
                 c.remove(k);
             }
             out.add(c.toString());

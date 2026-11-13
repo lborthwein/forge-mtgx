@@ -841,6 +841,7 @@ public final class RlLiveSeat {
             d.addProperty("plan", "searched");
             d.addProperty("proposeMs", Math.round(search.lastProposeMs * 10) / 10.0);
         }
+        phaseMs(d);
         replayFlags(d);
         decisionLine(d);
     }
@@ -880,8 +881,20 @@ public final class RlLiveSeat {
         if (forge.ai.WallClock.rebuilding()) {
             d.addProperty("rebuild", true);
         }
+        phaseMs(d);
         replayFlags(d);
         decisionLine(d);
+    }
+
+    /**
+     * state-machines-1113: the decision's phase times ({@link DecisionClock}: score, propose, solver, given, apply,
+     * total; ms) under {@code "ms"}. Timing only: the gates' digests drop the key, the host's parser ignores it.
+     */
+    private void phaseMs(final JsonObject d) {
+        final DecisionClock ck = search.decisionClock();
+        if (ck != null) {
+            d.add("ms", ck.toJson());
+        }
     }
 
     /**

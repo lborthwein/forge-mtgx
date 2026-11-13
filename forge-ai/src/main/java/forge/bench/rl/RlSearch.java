@@ -1578,6 +1578,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     private int decide0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
+        clock = null;
         pendingWindow = null;
         liveMacro = null;
         lastForced = false;
@@ -1624,6 +1625,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        final DecisionClock ck = new DecisionClock("seat" + me.getId(), t0); // state-machines-1113: timing only
+        clock = ck;
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
         try {
@@ -1637,6 +1640,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         scoreCalls++;
         scoreMs += (System.nanoTime() - t0) / 1e6;
+        ck.ended(DecisionClock.Phase.SCORE);
         final int c = m.C();
         if (sc.status != RlWire.ST_OK || sc.probs.length != c) {
             scoreFailures++;
@@ -1721,6 +1725,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (sb != null && sb.planPoint(g, menuObjs)) {
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
             stage = sb.propose(g, me, m, menuObjs, t0, bt0);
+            if (stage.solverMs >= 0) {
+                ck.solver(stage.solverMs);
+            }
+            ck.ended(DecisionClock.Phase.PROPOSE);
             if (stage.hook) {
                 // J1: a proven line taken at once; live must have taken one here too
                 final forge.ai.simulation.AiReplay.Mark mk = mark();
@@ -1774,6 +1782,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         } else {
             r = ls.decideGiven(g, me, given, cfg.breadth);
         }
+        ck.ended(DecisionClock.Phase.GIVEN);
         tookForce(r);
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
@@ -1783,6 +1792,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         if (stage != null) {
             final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6, sc.valueObs);
+            ck.ended(DecisionClock.Phase.APPLY);
             planRow(g, frame, stage, r, order, pa, t0);
             if (pa != -2) {
                 departures++;
@@ -3504,6 +3514,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         } catch (RuntimeException e) {
             System.err.println("[rlsearch] onPlanDecided failed: " + e);
         }
+    }
+
+    /** state-machines-1113: the searched priority decision being decided (its phase times), null outside one. */
+    private DecisionClock clock;
+
+    /** The current (or last) searched priority decision's clock, for its decision line's {@code "ms"}; null if none. */
+    public DecisionClock decisionClock() {
+        return clock;
     }
 
     /** The search's per-game counters (live play: the decision lines' running totals). */

@@ -1122,6 +1122,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final List<String> labels = new ArrayList<>();
         int knownTop;
         double ms;
+        /** state-machines-1113: the solver's part of {@link #ms} (ms), -1 = the solver did not run (DecisionClock). */
+        double solverMs = -1;
         String note = "";
         /** line-adoption-1107 (plans.lineHorizon): the absolute turn the play-outs run to, 0 = the search's own horizon. */
         int horizonTurn;
@@ -1175,7 +1177,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 solverCaps++;
                 st.note = solver.lastCap();
             }
-            solverMs.add((System.nanoTime() - a) / 1e6);
+            st.solverMs = (System.nanoTime() - a) / 1e6;
+            solverMs.add(st.solverMs);
             ForcedWinSolver.Proposal proven = null;
             for (ForcedWinSolver.Proposal pr : props) {
                 if (pr.proven(spec.unified ? 1 : spec.minProvenWorlds) && (proven == null || pr.steps < proven.steps)) {
