@@ -210,6 +210,26 @@ public class UntestedKeysSpecTest {
     }
 
     @Test
+    public void beliefDeckIsOffUnlessSet() {
+        // untested-keys-1113: the live "beliefDeck" key; absent or false = the config unchanged
+        final RlSearch.Config off = RlLiveSeat.Spec.parse(SHIP).search;
+        final RlSearch.Config f = RlLiveSeat.Spec.parse(SHIP + ",beliefDeck=false").search;
+        Assert.assertFalse(off.beliefDeck);
+        Assert.assertEquals(off.toJson().toString(), f.toJson().toString());
+        Assert.assertFalse(off.toJson().has("beliefDeck"));
+        final RlSearch.Config on = RlLiveSeat.Spec.parse(SHIP + ",beliefDeck=true").search;
+        Assert.assertTrue(on.beliefDeck && on.toJson().get("beliefDeck").getAsBoolean());
+        for (String bad : new String[] {"beliefDeck=1", "beliefDeck=yes", "beliefDeck=TRUE"}) {
+            try {
+                RlLiveSeat.Spec.parse(SHIP + "," + bad);
+                Assert.fail("accepted " + bad);
+            } catch (IllegalArgumentException expected) {
+                // true or false only
+            }
+        }
+    }
+
+    @Test
     public void badValuesAndTwiceAreRefused() {
         for (String bad : new String[] {"plans.solverCfg.engineAnyWindow=1", "plans.solverCfg.engineFocus=yes",
                 "plans.solverCfg.engineLoopCreditCap=true", "plans.solverCfg.engineLoopCreditCap=-3",
