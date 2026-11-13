@@ -741,7 +741,8 @@ public final class RlLiveSeat {
      * spec or its dudCast is off (the default): the seat's answers are then unchanged.
      */
     synchronized LookaheadSearch dudGuard() {
-        if (k8Config == null || k8Config.dudCast == AiFixes.Mode.OFF || dudGuardFailed) {
+        // shared-host-live-1113: never a new pool after finish() (a lone JVM's exit hid it; a host keeps it forever)
+        if (finished || k8Config == null || k8Config.dudCast == AiFixes.Mode.OFF || dudGuardFailed) {
             return null;
         }
         if (degraded && k8 != null) {
@@ -785,7 +786,7 @@ public final class RlLiveSeat {
 
     /** The seat stops for the rest of the game: Forge AI decides every ask, through the K8 look-ahead at priority. */
     synchronized void degrade(final String reason) {
-        if (degraded) {
+        if (degraded || finished) { // shared-host-live-1113: the game is over; no K8 pool nobody would shut down
             return;
         }
         degraded = true;

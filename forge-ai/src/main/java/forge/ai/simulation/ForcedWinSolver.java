@@ -2964,8 +2964,30 @@ public final class ForcedWinSolver {
         static final ForcedWinModel.Reader R = load();
     }
 
+    /**
+     * shared-host-live-1113: in a multi-game host ({@link forge.util.GameContext#hosting()}) the "JVM-wide" reader is the
+     * game's own, loaded on the game's first use as a lone JVM's is on its one game's: what one game's probes learn never
+     * reaches another game, and each game reads exactly what it would in its own JVM. Outside a host (every lone JVM) it is
+     * the one static reader, unchanged.
+     */
+    private static final forge.util.ScopedSlot<ForcedWinModel.Reader> GAME_OPP_READER = new forge.util.ScopedSlot<>();
+
     static ForcedWinModel.Reader sharedOppReader() {
-        return SharedOppReader.R;
+        if (!forge.util.GameContext.hosting()) {
+            return SharedOppReader.R;
+        }
+        final forge.util.GameContext game = forge.util.GameContext.current();
+        if (game == null) {
+            return load(); // a host thread that carries no game: a reader no game shares
+        }
+        synchronized (game) {
+            ForcedWinModel.Reader r = GAME_OPP_READER.get();
+            if (r == null) {
+                r = load();
+                GAME_OPP_READER.set(r);
+            }
+            return r;
+        }
     }
 
     /** strong-opp-1020: the jar's precomputed affordances of the mush cube's cards (absent = learn on first use). */
