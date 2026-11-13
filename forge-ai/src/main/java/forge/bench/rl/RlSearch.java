@@ -175,6 +175,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * ({@code playoutSample}) bypass it.
          */
         public boolean svcMemo = false;
+        /**
+         * searchspeed-1113 (race; 0 = off, and then nothing changes): racing with paired worlds. Every candidate is played
+         * out in the first {@code race} worlds; only a candidate whose mean paired gain over the policy's answer there is
+         * above 0 (or that won a world outright) gets the remaining worlds, with the policy's answer. No such candidate:
+         * the search ends with the policy's answer. Needs anytime (a candidate with fewer worlds is then compared on the
+         * worlds it has).
+         */
+        public int race = 0;
         public double workScale = 1.0;
         public long workWallMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
@@ -441,7 +449,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
-                "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
+                "blockSampleSeed", "svcMemo", "race", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
 
@@ -512,6 +520,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("workUnits")) c.workUnits = o.get("workUnits").getAsBoolean(); // work-units-1107
             if (o.has("blockSampleSeed")) c.blockSampleSeed = o.get("blockSampleSeed").getAsBoolean();
             if (o.has("svcMemo")) c.svcMemo = o.get("svcMemo").getAsBoolean(); // svcmemo-1114
+            if (o.has("race")) c.race = o.get("race").getAsInt();
             if (o.has("workScale")) c.workScale = o.get("workScale").getAsDouble();
             if (o.has("workWallMs")) c.workWallMs = o.get("workWallMs").getAsLong();
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
@@ -766,6 +775,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (svcMemo) {
                 o.addProperty("svcMemo", true); // svcmemo-1114: only when on
+            }
+            if (race > 0) {
+                o.addProperty("race", race); // searchspeed-1113: only when on
             }
             if (workUnits) {
                 // work-units-1107: only when on, so every other spec's JSON is unchanged
@@ -1207,6 +1219,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.threads = cfg.threads;
         lc.departZ = cfg.departZ;
         lc.anytime = cfg.anytime;
+        lc.race = cfg.race; // searchspeed-1113 (0 = off)
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
