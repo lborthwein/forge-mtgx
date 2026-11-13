@@ -3905,6 +3905,15 @@ public final class ForcedWinSolver {
                 final Line l = prefix == null
                         ? new Line(path, List.of(), path.contains(Step.PASS) ? 1 : 0, me.getLife(), 0, 0, List.of(), "engine")
                         : joined(prefix, path); // sdcc-bridge-1111
+                final PhaseHandler vph = live.getPhaseHandler();
+                if (prefix == null && otherWindow(vph, stackWindow)) {
+                    // untested-keys-1113: the replay follows the line in the window it was found in, as engineFallback's
+                    // line is followed (without this a line rooted at their end step was replayed from our next main
+                    // phase and refuted every time); off-window keys absent, never reached
+                    l.window = vph.getPhase();
+                    l.windowTurn = vph.getTurn();
+                    l.stackStart = stackWindow;
+                }
                 // evaluate's own unopposed world first: a line that fails it would be dropped after the search had stopped
                 return playout(live, l, mix(mix(cfg.seed, index * 1000L + 999), 0), 0, -1, decisionWall).won
                         && playout(live, l, mix(cfg.seed, 7_100_000L + 64L * index + tries[0]++), 0, -1, decisionWall).won;
@@ -3955,15 +3964,24 @@ public final class ForcedWinSolver {
         return el;
     }
 
+    /**
+     * R2-4 (c), endstep-rows-1103: the engine's root is a window other than our first main phase (their end step or our
+     * second main phase with engineAnyWindow; any empty-stack window with engineEveryWindow too; a response with engineStack).
+     * A line found there is followed in that window ({@link ForcedWinPlanner.Line#window}). Never true with those keys off.
+     */
+    private boolean otherWindow(final PhaseHandler eph, final boolean stackWindow) {
+        final boolean ourMain1 = eph.isPlayerTurn(me) && eph.is(PhaseType.MAIN1);
+        return stackWindow || cfg.engineAnyWindow && (eph.isPlayerTurn(me) ? eph.is(PhaseType.MAIN2)
+                : eph.is(PhaseType.END_OF_TURN)) || cfg.engineAnyWindow && cfg.engineEveryWindow && !ourMain1;
+    }
+
     private Line engineFallback(Game live, Position pos, int index, long t0, boolean planFailed) {
         final PhaseHandler eph = live.getPhaseHandler();
         final boolean main1 = eph.is(PhaseType.MAIN1) && eph.isPlayerTurn(me);
         // R3-5 (engineStack): our priority with the opponent's item on top is a window too (any phase)
         final boolean stackWindow = cfg.engineStack && !live.getStack().isEmpty()
                 && live.getStack().peek().getActivatingPlayer() != me && GameCopier.stackUnsupported(live) == null;
-        final boolean ourMain1 = eph.isPlayerTurn(me) && eph.is(PhaseType.MAIN1);
-        final boolean otherWindow = stackWindow || cfg.engineAnyWindow && (eph.isPlayerTurn(me) ? eph.is(PhaseType.MAIN2)
-                : eph.is(PhaseType.END_OF_TURN)) || cfg.engineAnyWindow && cfg.engineEveryWindow && !ourMain1; // endstep-rows-1103
+        final boolean otherWindow = otherWindow(eph, stackWindow); // endstep-rows-1103
         // unified-search-1106 (engineOpen): our MAIN2 is a window too
         final boolean openMain2 = cfg.engineOpen && eph.is(PhaseType.MAIN2) && eph.isPlayerTurn(me);
         if (!cfg.engine || !main1 && !otherWindow && !eph.is(PhaseType.MAIN1) && !openMain2) {

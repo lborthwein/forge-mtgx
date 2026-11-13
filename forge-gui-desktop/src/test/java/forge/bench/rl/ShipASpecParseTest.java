@@ -323,8 +323,9 @@ public class ShipASpecParseTest {
         refused(TODAY + ",reach.noSuchKey=1", "an unknown reach key");
         refused(TODAY + ",plans.solverCfg.breakOnCounter=1", "a flag that is not true|false");
         refused(TODAY + ",plans.solverCfg.planOrder=true", "a number that is not a number");
-        refused(TODAY + ",plans.solverCfg.engineFocus=true", "engineFocus is not a live key");
-        refused(TODAY + ",plans.solverCfg.engineLoopCredit=true", "engineLoopCredit is not a live key");
+        // untested-keys-1113: engineFocus and engineLoopCredit are live keys now (UntestedKeysSpecTest); these are not
+        refused(TODAY + ",plans.solverCfg.loopMacro=true", "loopMacro is not a live key");
+        refused(TODAY + ",plans.solverCfg.engineLadder=true", "engineLadder is not a live key");
         refused(TODAY + ",plans.lineChoices=nonsense", "an unknown lineChoices value");
         refused(TODAY + ",plans.planX=7", "a plan flag that is not true|false");
         refused(TODAY + ",stack=1", "a flag that is not true|false");

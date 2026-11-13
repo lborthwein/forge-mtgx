@@ -110,7 +110,17 @@ public final class RlLiveSeat {
                 "planLoops",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // untested-keys-1113 (each absent = off, the seat as before; until now label-side or bench-only): the engine
+                // search at the windows the pilot already plans at besides our main phase (engineAnyWindow: their end step
+                // and our second main phase; engineEndStepOpen: no board-power gate there; engineEveryWindow: any empty-stack
+                // window of ours, a plan point permitting; enginePassBudget: the turn-crossing pass gets its own step and card
+                // budgets; enginePassToEnd, read with engineAnyWindow: from our main phase that pass may also rest in their
+                // end step, the flash window before our turn), and the engine's move order and loop credit (engineFocus:
+                // productive lines first; engineLoopCredit: unbounded resource loops fast-forwarded)
+                "engineAnyWindow", "engineEndStepOpen", "engineEveryWindow", "enginePassBudget", "enginePassToEnd", "engineFocus",
+                "engineLoopCredit",
+                "engineLoopCreditCap"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -130,7 +140,16 @@ public final class RlLiveSeat {
                 "planLoops",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // untested-keys-1113 (each absent = off, the seat as before; until now label-side or bench-only): the engine
+                // search at the windows the pilot already plans at besides our main phase (engineAnyWindow: their end step
+                // and our second main phase; engineEndStepOpen: no board-power gate there; engineEveryWindow: any empty-stack
+                // window of ours, a plan point permitting; enginePassBudget: the turn-crossing pass gets its own step and card
+                // budgets; enginePassToEnd, read with engineAnyWindow: from our main phase that pass may also rest in their
+                // end step, the flash window before our turn), and the engine's move order and loop credit (engineFocus:
+                // productive lines first; engineLoopCredit: unbounded resource loops fast-forwarded)
+                "engineAnyWindow", "engineEndStepOpen", "engineEveryWindow", "enginePassBudget", "enginePassToEnd", "engineFocus",
+                "engineLoopCredit"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
