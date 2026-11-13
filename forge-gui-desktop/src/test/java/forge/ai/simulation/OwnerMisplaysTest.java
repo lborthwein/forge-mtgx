@@ -242,25 +242,23 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
     }
 
     /**
-     * loop-probe-1113: the probes take their time from the caller's budget. With the caller's deadline passed and no
-     * minimum, nothing is probed and nothing is recorded as "no loop": the same reader asks again once there is time.
+     * loop-probe-1113: the probes take their time from the caller's budget. With the caller's deadline passed nothing
+     * is probed and nothing is recorded as "no loop": the same reader asks again once there is time.
      */
     @Test
     public void theLoopProbeWaitsWhenTheCallerHasNoTimeAndAsksAgainLater() {
         final Game g = loopGame("Deceiver Exarch", MANY.replace("Grizzly Bears", "Zodiac Monkey"));
         final Player me = g.getPlayers().get(0);
         final ForcedWinSolver s = screenSolver(me, true);
-        final long min = ForcedWinSolver.LOOP_MIN_NANOS;
         try {
-            ForcedWinSolver.LOOP_MIN_NANOS = 0L;
             ForcedWinSolver.loopDeadline(g, System.nanoTime() - 1L);
             final long p0 = ForcedWinSolver.LOOP_PROBES.get();
             Assert.assertFalse(s.hasEnder(g), "no time: no probe, so no loop known yet");
+            Assert.assertFalse(s.hasEnder(g), "asked again in the same window: still no time, and nothing was probed");
             Assert.assertEquals(ForcedWinSolver.LOOP_PROBES.get() - p0, 0L);
-            ForcedWinSolver.loopDeadline(g, 0L);
-            Assert.assertTrue(s.hasEnder(g), "asked again with time: the loop is found");
+            ForcedWinSolver.loopDeadline(g, System.nanoTime() + 2_000_000_000_000L);
+            Assert.assertTrue(s.hasEnder(g), "the next decision's window: the loop is found");
         } finally {
-            ForcedWinSolver.LOOP_MIN_NANOS = min;
             ForcedWinSolver.loopDeadline(g, 0L);
         }
     }

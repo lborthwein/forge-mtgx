@@ -4432,12 +4432,10 @@ public final class ForcedWinSolver {
     static final long LOOP_NANOS = 3_000_000_000L;
 
     /**
-     * loop-probe-1113: by match (weak), the wall time ({@link System#nanoTime}) at which the decision or ask in progress
-     * runs out; the loop probes take their time from what is left. None set: one call's probes share LOOP_NANOS.
+     * loop-probe-1113: by game scope (weak; loopScope), the wall time ({@link System#nanoTime}) until which the loop
+     * probes of the decision or ask in progress may run: a quarter of its budget from its start ({@link #loopDeadline}).
      */
     private static final java.util.Map<Object, Long> LOOP_DEADLINE = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
-    /** loop-probe-1113: what one fillLoops call may always spend, even past the caller's deadline. */
-    static long LOOP_MIN_NANOS = 250_000_000L;
     /** loop-probe-1113 (tests, reports): sandbox probes run in this JVM. */
     static final java.util.concurrent.atomic.AtomicLong LOOP_PROBES = new java.util.concurrent.atomic.AtomicLong();
 
@@ -4449,13 +4447,17 @@ public final class ForcedWinSolver {
         return g.getRules() != null ? g.getRules() : LOOP_CACHE;
     }
 
-    /** loop-probe-1113: the caller's deadline for this game's loop probes ({@code nanos} on System.nanoTime; 0 = none). */
+    /**
+     * loop-probe-1113: a decision or ask of this game begins and runs out at {@code nanos} (System.nanoTime): its loop
+     * probes, in the live game and its copies, share a quarter of the time left. 0 = forget the window.
+     */
     public static void loopDeadline(final Game g, final long nanos) {
         final Object match = loopScope(g);
         if (nanos == 0L) {
             LOOP_DEADLINE.remove(match);
         } else {
-            LOOP_DEADLINE.put(match, nanos);
+            final long now = System.nanoTime();
+            LOOP_DEADLINE.put(match, now + Math.max(0L, nanos - now) / 4);
         }
     }
 
@@ -4575,16 +4577,16 @@ public final class ForcedWinSolver {
         // loop-probe-1113: one probe per game, seat, card and PARTNER (not per partner list: past LOOP_PARTNERS names the
         // list depends on the library's order, so every re-dealt or hidden-order copy probed again). The seat's other
         // readers (the root solver's, the reach's, the choice scorer's) reuse each answer. A probe's time comes out of the
-        // caller's budget (loopDeadline): a call takes at most a quarter of what is left; partners it could not probe are
-        // not cached and the template is asked again at its next read.
+        // caller's budget (loopDeadline): all the probes of one decision or ask share a quarter of its budget; partners
+        // left unprobed are not cached, and the template is asked again at a later read (at once "no time" until the
+        // next decision opens a new window).
         final Object match = loopScope(live);
         final java.util.Map<String, java.util.Set<String>> byKey = LOOP_CACHE.computeIfAbsent(match, x -> new java.util.HashMap<>());
         final String base = me.getId() + "|" + c.getName() + "|" + aura + "|";
         final int probed = partners.size();
-        final Long dl = LOOP_DEADLINE.get(match);
         final long t0 = System.nanoTime();
-        // no deadline known for this game: one call's probes share LOOP_NANOS (the rest at the template's next read)
-        final long end = t0 + (dl == null ? LOOP_NANOS : Math.max(LOOP_MIN_NANOS, (dl - t0) / 4));
+        // the window all of this decision's (or ask's) probes share; no caller known yet: one window of LOOP_NANOS
+        final long end = LOOP_DEADLINE.computeIfAbsent(match, x -> t0 + LOOP_NANOS);
         boolean cut = false;
         synchronized (byKey) {
             final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getName().hashCode());
