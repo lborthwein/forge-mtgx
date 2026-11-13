@@ -150,6 +150,8 @@ public final class LookaheadSearch {
         public boolean anytime = false;
         /** searchspeed-1113 (0 = off): racing with paired worlds after this many (RlSearch.Config.race). */
         public int race = 0;
+        /** sdcc-svcbatch-1113 (0 = off): the play-outs of a wave ask the policy service together; the longest wait, ms ({@link SvcGate}). */
+        public int svcBatchMs = 0;
         /**
          * Target variants (lane forge-ai-misplays-0928; 0 = off, the default: candidates unchanged). Up to this many
          * extra candidates per decision: a single-target spell or ability among the candidates played with a target
@@ -5469,7 +5471,16 @@ public final class LookaheadSearch {
         final java.util.concurrent.atomic.AtomicLong[] acc = poolCpu == null ? null : forge.ai.CpuAccount.get();
         // the wall only: how many tasks are running (to count the stragglers at a cut)
         final AtomicInteger running = wall == null ? null : new AtomicInteger();
-        for (Runnable task : tasks) {
+        final SvcGate gate = cfg.svcBatchMs > 0 ? new SvcGate(cfg.svcBatchMs) : null; // sdcc-svcbatch-1113 (null = off)
+        for (Runnable task0 : tasks) {
+            final Runnable task = gate == null ? task0 : () -> {
+                gate.enter();
+                try {
+                    task0.run();
+                } finally {
+                    gate.leave();
+                }
+            };
             final Runnable r = running == null ? task : () -> {
                 running.incrementAndGet();
                 try {

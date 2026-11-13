@@ -174,6 +174,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * worlds it has).
          */
         public int race = 0;
+        /** sdcc-svcbatch-1113 (svcBatchMs; 0 = off, and then nothing changes): LookaheadSearch.Config.svcBatchMs. */
+        public int svcBatchMs = 0;
         public double workScale = 1.0;
         public long workWallMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
@@ -447,7 +449,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "beliefDeckHeld", "beliefDeckInclusion", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "holdDeploy", "holdDeployCommit", "holdDeployFollowLine", "workUnits", "workScale", "workWallMs",
-                "blockSampleSeed", "race", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
+                "blockSampleSeed", "race", "svcBatchMs", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
 
@@ -521,6 +523,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("workUnits")) c.workUnits = o.get("workUnits").getAsBoolean(); // work-units-1107
             if (o.has("blockSampleSeed")) c.blockSampleSeed = o.get("blockSampleSeed").getAsBoolean();
             if (o.has("race")) c.race = o.get("race").getAsInt();
+            if (o.has("svcBatchMs")) c.svcBatchMs = o.get("svcBatchMs").getAsInt();
             if (o.has("workScale")) c.workScale = o.get("workScale").getAsDouble();
             if (o.has("workWallMs")) c.workWallMs = o.get("workWallMs").getAsLong();
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
@@ -789,6 +792,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (race > 0) {
                 o.addProperty("race", race); // searchspeed-1113: only when on
+            }
+            if (svcBatchMs > 0) {
+                o.addProperty("svcBatchMs", svcBatchMs); // sdcc-svcbatch-1113: only when on
             }
             if (workUnits) {
                 // work-units-1107: only when on, so every other spec's JSON is unchanged
@@ -1198,6 +1204,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.anytime = cfg.anytime;
         lc.holdDeploy = cfg.holdDeploy;
         lc.race = cfg.race; // searchspeed-1113 (0 = off)
+        lc.svcBatchMs = cfg.svcBatchMs; // sdcc-svcbatch-1113 (0 = off)
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);

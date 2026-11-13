@@ -208,6 +208,7 @@ public final class RlSearchClient implements Closeable {
 
     /** searchspeed-1113: the body of {@link #score} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
     private Scores scoreP(final byte[] decidePayload) throws IOException {
+        forge.ai.simulation.SvcGate.hold(); // sdcc-svcbatch-1113 (no gate on this thread: nothing)
         final long t = System.nanoTime();
         send(T_SCORE, 0, decidePayload);
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107 (no clock = no-op)
@@ -231,6 +232,7 @@ public final class RlSearchClient implements Closeable {
 
     /** searchspeed-1113: the body of {@link #decide} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
     private RlWire.Decision decideP(final byte[] decidePayload, final boolean sample) throws IOException {
+        forge.ai.simulation.SvcGate.hold(); // sdcc-svcbatch-1113 (no gate on this thread: nothing)
         final long t = System.nanoTime();
         send(RlWire.T_DECIDE, sample ? FLAG_SAMPLE : 0, decidePayload);
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107 (no clock = no-op)
