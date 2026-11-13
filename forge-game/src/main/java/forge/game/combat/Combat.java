@@ -114,6 +114,12 @@ public class Combat {
         for (Table.Cell<Card, GameEntity, Integer> entry : combat.damageMap.get().cellSet()) {
             damageMap.get().put(map.map(entry.getRowKey()), map.map(entry.getColumnKey()), entry.getValue());
         }
+        if (forge.game.EngineFixes.copyCombatStep()) { // mtgx state-machines-1113 (off by default)
+            legacyOrderCombatants = combat.legacyOrderCombatants;
+            for (Card c : combat.combatantsThatDealtFirstStrikeDamage.get()) {
+                combatantsThatDealtFirstStrikeDamage.get().add(map.map(c));
+            }
+        }
 
         attackConstraints = new AttackConstraints(this);
     }

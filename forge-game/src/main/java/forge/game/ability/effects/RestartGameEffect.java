@@ -35,7 +35,7 @@ public class RestartGameEffect extends SpellAbilityEffect {
 
         //Card.resetUniqueNumber();
         // need this code here, otherwise observables fail
-        forge.game.trigger.Trigger.resetIDs();
+        forge.game.trigger.Trigger.resetIDsForRestart(); // state-machines-1113: never the live counter from a copy
         TriggerHandler trigHandler = game.getTriggerHandler();
         trigHandler.clearDelayedTrigger();
         trigHandler.clearPlayerDefinedDelayedTrigger();

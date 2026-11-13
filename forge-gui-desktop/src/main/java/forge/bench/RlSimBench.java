@@ -30,7 +30,6 @@ import java.io.PrintWriter;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.ThreadMXBean;
-import java.lang.reflect.Field;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -634,24 +633,6 @@ public final class RlSimBench {
 
     // ------------------------------------------------------------------------------------------------- probe
 
-    private static Field fPrio, fFirst, fGive;
-
-    private static synchronized void initFields() {
-        if (fPrio != null) {
-            return;
-        }
-        try {
-            fPrio = PhaseHandler.class.getDeclaredField("pPlayerPriority");
-            fFirst = PhaseHandler.class.getDeclaredField("pFirstPriority");
-            fGive = PhaseHandler.class.getDeclaredField("givePriorityToPlayer");
-            fPrio.setAccessible(true);
-            fFirst.setAccessible(true);
-            fGive.setAccessible(true);
-        } catch (NoSuchFieldException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     /** One live game's GameCopier probe (cost at each probe turn; continuation identity or live-leak at one turn). */
     static final class Probe {
         final Game live;
@@ -783,11 +764,9 @@ public final class RlSimBench {
                 final Player cp = (Player) gc.find(p);
                 final PhaseHandler lph = g.getPhaseHandler();
                 final PhaseHandler cph = c.getPhaseHandler();
-                initFields();
-                final Player liveFirst = (Player) fFirst.get(lph);
-                fPrio.set(cph, cp);
-                fFirst.set(cph, liveFirst == null ? cp : (Player) gc.find(liveFirst));
-                fGive.setBoolean(cph, true);
+                final Player liveFirst = lph.getFirstPriorityPlayer(); // state-machines-1113: no reflection
+                cph.dangerouslySetPriorityState(new PhaseHandler.PriorityState(cp,
+                        liveFirst == null ? cp : (Player) gc.find(liveFirst), true));
                 o.addProperty("copyMs", (System.nanoTime() - a) / 1e6);
                 final Digest d = new Digest(c);
                 c.subscribeToEvents(d);

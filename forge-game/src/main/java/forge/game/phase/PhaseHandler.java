@@ -1293,14 +1293,7 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
     public final void devResetForPosition() {
         extraTurns.clear();
         extraPhases.clear();
-        nUpkeepsThisTurn = 0;
-        nUpkeepsThisGame = 0;
-        nCombatsThisTurn = 0;
-        nMainsThisTurn = 0;
-        nEndOfTurnsThisTurn = 0;
-        planarDiceSpecialActionThisTurn = 0;
-        skipDamageSteps = false;
-        bRepeatCleanup = false;
+        dangerouslySetTurnCounters(TurnCounters.FRESH); // state-machines-1113: the same eight resets, as one value
         playerPreviousTurn = null;
         noProgressGuard = null;
     }
@@ -1341,6 +1334,86 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
     // just to avoid exposing variable to outer classes
     public void onStackResolved() {
         givePriorityToPlayer = true;
+    }
+
+    // ---- mtgx state-machines-1113: the priority round (CR 117) as an explicit, public state -----------------------
+    // Until now the search read and wrote pPlayerPriority / pFirstPriority / givePriorityToPlayer by reflection. These
+    // accessors make the same reads and writes, in the same order, so every caller stays byte-identical, and a rename
+    // here becomes a compile error instead of a runtime failure in the first play-out.
+
+    /**
+     * The priority round: who holds priority ({@code holder}), who acted first in this round ({@code firstToAct}: when
+     * a pass would hand priority back to this player, every player has passed in succession), and whether the current
+     * step gives priority at all ({@code stepGivesPriority}; false in untap, in skipped steps and in a cleanup without
+     * a stack). States, derived: no-priority step; awaiting holder; round complete (resolve the top object, or advance
+     * when the stack is empty).
+     */
+    public record PriorityState(Player holder, Player firstToAct, boolean stepGivesPriority) {
+        /** The state a search copy resumes in: {@code p} holds priority, acted first, and the step gives priority. */
+        public static PriorityState resumeWith(Player p) {
+            return new PriorityState(p, p, true);
+        }
+    }
+
+    public final PriorityState getPriorityState() {
+        return new PriorityState(pPlayerPriority, pFirstPriority, givePriorityToPlayer);
+    }
+
+    /** Set the whole round at once (copies and rewinds only): no event fires and {@code Player.hasPriority} is untouched. */
+    public final void dangerouslySetPriorityState(final PriorityState s) {
+        pPlayerPriority = s.holder();
+        pFirstPriority = s.firstToAct();
+        givePriorityToPlayer = s.stepGivesPriority();
+    }
+
+    /** The player who acted first in the current round (allocation-free, for per-step state keys). */
+    public final Player getFirstPriorityPlayer() {
+        return pFirstPriority;
+    }
+
+    /** Copies and rewinds only: set who acted first, leaving the holder and the step's flag. */
+    public final void dangerouslySetFirstPriorityPlayer(final Player p) {
+        pFirstPriority = p;
+    }
+
+    /** Whether the current step gives priority on its next main-loop step (allocation-free). */
+    public final boolean givesPriorityThisStep() {
+        return givePriorityToPlayer;
+    }
+
+    /**
+     * mtgx state-machines-1113: the step counters and latches of the current turn, as one value. Trigger conditions read
+     * them ("your second main phase", "the first combat phase of the turn", "first upkeep of the game"), so a game copy
+     * that starts them at zero diverges from its original (GameCopier carries them when {@code forge.copyTurnCounters}).
+     */
+    public record TurnCounters(int upkeepsThisTurn, int upkeepsThisGame, int combatsThisTurn, int mainsThisTurn,
+                               int endOfTurnsThisTurn, int planarDiceThisTurn, boolean skipDamageSteps, boolean repeatCleanup) {
+        public static final TurnCounters FRESH = new TurnCounters(0, 0, 0, 0, 0, 0, false, false);
+    }
+
+    public final TurnCounters getTurnCounters() {
+        return new TurnCounters(nUpkeepsThisTurn, nUpkeepsThisGame, nCombatsThisTurn, nMainsThisTurn, nEndOfTurnsThisTurn,
+                planarDiceSpecialActionThisTurn, skipDamageSteps, bRepeatCleanup);
+    }
+
+    /** Copies and positions only. */
+    public final void dangerouslySetTurnCounters(final TurnCounters c) {
+        nUpkeepsThisTurn = c.upkeepsThisTurn();
+        nUpkeepsThisGame = c.upkeepsThisGame();
+        nCombatsThisTurn = c.combatsThisTurn();
+        nMainsThisTurn = c.mainsThisTurn();
+        nEndOfTurnsThisTurn = c.endOfTurnsThisTurn();
+        planarDiceSpecialActionThisTurn = c.planarDiceThisTurn();
+        skipDamageSteps = c.skipDamageSteps();
+        bRepeatCleanup = c.repeatCleanup();
+    }
+
+    /** Derived, read-only: would a pass by the holder complete the round (resolve the top object, or end the step)? */
+    public final boolean passCompletesRound() {
+        if (pPlayerPriority == null || pFirstPriority == null) {
+            return false;
+        }
+        return game.getNextPlayerAfter(pPlayerPriority) == pFirstPriority;
     }
 
     public void endCombat() {

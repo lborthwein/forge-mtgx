@@ -124,4 +124,52 @@ public final class EngineFixes {
     public static void setCopyRobustForTest(final boolean on) {
         copyRobust = on;
     }
+
+    // ---- state-machines-1113: copy-fidelity fixes, OFF by default (not live fixes: forge.liveFixes does not turn them on).
+    // Each makes a game copy carry state its original has; on, play-outs change, so each is a strategic change under the
+    // heuristic contract and part of a pilot's identity when on.
+
+    /**
+     * {@code -Dforge.copyCombatStep=true}: a combat copy keeps which combatants already dealt first-strike damage (and
+     * the rules' order-combatants setting). Off, a copy made after first-strike damage lets first strikers deal damage
+     * again in the regular damage step.
+     */
+    private static boolean copyCombatStep = Boolean.getBoolean("forge.copyCombatStep");
+
+    public static boolean copyCombatStep() {
+        return copyCombatStep;
+    }
+
+    /**
+     * {@code -Dforge.copyTurnCounters=true}: a game copy carries the turn's step counters (mains, combats, upkeeps, end
+     * steps, planar dice, the skip-damage and repeat-cleanup latches). Off, they start at zero, so "at the beginning of
+     * your second main phase" never triggers in a copy made in the first main phase, and "first combat" triggers misfire.
+     */
+    private static boolean copyTurnCounters = Boolean.getBoolean("forge.copyTurnCounters");
+
+    public static boolean copyTurnCounters() {
+        return copyTurnCounters;
+    }
+
+    /**
+     * {@code -Dforge.copyPhased=true}: a game copy carries phased-out permanents (and their phasing state). Off, every
+     * phased-out permanent is missing from every copy and never phases back in during a play-out.
+     */
+    private static boolean copyPhased = Boolean.getBoolean("forge.copyPhased");
+
+    public static boolean copyPhased() {
+        return copyPhased;
+    }
+
+    /** The copy-fidelity flags as one line (startup logs, manifests). */
+    public static String describeCopyFidelity() {
+        return "[copy-fidelity] copyCombatStep=" + copyCombatStep + " copyTurnCounters=" + copyTurnCounters + " copyPhased=" + copyPhased;
+    }
+
+    /** For tests. */
+    public static void setCopyFidelityForTest(final boolean combatStep, final boolean turnCounters, final boolean phased) {
+        copyCombatStep = combatStep;
+        copyTurnCounters = turnCounters;
+        copyPhased = phased;
+    }
 }

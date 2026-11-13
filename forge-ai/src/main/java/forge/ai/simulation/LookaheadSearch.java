@@ -5897,22 +5897,9 @@ public final class LookaheadSearch {
         return true;
     }
 
-    private static Field fExtraPhases;
-
-    /** True when PhaseHandler has an extra phase queued this turn (an extra combat may follow); unknown = true. */
+    /** True when PhaseHandler has an extra phase queued this turn (an extra combat may follow). */
     static boolean extraPhasePending(PhaseHandler ph) {
-        try {
-            synchronized (LookaheadSearch.class) {
-                if (fExtraPhases == null) {
-                    fExtraPhases = PhaseHandler.class.getDeclaredField("extraPhases");
-                    fExtraPhases.setAccessible(true);
-                }
-            }
-            final Object m = fExtraPhases.get(ph);
-            return !(m instanceof Map) || !((Map<?, ?>) m).isEmpty();
-        } catch (ReflectiveOperationException | RuntimeException e) {
-            return true;
-        }
+        return !ph.getExtraPhasesView().isEmpty(); // state-machines-1113: the public view, not reflection
     }
 
     /**
@@ -7049,51 +7036,21 @@ public final class LookaheadSearch {
         return new GameStateEvaluator().getStaticScore(g, me).value;
     }
 
-    private static Field fPrio, fFirst, fGive;
-
-    static synchronized void initFields() {
-        if (fPrio != null) {
-            return;
-        }
-        try {
-            fPrio = PhaseHandler.class.getDeclaredField("pPlayerPriority");
-            fFirst = PhaseHandler.class.getDeclaredField("pFirstPriority");
-            fGive = PhaseHandler.class.getDeclaredField("givePriorityToPlayer");
-            fPrio.setAccessible(true);
-            fFirst.setAccessible(true);
-            fGive.setAccessible(true);
-        } catch (NoSuchFieldException e) {
-            throw new IllegalStateException(e);
-        }
-    }
+    // state-machines-1113: the priority round is PhaseHandler's explicit PriorityState now (no reflection). Same writes
+    // in the same order as the reflective helpers they replace, so every caller stays byte-identical.
 
     /** The player who holds "first priority" (acted last) in {@code ph}, i.e. whose turn it is to see the stack resolve. */
     static Player firstPriority(PhaseHandler ph) {
-        initFields();
-        try {
-            return (Player) fFirst.get(ph);
-        } catch (IllegalAccessException e) {
-            throw new IllegalStateException(e);
-        }
+        return ph.getFirstPriorityPlayer();
     }
 
     static void setFirstPriority(PhaseHandler ph, Player p) {
-        initFields();
-        try {
-            fFirst.set(ph, p);
-        } catch (IllegalAccessException e) {
-            throw new IllegalStateException(e);
-        }
+        ph.dangerouslySetFirstPriorityPlayer(p);
     }
 
     /** Whether {@code ph} gives priority on its next main-loop step (read-only; state keys). */
     static boolean givePriorityFlag(PhaseHandler ph) {
-        initFields();
-        try {
-            return fGive.getBoolean(ph);
-        } catch (IllegalAccessException e) {
-            throw new IllegalStateException(e);
-        }
+        return ph.givesPriorityThisStep();
     }
 
     /** The copy resumes exactly where the live seat stands: it holds priority, it acted first. */
@@ -7103,14 +7060,7 @@ public final class LookaheadSearch {
     }
 
     static void givePriority(PhaseHandler ph, Player p) {
-        initFields();
-        try {
-            fPrio.set(ph, p);
-            fFirst.set(ph, p);
-            fGive.setBoolean(ph, true);
-        } catch (IllegalAccessException e) {
-            throw new IllegalStateException(e);
-        }
+        ph.dangerouslySetPriorityState(PhaseHandler.PriorityState.resumeWith(p));
     }
 
 
@@ -7249,14 +7199,7 @@ public final class LookaheadSearch {
     }
 
     private static void setPriorityState(PhaseHandler ph, Player prio, Player first, boolean give) {
-        initFields();
-        try {
-            fPrio.set(ph, prio);
-            fFirst.set(ph, first);
-            fGive.setBoolean(ph, give);
-        } catch (IllegalAccessException e) {
-            throw new IllegalStateException(e);
-        }
+        ph.dangerouslySetPriorityState(new PhaseHandler.PriorityState(prio, first, give));
     }
 
     /**

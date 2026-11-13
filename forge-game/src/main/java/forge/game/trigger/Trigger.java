@@ -74,6 +74,20 @@ public abstract class Trigger extends TriggerReplacementBase {
         Trigger.maxId = 50000;
     }
 
+    /**
+     * mtgx state-machines-1113: the trigger-id reset of a game restart (Karn Liberated). A restart resolved inside a
+     * search copy (an id scope of its own, not the hosted game's) leaves every counter alone: before, it reset the live
+     * game's counter (the process-wide one, or the hosted game's), so live triggers created later could reuse ids still
+     * active and be dropped as duplicates. Outside a search copy this is {@link #resetIDs()} unchanged.
+     */
+    public static void resetIDsForRestart() {
+        final Object scoped = forge.util.IdScope.capture();
+        if (scoped != null && scoped != forge.util.GameContext.gameIds()) {
+            return;
+        }
+        resetIDs();
+    }
+
     /** The ID. */
     private int id;
 

@@ -515,6 +515,9 @@ public class GameCopier {
         PhaseHandler origPhaseHandler = origGame.getPhaseHandler();
         Player newPlayerTurn = playerMap.get(origPhaseHandler.getPlayerTurn());
         newGame.getPhaseHandler().devModeSet(origPhaseHandler.getPhase(), newPlayerTurn, origPhaseHandler.getTurn());
+        if (forge.game.EngineFixes.copyTurnCounters()) { // state-machines-1113 (off by default): the turn's step counters
+            newGame.getPhaseHandler().dangerouslySetTurnCounters(origPhaseHandler.getTurnCounters());
+        }
         newGame.getTriggerHandler().suppressMode(TriggerType.ChangesZone);
         for (Player p : newGame.getPlayers()) {
             ((PlayerZoneBattlefield) p.getZone(ZoneType.Battlefield)).setTriggers(false);
@@ -1999,14 +2002,14 @@ public class GameCopier {
         }
 
         for (ZoneType zone : ZONES) {
-            for (Card card : origGame.getCardsIn(zone)) {
+            for (Card card : cardsToCopy(zone)) {
                 addCard(newGame, zone, card, aiPlayer);
             }
             // TODO CardsAddedThisTurn is now messed up
         }
         gameObjectMap = new CopiedGameObjectMap(newGame);
 
-        for (Card card : origGame.getCardsIn(ZoneType.Battlefield)) {
+        for (Card card : cardsToCopy(ZoneType.Battlefield)) {
             Card otherCard = cardMap.get(card);
             otherCard.setGameTimestamp(card.getGameTimestamp());
             otherCard.setLayerTimestamp(card.getLayerTimestamp());
@@ -2171,6 +2174,17 @@ public class GameCopier {
         }
     }
 
+    /**
+     * state-machines-1113: the original's cards of {@code zone} that a copy gets. With {@code forge.copyPhased} (off by
+     * default) the battlefield includes phased-out permanents; without it they are left out, as before.
+     */
+    private Iterable<Card> cardsToCopy(final ZoneType zone) {
+        if (zone == ZoneType.Battlefield && forge.game.EngineFixes.copyPhased()) {
+            return origGame.getCardsIncludePhasingIn(zone);
+        }
+        return origGame.getCardsIn(zone);
+    }
+
     private void addCard(Game newGame, ZoneType zone, Card c, Player aiPlayer) {
         final Player owner = playerMap.get(c.getOwner());
         final Card newCard = createCardCopy(newGame, owner, c, aiPlayer);
@@ -2211,6 +2225,11 @@ public class GameCopier {
 
             if (c.isTapped()) {
                 newCard.setTapped(true);
+            }
+            if (c.isPhasedOut() && forge.game.EngineFixes.copyPhased()) { // state-machines-1113 (off by default)
+                newCard.setPhasedOut(playerMap.get(c.getPhasedOut()));
+                newCard.setDirectlyPhasedOut(c.isDirectlyPhasedOut());
+                newCard.setWontPhaseInNormal(c.isWontPhaseInNormal());
             }
             if (c.isFaceDown()) {
                 newCard.turnFaceDown(true);
