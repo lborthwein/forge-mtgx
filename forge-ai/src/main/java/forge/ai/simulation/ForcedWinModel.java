@@ -1047,66 +1047,116 @@ public final class ForcedWinModel {
 
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         ACard card(Game live, Player me, Card c) {
-            if (cardLock) {
-                final ACard t;
-                synchronized (templates) {
-                    t = templates.get(templateKey(c));
-                }
-                if (t != null && !(probeObjects && t.hasObj)) {
-                    synchronized (t) {
-                        if (loopProbe == null || t.loopChecked) {
-                            return t.instance(c.getId());
-                        }
-                    }
-                }
+            if (!cardLock || probeObjects) {
+                return cardLocked(live, me, c, null);
             }
-            return cardLocked(live, me, c);
-        }
-
-        private synchronized ACard cardLocked(Game live, Player me, Card c) {
-            final boolean prevHide = ForcedWinProbe.HIDE.get();
-            ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
-            try {
-                return card0(live, me, c);
-            } finally {
-                ForcedWinProbe.HIDE.set(prevHide);
-            }
-        }
-
-        private ACard card0(Game live, Player me, Card c) {
-            // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
-            // sdcc-draws-1110: so does a probeSettle reader (its templates hold what the settled sandbox moved)
-            // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
-            // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
-            // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
             final String key = templateKey(c);
             ACard t;
             synchronized (templates) {
                 t = templates.get(key);
             }
             if (t == null) {
-                final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
-                final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
-                final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
-                ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
-                ForcedWinProbe.PLAN_SCRY.set(planScry);
-                ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
-                ForcedWinProbe.TUTOR_CAST.set(tutorCast);
-                ForcedWinProbe.SOURCE_LEAVES.set(sourceLeaves);
-                try {
-                    t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
-                } finally {
-                    ForcedWinProbe.PLAN_SCRY.set(prev);
-                    ForcedWinProbe.PROBE_SETTLE.set(prevSettle);
-                    ForcedWinProbe.TUTOR_CAST.set(prevTc);
-                    ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
-                    ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
+                if (Thread.holdsLock(this) || LEARNING.get()[0] > 0) {
+                    // nested (inside a loop probe or another learn of this thread): the monitor path. A thread never waits
+                    // for a card's lock while it holds the monitor or another card's lock, so the locks cannot cycle.
+                    return cardLocked(live, me, c, null);
                 }
-                if (!forge.ai.AiWork.spent()) {
+                final Object lk = cardLocks.computeIfAbsent(key, k -> new Object());
+                synchronized (lk) {
                     synchronized (templates) {
-                        templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                        t = templates.get(key);
+                    }
+                    if (t == null) {
+                        // this card's own lock: other threads learn other cards meanwhile
+                        final int[] depth = LEARNING.get();
+                        final boolean prevHide = ForcedWinProbe.HIDE.get();
+                        ForcedWinProbe.HIDE.set(hideLibrary);
+                        depth[0]++;
+                        try {
+                            t = learnTemplate(live, me, c, key);
+                        } finally {
+                            depth[0]--;
+                            ForcedWinProbe.HIDE.set(prevHide);
+                        }
                     }
                 }
+            }
+            synchronized (t) {
+                if (loopProbe == null || t.loopChecked) {
+                    return t.instance(c.getId());
+                }
+            }
+            return cardLocked(live, me, c, t); // its loop probe is still owed: under the monitor, as before
+        }
+
+        /** searchspeed-1113 (cardLock): one lock per template key; this thread's learns and monitor sections in progress. */
+        private final java.util.concurrent.ConcurrentHashMap<String, Object> cardLocks = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final ThreadLocal<int[]> LEARNING = ThreadLocal.withInitial(() -> new int[1]);
+
+        private synchronized ACard cardLocked(Game live, Player me, Card c, ACard have) {
+            final boolean prevHide = ForcedWinProbe.HIDE.get();
+            ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
+            final int[] depth = LEARNING.get();
+            depth[0]++; // searchspeed-1113: under a reader's monitor this thread never waits for a card's lock (any reader's)
+            try {
+                return card0(live, me, c, have);
+            } finally {
+                depth[0]--;
+                ForcedWinProbe.HIDE.set(prevHide);
+            }
+        }
+
+        /** The template of {@code c}, learned in a sandbox now (the caller holds the monitor, or with cardLock the card's lock). */
+        private ACard learnTemplate(Game live, Player me, Card c, String key) {
+            ACard t;
+            final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
+            final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
+            final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
+            ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
+            ForcedWinProbe.PLAN_SCRY.set(planScry);
+            ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
+            ForcedWinProbe.TUTOR_CAST.set(tutorCast);
+            ForcedWinProbe.SOURCE_LEAVES.set(sourceLeaves);
+            try {
+                t = ForcedWinProbe.learn(live, me, c, seed, probeStats);
+            } finally {
+                ForcedWinProbe.PLAN_SCRY.set(prev);
+                ForcedWinProbe.PROBE_SETTLE.set(prevSettle);
+                ForcedWinProbe.TUTOR_CAST.set(prevTc);
+                ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
+                ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
+            }
+            if (!forge.ai.AiWork.spent()) {
+                synchronized (templates) {
+                    // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                    final ACard first = cardLock ? templates.get(key) : null;
+                    if (first != null) {
+                        t = first; // cardLock: a nested learn of the same card got there first; one template per key
+                    } else {
+                        templates.put(key, t);
+                    }
+                }
+            }
+            return t;
+        }
+
+        private ACard card0(Game live, Player me, Card c, ACard have) {
+            // labeller-v2 (c): a planScry reader learns scry / surveil as kinds, under its own keys (never a v1 template)
+            // sdcc-draws-1110: so does a probeSettle reader (its templates hold what the settled sandbox moved)
+            // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
+            // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
+            // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
+            final String key = templateKey(c);
+            ACard t = have;
+            if (t == null) {
+                synchronized (templates) {
+                    t = templates.get(key);
+                }
+            }
+            if (have != null) {
+                // searchspeed-1113 (cardLock): the template is in hand; only its loop probe is owed
+            } else if (t == null) {
+                t = learnTemplate(live, me, c, key);
             } else if (probeObjects && t.hasObj && !forge.ai.AiWork.spent()) {
                 // sdcc-probeobj-1111: the template was learned at the card's first sight; objects of ours that are in play
                 // or in our hand now and that no sandbox has tried the ability with yet are tried here, once per name
