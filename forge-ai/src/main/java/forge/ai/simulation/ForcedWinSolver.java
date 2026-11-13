@@ -4433,7 +4433,7 @@ public final class ForcedWinSolver {
 
     /**
      * loop-probe-1113: by match (weak), the wall time ({@link System#nanoTime}) at which the decision or ask in progress
-     * runs out; the loop probes take their time from what is left. None set: a probe is bounded by LOOP_NANOS alone.
+     * runs out; the loop probes take their time from what is left. None set: one call's probes share LOOP_NANOS.
      */
     private static final java.util.Map<Object, Long> LOOP_DEADLINE = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
     /** loop-probe-1113: what one fillLoops call may always spend, even past the caller's deadline. */
@@ -4583,7 +4583,8 @@ public final class ForcedWinSolver {
         final int probed = partners.size();
         final Long dl = LOOP_DEADLINE.get(match);
         final long t0 = System.nanoTime();
-        final long end = dl == null ? Long.MAX_VALUE : t0 + Math.max(LOOP_MIN_NANOS, (dl - t0) / 4);
+        // no deadline known for this game: one call's probes share LOOP_NANOS (the rest at the template's next read)
+        final long end = t0 + (dl == null ? LOOP_NANOS : Math.max(LOOP_MIN_NANOS, (dl - t0) / 4));
         boolean cut = false;
         synchronized (byKey) {
             final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getName().hashCode());

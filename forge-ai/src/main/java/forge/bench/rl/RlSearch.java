@@ -2315,6 +2315,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final int greedy, final List<SpellAbility> menuObjs, final PlanSearch sb) {
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0);
+        if (cfg.budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+        }
         if (cfg.valueSink != null && m.C() >= 2) {
             try {
                 final JsonObject h = new JsonObject();
@@ -3059,6 +3062,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        if (cfg.budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+        }
         blockAsks++;
         lastProposeMs = -1;
         if (m.family != RlSchema.F_BLOCK || greedy == null || greedy.length != m.S() || m.S() == 0

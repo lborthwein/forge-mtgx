@@ -215,6 +215,8 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
     public void theLoopProbeIsNotRunAgainWhenTheLibraryOrderChanges() {
         final Game g = loopGame("Pestermite", MANY);
         final Player me = g.getPlayers().get(0);
+        // a caller with plenty of time (the result must not depend on the machine's load): a quarter of this a call
+        ForcedWinSolver.loopDeadline(g, System.nanoTime() + 2_000_000_000_000L);
         final long p0 = ForcedWinSolver.LOOP_PROBES.get();
         Assert.assertTrue(screenSolver(me, true).hasEnder(g), "the copier and its untapper are a loop");
         final long first = ForcedWinSolver.LOOP_PROBES.get() - p0;
