@@ -253,6 +253,42 @@ public final class AiTape {
     }
     private boolean finished;
 
+    /**
+     * Lane sdcc-replay-sample-1113 (off unless {@link #tolerant()} is called: every existing tape is unchanged): a RECORD
+     * tape whose own fault never reaches the game it records (a training game that carries a sampled decision log). A
+     * fault while an entry is opened, closed or a trait build is noted BREAKS the tape instead of being thrown: from
+     * then on it records nothing, its controller and every hook answer as if no tape were installed, and
+     * {@link #broken()} says why. The game plays on untouched; the caller drops the record.
+     */
+    private boolean tolerant;
+    private volatile String broken;
+
+    /** Before {@link #install}: see {@link #tolerant}. RECORD tapes only. */
+    public AiTape tolerant() {
+        if (mode != Mode.RECORD || resume) {
+            throw new IllegalStateException("only a RECORD tape can be tolerant");
+        }
+        tolerant = true;
+        return this;
+    }
+
+    public boolean isTolerant() {
+        return tolerant;
+    }
+
+    /** Why a tolerant tape stopped recording (its first fault), or null. */
+    public String broken() {
+        return broken;
+    }
+
+    private void breakTape(final Throwable e) {
+        if (broken == null) {
+            broken = String.valueOf(e);
+            open.clear();
+            lazyDepth = 0;
+        }
+    }
+
     private AiTape(final Mode mode, final Game game, final Player seat, final PlayoutKeys.TrackedRandom rng,
             final PrintStream out, final JsonArray tape, final boolean resume) {
         this.mode = mode;
@@ -437,7 +473,8 @@ public final class AiTape {
     // ------------------------------------------------------------------ where decisions are taped
 
     public boolean covers(final Player payer) {
-        return payer == seat && payer.getGame() == game && Thread.currentThread() == gameThread && divergence == null;
+        return payer == seat && payer.getGame() == game && Thread.currentThread() == gameThread && divergence == null
+                && broken == null;
     }
 
     /**
@@ -471,7 +508,7 @@ public final class AiTape {
 
     /** A controller call here is a decision: on the game thread, and no choice frame open (the AI's own deliberation). */
     boolean controllerHere() {
-        if (detached || Thread.currentThread() != gameThread || divergence != null) {
+        if (detached || broken != null || Thread.currentThread() != gameThread || divergence != null) {
             return false;
         }
         if (!(mode == Mode.RECORD ? open.isEmpty() || open.peek().exec : cursors.isEmpty() || cursors.peek().exec)) {
@@ -608,6 +645,21 @@ public final class AiTape {
 
     /** Open an entry of kind {@code k} ({@code m}: the method or hook detail). Exec entries take children. */
     Object begin(final String k, final String m, final boolean exec) {
+        if (tolerant) { // sdcc-replay-sample-1113: a fault breaks the tape, never the game (null = nothing is open)
+            if (broken != null) {
+                return null;
+            }
+            try {
+                return begin0(k, m, exec);
+            } catch (RuntimeException | StackOverflowError | LinkageError | AssertionError e) {
+                breakTape(e);
+                return null;
+            }
+        }
+        return begin0(k, m, exec);
+    }
+
+    private Object begin0(final String k, final String m, final boolean exec) {
         final long t0 = System.nanoTime();
         final String pre = sync();
         final Rec r = new Rec(exec, pre, !pre.equals(lastPost));
@@ -625,11 +677,29 @@ public final class AiTape {
 
     /** A field of the open entry {@code token} (from {@link #begin}). */
     void put(final Object token, final String key, final JsonElement v) {
+        if (token == null) {
+            return; // a tolerant tape that broke
+        }
         ((Rec) token).o.add(key, v == null ? JsonNull.INSTANCE : v);
     }
 
     /** Close {@code token} with answer {@code a}: written (top level) or kept as its parent's child. */
     void end(final Object token, final JsonElement a) {
+        if (tolerant) { // sdcc-replay-sample-1113
+            if (token == null || broken != null) {
+                return;
+            }
+            try {
+                end0(token, a);
+            } catch (RuntimeException | StackOverflowError | LinkageError | AssertionError e) {
+                breakTape(e);
+            }
+            return;
+        }
+        end0(token, a);
+    }
+
+    private void end0(final Object token, final JsonElement a) {
         final long t0 = System.nanoTime();
         final Rec r = (Rec) token;
         if (open.peek() != r) {
@@ -998,12 +1068,21 @@ public final class AiTape {
             AiTape inner = null;
             long innerFrame = 0;
             for (AiTape t : installed) {
-                if (st.getCard().getGame() == t.game && Thread.currentThread() == t.gameThread && t.divergence == null) {
+                if (st.getCard().getGame() == t.game && Thread.currentThread() == t.gameThread && t.divergence == null
+                        && t.broken == null) {
                     final long f = t.innermostFrame();
                     if (f > innerFrame) {
                         inner = t;
                         innerFrame = f;
                     }
+                }
+            }
+            if (inner != null && inner.tolerant) { // sdcc-replay-sample-1113
+                try {
+                    return inner.lazyBefore(st, kind);
+                } catch (RuntimeException | StackOverflowError | LinkageError | AssertionError e) {
+                    inner.breakTape(e);
+                    return null;
                 }
             }
             return inner == null ? null : inner.lazyBefore(st, kind);
@@ -1144,6 +1223,9 @@ public final class AiTape {
     }
 
     private void lazyAfter(final LazyTok t) {
+        if (broken != null) {
+            return; // a tolerant tape that broke: nothing is open
+        }
         lazyDepth--;
         if (t.rec != null) {
             end(t.rec, new JsonPrimitive(t.card));

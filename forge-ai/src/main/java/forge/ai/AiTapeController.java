@@ -314,7 +314,10 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
                 v = live.get();
                 ok = true;
             } finally {
-                tape.end(r, ok ? enc.apply(v) : AiTapeCodec.unencodable(new IllegalStateException("the call threw")));
+                final T done = v;
+                // sdcc-replay-sample-1113: a tolerant tape's encoding cannot fail the game (as a choice's cannot)
+                tape.end(r, !ok ? AiTapeCodec.unencodable(new IllegalStateException("the call threw"))
+                        : tape.isTolerant() ? tape.safe(() -> enc.apply(done)) : enc.apply(v));
             }
             return v;
         }

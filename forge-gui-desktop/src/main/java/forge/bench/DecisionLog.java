@@ -80,6 +80,93 @@ final class DecisionLog {
 
     private boolean diag;
 
+    // ------------------------------------------------------------------ a sampled log (lane sdcc-replay-sample-1113)
+
+    /**
+     * Lane sdcc-replay-sample-1113 ({@code "decisionLogSample"}; 0 = off, the default: no game is sampled and nothing
+     * changes): a generation run records the log of a deterministic sample of its games, chosen from the GAME seed alone
+     * ({@link #sampled}), so that a sampled game can later be re-run FORCED on any host and watched. A sampled log is a
+     * RECORD log with two differences: it tapes RL seats too (as {@code decisionLogRlSeats}), and its faults are the
+     * log's, never the game's ({@link AiTape#tolerant}; {@link #installSample}, {@link #finish}): a faulty log is dropped
+     * ({@link #dropped}), counted, and the game's tape line is written as an unsampled game's.
+     */
+    boolean sample;
+    /** A sampled log, or the forced replay of one: RL seats are taped (no {@code decisionLogRlSeats} key needed). */
+    boolean rlSeats;
+    private String dropped;
+    private final List<Object[]> swapped = new ArrayList<>(); // {player, the controller it had}
+    /** Sampled games; logs written to a tape line; dropped after a fault; void games; games with an untapeable seat. */
+    static final java.util.concurrent.atomic.AtomicLong SAMPLED = new java.util.concurrent.atomic.AtomicLong(),
+            SAMPLE_WRITTEN = new java.util.concurrent.atomic.AtomicLong(),
+            SAMPLE_DROPPED = new java.util.concurrent.atomic.AtomicLong(),
+            SAMPLE_VOID = new java.util.concurrent.atomic.AtomicLong(),
+            SAMPLE_SKIPPED = new java.util.concurrent.atomic.AtomicLong(),
+            SAMPLE_BYTES = new java.util.concurrent.atomic.AtomicLong();
+    /** Tests only: a diagnostics hook put on a sampled log's tapes (a throwing one is a recorder fault). Null by default. */
+    static volatile java.util.function.Function<Player, AiTape.Diag> SAMPLE_TEST_DIAG = null;
+
+    static DecisionLog sample() {
+        final DecisionLog d = new DecisionLog(Mode.RECORD, null);
+        d.sample = true;
+        d.rlSeats = true;
+        return d;
+    }
+
+    /**
+     * Is the game of {@code seed} in the sample of {@code rate} (a fraction in [0, 1])? A SplitMix64 finalizer of the
+     * seed, as a number in [0, 1), below the rate: reproducible from the seed alone on any host, the same for both
+     * seats, independent of the actor, the thread and the order of games; a higher rate's sample holds a lower rate's.
+     */
+    static boolean sampled(final long seed, final double rate) {
+        if (!(rate > 0)) {
+            return false;
+        }
+        long z = seed ^ 0x7265706c61792d31L; // "replay-1"
+        z = (z ^ (z >>> 30)) * 0xbf58476d1ce4e5b9L;
+        z = (z ^ (z >>> 27)) * 0x94d049bb133111ebL;
+        z ^= z >>> 31;
+        return (z >>> 11) * 0x1.0p-53 < rate;
+    }
+
+    /** Why this sampled log was dropped (its first fault), or null. */
+    String dropped() {
+        return dropped;
+    }
+
+    private void drop(final String why) {
+        if (dropped == null) {
+            dropped = why;
+        }
+    }
+
+    /**
+     * A sampled log's {@link #install} and {@link #bindGameThread}: a fault undoes the controller swaps and the tapes
+     * and drops the log; the game then starts exactly as an unsampled one (its random stream is the same either way).
+     */
+    boolean installSample(final Game game, final PlayoutKeys.TrackedRandom rng, final int[] seatIdx) {
+        try {
+            install(game, rng, seatIdx);
+            bindGameThread();
+            return true;
+        } catch (RuntimeException | StackOverflowError | LinkageError | AssertionError e) {
+            drop("install: " + e);
+            for (AiTape t : tapes) {
+                try {
+                    t.uninstall();
+                } catch (RuntimeException x) {
+                    // nothing more to undo
+                }
+            }
+            for (Object[] sw : swapped) {
+                ((Player) sw[0]).dangerouslySetController((forge.game.player.PlayerController) sw[1]);
+            }
+            tapes.clear();
+            seats.clear();
+            finished = true;
+            return false;
+        }
+    }
+
     private static AiTape.Diag diagOf(final Player p) {
         return new AiTape.Diag() {
             @Override
@@ -126,7 +213,10 @@ final class DecisionLog {
                 || log.get("format").getAsInt() != AiTape.FORMAT) {
             throw new IllegalArgumentException("decision log: not an AI tape of format " + AiTape.FORMAT);
         }
-        return new DecisionLog(Mode.FORCED, log);
+        final DecisionLog d = new DecisionLog(Mode.FORCED, log);
+        // sdcc-replay-sample-1113: a sampled log names itself, so its replay tapes the RL seats it recorded
+        d.rlSeats = log.has("sample") && log.get("sample").isJsonPrimitive() && log.get("sample").getAsBoolean();
+        return d;
     }
 
     /**
@@ -151,7 +241,15 @@ final class DecisionLog {
             if (mode == Mode.RECORD && diag) {
                 t.diag(diagOf(p)); // bvw-tape-decisions-1028: per-decision wall ms and solver work (diagnostics only)
             }
+            if (sample) {
+                t.tolerant(); // sdcc-replay-sample-1113: the tape's faults are its own
+                final java.util.function.Function<Player, AiTape.Diag> td = SAMPLE_TEST_DIAG;
+                if (td != null) {
+                    t.diag(td.apply(p));
+                }
+            }
             t.tagSeat();
+            swapped.add(new Object[] {p, inner});
             p.dangerouslySetController(AiTapeController.wrap(inner, t));
             t.install();
             tapes.add(t);
@@ -174,6 +272,42 @@ final class DecisionLog {
         }
         finished = true;
         final long t0 = System.nanoTime();
+        if (sample) {
+            // sdcc-replay-sample-1113: the end of a sampled log cannot fail its game; a broken tape drops the log
+            for (AiTape t : tapes) {
+                try {
+                    if (t.broken() != null) {
+                        drop("seat " + seats.get(tapes.indexOf(t)) + ": " + t.broken());
+                    }
+                    t.finish();
+                } catch (RuntimeException | StackOverflowError | LinkageError | AssertionError e) {
+                    drop("finish: " + e);
+                } finally {
+                    try {
+                        t.uninstall();
+                    } catch (RuntimeException e) {
+                        drop("uninstall: " + e);
+                    }
+                }
+            }
+            try {
+                out.flush();
+                lines = new ArrayList<>();
+                for (String l : new String(buf.toByteArray(), StandardCharsets.UTF_8).split("\n")) {
+                    final String s = l.trim();
+                    if (s.startsWith(AiTape.PREFIX.trim())) {
+                        final JsonElement e = JsonParser.parseString(s.substring(AiTape.PREFIX.trim().length()).trim());
+                        if (e.isJsonObject()) {
+                            lines.add(e.getAsJsonObject());
+                        }
+                    }
+                }
+            } catch (RuntimeException | StackOverflowError e) {
+                drop("lines: " + e);
+            }
+            nanos += System.nanoTime() - t0;
+            return;
+        }
         for (AiTape t : tapes) {
             try {
                 t.finish();
@@ -198,6 +332,36 @@ final class DecisionLog {
     private static boolean status(final JsonObject o) {
         final String k = o.has("k") ? o.get("k").getAsString() : "";
         return "boot".equals(k) || "end".equals(k) || "divergence".equals(k) || "live".equals(k);
+    }
+
+    /**
+     * sdcc-replay-sample-1113: a sampled log's {@link #KEY} object, or null when the log was dropped (a fault at install,
+     * while recording or here; an answer the tape could not encode: a forced replay would stop there, so it is no log).
+     */
+    JsonObject sampleJson() {
+        if (dropped != null || lines == null) {
+            return null;
+        }
+        try {
+            final JsonObject o = tapeJson();
+            int ends = 0;
+            for (JsonElement e : o.getAsJsonArray("end")) {
+                ends++;
+                if (e.getAsJsonObject().get("unencodable").getAsInt() != 0) {
+                    drop("unencodable answers");
+                    return null;
+                }
+            }
+            if (ends != tapes.size()) {
+                drop("end lines " + ends + " of " + tapes.size());
+                return null;
+            }
+            o.addProperty("sample", true);
+            return o;
+        } catch (RuntimeException | StackOverflowError e) {
+            drop("json: " + e);
+            return null;
+        }
     }
 
     /** RECORD: the tape line's {@link #KEY} object. */

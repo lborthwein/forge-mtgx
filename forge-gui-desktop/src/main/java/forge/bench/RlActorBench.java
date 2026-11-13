@@ -265,6 +265,23 @@ public final class RlActorBench {
          * forced past the first such line (doomsday-audit-1106: 49 of 84).
          */
         boolean decisionLogRlSeats = false;
+        /**
+         * sdcc-replay-sample-1113 (0 = off, the default: no game is sampled, and every output byte is today's): the
+         * fraction of a generation run's games (train / eval / record) whose decision log is recorded, RL seats included,
+         * and put on the game's tape line ({@link DecisionLog#KEY}), so the game can later be re-run FORCED and watched
+         * ({@link #replayWatchOut}). A game is in the sample by its GAME seed alone ({@link DecisionLog#sampled}). An
+         * unsampled game's play and outputs are untouched; a sampled game's play is the same game (the log decides
+         * nothing), its tape line gains the one key, and a fault of its log drops the log, never the game. Not with
+         * {@code decisionLog "record"} (which logs every game).
+         */
+        double decisionLogSample = 0;
+        /**
+         * sdcc-replay-sample-1113 (null = off, the default: a replay writes what it wrote): replay mode attaches the
+         * watch recorder ({@link forge.interactive.WatchRecorder}) to every replayed game and writes
+         * {@code <dir>/<game uid>/{stream.jsonl, config.json, deck0.dck, deck1.dck}}: both seats' channels of the
+         * interactive protocol, as a watch table's stdout ({@code replay.watchOut}).
+         */
+        String replayWatchOut = null;
         /** bvw-decision-log-1027: replay {@code "record"}: the directory of {@code decision-logs-<pid>.jsonl.gz}. */
         String decisionLogOut = null;
         /** bvw-decision-log-1027: replay: logs an earlier {@code "record"} replay wrote (used for digest-equal games). */
@@ -550,6 +567,19 @@ public final class RlActorBench {
                 throw new IllegalArgumentException("decisionLogDiag is for decisionLog record");
             }
         }
+        if (o.has("decisionLogSample") && !o.get("decisionLogSample").isJsonNull()) {
+            // sdcc-replay-sample-1113: checked once, at JVM start (exit 2 on a bad value)
+            c.decisionLogSample = o.get("decisionLogSample").getAsDouble();
+            if (!(c.decisionLogSample >= 0 && c.decisionLogSample <= 1)) {
+                throw new IllegalArgumentException("decisionLogSample is a fraction in [0, 1], not " + c.decisionLogSample);
+            }
+            if (c.decisionLogSample > 0 && "replay".equals(c.mode)) {
+                throw new IllegalArgumentException("decisionLogSample is for a generation run (train, eval, record)");
+            }
+            if (c.decisionLogSample > 0 && "record".equals(c.decisionLog)) {
+                throw new IllegalArgumentException("decisionLogSample with decisionLog record: every game is logged already");
+            }
+        }
         if (o.has("decisionLogRlSeats") && !o.get("decisionLogRlSeats").isJsonNull()) {
             c.decisionLogRlSeats = o.get("decisionLogRlSeats").getAsBoolean();
         }
@@ -643,6 +673,12 @@ public final class RlActorBench {
             if (r.has("dir")) c.replayDir = r.get("dir").getAsString();
             if (r.has("sample")) c.replaySample = r.get("sample").getAsInt();
             if (r.has("sampleSeed")) c.replaySampleSeed = r.get("sampleSeed").getAsLong();
+            if (r.has("watchOut") && !r.get("watchOut").isJsonNull()) {
+                c.replayWatchOut = r.get("watchOut").getAsString(); // sdcc-replay-sample-1113
+            }
+        }
+        if (c.replayWatchOut != null && !"replay".equals(c.mode)) {
+            throw new IllegalArgumentException("replay.watchOut is for replay mode");
         }
         return c;
     }
@@ -668,6 +704,7 @@ public final class RlActorBench {
                 case "--tapes": c.replayDir = v; break;
                 case "--sample": c.replaySample = Integer.parseInt(v); break;
                 case "--sample-seed": c.replaySampleSeed = Long.parseLong(v); break;
+                case "--watch-out": c.replayWatchOut = v; break; // sdcc-replay-sample-1113
                 default: throw new IllegalArgumentException("unknown argument " + k);
             }
         }
@@ -858,8 +895,37 @@ public final class RlActorBench {
     static Played play(final Cfg cfg, final String mode, final JsonObject g, final RlFeaturizer feat,
             final RlSeat.Endpoint ep, final RlSeat.FrameListener listener, final String jarSha, final GameHook hook) {
         // bvw-decision-log-1027: a generation run's decisionLog "record" logs every game (a replay chooses per tape)
-        return play(cfg, mode, g, feat, ep, listener, jarSha, hook,
-                "record".equals(cfg.decisionLog) && !"replay".equals(cfg.mode) ? DecisionLog.record(cfg.decisionLogDiag) : null);
+        if ("record".equals(cfg.decisionLog) && !"replay".equals(cfg.mode)) {
+            return play(cfg, mode, g, feat, ep, listener, jarSha, hook, DecisionLog.record(cfg.decisionLogDiag));
+        }
+        return play(cfg, mode, g, feat, ep, listener, jarSha, hook, sampleLog(cfg, g));
+    }
+
+    /**
+     * sdcc-replay-sample-1113: the sampled decision log of GAME {@code g}, or null: the key is off (the default), the
+     * game's seed is not in the sample, or one of its seats cannot be taped (a K8 or recorder seat: counted, the game
+     * plays unsampled). Nothing here can refuse or fail a game.
+     */
+    static DecisionLog sampleLog(final Cfg cfg, final JsonObject g) {
+        if (!(cfg.decisionLogSample > 0) || "replay".equals(cfg.mode)) {
+            return null;
+        }
+        try {
+            if (!DecisionLog.sampled(g.get("seed").getAsLong(), cfg.decisionLogSample)) {
+                return null;
+            }
+            DecisionLog.SAMPLED.incrementAndGet();
+            for (JsonElement c : g.getAsJsonArray("controllers")) {
+                final String ctl = c.getAsString();
+                if (K8_CONTROLLER.equals(ctl) || RlSeat.roleOf(ctl) == RlSeat.Role.RECORD) {
+                    DecisionLog.SAMPLE_SKIPPED.incrementAndGet();
+                    return null;
+                }
+            }
+            return DecisionLog.sample();
+        } catch (RuntimeException e) {
+            return null; // a GAME the guards below refuse, or play as they always did
+        }
     }
 
     /** bvw-decision-log-1027: {@code dl} (null = none, as before) records or forces both Forge seats' decisions. */
@@ -934,7 +1000,7 @@ public final class RlActorBench {
             // dec rows, and the K8 seat is not taped here
             for (int s = 0; s < 2; s++) {
                 if (K8_CONTROLLER.equals(ctl[s]) || RlSeat.roleOf(ctl[s]) != RlSeat.Role.FORGE
-                        && !(cfg.decisionLogRlSeats && RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL)) {
+                        && !((cfg.decisionLogRlSeats || dl.rlSeats) && RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL)) {
                     out.guardError = "decision log: seat " + s + " (" + ctl[s] + ") is not a Forge seat";
                     return out;
                 }
@@ -1179,8 +1245,13 @@ public final class RlActorBench {
             if (dl != null) {
                 // bvw-decision-log-1027: both seats' taping controllers, last (every seat bound, every listener on)
                 out.decisionLog = dl;
-                dl.install(game, (forge.ai.simulation.PlayoutKeys.TrackedRandom) gameRandom, new int[] {0, 1});
-                dl.bindGameThread();
+                if (dl.sample) {
+                    // sdcc-replay-sample-1113: a sampled log's install cannot fail the game (undone and dropped)
+                    dl.installSample(game, (forge.ai.simulation.PlayoutKeys.TrackedRandom) gameRandom, new int[] {0, 1});
+                } else {
+                    dl.install(game, (forge.ai.simulation.PlayoutKeys.TrackedRandom) gameRandom, new int[] {0, 1});
+                    dl.bindGameThread();
+                }
             }
             RUNNING.put(Thread.currentThread(), new Object[] {game,
                     System.currentTimeMillis() + cfg.gameTimeoutSec * 1000L, uid});
@@ -1478,7 +1549,21 @@ public final class RlActorBench {
             t.addProperty("loop_guard", loopGuard);
             t.addProperty("loop_guard_hits", seat.loopGuardHits());
         }
-        if (dl != null && dl.mode == DecisionLog.Mode.RECORD) {
+        if (dl != null && dl.sample) {
+            // sdcc-replay-sample-1113: the sampled log, unless it was dropped (then the line is an unsampled game's)
+            final JsonObject sj = voidReason == null ? dl.sampleJson() : null;
+            if (sj != null) {
+                t.add(DecisionLog.KEY, sj);
+                DecisionLog.SAMPLE_WRITTEN.incrementAndGet();
+                DecisionLog.SAMPLE_BYTES.addAndGet(sj.toString().length());
+            } else if (voidReason != null) {
+                DecisionLog.SAMPLE_VOID.incrementAndGet(); // a void game has no replay to watch: not a recorder fault
+            } else {
+                DecisionLog.SAMPLE_DROPPED.incrementAndGet();
+                System.err.println("[rlactor] sampled decision log of game " + Long.toUnsignedString(uid) + " dropped: "
+                        + dl.dropped());
+            }
+        } else if (dl != null && dl.mode == DecisionLog.Mode.RECORD) {
             t.add(DecisionLog.KEY, dl.tapeJson()); // bvw-decision-log-1027: no key without a log
         }
         out.tape = t;
@@ -1774,6 +1859,19 @@ public final class RlActorBench {
         s.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
         s.addProperty("process_cpu_s", (os.getProcessCpuTime() - pcpu0) / 1e9);
         s.addProperty("unknown_card_lookups", index.unknownLookups());
+        if (cfg.decisionLogSample > 0) {
+            // sdcc-replay-sample-1113 (no key when off): sampled games; logs written; logs dropped after a recorder
+            // fault; sampled games that were void (no log kept); sampled games with a seat that cannot be taped
+            final JsonObject ds = new JsonObject();
+            ds.addProperty("rate", cfg.decisionLogSample);
+            ds.addProperty("sampled", DecisionLog.SAMPLED.get());
+            ds.addProperty("written", DecisionLog.SAMPLE_WRITTEN.get());
+            ds.addProperty("dropped", DecisionLog.SAMPLE_DROPPED.get());
+            ds.addProperty("void", DecisionLog.SAMPLE_VOID.get());
+            ds.addProperty("skipped", DecisionLog.SAMPLE_SKIPPED.get());
+            ds.addProperty("bytes", DecisionLog.SAMPLE_BYTES.get());
+            s.add("decision_log_sample", ds);
+        }
         if (index.facesOn()) {
             s.addProperty("card_index_faces", true);
         }
@@ -2400,8 +2498,21 @@ public final class RlActorBench {
                             trajectoryRef.provenance()) : null, rowsHere);
                     game.addPriorityDecisionListener(checks[0]);
                 };
+                // sdcc-replay-sample-1113 (replay.watchOut; null = off): the watch recorder on the replayed game
+                final forge.interactive.WatchRecorder[] watch = new forge.interactive.WatchRecorder[1];
+                final GameHook hookW = cfg.replayWatchOut == null ? hook : (game, seat, know) -> {
+                    if (hook != null) {
+                        hook.start(game, seat, know);
+                    }
+                    watch[0] = forge.interactive.WatchRecorder.attach(game, Paths.get(cfg.replayWatchOut),
+                            t, f, fl[1], jarSha, forced);
+                };
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
-                        t.get("game_uid").getAsString()), cfg.bankSpec != null), null, jarSha, hook, dl);
+                        t.get("game_uid").getAsString()), cfg.bankSpec != null), null, jarSha, hookW, dl);
+                if (watch[0] != null) {
+                    row.add("watch", watch[0].finish(p.end == null ? null : p.end.get("digest").getAsString(),
+                            p.end != null && p.end.get("void").isJsonNull()));
+                }
                 final forge.bench.rl.RlReplayLabeller lab = labs[0];
                 if (p.guardError != null) {
                     row.addProperty("error", "deck_guard: " + p.guardError);
