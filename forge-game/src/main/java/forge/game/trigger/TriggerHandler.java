@@ -55,6 +55,104 @@ public class TriggerHandler {
         game = gameState;
     }
 
+    // ---------------------------------------------------------------- mtgx trigger-owner-1113: ownership diagnostic
+    /*
+     * Off unless -Dforge.debug.triggerOwner=true; off, nothing here runs and the handler behaves exactly as before.
+     * waitingTriggers is a plain ArrayList that belongs to the thread running this game's main loop. A "wt is null" NPE
+     * in collectTriggerForWaiting (bench, 1 in ~1,400 games at two games per JVM; also 11-07) means a second thread
+     * wrote to it. On, this reports, once per distinct stack, on stderr as "[trigger-owner]":
+     *   NON_OWNER  - a thread other than the loop thread touched the list (the loop thread's state says whether it was
+     *                waiting on that thread, e.g. the AI's eval thread, or running at the same time);
+     *   CONCURRENT - two threads were inside the list at the same moment (both stacks).
+     */
+    private static volatile boolean ownerCheck = Boolean.getBoolean("forge.debug.triggerOwner");
+    private static volatile List<String> ownerSink;
+    private static final Set<String> OWNER_SEEN = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Reports per category (CONCURRENT; NON_OWNER with the loop thread running; NON_OWNER with it waiting), each capped. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> OWNER_REPORTS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int OWNER_MAX_REPORTS = 100;
+    private volatile Thread loopThread;
+    private final java.util.concurrent.atomic.AtomicReference<Thread> inList = new java.util.concurrent.atomic.AtomicReference<>();
+
+    /** Tests: turn the diagnostic on or off and collect its reports in {@code sink} (null: stderr only). */
+    public static void setOwnerCheckForTest(final boolean on, final List<String> sink) {
+        ownerCheck = on;
+        ownerSink = sink;
+        OWNER_SEEN.clear();
+        OWNER_REPORTS.clear();
+    }
+
+    /** PhaseHandler.mainGameLoop: the calling thread owns this game's waiting triggers (diagnostic only). */
+    public void claimLoopThread() {
+        if (ownerCheck) {
+            loopThread = Thread.currentThread();
+        }
+    }
+
+    private static final int LIST_OFF = 0, LIST_OUTER = 1, LIST_NESTED = 2;
+
+    /** Before a waiting-trigger list operation; the token for {@link #exitList} (LIST_OFF when the check is off). */
+    private int enterList(final String op) {
+        if (!ownerCheck) {
+            return LIST_OFF;
+        }
+        final Thread me = Thread.currentThread();
+        final Thread owner = loopThread;
+        if (owner != null && owner != me) {
+            ownerReport("NON_OWNER " + op, me, owner, false);
+        }
+        final Thread other = inList.getAndSet(me);
+        if (other != null && other != me) {
+            ownerReport("CONCURRENT " + op, me, other, true);
+        }
+        return other == me ? LIST_NESTED : LIST_OUTER;
+    }
+
+    /** After the operation: a nested call leaves the list with its thread; the outermost frees it. */
+    private void exitList(final int token) {
+        if (token == LIST_NESTED) {
+            inList.set(Thread.currentThread());
+        } else if (token == LIST_OUTER) {
+            inList.set(null);
+        }
+    }
+
+    private void ownerReport(final String kind, final Thread me, final Thread other, final boolean otherStack) {
+        final StackTraceElement[] st = new Throwable().getStackTrace();
+        final StringBuilder sig = new StringBuilder(kind).append('|').append(me.getName().replaceAll("\\d+$", ""))
+                .append('|').append(other.getName().replaceAll("\\d+$", ""));
+        for (int i = 2; i < Math.min(st.length, 16); i++) {
+            sig.append('|').append(st[i]);
+        }
+        // the AI's eval thread works on the live game while the loop thread waits for it: those touches must not use up
+        // the reports of a touch made while the loop thread itself was running (a real race)
+        final Thread.State state = other.getState();
+        final String category = otherStack ? "CONCURRENT" : state == Thread.State.RUNNABLE ? "NON_OWNER running" : "NON_OWNER waiting";
+        if (!OWNER_SEEN.add(sig.toString())
+                || OWNER_REPORTS.computeIfAbsent(category, k -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet() > OWNER_MAX_REPORTS) {
+            return;
+        }
+        final StringBuilder sb = new StringBuilder("[trigger-owner] ").append(kind).append(" game ").append(game.getId())
+                .append(" thread '").append(me.getName()).append("' ").append(otherStack ? "other" : "loop thread")
+                .append(" '").append(other.getName()).append("' (").append(state).append(')');
+        for (int i = 2; i < Math.min(st.length, 42); i++) {
+            sb.append("\n[trigger-owner]   at ").append(st[i]);
+        }
+        if (otherStack) {
+            sb.append("\n[trigger-owner]  other thread '").append(other.getName()).append("':");
+            final StackTraceElement[] os = other.getStackTrace();
+            for (int i = 0; i < Math.min(os.length, 40); i++) {
+                sb.append("\n[trigger-owner]   at ").append(os[i]);
+            }
+        }
+        System.err.println(sb);
+        final List<String> sink = ownerSink;
+        if (sink != null) {
+            sink.add(sb.toString());
+        }
+    }
+
     /** mtgx (gamecopier-fidelity-1030): the pending delayed triggers in order, read-only (a game copier carries them). */
     public final List<Trigger> getDelayedTriggersView() {
         return Collections.unmodifiableList(delayedTriggers);
@@ -192,13 +290,18 @@ public class TriggerHandler {
     }
 
     public void collectTriggerForWaiting() {
-        for (final TriggerWaiting wt : waitingTriggers) {
-            if (wt.getTriggers() != null)
-                continue;
+        final int tok = enterList("collect"); // trigger-owner-1113 (diagnostic; off = nothing)
+        try {
+            for (final TriggerWaiting wt : waitingTriggers) {
+                if (wt.getTriggers() != null)
+                    continue;
 
-            // TODO we don't seem to handle Static ones from this,
-            // so they shouldn't be checked for performance in the first place
-            wt.setTriggers(getActiveTrigger(wt.getMode(), wt.getParams()));
+                // TODO we don't seem to handle Static ones from this,
+                // so they shouldn't be checked for performance in the first place
+                wt.setTriggers(getActiveTrigger(wt.getMode(), wt.getParams()));
+            }
+        } finally {
+            exitList(tok);
         }
     }
 
@@ -275,7 +378,12 @@ public class TriggerHandler {
         if (mode == TriggerType.Always) {
             runStateTrigger(runParams);
         } else if (canWait && (game.getStack().isFrozen() || holdTrigger) && mode != TriggerType.TapsForMana && mode != TriggerType.ManaAdded) {
-            waitingTriggers.add(new TriggerWaiting(mode, runParams));
+            final int tok = ownerCheck ? enterList("add " + mode) : LIST_OFF; // trigger-owner-1113 (diagnostic; off = nothing)
+            try {
+                waitingTriggers.add(new TriggerWaiting(mode, runParams));
+            } finally {
+                exitList(tok);
+            }
         } else {
             runWaitingTrigger(new TriggerWaiting(mode, runParams));
         }
@@ -293,8 +401,14 @@ public class TriggerHandler {
         if (waitingTriggers.isEmpty()) {
             return false;
         }
-        final List<TriggerWaiting> waiting = new ArrayList<>(waitingTriggers);
-        waitingTriggers.clear();
+        final List<TriggerWaiting> waiting;
+        final int tok = enterList("take"); // trigger-owner-1113 (diagnostic; off = nothing)
+        try {
+            waiting = new ArrayList<>(waitingTriggers);
+            waitingTriggers.clear();
+        } finally {
+            exitList(tok);
+        }
 
         boolean haveWaiting = false;
         for (final TriggerWaiting wt : waiting) {
@@ -369,7 +483,12 @@ public class TriggerHandler {
     }
 
     public void clearWaitingTriggers() {
-        waitingTriggers.clear();
+        final int tok = enterList("clear"); // trigger-owner-1113 (diagnostic; off = nothing)
+        try {
+            waitingTriggers.clear();
+        } finally {
+            exitList(tok);
+        }
     }
 
     private boolean isTriggerActive(final Trigger regtrig) {
