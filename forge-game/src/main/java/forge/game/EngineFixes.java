@@ -185,11 +185,12 @@ public final class EngineFixes {
 
     /**
      * gate-loop-window-1113 ({@code -Dforge.gateLoopWindow}, a live fix: default {@link #liveFixes()}): a pilot ask that
-     * reads the reach (the decision's reach gate, the mulligan's keep gate) opens its loop-probe window before that read,
-     * on its own seat's clock. Off, both read a window opened earlier: the previous ask's (on the real clock usually
-     * expired, so the gate's Kiki loop probes were cut and the gate stayed closed until the next draw or turn), or on a
-     * work-clock seat possibly the other pilot seat's, opened on that seat's clock. The decision's own search keeps the
-     * window opened at its gate: its probes still share one quarter of the budget. A seat's spec key
+     * reads the reach (the decision's reach gate, the mulligan's keep gate) reads it in a loop-probe window of its own,
+     * opened just before on its own seat's clock. Off, both read a window opened earlier: the previous ask's (on the real
+     * clock usually expired, so the gate's Kiki loop probes were cut and the gate stayed closed until the next draw or
+     * turn), or on a work-clock seat possibly the other pilot seat's, opened on that seat's clock. The gate borrows the
+     * game's window slot and puts its old value back, so the decision's search and the other seat see exactly the windows
+     * they saw before; only the gates' reads change. A seat's spec key
      * {@code reach.gateWindow} overrides this default (RlSearch.ReachCfg#gateWindow).
      */
     private static boolean gateLoopWindow = flag("forge.gateLoopWindow");
