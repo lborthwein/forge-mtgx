@@ -30,7 +30,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>Two threads that ask the same key at once send once: the first owns the send on its own connection, the
  *       others wait for its answer. The owner is already running (it is not queued behind anything), so the wait
  *       cannot deadlock with the search's pool; if the owner fails, the waiters send for themselves.</li>
- *   <li>Only an OK answer is stored.</li>
+ *   <li>Only an OK answer is stored, and what is stored is the memo's own copy: neither the first asker nor any later
+ *       one holds the stored object, so a caller that changes its answer (a seat whose schedule, plan or search
+ *       overrides the policy) changes nothing for anyone else.</li>
  * </ul>
  */
 public final class SvcMemo {
@@ -138,16 +140,26 @@ public final class SvcMemo {
                 version = d.policyVersion;
             }
         }
-        mine.complete(d);
+        // The stored answer is the memo's OWN copy: the owner's caller may change the object it gets back (RlSeat replaces
+        // d.steps when a schedule, a plan or a search overrides the policy's answer), and no later asker may see that.
+        mine.complete(copy(d));
         return d;
     }
 
     /** A stored answer for another asker: the same steps, logp, value and version under the asker's uid and index. */
     static RlWire.Decision readdress(final RlWire.Decision d, final byte[] payload) {
         final java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        final RlWire.Decision o = new RlWire.Decision();
+        final RlWire.Decision o = copy(d);
         o.gameUid = b.getLong();
         o.decIdx = b.getInt();
+        return o;
+    }
+
+    /** A Decision that shares nothing with {@code d} (its own steps array). */
+    static RlWire.Decision copy(final RlWire.Decision d) {
+        final RlWire.Decision o = new RlWire.Decision();
+        o.gameUid = d.gameUid;
+        o.decIdx = d.decIdx;
         o.status = d.status;
         o.policyVersion = d.policyVersion;
         o.logp = d.logp;
