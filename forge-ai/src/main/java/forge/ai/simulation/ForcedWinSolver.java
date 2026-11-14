@@ -5405,7 +5405,8 @@ public final class ForcedWinSolver {
             for (int i = 0; i < ls.size() && i < Math.max(1, maxLines); i++) {
                 run++;
                 vr.checks++;
-                final Outcome u = checkLine(g, ls.get(i), tops, mode, mix(seed, 31L * mode + i), free);
+                // only the key's own world runs on the pilot's clock; a second world asked for the log is always free
+                final Outcome u = checkLine(g, ls.get(i), tops, mode, mix(seed, 31L * mode + i), free || mode != keyMode);
                 if (u.won) {
                     turn = ls.get(i).winTurn;
                     first = "won";

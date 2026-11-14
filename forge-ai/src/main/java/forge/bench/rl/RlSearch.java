@@ -1888,6 +1888,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6, sc.valueObs);
             ck.ended(DecisionClock.Phase.APPLY);
             planRow(g, frame, stage, r, order, pa, t0);
+            fpEmit(g, frame, r, order, "plan:" + pa); // reach-verify-1114 (fpCheck only)
             if (pa != -2) {
                 departures++;
                 planDecided(g, stage, r, t0);
@@ -2148,21 +2149,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("score_ms", Math.round((System.nanoTime() - t0) / 1e5 - r.ms * 10) / 10.0);
             addRow(row);
         }
-        if (FP_CHECK && r.fpPicks != null && r.fpRaw != null) {
-            // reach-verify-1114 (fpCheck only): on stderr always (a live seat has no decision log), and in the log
-            try {
-                final JsonObject fr = fpRow(g, frame, r, order);
-                System.err.println("[fp-check] " + fr);
-                if (cfg.decisionLog != null || rowsWanted) {
-                    addRow(fr);
-                }
-            } catch (RuntimeException e) {
-                System.err.println("[fp-check] row failed: " + e);
-            }
-        }
-        if (FP_CHECK) {
-            fpLeaves.clear();
-        }
+        fpEmit(g, frame, r, order, "look"); // reach-verify-1114 (fpCheck only)
         tap(r.givenIndex.length > 0 ? "searched" : String.valueOf(r.outcome), stage, r, order.size(), answer);
         return answer;
     }
@@ -4689,6 +4676,28 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         row.addProperty("ms", Math.round(r.ms * 10) / 10.0);
         fpLeaves.clear();
         return row;
+    }
+
+    /** reach-verify-1114 (fpCheck only): the decision's fp row on stderr always (a live seat has no decision log), and in the log. */
+    private void fpEmit(final Game g, final RlWire.Decide frame, final LookaheadSearch.GivenResult r, final List<Integer> order,
+            final String path) {
+        if (!FP_CHECK) {
+            return;
+        }
+        if (r != null && r.fpPicks != null && r.fpRaw != null) {
+            try {
+                final JsonObject fr = fpRow(g, frame, r, order);
+                fr.addProperty("path", path);
+                System.err.println("[fp-check] " + fr);
+                if (cfg.decisionLog != null || rowsWanted) {
+                    addRow(fr);
+                }
+            } catch (RuntimeException e) {
+                System.err.println("[fp-check] row failed: " + e);
+            }
+            r.fpPicks = null; // one row a decision (a plan stage that leaves the answer to the look-ahead row)
+        }
+        fpLeaves.clear();
     }
 
     private static Number fpNum(final double[] rr, final int i) {
