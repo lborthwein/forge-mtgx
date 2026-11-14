@@ -263,6 +263,73 @@ public class OwnerMisplaysTest extends forge.ai.AITest {
         }
     }
 
+    /**
+     * loop-window-1113: on a work-clock seat the loop window binds on work, not real time. A decision opens a window of a
+     * quarter of a 400 ms budget (100 ms) and then 150 ms of real time pass with no engine work: with
+     * {@code forge.loopWorkClock} the window is still open (no work was done) and the probe finds the loop; off, the
+     * window closed on the host clock and nothing is probed, so the answer depended on how long the host took.
+     */
+    @Test
+    public void theLoopWindowBindsOnWorkNotRealTime() throws InterruptedException {
+        final boolean was = forge.game.EngineFixes.loopWorkClock();
+        final forge.game.WorkClock.Clock prev = forge.game.WorkClock.install(forge.game.WorkClock.newClock(1.0));
+        try {
+            for (final boolean on : new boolean[] {true, false}) {
+                forge.game.EngineFixes.setLoopWorkClockForTest(on);
+                final Game g = loopGame("Pestermite", "Grizzly Bears");
+                final Player me = g.getPlayers().get(0);
+                ForcedWinSolver.loopWindow(g, System.nanoTime(), 400_000_000L);
+                Thread.sleep(150);
+                final long p0 = ForcedWinSolver.LOOP_PROBES.get();
+                final long[] t0 = ForcedWinSolver.loopTally();
+                final boolean ender = screenSolver(me, true).hasEnder(g);
+                final long probes = ForcedWinSolver.LOOP_PROBES.get() - p0;
+                final long[] t1 = ForcedWinSolver.loopTally();
+                ForcedWinSolver.loopDeadline(g, 0L);
+                Assert.assertEquals(t1[0] - t0[0], probes, "this thread's tally counts its probes");
+                if (on) {
+                    Assert.assertTrue(ender, "work clock: no work since the window opened, so it is still open");
+                    Assert.assertTrue(probes > 0, "work clock: the partner is probed");
+                    Assert.assertEquals(t1[1] - t0[1], 0L, "work clock: no read cut by its window");
+                } else {
+                    Assert.assertFalse(ender, "host clock: 150 ms passed a 100 ms window");
+                    Assert.assertEquals(probes, 0L, "host clock: nothing probed");
+                    Assert.assertTrue(t1[1] - t0[1] > 0, "host clock: the read is counted as cut by its window");
+                }
+            }
+        } finally {
+            forge.game.EngineFixes.setLoopWorkClockForTest(was);
+            forge.game.WorkClock.install(prev);
+        }
+    }
+
+    /** loop-window-1113: without a work clock on the thread, on and off open the same window: a quarter of the budget. */
+    @Test
+    public void withoutAWorkClockOnAndOffOpenTheSameWindow() throws ReflectiveOperationException {
+        final boolean was = forge.game.EngineFixes.loopWorkClock();
+        final forge.game.WorkClock.Clock prev = forge.game.WorkClock.install(null);
+        final java.lang.reflect.Field f = ForcedWinSolver.class.getDeclaredField("LOOP_DEADLINE");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        final Map<Object, Long> deadlines = (Map<Object, Long>) f.get(null);
+        final Game g = loopGame("Pestermite", "Grizzly Bears");
+        try {
+            for (final boolean on : new boolean[] {true, false}) {
+                forge.game.EngineFixes.setLoopWorkClockForTest(on);
+                final long before = System.nanoTime();
+                ForcedWinSolver.loopWindow(g, before, 400_000_000L);
+                final long after = System.nanoTime();
+                final long end = deadlines.get(g.getRules());
+                Assert.assertTrue(end >= before + 100_000_000L - (after - before) && end <= after + 100_000_000L,
+                        (on ? "on" : "off") + ": the window ends a quarter of the budget out: " + (end - before));
+            }
+        } finally {
+            ForcedWinSolver.loopDeadline(g, 0L);
+            forge.game.EngineFixes.setLoopWorkClockForTest(was);
+            forge.game.WorkClock.install(prev);
+        }
+    }
+
     // ------------------------------------------------------------------ G17: the solver
 
     static final String G17_FRAME = "[state]\nturn=7\nactiveplayer=human\nactivephase=MAIN2\nhumanlife=18\nailife=16\n"
