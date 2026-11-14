@@ -114,7 +114,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /**
          * sdcc-floor-1114 (off by default; written to JSON only when on): a menu entry whose policy prior is below
          * {@link #priorFloorMin} is not offered to the look-ahead as a departure (the policy's own answer always is), and
-         * a sampled policy plan whose first step is such an entry is dropped. The solver's lines (a plan or proven line)
+         * a sampled policy plan that starts with such an entry, or samples any step the policy rated below the floor, is
+         * dropped. The solver's lines (a plan or proven line)
          * are not filtered, so a move one of them backs is still offered, as that line.
          */
         public boolean priorFloor = false;
@@ -1476,9 +1477,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /**
-     * sdcc-floor-1114 ({@link Config#priorFloor}): drops each sampled policy plan whose first step is a menu entry with a
-     * summed policy prior below {@code min} (with its label). The solver's lines are kept whatever their first step: a
-     * move a plan or proven line backs is still offered, as that line. Returns how many were dropped.
+     * sdcc-floor-1114 ({@link Config#priorFloor}): drops each sampled policy plan (with its label) whose first step is a
+     * menu entry with a summed policy prior below {@code min}, or any of whose sampled steps had a policy probability
+     * below {@code min} when it was sampled ({@link PlanSearch.PolicyPlan#minStepP}: a plan that plays the policy's own
+     * first move and then a move the policy rates below the floor is the same departure one step later). The solver's
+     * lines are kept whatever their steps: a move a plan or proven line backs is still offered, as that line. Returns how
+     * many were dropped.
      */
     static int priorFloorSamples(final PlanSearch.Stage st, final RlCandidates.Menu m, final List<SpellAbility> objs,
             final Map<Integer, double[]> by, final Map<String, Integer> entryOf, final double min) {
@@ -1494,7 +1498,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             final Integer e = entryOf.get(actionKey(ch == 0 ? null : objs.get(ch - 1)));
             final double[] a = e == null ? null : by.get(e);
-            if (a != null && a[0] < min) {
+            final double later = ((PlanSearch.PolicyPlan) st.plans.get(i)).minStepP;
+            if (LOG_ACTS) {
+                System.err.println("[prior-floor] plan " + (i < st.labels.size() ? st.labels.get(i) : "#" + i) + " first="
+                        + (a == null ? "?" : Math.round(a[0] * 1e4) / 1e4) + " minStepP=" + later);
+            }
+            if (a != null && a[0] < min || later < min) {
                 st.plans.remove(i);
                 if (i < st.labels.size()) {
                     st.labels.remove(i);

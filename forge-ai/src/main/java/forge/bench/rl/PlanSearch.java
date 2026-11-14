@@ -341,6 +341,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final int turn;
         final List<PStep> steps;
         final String key;
+        /** sdcc-floor-1114 (read only by search.priorFloor): the lowest policy probability of a sampled step; NaN = none known. */
+        double minStepP = Double.NaN;
 
         PolicyPlan(final int turn, final List<PStep> steps) {
             this.turn = turn;
@@ -482,6 +484,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final int maxSteps;
         final boolean exactActions;
         final List<PStep> steps = new ArrayList<>();
+        /**
+         * sdcc-floor-1114 (read only by search.priorFloor): the policy's probability of each recorded step's candidate where
+         * the step was sampled ({@link #sample}), NaN where it was not; parallel to {@link #steps}.
+         */
+        final List<Double> stepP = new ArrayList<>();
+        private double lastP = Double.NaN;
         /** unified-search-1106 (plans.planX). */
         boolean recordX;
         Player seatPlayer;
@@ -519,9 +527,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         @Override
         public void answered(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
                 final int choice, final int x) {
+            final double sp = lastP;
+            lastP = Double.NaN;
             if (!inPlan(g, p) || choice < 0 || choice > objs.size()) {
                 return;
             }
+            stepP.add(sp); // sdcc-floor-1114
             final SpellAbility sa = choice == 0 ? null : objs.get(choice - 1);
             final String phase = String.valueOf(g.getPhaseHandler().getPhase());
             if (exactActions) {
@@ -566,6 +577,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             d.policyVersion = s.policyVersion;
             d.valueObs = s.valueObs;
             d.steps = new short[] {(short) pick};
+            lastP = pick < s.probs.length ? s.probs[pick] : Double.NaN; // sdcc-floor-1114
             return d;
         }
     }
@@ -1358,6 +1370,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     continue;
                 }
                 final PolicyPlan pp = new PolicyPlan(ph.getTurn(), new ArrayList<>(r.steps));
+                for (double x : r.stepP) {
+                    if (!Double.isNaN(x) && !(x >= pp.minStepP)) {
+                        pp.minStepP = x; // sdcc-floor-1114
+                    }
+                }
                 if (!seen.add(pp.key) || match(m, objs, pp.steps.get(0)) < 0) {
                     continue;
                 }

@@ -182,7 +182,14 @@ public class PriorFloorTest extends SimulationTest {
         st.labels.add("sample#1 engine");
         st.plans.add(new PlanSearch.PolicyPlan(g.getPhaseHandler().getTurn(), List.of(new PlanSearch.PStep(tideSa, "MAIN1"))));
         st.labels.add("sample#2 boost");
-        AssertJUnit.assertEquals(1, RlSearch.priorFloorSamples(st, m, objs, by, entryOf, 0.05));
+        // NC06 live rerun with the floor: the look-ahead then adopted a sample playing the policy's own first move and the
+        // engine next; a sampled step the policy rated below the floor drops the plan too
+        final PlanSearch.PolicyPlan later = new PlanSearch.PolicyPlan(g.getPhaseHandler().getTurn(),
+                List.of(new PlanSearch.PStep(tideSa, "MAIN1"), new PlanSearch.PStep(engineSa, "MAIN1")));
+        later.minStepP = P_ENGINE;
+        st.plans.add(later);
+        st.labels.add("sample#3 boost, engine");
+        AssertJUnit.assertEquals(2, RlSearch.priorFloorSamples(st, m, objs, by, entryOf, 0.05));
         AssertJUnit.assertEquals(2, st.plans.size());
         AssertJUnit.assertTrue("the solver's line through the engine is still offered", st.plans.get(0) instanceof PlanSearch.LinePlan);
         AssertJUnit.assertEquals(List.of("line#0", "sample#2 boost"), st.labels);
