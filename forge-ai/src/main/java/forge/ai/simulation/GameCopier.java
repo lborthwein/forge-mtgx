@@ -181,6 +181,17 @@ public class GameCopier {
 
     public void setCopyStaleRefs(boolean on) { this.copyStaleRefs = on; }
 
+    /**
+     * Lane sdcc-copycast-1114 (off by default, and then nothing changes): a triggered ability waiting on the original
+     * stack is rebuilt in the copy from its host's trigger at the same position (as the resolving top trigger is rebuilt
+     * by the search), with its controller, triggering objects, targets and optional flag mapped into the copy. Callers
+     * check {@link #stackUnsupported(Game, boolean, boolean)} with the same flag first; an entry that cannot be rebuilt
+     * fails the copy.
+     */
+    private boolean copyTriggers = false;
+
+    public void setCopyTriggers(boolean on) { this.copyTriggers = on; }
+
     /** copyStaleRefs: {@code o} is a card object the original game no longer holds (replaced by a newer object, or gone). */
     private boolean staleCard(GameObject o) {
         return o instanceof Card && !cardMap.containsKey(o) && origGame.findById(((Card) o).getId()) != o;
@@ -284,6 +295,17 @@ public class GameCopier {
      * whole stack unfrozen, the resolving entry on top and not yet resolved, so a play-out can resolve it again.
      */
     public static String stackUnsupported(Game g, boolean resolvingTop) {
+        return stackUnsupported(g, resolvingTop, false);
+    }
+
+    /**
+     * As {@link #stackUnsupported(Game, boolean)}; with {@code triggers} (the copier's {@link #setCopyTriggers}), a
+     * triggered ability waiting on the stack is accepted when it can be rebuilt in a copy: its host is a card the game
+     * holds, the trigger is one of that host's own triggers (not a delayed trigger), it is not a copy or modal, and
+     * every triggering object is of a kind the copier maps. Otherwise the reason is "trigger-host", "trigger-kind",
+     * "trigger-modes" or "trigger-object" ("trigger" for an entry that is not a wrapped trigger).
+     */
+    public static String stackUnsupported(Game g, boolean resolvingTop, boolean triggers) {
         final forge.game.zone.MagicStack st = g.getStack();
         if (st.hasSimultaneousStackEntries()) {
             return "simultaneous";
@@ -301,7 +323,25 @@ public class GameCopier {
                     // The resolving trigger is not copied: the caller rebuilds its ability in the copy (setSkipResolvingTrigger).
                     continue;
                 }
-                return "trigger";
+                if (!triggers) {
+                    return "trigger";
+                }
+                final String tw = triggerUnsupported(g, sa);
+                if (tw != null) {
+                    return tw;
+                }
+                for (SpellAbility s = ((forge.game.trigger.WrappedAbility) sa).getWrappedAbility(); s != null; s = s.getSubAbility()) {
+                    if (!s.usesTargeting()) {
+                        continue;
+                    }
+                    for (GameObject o : s.getTargets()) {
+                        if (o instanceof SpellAbility ? !below.contains(o) : !(o instanceof Card) && !(o instanceof Player)) {
+                            return "target";
+                        }
+                    }
+                }
+                below.add(sa);
+                continue;
             }
             final boolean spell = si.isSpell() && sa.isSpell();
             final Card host = sa.getHostCard();
@@ -347,6 +387,178 @@ public class GameCopier {
         return null;
     }
 
+    /** copyTriggers: why a waiting trigger on the stack cannot be rebuilt in a copy, or null. */
+    private static String triggerUnsupported(Game g, SpellAbility sa) {
+        if (!(sa instanceof forge.game.trigger.WrappedAbility)) {
+            return "trigger";
+        }
+        final forge.game.trigger.WrappedAbility w = (forge.game.trigger.WrappedAbility) sa;
+        final SpellAbility inner = w.getWrappedAbility();
+        final Trigger t = w.getTrigger();
+        final Card host = w.getHostCard();
+        if (t == null || inner == null || host == null || g.findById(host.getId()) == null) {
+            return "trigger-host";
+        }
+        if (inner.isCopied() || t.isStatic() || LookaheadSearch.triggerIndex(host, t) < 0
+                || (t.getOverridingAbility() == null && !t.hasParam("Execute"))) {
+            return "trigger-kind";
+        }
+        if (inner.getApi() == forge.game.ability.ApiType.Charm || inner.getChosenList() != null) {
+            return "trigger-modes";
+        }
+        for (SpellAbility s = inner; s != null; s = s.getSubAbility()) {
+            for (Object v : s.getTriggeringObjects().values()) {
+                if (!triggeringShapeOk(v, g, 0)) {
+                    return "trigger-object";
+                }
+            }
+            if (!s.getPaidHash().isEmpty()) {
+                return "trigger-object";
+            }
+        }
+        return null;
+    }
+
+    /** copyTriggers: a triggering object of a kind {@link #mapTriggering} maps (cards, players, stack entries, plain values, lists of those). */
+    private static boolean triggeringShapeOk(Object v, Game g, int depth) {
+        if (v == null) {
+            return true;
+        }
+        for (Class<?> k : PASS) {
+            if (k.isInstance(v)) {
+                return true;
+            }
+        }
+        if (v instanceof Card) {
+            return ((Card) v).getGame() == g;
+        }
+        if (v instanceof Player) {
+            return ((Player) v).getGame() == g;
+        }
+        if (v instanceof SpellAbility) {
+            return true;
+        }
+        if (v instanceof SpellAbilityStackInstance) {
+            for (SpellAbilityStackInstance si : g.getStack()) {
+                if (si == v) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (v instanceof List && depth < 3) {
+            for (Object o : (List<?>) v) {
+                if (!triggeringShapeOk(o, g, depth + 1)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /** copyTriggers: a triggering object mapped into the copy, or {@link #REFUSE}. */
+    private Object mapTriggering(Object v, Game newGame, String where) {
+        if (v instanceof SpellAbility && stackSaMap.containsKey(v)) {
+            return stackSaMap.get(v);
+        }
+        if (v instanceof SpellAbilityStackInstance) {
+            final SpellAbility m = stackSaMap.get(((SpellAbilityStackInstance) v).getSpellAbility());
+            if (m != null) {
+                for (SpellAbilityStackInstance si : newGame.getStack()) {
+                    if (si.getSpellAbility() == m) {
+                        return si;
+                    }
+                }
+            }
+            return REFUSE;
+        }
+        if (v instanceof List && !(v instanceof forge.game.card.CardCollection) && !(v instanceof forge.game.player.PlayerCollection)) {
+            final List<Object> out = new ArrayList<>();
+            for (Object o : (List<?>) v) {
+                final Object m = mapTriggering(o, newGame, where);
+                if (m == REFUSE) {
+                    return REFUSE;
+                }
+                out.add(m);
+            }
+            return out;
+        }
+        return mapPending(v, newGame, where);
+    }
+
+    /**
+     * copyTriggers: the waiting trigger {@code w} of the original stack as a wrapped ability of the copy, built as
+     * Forge builds a trigger's ability (TriggerHandler.runSingleTriggerInternal) from the copied host's trigger at the
+     * same position. Throws when it cannot be rebuilt.
+     */
+    private SpellAbility rebuildStackTrigger(forge.game.trigger.WrappedAbility w, Game newGame) {
+        final SpellAbility live = w.getWrappedAbility();
+        final Trigger lt = w.getTrigger();
+        final int idx = LookaheadSearch.triggerIndex(w.getHostCard(), lt);
+        final Card host = newGame.findById(w.getHostCard().getId());
+        if (host == null || idx < 0) {
+            throw new IllegalStateException("stack copy: trigger host " + w.getHostCard() + " missing");
+        }
+        Trigger t = null;
+        int i = 0;
+        for (Trigger x : host.getTriggers()) {
+            if (i++ == idx) {
+                t = x;
+                break;
+            }
+        }
+        if (t == null || t.getMode() != lt.getMode() || !java.util.Objects.equals(t.getParam("Execute"), lt.getParam("Execute"))) {
+            throw new IllegalStateException("stack copy: trigger " + idx + " of " + host + " does not match");
+        }
+        final Player activator = (Player) find(live.getActivatingPlayer());
+        SpellAbility sa = t.getOverridingAbility();
+        if (sa == null) {
+            if (!t.hasParam("Execute")) {
+                throw new IllegalStateException("stack copy: trigger " + idx + " of " + host + " has no ability");
+            }
+            sa = forge.game.ability.AbilityFactory.getAbility(host, t.getParam("Execute"));
+            sa.setActivatingPlayer(activator);
+            if (t.isIntrinsic()) {
+                sa.setIntrinsic(true);
+                sa.changeText();
+            }
+        } else {
+            sa = sa.copy(host, activator, false, true);
+        }
+        sa.setTrigger(t);
+        sa.setActivatingPlayer(activator);
+        final String where = "stack trigger[" + lt.getMode() + " " + host.getName() + "]";
+        for (SpellAbility a = live, b = sa; a != null || b != null; a = a.getSubAbility(), b = b.getSubAbility()) {
+            if (a == null || b == null || a.usesTargeting() != b.usesTargeting() || a.getApi() != b.getApi()) {
+                throw new IllegalStateException("stack copy: the ability of " + where + " does not match");
+            }
+            if (a.getTriggeringObjects().isEmpty()) {
+                continue;
+            }
+            final Map<forge.game.ability.AbilityKey, Object> trig = forge.game.ability.AbilityKey.newMap();
+            for (Map.Entry<forge.game.ability.AbilityKey, Object> e : a.getTriggeringObjects().entrySet()) {
+                final Object m = mapTriggering(e.getValue(), newGame, where);
+                if (m == REFUSE) {
+                    throw new IllegalStateException("stack copy: triggering " + e.getKey() + " of " + where + " not mapped");
+                }
+                trig.put(e.getKey(), m);
+            }
+            b.setTriggeringObjects(trig);
+        }
+        for (SpellAbility sub = sa; sub != null; sub = sub.getSubAbility()) {
+            if (sub.usesTargeting()) {
+                sub.resetTargets();
+            }
+        }
+        SpellAbilityChoiceCopier.copyTargets(live, sa, o -> copyStaleRefs && staleCard(o) ? null : findWithStack(o));
+        sa.setOptionalTrigger(live.isOptionalTrigger());
+        sa.setXManaCostPaid(live.getXManaCostPaid());
+        sa.setStackDescription(sa.toString());
+        final Player decider = w.getDecider() == null ? null : (Player) find(w.getDecider());
+        return new forge.game.trigger.WrappedAbility(t, sa, decider);
+    }
+
     /**
      * Rebuild the original stack in the copy, bottom first: each spell is its copied card's own ability with the
      * original's cast choices (X, optional costs, modes) and targets mapped into the copy. Throws if any entry cannot
@@ -361,6 +573,14 @@ public class GameCopier {
             final SpellAbility orig = sourceEntry.getSpellAbility();
             if (skipResolvingTrigger && orig == origTop && orig.isWrapper() && origGame.getStack().isResolving()) {
                 skipped++;
+                continue;
+            }
+            if (copyTriggers && orig instanceof forge.game.trigger.WrappedAbility) {
+                // sdcc-copycast-1114: a waiting trigger, rebuilt from its host's trigger in the copy
+                final SpellAbility copy = rebuildStackTrigger((forge.game.trigger.WrappedAbility) orig, newGame);
+                newGame.getStack().dangerouslyPushCopy(copy);
+                if (historyIds != null) historyIds.put(sourceEntry.getId(), newGame.getStack().peek().getId());
+                stackSaMap.put(orig, copy);
                 continue;
             }
             final Card newHost = (Card) find(orig.getHostCard());

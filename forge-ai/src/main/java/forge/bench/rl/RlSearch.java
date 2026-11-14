@@ -444,6 +444,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean copyDungeon = false;
         /** Lane sdcc-copycast-1114 ({@link LookaheadSearch.Config#copyStaleRefs}); false = off, nothing changes. */
         public boolean copyStaleRefs = false;
+        /** Lane sdcc-copycast-1114 ({@link LookaheadSearch.Config#copyTriggers}); false = off, nothing changes. */
+        public boolean copyTriggers = false;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -453,7 +455,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "copyStaleRefs", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
+                "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "copyStaleRefs", "copyTriggers", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
@@ -633,6 +635,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("copyCast")) c.copyCast = o.get("copyCast").getAsBoolean();
             if (o.has("copyDungeon")) c.copyDungeon = o.get("copyDungeon").getAsBoolean();
             if (o.has("copyStaleRefs")) c.copyStaleRefs = o.get("copyStaleRefs").getAsBoolean();
+            if (o.has("copyTriggers")) c.copyTriggers = o.get("copyTriggers").getAsBoolean();
             c.check();
             return c;
         }
@@ -914,6 +917,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (copyStaleRefs) {
                 o.addProperty("copyStaleRefs", true); // sdcc-copycast-1114: only when on
+            }
+            if (copyTriggers) {
+                o.addProperty("copyTriggers", true); // sdcc-copycast-1114: only when on
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -1286,6 +1292,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.copyCast = cfg.copyCast; // sdcc-copycast-1114
         lc.copyDungeon = cfg.copyDungeon; // sdcc-copycast-1114
         lc.copyStaleRefs = cfg.copyStaleRefs; // sdcc-copycast-1114
+        lc.copyTriggers = cfg.copyTriggers; // sdcc-copycast-1114
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
             lc.stack = true;
@@ -2157,6 +2164,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("fw_ms", Math.round(sd.lastMs * 10) / 10.0);
             }
             row.addProperty("outcome", r.outcome);
+            if (r.stackNote != null) {
+                // measurement only (-Dsdcc.stackNote=true): the stack, the policy's answer and the menu by name
+                row.add("stack_note", r.stackNote);
+                row.addProperty("def_act", actLabel(given.isEmpty() ? null : given.get(0)));
+                final JsonArray menu = new JsonArray();
+                for (SpellAbility x : given) {
+                    menu.add(actLabel(x));
+                }
+                row.add("menu", menu);
+            }
             row.addProperty("chosen", r.chosen <= 0 ? 0 : r.chosen < order.size() ? order.get(r.chosen) : -1);
             row.addProperty("failed", r.failed);
             row.addProperty("leaf_fallback", r.leafFallback);
@@ -2967,6 +2984,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             scorer = new ChoiceScorer(ChoiceScorer.Config.parse(cfg.choiceScorer), index, obsVersion, uid);
             scorer.setCopyDungeon(cfg.copyDungeon); // sdcc-copycast-1114
             scorer.setCopyStaleRefs(cfg.copyStaleRefs); // sdcc-copycast-1114
+            scorer.setCopyTriggers(cfg.copyTriggers); // sdcc-copycast-1114
             final ChoiceScorer.Config sc = scorer.config();
             if (sc.screenNodes > 0 || sc.pile) {
                 sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();

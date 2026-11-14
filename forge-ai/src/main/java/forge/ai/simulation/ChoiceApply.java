@@ -42,6 +42,11 @@ public final class ChoiceApply {
             return false;
         }
 
+        /** sdcc-copycast-1114: the copies rebuild a trigger waiting on the stack ({@link GameCopier#setCopyTriggers}). */
+        default boolean copyTriggers() {
+            return false;
+        }
+
         /** The seat arranged these cards going to its library (what the live bridge reports as a look). */
         default void onOrder(Object ctx, Game g, Player me, List<Card> cards) {
         }
@@ -119,7 +124,12 @@ public final class ChoiceApply {
 
     /** Why a resolving choice can't be replayed on a copy, or null. */
     public static String unsupported(final Game live, final SpellAbility sa) {
-        final String why = GameCopier.stackUnsupported(live, true);
+        return unsupported(live, sa, false);
+    }
+
+    /** As {@link #unsupported(Game, SpellAbility)}; with {@code triggers}, a trigger waiting under the resolving effect is accepted. */
+    public static String unsupported(final Game live, final SpellAbility sa, final boolean triggers) {
+        final String why = GameCopier.stackUnsupported(live, true, triggers);
         if (why != null) {
             return why;
         }
@@ -346,6 +356,9 @@ public final class ChoiceApply {
         }
         if (frames != null && frames.copyStaleRefs()) {
             c.setCopyStaleRefs(true); // sdcc-copycast-1114
+        }
+        if (frames != null && frames.copyTriggers()) {
+            c.setCopyTriggers(true); // sdcc-copycast-1114
         }
         if (fidelity > 0) {
             c.setCopyFidelity(fidelity);
