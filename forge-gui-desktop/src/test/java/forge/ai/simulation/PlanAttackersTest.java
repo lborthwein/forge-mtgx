@@ -225,6 +225,51 @@ public class PlanAttackersTest extends AITest {
         Assert.assertFalse(res.lines.isEmpty(), "the line survives 2 damage at 3 life with or without the removal");
     }
 
+    /**
+     * Measurement (printed; the only assertions are that the key-off search plays no removal and that the key never
+     * loses a line): the width search's nodes with the slice off and on, on unit positions with 0 to 4 opposing
+     * attackers, one to three removal spells in hand beside cantrips and burn, at a safe and at a threatened life total.
+     */
+    @Test
+    public void nodeCostOnUnitPositions() {
+        final String[] hands = {
+            "Brainstorm;Ponder;Preordain;Lightning Bolt;" + DESTROY,
+            "Brainstorm;Ponder;Preordain;Lightning Bolt;Lightning Bolt;" + DESTROY + ";" + BOUNCE,
+            "Brainstorm;Ponder;Gitaxian Probe;Lightning Bolt;" + DESTROY + ";" + BOUNCE + ";" + DAMAGE,
+        };
+        final String[] boards = {"Plains", "Plains;Hill Giant", "Plains;Hill Giant;Grizzly Bears;Craw Wurm",
+            "Plains;Hill Giant;Grizzly Bears;Craw Wurm;Llanowar Elves"};
+        final String field = "Mountain;Mountain;Swamp;Swamp;Swamp;Island;Island;Island";
+        for (int life : new int[] {20, 5}) {
+            for (String hand : hands) {
+                for (String board : boards) {
+                    final int[] nodes = new int[2], lines = new int[2], moves = new int[2];
+                    final long[] ms = new long[2];
+                    for (int key = 0; key < 2; key++) {
+                        final Game g = game(hand, field, life, board, 9);
+                        final Player me = g.getPlayers().get(0);
+                        final ForcedWinModel.Reader r = new ForcedWinModel.Reader();
+                        r.planAttackers = key == 1;
+                        final ForcedWinModel.Position pos = r.read(g, me, null, true);
+                        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+                        lim.ms = 60_000; // the node limit, not the clock, ends a search here
+                        final long t0 = System.nanoTime();
+                        final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+                        ms[key] = (System.nanoTime() - t0) / 1_000_000L;
+                        nodes[key] = res.nodes;
+                        lines[key] = res.lines.size();
+                        moves[key] = res.tgtMoves;
+                    }
+                    System.err.println("PA nodes life=" + life + " removal=" + (hand.split(";").length - 4) + " attackers=" + (board.split(";").length - 1)
+                            + " off nodes=" + nodes[0] + " lines=" + lines[0] + " ms=" + ms[0] + " | on nodes=" + nodes[1] + " lines=" + lines[1]
+                            + " ms=" + ms[1] + " tgtMoves=" + moves[1]);
+                    Assert.assertEquals(moves[0], 0);
+                    Assert.assertTrue(lines[1] > 0 || lines[0] == 0, "the key never loses a line: " + hand + " / " + board);
+                }
+            }
+        }
+    }
+
     @Test
     public void thePlanRowsBoardIsCountsOnlyAndOffByDefault() {
         Assert.assertFalse(forge.bench.rl.RlSearch.PLAN_BOARD_LOG, "-Dsdcc.planBoardLog is off unless asked: the plan row is as before");
