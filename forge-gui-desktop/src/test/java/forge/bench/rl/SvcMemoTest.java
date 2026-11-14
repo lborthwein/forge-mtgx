@@ -92,6 +92,11 @@ public class SvcMemoTest {
         Assert.assertFalse(RlLiveSeat.Spec.parse(base).search.toJson().has("svcMemo"));
         Assert.assertTrue(RlLiveSeat.Spec.parse(base + ",svcMemo=1").search.svcMemo);
         Assert.assertFalse(RlLiveSeat.Spec.parse(base + ",svcMemo=0").search.svcMemo);
+        // the live opponent key (untested-keys-1113, taken with this lane): absent = Forge AI, as before
+        Assert.assertEquals(RlLiveSeat.Spec.parse(base).search.toJson().toString(),
+                RlLiveSeat.Spec.parse(base + ",opponent=forge").search.toJson().toString(), "opponent=forge is the seat as before");
+        Assert.assertEquals(RlLiveSeat.Spec.parse(base + ",opponent=policy").search.opponent, "policy");
+        Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(base + ",opponent=human"));
     }
 
     // ------------------------------------------------------------------------------------------------ the seat's path
