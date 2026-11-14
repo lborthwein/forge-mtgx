@@ -100,7 +100,7 @@ public final class RlLiveSeat {
                 "budgetMs", "engineMs", "evalReserveMs", "wallGraceMs", "planMs", "nodes", "engineNodes", "worlds", "top",
                 "horizon", "planOrder", "cycles", "hideOwnLibrary", "hiddenOrderLegacy", "staleStatics", "engineOpen", "engineVerify",
                 "followPay", "paySearch", "engineAfterPlanFail", "sourceOutput", "planDiscard", "engineTriggerTargets", "verifyReplan",
-                "breakOnCounter", "copyBackFace", "engineLongLoops", "engineLoopBisect", "engineLoopHoist", "engineLoopReach",
+                "breakOnCounter", "copyBackFace", "copyDungeon", "engineLongLoops", "engineLoopBisect", "engineLoopHoist", "engineLoopReach",
                 "engineMoves", "engineNodesPerSearch", "engineRerun", "historyLki", "landEntersProbe", "lineUncapped", "loopMarginal",
                 "offBattlefieldLimits", "planDiscardWall", "planExpandCap", "probeSettle", "readerPerGame", "sourceColorsLive",
                 "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds",
@@ -120,7 +120,7 @@ public final class RlLiveSeat {
         private static final java.util.Set<String> LIVE_SOLVER_FLAGS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "cycles", "hideOwnLibrary", "hiddenOrderLegacy", "staleStatics", "engineOpen", "engineVerify", "followPay", "paySearch",
                 "engineAfterPlanFail", "sourceOutput", "planDiscard", "engineTriggerTargets", "verifyReplan",
-                "breakOnCounter", "copyBackFace", "engineLongLoops", "engineLoopBisect", "engineLoopHoist", "engineLoopReach",
+                "breakOnCounter", "copyBackFace", "copyDungeon", "engineLongLoops", "engineLoopBisect", "engineLoopHoist", "engineLoopReach",
                 "engineMoves", "engineNodesPerSearch", "engineRerun", "historyLki", "landEntersProbe", "lineUncapped", "loopMarginal",
                 "offBattlefieldLimits", "planDiscardWall", "planExpandCap", "probeSettle", "readerPerGame", "sourceColorsLive",
                 "sourceLeaves", "stackAbilityCopies", "stackHistory", "stalePlayerStatics", "turnLimits", "tutorCast", "unknownWorlds",

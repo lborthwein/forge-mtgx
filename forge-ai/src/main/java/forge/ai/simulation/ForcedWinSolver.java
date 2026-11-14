@@ -339,6 +339,8 @@ public final class ForcedWinSolver {
          * search, and a followed line's modal cast is not bound to what was verified.
          */
         public boolean engineModeChoice = false;
+        /** sdcc-copycast-1114 (false = off, nothing changes): the solver's copies carry a dungeon card ({@link GameCopier#setCopyDungeon}). */
+        public boolean copyDungeon = false;
         /**
          * sdcc-tutorcast-1110 (false = off: the reader, its templates and every plan are unchanged). The probes also
          * note where an activated ability leaves its own source once it has resolved (the top of our library, our
@@ -967,6 +969,7 @@ public final class ForcedWinSolver {
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
+            c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.probeObjects = "true".equals(get.apply("probeObjects")); // sdcc-probeobj-1111
             c.planBridge = "true".equals(get.apply("planBridge")); // sdcc-bridge-1111
@@ -1052,6 +1055,7 @@ public final class ForcedWinSolver {
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
+                + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
                 + (sourceLeaves ? " sourceLeaves" : "")
                 + (probeObjects ? " probeObjects" : "") // sdcc-probeobj-1111
@@ -3134,6 +3138,7 @@ public final class ForcedWinSolver {
                     copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                     copier.setHistoryLki(cfg.historyLki); // house p13
                     copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                    copier.setCopyDungeon(cfg.copyDungeon); // sdcc-copycast-1114
                     copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
                     copier.setStackHistory(cfg.stackHistory); // house p17
                     g = copier.makeCopy();
@@ -3936,6 +3941,7 @@ public final class ForcedWinSolver {
         el.offBattlefieldLimits = cfg.offBattlefieldLimits; // house p12
         el.historyLki = cfg.historyLki; // house p13
         el.copyBackFace = cfg.copyBackFace; // house p15
+        el.copyDungeon = cfg.copyDungeon; // sdcc-copycast-1114
         el.stackAbilityCopies = cfg.stackAbilityCopies; // house p16
         el.stackHistory = cfg.stackHistory; // house p17
         el.cycles = cfg.cycles;
@@ -4635,6 +4641,7 @@ public final class ForcedWinSolver {
         el.offBattlefieldLimits = cfg.offBattlefieldLimits;
         el.historyLki = cfg.historyLki;
         el.copyBackFace = cfg.copyBackFace;
+        el.copyDungeon = cfg.copyDungeon; // sdcc-copycast-1114
         el.stackAbilityCopies = cfg.stackAbilityCopies;
         el.stackHistory = cfg.stackHistory;
         el.cycles = cfg.cycles;
@@ -4857,6 +4864,7 @@ public final class ForcedWinSolver {
                 copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                 copier.setHistoryLki(cfg.historyLki); // house p13
                 copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                copier.setCopyDungeon(cfg.copyDungeon); // sdcc-copycast-1114
                 copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
                 copier.setStackHistory(cfg.stackHistory); // house p17
                 g = copier.makeCopy();
@@ -6509,6 +6517,7 @@ public final class ForcedWinSolver {
                 copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits); // house p12
                 copier.setHistoryLki(cfg.historyLki); // house p13
                 copier.setCopyBackFace(cfg.copyBackFace); // house p15
+                copier.setCopyDungeon(cfg.copyDungeon); // sdcc-copycast-1114
                 copier.setStackAbilityCopies(cfg.stackAbilityCopies); // house p16
                 copier.setStackHistory(cfg.stackHistory); // house p17
                 g = copier.makeCopy();
