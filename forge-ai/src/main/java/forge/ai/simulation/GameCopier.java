@@ -23,6 +23,7 @@ import forge.game.phase.PhaseHandler;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;
+import forge.game.spellability.AbilityManaPart;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.staticability.StaticAbility;
@@ -506,8 +507,10 @@ public class GameCopier {
             newPlayer.setUnlimitedHandSize(origPlayer.isUnlimitedHandSize());
             newPlayer.setCrankCounter(origPlayer.getCrankCounter());
             // TODO creatureAttackedThisTurn
-            for (Mana m : origPlayer.getManaPool()) {
-                newPlayer.getManaPool().addManaNoEvent(m);
+            if (!forge.game.EngineFixes.copyPoolMana()) { // copy-pool-mana-1113: on, the pool is rebuilt after the cards (below)
+                for (Mana m : origPlayer.getManaPool()) {
+                    newPlayer.getManaPool().addManaNoEvent(m);
+                }
             }
             playerMap.put(origPlayer, newPlayer);
         }
@@ -524,6 +527,14 @@ public class GameCopier {
         }
 
         copyGameState(newGame, aiPlayer);
+
+        if (forge.game.EngineFixes.copyPoolMana()) {
+            for (Map.Entry<Player, Player> e : playerMap.entrySet()) {
+                for (Mana m : e.getKey().getManaPool()) {
+                    e.getValue().getManaPool().addManaNoEvent(copyPoolMana(m, e.getValue()));
+                }
+            }
+        }
 
         for (Player origPlayer : playerMap.keySet()) {
             Player newPlayer = playerMap.get(origPlayer);
@@ -2501,6 +2512,57 @@ public class GameCopier {
             sub = sub.getSubAbility();
         }
         return sub != null ? sub : n;
+    }
+
+    /**
+     * copy-pool-mana-1113: a floating mana of the original as the copy's own: the copy's player, the copy's card of its
+     * source (by id; the original holds a last-known copy), and that card's mana ability at the same place
+     * ({@link #findManaPart}). When the source is not in the copy (a token that ceased to exist) it keeps the original's
+     * source and ability, still with the copy's player; when the ability is not found it keeps the original's ability.
+     */
+    private Mana copyPoolMana(final Mana m, final Player newPlayer) {
+        final Card src = m.getSourceCard();
+        final Card newSrc = src == null ? null : cardMap.get(src);
+        AbilityManaPart part = m.getManaAbility();
+        if (newSrc != null && part != null) {
+            final AbilityManaPart mapped = findManaPart(part, newSrc);
+            if (mapped != null) {
+                part = mapped;
+            }
+        }
+        return new Mana(m.getColor(), newSrc != null ? newSrc : src, part, newPlayer);
+    }
+
+    /**
+     * copy-pool-mana-1113: the mana ability of {@code newHost} at the place of {@code part}: the host's own ability that
+     * {@code part}'s root ability was played from (by description, as {@link #findSAInCard}), then the same depth in its
+     * sub-ability chain. Null when not found.
+     */
+    private static AbilityManaPart findManaPart(final AbilityManaPart part, final Card newHost) {
+        final SpellAbility sa = part.getSourceSA();
+        if (sa == null) {
+            return null;
+        }
+        final SpellAbility root = sa.getRootAbility();
+        final SpellAbility played = root.getOriginalAbility() != null ? root.getOriginalAbility() : root;
+        final SpellAbility printed = findSAInCard(played, newHost);
+        if (printed == null) {
+            return null;
+        }
+        int depth = 0;
+        SpellAbility a = root;
+        while (a != null && a != sa) {
+            a = a.getSubAbility();
+            depth++;
+        }
+        if (a == null) {
+            return null;
+        }
+        SpellAbility sub = printed;
+        for (int k = 0; sub != null && k < depth; k++) {
+            sub = sub.getSubAbility();
+        }
+        return sub == null ? null : sub.getManaPart();
     }
 
     private static SpellAbility findSAInCard(SpellAbility sa, Card c) {

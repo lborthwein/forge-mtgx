@@ -6,7 +6,7 @@ package forge.game;
  *
  * <p><b>Live line (live-fixes-1107):</b> {@code -Dforge.liveFixes} (default {@code true} on this line only) is the one
  * switch that sets the DEFAULT of every selected bug fix for every seat: the JVM flags {@code forge.copyRobust},
- * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
+ * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.copyPoolMana}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
  * ({@code forge.house.<key>}, read in LookaheadSearch), and the solver keys {@code staleStatics}, {@code turnLimits},
  * {@code lineUncapped} ({@code ForcedWinSolver.Config.fromProps}). An explicit flag or key still wins.
  * {@code -Dforge.liveFixes=false} is the live jar before these fixes, byte for byte.
@@ -38,7 +38,7 @@ public final class EngineFixes {
     /** The startup line: the switch and what each fix resolved to. */
     public static String describe() {
         return "[live-fixes] forge.liveFixes=" + liveFixes + " copyRobust=" + copyRobust + " copyAltCost=" + copyAltCost
-                + " researchFixes=" + researchFixes + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
+                + " researchFixes=" + researchFixes + " copyPoolMana=" + copyPoolMana + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
                 + " house(beliefStatics,beliefPlayerStatics,copyTurnLimits,offBattlefieldLimits,beliefRememberedHand,copyBackFace,stackAbilityCopies)="
                 + flag("forge.house.beliefStatics") + "," + flag("forge.house.beliefPlayerStatics") + "," + flag("forge.house.copyTurnLimits")
                 + "," + flag("forge.house.offBattlefieldLimits") + "," + flag("forge.house.beliefRememberedHand") + ","
@@ -123,6 +123,25 @@ public final class EngineFixes {
     /** For tests. */
     public static void setCopyRobustForTest(final boolean on) {
         copyRobust = on;
+    }
+
+    /**
+     * copy-pool-mana-1113 ({@code -Dforge.copyPoolMana}, a live fix: default {@link #liveFixes()}): a game copy rebuilds
+     * each floating mana as the copy's own, its player the copy's player and its source card and mana ability the
+     * copy's. Off, a copy shares the original's {@code Mana} objects, so spending floating mana in a play-out raises the
+     * ORIGINAL player's mana-spent count and holds a ManaExpend trigger on the ORIGINAL game's waiting list, from the
+     * play-out's thread (the "wt is null" crash in TriggerHandler.collectTriggerForWaiting), and mana whose ability adds
+     * an effect when spent (can't be countered, counters) adds it to the original game.
+     */
+    private static boolean copyPoolMana = flag("forge.copyPoolMana");
+
+    public static boolean copyPoolMana() {
+        return copyPoolMana;
+    }
+
+    /** For tests. */
+    public static void setCopyPoolManaForTest(final boolean on) {
+        copyPoolMana = on;
     }
 
     // ---- state-machines-1113: copy-fidelity fixes, OFF by default (not live fixes: forge.liveFixes does not turn them on).
