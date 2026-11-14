@@ -4483,10 +4483,13 @@ public final class ForcedWinSolver {
         }
     }
 
-    /** loop-window-1113: this thread's loop probes run and loop-probe reads cut by their window (diagnosis only). */
-    private static final ThreadLocal<long[]> LOOP_TALLY = ThreadLocal.withInitial(() -> new long[2]);
+    /**
+     * loop-window-1113: this thread's loop probes run, loop-probe reads cut by their window and (gate-loop-window-1113)
+     * probes that found a win (diagnosis only).
+     */
+    private static final ThreadLocal<long[]> LOOP_TALLY = ThreadLocal.withInitial(() -> new long[3]);
 
-    /** loop-window-1113: this thread's {probes run, reads cut by the window} so far (a copy). */
+    /** loop-window-1113: this thread's {probes run, reads cut by the window, probes that won} so far (a copy). */
     public static long[] loopTally() {
         return LOOP_TALLY.get().clone();
     }
@@ -4528,6 +4531,7 @@ public final class ForcedWinSolver {
         final boolean w = ForcedWinProbe.sandboxWin(live, me, c.getId(), partner == null ? -1 : partner.getId(), aura, loopLimits(cfg),
                 seed, budget);
         if (w) {
+            LOOP_TALLY.get()[2]++; // gate-loop-window-1113
             return Boolean.TRUE;
         }
         // a search that stopped on a budget shorter than the full one did not finish: no answer
