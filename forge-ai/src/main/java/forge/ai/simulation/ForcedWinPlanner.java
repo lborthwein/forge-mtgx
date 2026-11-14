@@ -1099,8 +1099,7 @@ public final class ForcedWinPlanner {
             }
             for (Abil ab : a.fromHand) {
                 final boolean objAb = objMove(ab) && !pending; // sdcc-probeobj-1111 (false when off)
-                final boolean tgtAb = !objAb && tgtMove(ab) && !pending; // plantargets-1114 (false when off)
-                if (ab.unplayable || ab.cardTargets && ab.kind != AbilKind.LAND && !objAb && !tgtAb) {
+                if (ab.unplayable || ab.cardTargets && ab.kind != AbilKind.LAND && !objAb) {
                     continue;
                 }
                 if (pending && ab.kind != AbilKind.SPELL) {
@@ -1111,7 +1110,6 @@ public final class ForcedWinPlanner {
                 }
                 final String k = a.name + "|" + ab.kind + "|" + ab.costKey + "|" + ab.desc + "|" + ab.targetVariant;
                 if (!tried.add(k) || !pending && !(objAb ? (s.sorcery || ab.instant) && handOk(s, ab) && hasObject(s, ab, -1)
-                        : tgtAb ? (s.sorcery || ab.instant) && handOk(s, ab) && tgtOpen(s, a, ab) != 0
                         : allowed(s, a, ab))) {
                     continue;
                 }
@@ -1176,13 +1174,11 @@ public final class ForcedWinPlanner {
             }
             for (Abil ab : a.onBattlefield) {
                 final boolean objAb = objMove(ab); // sdcc-probeobj-1111 (false when off)
-                final boolean tgtAb = !objAb && tgtMove(ab); // plantargets-1114 (false when off)
-                if (ab.unplayable || ab.cardTargets && !objAb && !tgtAb) {
+                if (ab.unplayable || ab.cardTargets && !objAb) {
                     continue;
                 }
                 final String k = "bf" + bi + "|" + ab.desc + "|" + ab.costKey + "|" + ab.targetVariant;
-                if (!tried.add(k) || !(objAb ? allowedBfCost(s, p, ab) && hasObject(s, ab, bi)
-                        : tgtAb ? allowedBfCost(s, p, ab) && tgtOpen(s, a, ab) != 0 : allowedBf(s, p, ab))) {
+                if (!tried.add(k) || !(objAb ? allowedBfCost(s, p, ab) && hasObject(s, ab, bi) : allowedBf(s, p, ab))) {
                     continue;
                 }
                 final List<S> into = ab.has(EffKind.DRAW) || ab.has(EffKind.WIN) ? second : third;
@@ -1214,9 +1210,15 @@ public final class ForcedWinPlanner {
             return out;
         }
         if (s.turnIdx < lim.horizon - 1 && !pending) {
-            final S n = s.copy();
-            n.steps.add(Step.PASS);
-            out.addAll(passTurn(n));
+            if (pos.tgtMask != null && !quiet && diesAtPass(s)) {
+                // plantargets-1114, slice "attackers": passing now dies to the opponent's attackers: removal of ours is
+                // played first, on the attackers whose leaving lets the line survive (nowhere else: no other node grows)
+                rescue(s, 0, out, new HashSet<>());
+            } else {
+                final S n = s.copy();
+                n.steps.add(Step.PASS);
+                out.addAll(passTurn(n));
+            }
         }
         return out;
     }
@@ -1406,6 +1408,76 @@ public final class ForcedWinPlanner {
             }
         }
         cur[k] = -1;
+    }
+
+    /** plantargets-1114: passing the turn in {@code s} loses to the opponent's attackers (the open removals' best targets counted). */
+    private boolean diesAtPass(S s) {
+        if (s.oppLib <= 0 || pos.oppPowers.isEmpty()) {
+            return false;
+        }
+        final int blockers = blockers(s);
+        final int n = s.rem == null ? 0 : s.rem.size();
+        final int[] best = {clock(s.oppGone, blockers), s.oppGone};
+        if (n > 0) {
+            best[0] = Integer.MAX_VALUE;
+            assignTargets(s, 0, s.oppGone, blockers, new int[n], best, new int[n]);
+        }
+        return best[0] >= s.life;
+    }
+
+    /**
+     * plantargets-1114, slice "attackers": {@code s} dies if it passes the turn. Each removal ability of ours that can
+     * still take an attacker off the opponent's clock (at most {@link Position#TGT_CAP} different ones a level, at most
+     * that many in a row) is played; where the line then survives the turn is passed, else the next removal is tried.
+     * Every state made here counts as a node.
+     */
+    private void rescue(S s, int depth, List<S> out, Set<String> tried) {
+        if (depth >= Position.TGT_CAP) {
+            return;
+        }
+        final List<List<S>> next = new ArrayList<>();
+        int used = 0;
+        for (int hi = 0; hi < s.hand.size() && used < Position.TGT_CAP; hi++) {
+            final int h = s.hand.get(hi);
+            if (h < 0) {
+                continue;
+            }
+            final ACard a = cards.get(h);
+            for (Abil ab : a.fromHand) {
+                if (used >= Position.TGT_CAP || !tgtMove(ab) || ab.unplayable || objMove(ab) || !(s.sorcery || ab.instant)
+                        || !handOk(s, ab) || tgtOpen(s, a, ab) == 0 || !tried.add(depth + "|" + a.name + "|" + ab.costKey + "|" + ab.desc)) {
+                    continue;
+                }
+                used++;
+                next.add(apply(s, hi, -1, a, ab));
+            }
+        }
+        for (int bi = 0; bi < s.bf.size() && used < Position.TGT_CAP; bi++) {
+            final Perm p = s.bf.get(bi);
+            final ACard a = cards.get(p.card);
+            for (Abil ab : a.onBattlefield) {
+                if (used >= Position.TGT_CAP || !tgtMove(ab) || ab.unplayable || objMove(ab) || !allowedBfCost(s, p, ab)
+                        || tgtOpen(s, a, ab) == 0 || !tried.add(depth + "|bf|" + a.name + "|" + ab.costKey + "|" + ab.desc)) {
+                    continue;
+                }
+                used++;
+                next.add(apply(s, -1, bi, a, ab));
+            }
+        }
+        for (List<S> states : next) {
+            for (S n : states) {
+                nodes++;
+                if (n.dead || n.rem == null || n.rem.isEmpty()) {
+                    continue;
+                }
+                if (diesAtPass(n)) {
+                    rescue(n, depth + 1, out, new HashSet<>());
+                } else {
+                    n.steps.add(Step.PASS);
+                    out.addAll(passTurn(n));
+                }
+            }
+        }
     }
 
     /** sdcc-probeobj-1111: the ability is planned through its observed object need (never with the key off). */
