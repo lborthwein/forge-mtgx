@@ -137,6 +137,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * candidates as a non-proven line instead (maxLines), beside the menu, so S-c's worlds and its own proof decide.
          */
         public boolean provenThisTurn = false;
+        /**
+         * proven-worlds-1114 (false = off, the default, and then nothing changes): with unified, a solver line is proven
+         * only when it won in at least minProvenWorlds belief worlds, as without unified (unified alone: one won world).
+         */
+        public boolean unifiedMinWorlds = false;
         public boolean lineFloorAlways = false;
         /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
         public boolean lineKeep = false;
@@ -183,7 +188,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 "samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
                 "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lookFloorMs", "lineFloorAlways", "lineDuel", "unified", "planX",
-                "lineHorizon", "exactActions", "provenThisTurn"));
+                "lineHorizon", "exactActions", "provenThisTurn", "unifiedMinWorlds"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -219,6 +224,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineHorizon")) s.lineHorizon = o.get("lineHorizon").getAsBoolean();
             if (o.has("exactActions")) s.exactActions = o.get("exactActions").getAsBoolean();
             if (o.has("provenThisTurn")) s.provenThisTurn = o.get("provenThisTurn").getAsBoolean();
+            if (o.has("unifiedMinWorlds")) s.unifiedMinWorlds = o.get("unifiedMinWorlds").getAsBoolean();
             if (o.has("setup")) s.setup = o.get("setup").getAsBoolean();
             if (o.has("setupNodes")) s.setupNodes = o.get("setupNodes").getAsInt();
             if (o.has("setupMaxNodes")) s.setupMaxNodes = o.get("setupMaxNodes").getAsLong();
@@ -1183,6 +1189,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return proven && (!thisTurnOnly || winTurn == 0);
     }
 
+    /** proven-worlds-1114: the won belief worlds a proof needs (unified: 1, or minProvenWorlds with unifiedMinWorlds). */
+    static int provenWorlds(final Spec spec) {
+        return spec.unified && !spec.unifiedMinWorlds ? 1 : spec.minProvenWorlds;
+    }
+
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
     Stage propose(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs, final long t0) {
         return propose(g, p, m, objs, t0, t0);
@@ -1227,7 +1238,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             solverMs.add(st.solverMs);
             ForcedWinSolver.Proposal proven = null;
             for (ForcedWinSolver.Proposal pr : props) {
-                if (takenAtOnce(pr.proven(spec.unified ? 1 : spec.minProvenWorlds), pr.winTurn, spec.provenThisTurn)
+                if (takenAtOnce(pr.proven(provenWorlds(spec)), pr.winTurn, spec.provenThisTurn)
                         && (proven == null || pr.steps < proven.steps)) {
                     proven = pr;
                 }

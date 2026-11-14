@@ -385,6 +385,32 @@ final class ForcedWinChoices {
         return "y".equals(payload(tok));
     }
 
+    /**
+     * line-answers-1114 ({@link ForcedWinSolver.Config#lineAnswers}): a yes/no confirmation of a followed line
+     * ({@code conf:y} / {@code conf:n}), consumed by the first confirmation ask of the step.
+     */
+    static final String CONF = "conf";
+
+    static String confTok(final boolean yes) {
+        return CONF + ":" + (yes ? "y" : "n");
+    }
+
+    /**
+     * line-answers-1114: the answer a followed line gives a yes/no confirmation that no other line answer took: the
+     * step's recorded token when there is one, else "no" for an effect's offer to cast or play a card the line has no
+     * step for ({@code playOffer}), the answer every world of the line was verified with; else null (Forge AI's answer,
+     * as before). Off: null.
+     */
+    static Boolean lineConfirm(final boolean on, final String tok, final boolean playOffer) {
+        if (!on) {
+            return null;
+        }
+        if (tok != null && CONF.equals(kindOf(tok))) {
+            return "y".equals(payload(tok));
+        }
+        return playOffer ? Boolean.FALSE : null;
+    }
+
     // ------------------------------------------------------------------ a step's recorded answers
 
     /** A step's recorded tokens, consumed in order, each by the first ask of its kind (null tokens = nothing recorded). */

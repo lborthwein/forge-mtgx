@@ -331,6 +331,14 @@ public final class ForcedWinSolver {
          */
         public boolean tutorCast = false;
         /**
+         * line-answers-1114 (false = off, the default, and then nothing changes): a yes/no confirmation asked while a line
+         * is followed, live and in the line's verification play-outs alike, is answered by the line
+         * ({@link ForcedWinChoices#lineConfirm}): its recorded conf token, else "no" to an effect's offer to cast or play
+         * a card the line has no step for (Chandra, Torch of Defiance's +1 then deals its damage), instead of Forge AI's
+         * fresh answer, which depends on the card a world happens to reveal.
+         */
+        public boolean lineAnswers = false;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -966,6 +974,7 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
+            c.lineAnswers = "true".equals(get.apply("lineAnswers")); // line-answers-1114
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.probeObjects = "true".equals(get.apply("probeObjects")); // sdcc-probeobj-1111
@@ -1051,6 +1060,7 @@ public final class ForcedWinSolver {
                 + (probeSettle ? " probeSettle" : "")
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (lineAnswers ? " lineAnswers" : "") // line-answers-1114
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
                 + (sourceLeaves ? " sourceLeaves" : "")
@@ -7019,6 +7029,14 @@ public final class ForcedWinSolver {
                 return cast;
             }
         }
+        if (active != null && !active.done && (message == null || !message.toLowerCase().contains("shuffle"))) {
+            final Boolean la = active.lineConfirm(sa); // line-answers-1114: as the line's verification answered (off: null)
+            if (la != null) {
+                receipt("FORCED_WIN line-answer" + tag() + " turn=" + me.getGame().getPhaseHandler().getTurn() + " ask="
+                        + (sa == null || sa.getHostCard() == null ? "?" : sa.getHostCard().getName()) + " yes=" + la);
+                return la;
+            }
+        }
         if (active == null || active.done || message == null || !message.toLowerCase().contains("shuffle")) {
             return null;
         }
@@ -7248,6 +7266,7 @@ public final class ForcedWinSolver {
             fo.modeLine = cfg.engineModeChoice; // owner-misplays-1113
             fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
             fo.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
+            fo.lineAnswers = cfg.lineAnswers; // line-answers-1114
             fo.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
             return fo;
         }
@@ -7319,6 +7338,18 @@ public final class ForcedWinSolver {
         }
 
         /** "Cast it?" of a play effect of a step of ours that searches to cast: yes for the line's free cast, no otherwise; null = not ours. */
+        /** line-answers-1114 ({@link Config#lineAnswers}). */
+        boolean lineAnswers;
+
+        /** line-answers-1114: the line's answer to a confirmation no other answer took (null: Forge AI's, as before). */
+        Boolean lineConfirm(final SpellAbility sa) {
+            if (!lineAnswers || done) {
+                return null;
+            }
+            final String tok = cacLine ? choices.next(ForcedWinChoices.CONF) : null;
+            return ForcedWinChoices.lineConfirm(true, tok, sa != null && sa.getApi() == ApiType.Play);
+        }
+
         Boolean castConfirm(final SpellAbility sa) {
             if (!tutorCast || sa == null || sa.getApi() != ApiType.Play) {
                 return null;
@@ -8015,11 +8046,12 @@ public final class ForcedWinSolver {
                     final Line fresh = rp.apply(f.line);
                     if (fresh != null) {
                         final boolean keep = f.putBackKeep, keepEnginePay = f.enginePay, keepTutorCast = f.tutorCast;
-                        final boolean keepObjects = f.probeObjects;
+                        final boolean keepObjects = f.probeObjects, keepLineAnswers = f.lineAnswers;
                         f = new Follower(fresh);
                         f.probeObjects = keepObjects; // sdcc-probeobj-1111
                         f.putBackKeep = keep; // next-turn-1107
                         f.tutorCast = keepTutorCast; // sdcc-tutorcast-1110: the re-planned line may search and cast too
+                        f.lineAnswers = keepLineAnswers; // line-answers-1114
                         if (keepEnginePay) {
                             f.enginePay = true; // ledger-sweep-1107 (row 60): the re-planned line's recorded payments too
                             f.payRecord = true;
@@ -8138,6 +8170,10 @@ public final class ForcedWinSolver {
             final Boolean cast = f.castConfirm(sa); // sdcc-tutorcast-1110 (off, or not such a step: null)
             if (cast != null) {
                 return cast;
+            }
+            final Boolean la = f.lineConfirm(sa); // line-answers-1114 (off: null)
+            if (la != null) {
+                return la;
             }
             return super.confirmAction(sa, mode, message, options, cardToShow, params);
         }

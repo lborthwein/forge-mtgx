@@ -38,10 +38,27 @@ public class ProvenThisTurnTest {
     }
 
     @Test
+    public void unifiedMinWorldsHonorsMinProvenWorlds() {
+        final PlanSearch.Spec today = PlanSearch.Spec.parse(JsonParser.parseString("{\"unified\":true}").getAsJsonObject());
+        Assert.assertEquals(PlanSearch.provenWorlds(today), 1, "unified alone: one won belief world is a proof");
+        final PlanSearch.Spec on = PlanSearch.Spec.parse(
+                JsonParser.parseString("{\"unified\":true,\"unifiedMinWorlds\":true}").getAsJsonObject());
+        Assert.assertEquals(PlanSearch.provenWorlds(on), 3, "minProvenWorlds' default");
+        final PlanSearch.Spec five = PlanSearch.Spec.parse(JsonParser.parseString(
+                "{\"unified\":true,\"unifiedMinWorlds\":true,\"minProvenWorlds\":5}").getAsJsonObject());
+        Assert.assertEquals(PlanSearch.provenWorlds(five), 5);
+        final PlanSearch.Spec plain = PlanSearch.Spec.parse(JsonParser.parseString("{}").getAsJsonObject());
+        Assert.assertEquals(PlanSearch.provenWorlds(plain), 3, "without unified: as before");
+    }
+
+    @Test
     public void liveStringAcceptsTheKey() {
         final RlLiveSeat.Spec s = RlLiveSeat.Spec.parse(ShipASpecParseTest.HOST + ShipASpecParseTest.TODAY
-                + ",plans.unified=true,plans.provenThisTurn=true");
-        Assert.assertTrue(PlanSearch.Spec.parse(s.search.plans).provenThisTurn);
+                + ",plans.unified=true,plans.provenThisTurn=true,plans.unifiedMinWorlds=true,plans.solverCfg.lineAnswers=true");
+        final PlanSearch.Spec ps = PlanSearch.Spec.parse(s.search.plans);
+        Assert.assertTrue(ps.provenThisTurn);
+        Assert.assertTrue(ps.unifiedMinWorlds);
+        Assert.assertTrue(ps.solverConfig().lineAnswers);
         final RlLiveSeat.Spec today = RlLiveSeat.Spec.parse(ShipASpecParseTest.HOST + ShipASpecParseTest.TODAY);
         Assert.assertFalse(today.search.plans.has("provenThisTurn"), "today's string carries no new key");
         Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(ShipASpecParseTest.HOST

@@ -91,10 +91,11 @@ public final class RlLiveSeat {
         /** sb-live-1018: the {@code plans.<key>} keys live accepts (numbers, or true/false for {@code solver}). */
         public static final java.util.Set<String> LIVE_PLAN_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "samples", "temperature", "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs",
-                "unified", "lineKeep", "planX", "replanOnEntry", "lineChoices", "lookFloorMs", "provenThisTurn"));
+                "unified", "lineKeep", "planX", "replanOnEntry", "lineChoices", "lookFloorMs", "provenThisTurn",
+                "unifiedMinWorlds"));
         /** shipA-on-leakfix-1112: the plan keys above whose value is true or false. */
         private static final java.util.Set<String> LIVE_PLAN_FLAGS = new java.util.TreeSet<>(java.util.Arrays.asList(
-                "solver", "unified", "lineKeep", "planX", "replanOnEntry", "provenThisTurn"));
+                "solver", "unified", "lineKeep", "planX", "replanOnEntry", "provenThisTurn", "unifiedMinWorlds"));
         /** sb-live-1018: the {@code plans.solverCfg.<key>} keys live accepts (the solver's sizes, its wall, cycles, the leak fix). */
         public static final java.util.Set<String> LIVE_SOLVER_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
                 "budgetMs", "engineMs", "evalReserveMs", "wallGraceMs", "planMs", "nodes", "engineNodes", "worlds", "top",
@@ -110,7 +111,9 @@ public final class RlLiveSeat {
                 "planLoops",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // line-answers-1114 (absent = off): a followed line answers its yes/no confirmations
+                "lineAnswers"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -130,7 +133,9 @@ public final class RlLiveSeat {
                 "planLoops",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // line-answers-1114 (absent = off): a followed line answers its yes/no confirmations
+                "lineAnswers"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
