@@ -1809,7 +1809,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (mk != null && !"proven".equals(mk.outcome)) {
                     lastForcedMiss = true;
                 }
-                planRow(g, frame, stage, null, order, -1, t0);
+                planRow(g, me, frame, stage, null, order, -1, t0);
                 planDecided(g, stage, null, t0);
                 tap("proven_line", stage, null, order.size(), RlSeat.PrioritySearch.HOOK);
                 return RlSeat.PrioritySearch.HOOK;
@@ -1890,7 +1890,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (stage != null) {
             final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6, sc.valueObs);
             ck.ended(DecisionClock.Phase.APPLY);
-            planRow(g, frame, stage, r, order, pa, t0);
+            planRow(g, me, frame, stage, r, order, pa, t0);
             if (pa != -2) {
                 departures++;
                 planDecided(g, stage, r, t0);
@@ -2436,7 +2436,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (sb.planPoint(g, menuObjs)) {
                 final PlanSearch.Stage stage = sb.propose(g, me, m, menuObjs, t0, bt0);
                 if (stage.hook) {
-                    planRow(g, frame, stage, null, new ArrayList<Integer>(), -1, t0);
+                    planRow(g, me, frame, stage, null, new ArrayList<Integer>(), -1, t0);
                     planDecided(g, stage, null, t0);
                     tap("proven_line", stage, null, 0, RlSeat.PrioritySearch.HOOK);
                     return RlSeat.PrioritySearch.HOOK;
@@ -2509,7 +2509,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** search-bones-1015: one JSON row per S-b plan point (decision log / rows, as the S-c rows). */
-    private void planRow(final Game g, final RlWire.Decide frame, final PlanSearch.Stage st,
+    private void planRow(final Game g, final Player me, final RlWire.Decide frame, final PlanSearch.Stage st,
             final LookaheadSearch.GivenResult r, final List<Integer> order, final int answer, final long t0) {
         if (cfg.decisionLog == null && !rowsWanted) {
             return;
@@ -2564,7 +2564,47 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         row.addProperty("answer", answer);
         row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
+        if (PLAN_BOARD_LOG) {
+            row.add("board", boardCounts(g, me)); // plantargets-1114 (-Dsdcc.planBoardLog; off: the row is as before)
+        }
         addRow(row);
+    }
+
+    /**
+     * plantargets-1114 (measurement, -Dsdcc.planBoardLog=true; false = off, and then no row changes): each plan row
+     * also carries what the seat can see of the table, as counts only: per side the permanents by type, the hand's
+     * size, the graveyard's size and the life total. No card names, nothing of a hand's contents or a library's order
+     * (the opponent's hand size is public). It is written after the decision is made and read by nothing in the game.
+     */
+    public static final boolean PLAN_BOARD_LOG = Boolean.getBoolean("sdcc.planBoardLog");
+
+    public static JsonObject boardCounts(final Game g, final Player me) {
+        final JsonObject out = new JsonObject();
+        for (Player p : g.getPlayers()) {
+            int creatures = 0, untapped = 0, artifacts = 0, enchantments = 0, walkers = 0, lands = 0;
+            for (forge.game.card.Card c : p.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+                if (c.isCreature()) {
+                    creatures++;
+                    untapped += c.isTapped() ? 0 : 1;
+                }
+                artifacts += c.isArtifact() ? 1 : 0;
+                enchantments += c.isEnchantment() ? 1 : 0;
+                walkers += c.isPlaneswalker() ? 1 : 0;
+                lands += c.isLand() ? 1 : 0;
+            }
+            final JsonObject o = new JsonObject();
+            o.addProperty("creatures", creatures);
+            o.addProperty("creatures_untapped", untapped);
+            o.addProperty("artifacts", artifacts);
+            o.addProperty("enchantments", enchantments);
+            o.addProperty("planeswalkers", walkers);
+            o.addProperty("lands", lands);
+            o.addProperty("hand", p.getCardsIn(forge.game.zone.ZoneType.Hand).size());
+            o.addProperty("graveyard", p.getCardsIn(forge.game.zone.ZoneType.Graveyard).size());
+            o.addProperty("life", p.getLife());
+            out.add(p == me ? "me" : "opp", o);
+        }
+        return out;
     }
 
     // ------------------------------------------------------------------------------------------------ block search
