@@ -4517,22 +4517,22 @@ public final class ForcedWinSolver {
 
     /**
      * gate-loop-window-1113: open a window for one read, as {@link #loopWindow}, and return the slot's value before it
-     * ({@code [null]} = the slot was empty) for {@link #returnLoopWindow}. The game's asks run one at a time.
+     * for {@link #returnLoopWindow}. An EMPTY slot is left alone ({@code []}: nothing borrowed): the read then opens its
+     * own default window ({@link #fillLoops}, LOOP_NANOS from now on its own clock) and leaves it, exactly as the old code
+     * does. The game's asks run one at a time.
      */
     public static Long[] borrowLoopWindow(final Game g, final long t0, final long budgetNanos) {
-        final Long[] lent = {LOOP_DEADLINE.get(loopScope(g))};
+        final Long prev = LOOP_DEADLINE.get(loopScope(g));
+        if (prev == null) {
+            return new Long[0];
+        }
         loopWindow(g, t0, budgetNanos);
-        return lent;
+        return new Long[] {prev};
     }
 
-    /** gate-loop-window-1113: put back the slot a {@link #borrowLoopWindow} replaced (null = nothing was borrowed). */
+    /** gate-loop-window-1113: put back the slot a {@link #borrowLoopWindow} replaced (null or empty = nothing borrowed). */
     public static void returnLoopWindow(final Game g, final Long[] lent) {
-        if (lent == null) {
-            return;
-        }
-        if (lent[0] == null) {
-            LOOP_DEADLINE.remove(loopScope(g));
-        } else {
+        if (lent != null && lent.length == 1) {
             LOOP_DEADLINE.put(loopScope(g), lent[0]);
         }
     }
