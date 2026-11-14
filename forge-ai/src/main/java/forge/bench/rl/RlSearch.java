@@ -2148,6 +2148,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("score_ms", Math.round((System.nanoTime() - t0) / 1e5 - r.ms * 10) / 10.0);
             addRow(row);
         }
+        if (FP_CHECK && r.fpPicks != null && r.fpRaw != null) {
+            // reach-verify-1114 (fpCheck only): on stderr always (a live seat has no decision log), and in the log
+            try {
+                final JsonObject fr = fpRow(g, frame, r, order);
+                System.err.println("[fp-check] " + fr);
+                if (cfg.decisionLog != null || rowsWanted) {
+                    addRow(fr);
+                }
+            } catch (RuntimeException e) {
+                System.err.println("[fp-check] row failed: " + e);
+            }
+        }
+        if (FP_CHECK) {
+            fpLeaves.clear();
+        }
         tap(r.givenIndex.length > 0 ? "searched" : String.valueOf(r.outcome), stage, r, order.size(), answer);
         return answer;
     }
@@ -4131,9 +4146,32 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          */
         public int leafGfNodes = 0;
         public long leafGfMaxNodes = 0;
+        /**
+         * reach-verify-1114 ("off" = the default, and nothing changes): a leaf's reach counts only the planner screens
+         * whose line the engine confirms. Each screen that found a line has up to {@link #verifyLines} of its lines played
+         * by the solver's line play-out in a copy of the leaf, the screen's next card moved into its library slot:
+         * "sampled" = the leaf as it stands (the world the play-out sampled; the opponent keeps its cards and passes at our
+         * response points), "unopposed" = the solver's world 0 (the opponent's hidden hand removed). {@link #verifyFull}: a
+         * direct line that fails is followed by the per-card screens. The checks run on the pilot's clock.
+         */
+        public String verify = "off";
+        public int verifyLines = 3;
+        public boolean verifyFull = true;
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
                 "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart",
-                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree", "gateEnder", "leafGfNodes", "leafGfMaxNodes"));
+                "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree", "gateEnder", "leafGfNodes", "leafGfMaxNodes",
+                "verify", "verifyLines", "verifyFull"));
+
+        /** reach-verify-1114: the key is on. */
+        public boolean verifyOn() {
+            return !"off".equals(verify);
+        }
+
+        /** reach-verify-1114: the world whose verdicts count. */
+        public int verifyMode() {
+            return "unopposed".equals(verify) ? forge.ai.simulation.ForcedWinSolver.VERIFY_UNOPPOSED
+                    : forge.ai.simulation.ForcedWinSolver.VERIFY_SAMPLED;
+        }
 
         public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
             final forge.ai.simulation.ForcedWinSolver.ReachOpts o = new forge.ai.simulation.ForcedWinSolver.ReachOpts();
@@ -4177,6 +4215,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("leafGfFree")) c.leafGfFree = o.get("leafGfFree").getAsBoolean();
             if (o.has("leafGfNodes")) c.leafGfNodes = o.get("leafGfNodes").getAsInt();
             if (o.has("leafGfMaxNodes")) c.leafGfMaxNodes = o.get("leafGfMaxNodes").getAsLong();
+            if (o.has("verify")) c.verify = o.get("verify").getAsString();
+            if (o.has("verifyLines")) c.verifyLines = o.get("verifyLines").getAsInt();
+            if (o.has("verifyFull")) c.verifyFull = o.get("verifyFull").getAsBoolean();
+            if (!java.util.Arrays.asList("off", "sampled", "unopposed").contains(c.verify)) {
+                throw new IllegalArgumentException("reach.verify is off, sampled or unopposed, not " + c.verify);
+            }
             return c;
         }
     }
@@ -4376,9 +4420,34 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         // {R_me, R_opp, then cost (report only): planner nodes, s0 capped, skipped, per-card screens, per-card capped; then
         // the value sink's leaf row (labels only, never read to decide): goldfish, its turn, 1 = this leaf is a sink row}
         // [10], [11]: the sink row's sampled goldfish and its share of orders with a line (labels only; reach.sinkSamples)
-        final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0, Double.NaN, Double.NaN};
+        // reach-verify-1114 (verify key or -Dsdcc.fpCheck only): [12] claimed own reach, [13] verified own, [14] claimed
+        // opponent's, [15] verified opponent's, [16] the leaf's claim record (-1 = none), [17] check nanos
+        final boolean ver = rc.verifyOn(), fp = FP_CHECK;
+        final double[] out = ver || fp
+                ? new double[] {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0, Double.NaN, Double.NaN,
+                        Double.NaN, Double.NaN, Double.NaN, Double.NaN, -1, 0}
+                : new double[] {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0, Double.NaN, Double.NaN};
+        JsonObject rec = null;
         if (rc.gate && !reachOn) {
             out[0] = 0.0; // the root showed no potential: no screens for the seat at this decision's leaves
+            if (ver || fp) {
+                out[12] = 0.0;
+                out[13] = 0.0;
+            }
+        } else if (ver || fp) {
+            final forge.ai.simulation.ForcedWinSolver.VerifiedReach vr = reachChecked(k, g, me, rc, rc.opts(), ver);
+            final forge.ai.simulation.ForcedWinSolver.Reach r = vr.reach;
+            final double claimed = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
+            final double verified = r.failed ? Double.NaN : Double.isNaN(vr.pv) ? claimed : rc.gamma < 1.0 ? vr.pdv : vr.pv;
+            out[0] = ver ? verified : claimed;
+            out[12] = claimed;
+            out[13] = verified;
+            out[17] += vr.checkNanos;
+            addCost(out, r);
+            if (fp && !vr.claims.isEmpty()) {
+                rec = fpLeafRecord(g, me);
+                rec.add("own", fpReachJson(r, vr, claimed, verified));
+            }
         } else {
             final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
             out[0] = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
@@ -4392,10 +4461,37 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 leafTeacher(rc, k, g, me, out);
             }
         }
-        if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
+        if (rc.oppBeta > 0 && me.getOpponents().size() == 1 && (ver || fp)) {
+            // reach-verify-1114: the opponent's reach, claimed and checked (oppDirect: its no-new-card screen only)
+            final Player opp = me.getOpponents().get(0);
+            final forge.ai.simulation.ForcedWinSolver.ReachOpts oo = rc.opts();
+            if (rc.oppDirect) {
+                oo.maxNames = 0;
+            }
+            final forge.ai.simulation.ForcedWinSolver.VerifiedReach vo = reachChecked(k, g, opp, rc, oo, ver);
+            final forge.ai.simulation.ForcedWinSolver.Reach ro = vo.reach;
+            final double claimed = ro.failed ? Double.NaN : ro.p;
+            final double verified = ro.failed ? Double.NaN : Double.isNaN(vo.pv) ? claimed : vo.pv;
+            out[1] = ver ? verified : claimed;
+            out[14] = claimed;
+            out[15] = verified;
+            out[17] += vo.checkNanos;
+            addCost(out, ro);
+            if (fp && !vo.claims.isEmpty()) {
+                if (rec == null) {
+                    rec = fpLeafRecord(g, me);
+                }
+                rec.add("opp", fpReachJson(ro, vo, claimed, verified));
+            }
+        } else if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
             final forge.ai.simulation.ForcedWinSolver.Reach ro = reachOpp(k, g, me.getOpponents().get(0), rc);
             out[1] = ro.failed ? Double.NaN : ro.p;
             addCost(out, ro);
+        }
+        if (rec != null) {
+            final int id = fpLeafSeq.incrementAndGet();
+            fpLeaves.put(id, rec);
+            out[16] = id;
         }
         if (cfg.valueSink != null && (out[0] > 0 || out[1] > 0 || leafSeen.getAndIncrement() % LEAF_KEEP == 0)) {
             // a sink row: every leaf with a reach above 0 (either seat) and one in LEAF_KEEP of the others, with the
@@ -4423,6 +4519,183 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         return out;
+    }
+
+    // ---- reach-verify-1114: the engine check of leaf reach (the verify key) and its measurement (-Dsdcc.fpCheck)
+
+    /** reach-verify-1114 (measurement only; off unless set): log each leaf claim's checks and each decision's three picks. */
+    static final boolean FP_CHECK = Boolean.getBoolean("sdcc.fpCheck");
+    /** reach-verify-1114 (fpCheck only): the claim records of this decision's leaves, by the id in the leaf's reach array. */
+    private final java.util.concurrent.ConcurrentHashMap<Integer, JsonObject> fpLeaves = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicInteger fpLeafSeq = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * reach-verify-1114: the reach of {@code p} at {@code g} with its screens' lines checked. With the key on the checks
+     * run on the pilot's clock; under fpCheck alone they run off it (and the direct line's fallback screens are not run).
+     */
+    private forge.ai.simulation.ForcedWinSolver.VerifiedReach reachChecked(final RlKnowledge k, final Game g, final Player p,
+            final ReachCfg rc, final forge.ai.simulation.ForcedWinSolver.ReachOpts o, final boolean ver) {
+        final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        final int key = rc.verifyMode();
+        final int modes = FP_CHECK ? forge.ai.simulation.ForcedWinSolver.VERIFY_SAMPLED
+                | forge.ai.simulation.ForcedWinSolver.VERIFY_UNOPPOSED : key;
+        final long seed = splitmix(uid ^ 0xF9C4EC4L ^ (0x9E3779B97F4A7C15L * fpLeafSeq.get()) ^ p.getId());
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).reachVerified(g, knownTopOf(k, p), o,
+                modes, key, rc.verifyLines, ver && rc.verifyFull, !ver, seed);
+    }
+
+    private static JsonObject fpLeafRecord(final Game g, final Player me) {
+        final JsonObject rec = new JsonObject();
+        rec.addProperty("turn", g.getPhaseHandler().getTurn());
+        rec.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        rec.addProperty("active", g.getPhaseHandler().getPlayerTurn() == me ? "me" : "opp");
+        try {
+            rec.addProperty("state", forge.ai.simulation.PlayoutKeys.stateKey(g, false));
+        } catch (RuntimeException e) {
+            rec.addProperty("state", "error:" + e);
+        }
+        return rec;
+    }
+
+    private static JsonObject fpReachJson(final forge.ai.simulation.ForcedWinSolver.Reach r,
+            final forge.ai.simulation.ForcedWinSolver.VerifiedReach vr, final double claimed, final double verified) {
+        final JsonObject o = new JsonObject();
+        o.addProperty("claimed", claimed);
+        o.addProperty("verified", verified);
+        o.addProperty("direct", r.direct);
+        o.addProperty("unknown", r.unknown);
+        o.addProperty("checks", vr.checks);
+        o.addProperty("check_ms", Math.round(vr.checkNanos / 1e5) / 10.0);
+        final JsonArray cs = new JsonArray();
+        for (forge.ai.simulation.ForcedWinSolver.Claim c : vr.claims) {
+            final JsonObject x = new JsonObject();
+            if (c.group != null) {
+                x.addProperty("group", c.group);
+            }
+            x.addProperty("count", c.count);
+            x.addProperty("w", Math.round(c.weight * 1e5) / 1e5);
+            x.addProperty("lines", c.lines);
+            x.addProperty("turn", c.winTurn);
+            x.addProperty("steps", c.steps);
+            x.addProperty("loop", c.loop);
+            x.addProperty("fallback", c.fallback);
+            x.addProperty("line", c.line);
+            if (c.sampled != null) {
+                x.addProperty("S", c.sampled);
+                x.addProperty("S_run", c.sampledRun);
+                x.addProperty("S_ms", Math.round(c.sampledNanos / 1e5) / 10.0);
+            }
+            if (c.unopposed != null) {
+                x.addProperty("U", c.unopposed);
+                x.addProperty("U_run", c.unopposedRun);
+                x.addProperty("U_ms", Math.round(c.unopposedNanos / 1e5) / 10.0);
+            }
+            cs.add(x);
+        }
+        o.add("claims", cs);
+        return o;
+    }
+
+    @Override
+    public boolean fpCheck() {
+        return FP_CHECK && cfg.reach != null;
+    }
+
+    @Override
+    public double[] claimedReach(final double[] r) {
+        if (r == null || r.length < 18) {
+            return r;
+        }
+        final double[] x = r.clone();
+        x[0] = r[12];
+        x[1] = r[14];
+        return x;
+    }
+
+    @Override
+    public double[] verifiedReach(final double[] r) {
+        if (r == null || r.length < 18) {
+            return r;
+        }
+        final double[] x = r.clone();
+        x[0] = r[13];
+        x[1] = r[15];
+        return x;
+    }
+
+    /** reach-verify-1114 (fpCheck only): one searched decision's three picks, its leaves' reach and their claim records. */
+    private JsonObject fpRow(final Game g, final RlWire.Decide frame, final LookaheadSearch.GivenResult r, final List<Integer> order) {
+        final JsonObject row = new JsonObject();
+        row.addProperty("kind", "fp");
+        row.addProperty("game_uid", Long.toUnsignedString(uid));
+        row.addProperty("dec_idx", frame.decIdx);
+        row.addProperty("seat", frame.seat);
+        row.addProperty("turn", g.getPhaseHandler().getTurn());
+        row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        row.addProperty("outcome", r.outcome);
+        row.addProperty("verify", reachCfg().verify);
+        final JsonArray pk = new JsonArray();
+        for (int x : r.fpPicks) {
+            pk.add(x);
+        }
+        row.add("picks", pk); // [as made, recomputed as given, claimed, no reach, verified only] (searched indices)
+        final JsonArray ix = new JsonArray();
+        for (int j = 0; j < r.givenIndex.length; j++) {
+            ix.add(r.givenIndex[j] < order.size() ? order.get(r.givenIndex[j]) : -1 - (r.givenIndex[j] - order.size()));
+        }
+        row.add("entry", ix);
+        final JsonArray raw = new JsonArray(), rc = new JsonArray(), rv = new JsonArray(), oc = new JsonArray(),
+                ov = new JsonArray(), ids = new JsonArray();
+        final JsonObject leaves = new JsonObject();
+        double checkMs = 0;
+        for (int c = 0; c < r.fpRaw.length; c++) {
+            final JsonArray a = new JsonArray(), b = new JsonArray(), d = new JsonArray(), e = new JsonArray(),
+                    f = new JsonArray(), h = new JsonArray();
+            for (int w = 0; w < r.fpRaw[c].length; w++) {
+                final double v = r.fpRaw[c][w];
+                a.add(Double.isNaN(v) || Double.isInfinite(v) ? null : (Number) (Math.round(v * 1e4) / 1e4));
+                final double[] rr = r.fpReach[c][w];
+                b.add(fpNum(rr, 12));
+                d.add(fpNum(rr, 13));
+                e.add(fpNum(rr, 14));
+                f.add(fpNum(rr, 15));
+                final int id = rr == null || rr.length < 18 ? -1 : (int) rr[16];
+                h.add(id);
+                if (rr != null && rr.length >= 18) {
+                    checkMs += rr[17] / 1e6;
+                }
+                if (id > 0) {
+                    final JsonObject rec = fpLeaves.get(id);
+                    if (rec != null) {
+                        leaves.add(String.valueOf(id), rec);
+                    }
+                }
+            }
+            raw.add(a);
+            rc.add(b);
+            rv.add(d);
+            oc.add(e);
+            ov.add(f);
+            ids.add(h);
+        }
+        row.add("v_raw", raw);
+        row.add("reach_claimed", rc);
+        row.add("reach_verified", rv);
+        row.add("opp_claimed", oc);
+        row.add("opp_verified", ov);
+        row.add("leaf_ids", ids);
+        row.add("leaves", leaves);
+        row.addProperty("check_ms", Math.round(checkMs * 10) / 10.0);
+        row.addProperty("ms", Math.round(r.ms * 10) / 10.0);
+        fpLeaves.clear();
+        return row;
+    }
+
+    private static Number fpNum(final double[] rr, final int i) {
+        if (rr == null || rr.length < 18 || Double.isNaN(rr[i])) {
+            return null;
+        }
+        return Math.round(rr[i] * 1e5) / 1e5;
     }
 
     /** {@link ReachCfg#leafGf}, {@link ReachCfg#leafGfs}: the teacher's potential at this leaf joins its reach. */

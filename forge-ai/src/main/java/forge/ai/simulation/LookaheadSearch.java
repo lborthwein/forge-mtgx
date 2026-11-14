@@ -1676,6 +1676,24 @@ public final class LookaheadSearch {
             return 0.0;
         }
 
+        /**
+         * reach-verify-1114 (measurement only; false = off, the default, and nothing below runs): the decision also
+         * computes its pick with no reach credit and with verified reach only ({@link GivenResult#fpPicks}).
+         */
+        default boolean fpCheck() {
+            return false;
+        }
+
+        /** reach-verify-1114: a leaf's reach array with the claimed reach (as the planner screens give it). */
+        default double[] claimedReach(double[] reach) {
+            return reach;
+        }
+
+        /** reach-verify-1114: a leaf's reach array with only the engine-confirmed reach. */
+        default double[] verifiedReach(double[] reach) {
+            return reach;
+        }
+
         /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
         default String leafError() {
             return null;
@@ -2540,6 +2558,14 @@ public final class LookaheadSearch {
          * terminal} as {@code pairs[0..2][candidate][world]} (P(win) of each seat; terminal 1 / 0 / 0.5, NaN = a leaf).
          */
         public double[][][] pairs;
+        /**
+         * reach-verify-1114 ({@link SearchHooks#fpCheck} only; null otherwise): the searched index of the plain pick as
+         * made, and recomputed with the claimed reach, with no reach and with verified reach only; the leaf values
+         * before the reach and each leaf's reach array, per searched candidate and world.
+         */
+        public int[] fpPicks;
+        public double[][] fpRaw;
+        public double[][][] fpReach;
     }
 
     /**
@@ -2999,6 +3025,8 @@ public final class LookaheadSearch {
             throw new IllegalStateException("S-t: expanding choices needs policy play-outs");
         }
         final GivenResult res = new GivenResult();
+        fpRaw = null; // reach-verify-1114 (fpCheck only)
+        fpReach = null;
         decisionForce = forcePlayed;
         forcePlayed = null;
         final java.util.function.IntPredicate bump = testBump;
@@ -3383,6 +3411,23 @@ public final class LookaheadSearch {
                         hooks.reachDepart(), stats)
                 : argmax(values, okArg, n, k);
         reachPart = null; // this decision's only
+        if (fpRaw != null) {
+            // reach-verify-1114 (fpCheck only): the pick as made, and recomputed as given / claimed / no reach / verified
+            if (hooks.fpCheck() && fpRaw.length == n && fpReach.length == n) {
+                try {
+                    res.fpPicks = new int[] {plainBest, fpPick(0, values, finished, okArg, n, k, overBudget, provenPick),
+                            fpPick(1, values, finished, okArg, n, k, overBudget, provenPick),
+                            fpPick(2, values, finished, okArg, n, k, overBudget, provenPick),
+                            fpPick(3, values, finished, okArg, n, k, overBudget, provenPick)};
+                    res.fpRaw = fpRaw;
+                    res.fpReach = fpReach;
+                } catch (RuntimeException e) {
+                    System.err.println("[fp-check] picks failed: " + e);
+                }
+            }
+            fpRaw = null;
+            fpReach = null;
+        }
         int best = plainBest;
         if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0 && finished == null) {
             final int medBest = argmaxMedian(values, okArg, n, k);
@@ -3680,6 +3725,77 @@ public final class LookaheadSearch {
      */
     /** solver-distill-cc-1109: the last valued decision's reach part per candidate and world (null = the rule is off). */
     private double[][] reachPart;
+    /** reach-verify-1114 (fpCheck only; null otherwise): the last valued decision's leaf values before the reach, and reach arrays. */
+    private double[][] fpRaw;
+    private double[][][] fpReach;
+
+    /** reach-verify-1114: start the decision's copy of its values (terminal values as they are; leaves set by the caller). */
+    private void fpStart(double[][] values, int n, int k) {
+        fpRaw = new double[n][];
+        for (int c = 0; c < n; c++) {
+            fpRaw[c] = values[c].clone();
+        }
+        fpReach = new double[n][k][];
+    }
+
+    /**
+     * reach-verify-1114: the plain pick as made at the call site, recomputed from the decision's leaf values with each
+     * leaf's reach array replaced by {@code which} (0 = as the hooks gave it, 1 = the claimed reach, 2 = no reach, 3 =
+     * verified only). No counter or stat changes.
+     */
+    private int fpPick(int which, double[][] values, boolean[][] finished, boolean[] okArg, int n, int k, boolean overBudget,
+            int provenPick) {
+        if (overBudget) {
+            return 0;
+        }
+        if (provenPick >= 0) {
+            return provenPick;
+        }
+        final double[][] v = new double[n][k];
+        final double[][] rp = new double[n][k];
+        for (int c = 0; c < n; c++) {
+            for (int w = 0; w < k; w++) {
+                final double[] rr = fpReach[c][w];
+                if (rr == null) {
+                    v[c][w] = values[c][w];
+                    continue;
+                }
+                final double[] alt = which == 1 ? hooks.claimedReach(rr) : which == 3 ? hooks.verifiedReach(rr) : rr;
+                if (which == 2) {
+                    v[c][w] = fpRaw[c][w];
+                } else {
+                    v[c][w] = hooks.combineReach(fpRaw[c][w], alt);
+                    rp[c][w] = hooks.reachPart(alt);
+                }
+            }
+        }
+        if (finished != null) {
+            return chooseAnytime(v, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP,
+                    which != 2 && hooks.reachDepart() > 0 ? rp : null, hooks.reachDepart(), null);
+        }
+        // argmax without its counter
+        if (!okArg[0]) {
+            return 0;
+        }
+        int best = 0;
+        final double[] ev = new double[n];
+        for (int c = 0; c < n; c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += v[c][w];
+            }
+            ev[c] = okArg[c] ? s / k : Double.NEGATIVE_INFINITY;
+        }
+        for (int c = 1; c < n; c++) {
+            if (cfg.departZ > 0 && okArg[c] && !confident(v, c, k, cfg.departZ)) {
+                continue;
+            }
+            if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
+                best = c;
+            }
+        }
+        return best;
+    }
 
     private void valueLeaves(double[][] values, Rollout[][] outs, boolean[] ok, int k) {
         if (cfg.leafOpp) {
@@ -3740,9 +3856,16 @@ public final class LookaheadSearch {
                 }
             }
         }
+        if (hooks.fpCheck()) {
+            fpStart(values, n, k); // reach-verify-1114
+        }
         for (int i = 0; i < where.size(); i++) {
             final int c = where.get(i)[0], w = where.get(i)[1];
             final double[] rr = outs[c][w].leafReach;
+            if (fpRaw != null) {
+                fpRaw[c][w] = p[i];
+                fpReach[c][w] = rr;
+            }
             values[c][w] = rr == null ? p[i] : hooks.combineReach(p[i], rr);
             if (rr != null) {
                 stats.noteReach(rr);
@@ -3871,12 +3994,19 @@ public final class LookaheadSearch {
                 }
             }
         }
+        if (hooks.fpCheck()) {
+            fpStart(values, n, k); // reach-verify-1114
+        }
         for (int i = 0; i < m; i++) {
             final int c = where.get(i)[0], w = where.get(i)[1];
             final double vs = ps[i];
             final double vo = po == null ? Double.NaN : po[i];
             values[c][w] = cfg.leafSym ? (vs + 1.0 - vo) / 2.0 : vs;
             final double[] rr = outs[c][w].leafReach;
+            if (fpRaw != null) {
+                fpRaw[c][w] = values[c][w]; // reach-verify-1114
+                fpReach[c][w] = rr;
+            }
             if (rr != null) {
                 hooks.noteLeaf(outs[c][w].leafPayload, values[c][w], rr);
                 values[c][w] = hooks.combineReach(values[c][w], rr);
