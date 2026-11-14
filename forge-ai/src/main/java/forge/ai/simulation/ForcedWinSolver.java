@@ -5324,6 +5324,9 @@ public final class ForcedWinSolver {
             double p = 0, pd = 0;
             final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
             for (int i = 0; i < groups.size() && i < o.maxNames; i++) {
+                if (Thread.currentThread().isInterrupted()) {
+                    break; // reach-verify-1114: the world was cancelled; its value is discarded
+                }
                 final List<Card> grp = groups.get(i);
                 final Screen s = screenAt(g, top, grp.get(0), nameNodes, o.ms, o.window, o.nameOnePass);
                 if (!directFailed) {
@@ -5403,6 +5406,12 @@ public final class ForcedWinSolver {
             String first = null;
             int run = 0, turn = -1;
             for (int i = 0; i < ls.size() && i < Math.max(1, maxLines); i++) {
+                if (Thread.currentThread().isInterrupted()) {
+                    if (first == null) {
+                        first = "cancelled"; // reach-verify-1114: the world was cancelled: no more checks
+                    }
+                    break;
+                }
                 run++;
                 vr.checks++;
                 // only the key's own world runs on the pilot's clock; a second world asked for the log is always free
@@ -5448,6 +5457,7 @@ public final class ForcedWinSolver {
         arrangeTop = tops;
         passiveOpp = mode == VERIFY_SAMPLED;
         noReplan = true;
+        final boolean vc0 = forge.ai.VerifyCancel.set(true); // reach-verify-1114: a cancelled world stops the check
         try {
             return playout(g, line, seed, mode == VERIFY_SAMPLED ? -1 : 0, -1,
                     forge.game.WorkClock.nanoTime() + VERIFY_WALL_NS);
@@ -5456,6 +5466,7 @@ public final class ForcedWinSolver {
             o.why = "error:" + e;
             return o;
         } finally {
+            forge.ai.VerifyCancel.set(vc0);
             arrangeTop = a0;
             passiveOpp = p0;
             noReplan = r0;
@@ -6888,6 +6899,9 @@ public final class ForcedWinSolver {
             meter.playouts++;
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps && !lineAi.rested) {
                 ForcedWinEngine.checkWall(wall, "play-out step");
+                if (noReplan && forge.ai.VerifyCancel.cancelled()) {
+                    throw new ForcedWinEngine.OutOfBudget("cancelled: play-out step"); // reach-verify-1114
+                }
                 ph.mainLoopStep();
                 steps++;
                 meter.playoutSteps++;
@@ -6949,6 +6963,11 @@ public final class ForcedWinSolver {
             }
         } catch (ForcedWinEngine.OutOfBudget | forge.ai.AiWork.Exhausted ex) {
             libCut = true; // review #161 S2-2
+            if (ex.getMessage() != null && ex.getMessage().startsWith("cancelled")) {
+                out.won = false; // reach-verify-1114: the check's look-ahead world was cancelled: not a win, not a wall cut
+                out.why = "cancelled";
+                return out;
+            }
             if (forge.ai.AiWork.spent()) {
                 // rollout-budget-1101: the decision's Forge AI work cap is spent: not a win, and not dropped as at the wall
                 out.won = false;
