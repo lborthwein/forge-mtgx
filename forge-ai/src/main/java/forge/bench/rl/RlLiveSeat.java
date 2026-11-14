@@ -327,6 +327,15 @@ public final class RlLiveSeat {
                     case "seatTimeoutMs": s.seatTimeoutMs = Integer.parseInt(v); break;
                     case "capActions": s.capActions = Integer.parseInt(v); break;
                     case "maxDecisions": s.maxDecisions = Integer.parseInt(v); break;
+                    // untested-keys-1113 (as lane/sdcc-untested-keys a519da35338, taken here so that the memo can be measured
+                    // with the policy opponent): the play-out opponent (absent = "forge", Forge AI, as before; "policy" = the
+                    // same policy seat as ours on its own observation, needs playout=policy)
+                    case "opponent":
+                        if (!"forge".equals(v) && !"policy".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: opponent=" + v + " (want forge or policy)");
+                        }
+                        c.opponent = v;
+                        break;
                     case "svcMemo": c.svcMemo = !"0".equals(v) && !"false".equals(v) && !"off".equals(v); break; // svcmemo-1114 (absent = off)
                     case "loopGuard": s.loopGuard = Integer.parseInt(v); break;
                     case "aiFixes0928": s.aiFixes0928 = AiFixes.Mode.parse(v); break;
