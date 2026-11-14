@@ -409,6 +409,7 @@ public final class ForcedWinCanon {
                         b.me.getZone(ZoneType.Library).add(Card.fromPaperCard(paper(n), b.me));
                     }
                 }
+                settle(game);
                 return b;
             }
             for (String n : names) {
@@ -416,8 +417,21 @@ public final class ForcedWinCanon {
                 b.me.getZone(ZoneType.Library).add(c);
                 b.byName.put(n, c);
             }
+            settle(game);
             return b;
         });
+    }
+
+    /**
+     * cardtable2-1114: the base position's continuous effects are applied once, when it is built. The library's cards
+     * were put there after the frame was applied, so a characteristic of theirs that holds in every zone (a card that
+     * is "also a creature of another type" while it is not on the battlefield) was not yet in force; the first probe
+     * that made the engine apply continuous effects on the base then changed what every LATER learn read from the base's
+     * card (its creature flag and subtypes): a model depended on what the JVM had learned before. Applied here, a later
+     * application finds nothing to change, so a card's model no longer depends on the order of learning.
+     */
+    private static void settle(final Game game) {
+        game.getAction().checkStaticAbilities();
     }
 
     private interface WithCard<T> {
@@ -443,10 +457,12 @@ public final class ForcedWinCanon {
             return null; // another face or a copy of something else: not the card that was asked about
         }
         b.me.getZone(ZoneType.Library).add(extra);
+        settle(b.g); // cardtable2-1114: the extra card's own all-zone characteristics, as for the pool's cards
         try {
             return use.use(extra);
         } finally {
             b.me.getZone(ZoneType.Library).remove(extra);
+            settle(b.g);
         }
     }
 
@@ -590,6 +606,35 @@ public final class ForcedWinCanon {
         /** Null = nothing is appended (a table made in memory, or the generator's). */
         Path additions;
         public final AtomicLong hits = new AtomicLong(), learned = new AtomicLong(), stale = new AtomicLong(), tokens = new AtomicLong();
+        /** cardtable2-1114: lookups of a card that is not in the table's pool (learned as without the key, never appended). */
+        public final AtomicLong outside = new AtomicLong();
+        /** cardtable2-1114: the names the table knows (its pool list, the basic lands, every name it holds a model of). */
+        private volatile java.util.Set<String> known;
+
+        /**
+         * cardtable2-1114: is {@code name} a card of this table's pool? A card from outside (one a booster-opening effect
+         * made, a card of a deck the table was not generated for) is learned lazily, exactly as without the key, and is
+         * not appended: read R3 met 578 such names in 132 games, each a full canonical learn under the table's lock and
+         * one more line of the additions file, almost none of them ever asked for again. A pool card whose saved model
+         * is missing for the reader's key or stale (its script changed) is still learned canonically and appended.
+         */
+        boolean inPool(final String name) {
+            java.util.Set<String> k = known;
+            if (k == null) {
+                k = ConcurrentHashMap.newKeySet();
+                k.addAll(pool);
+                k.addAll(BeliefSampler.basics());
+                for (String key : entries.keySet()) {
+                    k.add(key.substring(key.lastIndexOf('|') + 1));
+                }
+                known = k;
+            }
+            if (k.contains(name)) {
+                return true;
+            }
+            final Base b = base;
+            return b != null && b.byName.containsKey(name);
+        }
 
         Table(final String path, final String stamp) {
             this.path = path;
@@ -636,6 +681,10 @@ public final class ForcedWinCanon {
          * under {@code key}. Null for a card with no paper card (a token), which the caller learns as without the key.
          */
         ACard learn(final String key, final Card c, final ForcedWinProbe.Stats st) {
+            if (!inPool(c.getName())) {
+                outside.incrementAndGet();
+                return null; // cardtable2-1114: not a pool card: the caller learns it as without the key
+            }
             synchronized (LOCK) {
                 final Entry have = entries.get(key);
                 final String h = scriptHash(c.getName());

@@ -196,6 +196,75 @@ public class CardTableTest extends AITest {
         }
     }
 
+    /**
+     * cardtable2-1114: a card that is not in the table's pool (a card a booster-opening effect made, in read R3) is
+     * learned exactly as without the key, kept by the reader only, and never appended.
+     */
+    @Test
+    public void aCardFromOutsideThePoolIsLearnedAsWithoutTheKeyAndNotAppended() throws Exception {
+        final Path p = saved(generated(POOL));
+        final Path add = Path.of(p + ".add.jsonl");
+        try {
+            ForcedWinCanon.forgetForTest();
+            final ForcedWinCanon.Table tb = ForcedWinCanon.open(p.toString());
+            final int n0 = tb.entries.size();
+            final String hand = "Giant Growth;Shock;Lightning Bolt";
+            final Game g = game(hand, "Forest;Mountain;Grizzly Bears", "Grizzly Bears");
+            final Game same = game(hand, "Forest;Mountain;Grizzly Bears", "Grizzly Bears");
+            final Player me = g.getPlayers().get(0), meSame = same.getPlayers().get(0);
+            final ForcedWinModel.Reader with = new ForcedWinModel.Reader(), without = new ForcedWinModel.Reader();
+            with.table = tb;
+            final List<Card> a = new ArrayList<>(me.getCardsIn(ZoneType.Hand)), b = new ArrayList<>(meSame.getCardsIn(ZoneType.Hand));
+            for (int i = 0; i < a.size(); i++) {
+                final String name = a.get(i).getName();
+                if (POOL.contains(name)) {
+                    with.card(g, me, a.get(i));
+                    continue;
+                }
+                Assert.assertFalse(tb.inPool(name), name);
+                Assert.assertEquals(shape(with.card(g, me, a.get(i))), shape(without.card(same, meSame, b.get(i))), name);
+            }
+            Assert.assertEquals(tb.outside.get(), 2, "two cards from outside the pool");
+            Assert.assertEquals(tb.learned.get(), 0, "nothing learned canonically");
+            Assert.assertEquals(tb.entries.size(), n0, "nothing added to the table");
+            Assert.assertFalse(Files.exists(add) && !Files.readAllLines(add).isEmpty(), "nothing appended");
+        } finally {
+            ForcedWinCanon.forgetForTest();
+            Files.deleteIfExists(p);
+            Files.deleteIfExists(add);
+        }
+    }
+
+    /**
+     * cardtable2-1114: a card's canonical model does not depend on what the JVM learned before it. The base position's
+     * continuous effects are applied when it is built, so a card with a characteristic that holds in every zone (one
+     * that is also a creature while it is not on the battlefield) reads the same whether it is learned first or last.
+     */
+    @Test
+    public void aModelDoesNotDependOnTheOrderOfLearning() {
+        final List<String> pool = new ArrayList<>(POOL);
+        pool.add("Grist, the Hunger Tide");
+        final List<String> back = new ArrayList<>(pool);
+        java.util.Collections.reverse(back);
+        final List<ForcedWinCanon.Table> tables = new ArrayList<>();
+        for (List<String> order : Arrays.asList(pool, back)) {
+            final ForcedWinCanon.Table tb = ForcedWinCanon.newTable(pool);
+            for (String v : VARIANTS) {
+                for (String n : order) {
+                    Assert.assertTrue(ForcedWinCanon.generate(tb, v, n), v + n);
+                }
+            }
+            tables.add(tb);
+        }
+        for (String v : VARIANTS) {
+            for (String n : pool) {
+                Assert.assertEquals(shape(tables.get(0).entries.get(v + n).card), shape(tables.get(1).entries.get(v + n).card), v + n);
+            }
+            Assert.assertTrue(tables.get(0).entries.get(v + "Grist, the Hunger Tide").card.creature,
+                    "the all-zone characteristic is in force from the first learn");
+        }
+    }
+
     @Test
     public void loopProbesAreSavedPerPair() throws Exception {
         final ForcedWinCanon.Table tb = generated(POOL);
