@@ -71,6 +71,13 @@ public class GateLoopWindowTest extends forge.ai.AITest {
         return m.get(g.getRules());
     }
 
+    /** The real nanoseconds of loop probing this decision's gate charged to its budget. */
+    private static long charge(final RlSearch rs) throws ReflectiveOperationException {
+        final Field f = RlSearch.class.getDeclaredField("gateChargeReal");
+        f.setAccessible(true);
+        return f.getLong(rs);
+    }
+
     private static boolean gateOpen(final RlSearch rs) throws ReflectiveOperationException {
         final Method m = RlSearch.class.getDeclaredMethod("reachGateOpen");
         m.setAccessible(true);
@@ -107,10 +114,12 @@ public class GateLoopWindowTest extends forge.ai.AITest {
                         Assert.assertEquals(cut, 0L, what + ": no read cut");
                         Assert.assertTrue(found > 0, what + ": the copier and its untapper win");
                         Assert.assertTrue(gateOpen(rs), what + ": the gate opens on this decision");
+                        Assert.assertTrue(charge(rs) > 0L, what + ": the probes' time is charged to the decision");
                     } else {
                         Assert.assertEquals(probes, 0L, what + ": the stale window: nothing probed");
                         Assert.assertTrue(cut > 0, what + ": the read is cut");
                         Assert.assertFalse(gateOpen(rs), what + ": the gate stays shut");
+                        Assert.assertEquals(charge(rs), 0L, what + ": nothing charged off");
                         // the decision then opens its own window (decide0 after the gate), and the next ask of the same
                         // turn and library size does not check again: shut until a draw or the next turn
                         ForcedWinSolver.loopWindow(g, System.nanoTime(), 8_000_000_000L);
@@ -151,6 +160,7 @@ public class GateLoopWindowTest extends forge.ai.AITest {
                     Assert.assertEquals(t1[0] - t0[0], 3L, key + ": alone and two partners probed");
                     Assert.assertEquals(t1[1] - t0[1], 0L, key + ": nothing cut");
                     Assert.assertNotNull(slot(g), key + ": the read's default window stays, as off");
+                    Assert.assertEquals(charge(rs), 0L, key + ": nothing borrowed, nothing charged (as off)");
                 } finally {
                     ForcedWinSolver.loopDeadline(g, 0L);
                     rs.close();
