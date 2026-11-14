@@ -82,14 +82,37 @@ public final class SvcMemo {
     private long version = -1;
     public final AtomicInteger hits = new AtomicInteger(), misses = new AtomicInteger(), versionDrops = new AtomicInteger();
     /**
-     * svcmemo-verify-1114 (MEASUREMENT ONLY, never for shipping; -Dsdcc.svcMemoVerify=true, default off and then nothing
-     * changes): on every hit the request is ALSO sent, and the fresh answer is compared with the stored one. The play-out
-     * still gets the STORED answer, so the game is the memo arm's; the send ticks the work clock once, in place of the
-     * hit's own tick, so the work accounting is the memo arm's too. Every mismatch is one {@code [svcmemo-verify]} line
-     * on stderr. A mismatch means the service gave two different greedy answers to byte-identical requests.
+     * The shadow-verify debug flag ({@code -Dsdcc.svcMemoVerify=true}; OFF by default, and then nothing is sent, counted
+     * or logged beyond the memo itself). With it on, every request the memo answers, whether a hit on a finished entry
+     * or a JOIN on another thread's send still in flight, is ALSO sent, and the fresh answer is compared with the stored
+     * one. The play-out still gets the stored answer, and the extra send ticks the work clock once in place of the
+     * hit's own tick, so the game and the work accounting are the memo's. A fresh answer whose steps or status differ
+     * is one {@code [svcmemo-verify] MISMATCH} line on stderr (hit or join, the asker's and the stored answer's uid and
+     * decision index, the thread, the request kind, a sha256 of the keyed payload bytes, seat, family and mode, and both
+     * answers with logp, value and policy version) and counts in {@code memoMismatches} on the decision row, beside
+     * {@code memoVerified} and {@code memoVerifiedJoins}. Cost: the flag undoes the memo's saving (every request is sent
+     * again), so it is for a diagnostic run, not for play. A mismatch means either that the memo served something other
+     * than the policy's answer to those bytes (the fault of 11-14: the stored object was shared with the first asker,
+     * whose seat changed it) or that the service gave two different greedy answers to byte-identical requests.
      */
-    static final boolean VERIFY = Boolean.getBoolean("sdcc.svcMemoVerify");
+    static final boolean VERIFY_DEFAULT = Boolean.getBoolean("sdcc.svcMemoVerify");
+    private final boolean verify;
+    /** Where a mismatch line goes (stderr; a test reads it). */
+    java.util.function.Consumer<String> mismatchLog = System.err::println;
     public final AtomicInteger verified = new AtomicInteger(), verifiedJoins = new AtomicInteger(), mismatches = new AtomicInteger();
+
+    public SvcMemo() {
+        this(VERIFY_DEFAULT);
+    }
+
+    /** {@code verify}: the shadow-verify debug flag for this memo (production: {@link #VERIFY_DEFAULT}). */
+    SvcMemo(final boolean verify) {
+        this.verify = verify;
+    }
+
+    public boolean verifying() {
+        return verify;
+    }
 
     /** The kind of a greedy DECIDE request: the frame type and its flags (0 = greedy). */
     public static int kindOf(final int frameType, final int flags) {
@@ -119,7 +142,7 @@ public final class SvcMemo {
             }
             if (d != null) {
                 hits.incrementAndGet();
-                if (VERIFY) {
+                if (verify) {
                     verify(key, d, payload, sender, joined); // sends (and so ticks the work clock once, as the hit would)
                 } else {
                     forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // as the send it replaces (no clock = no-op)
@@ -160,7 +183,7 @@ public final class SvcMemo {
         return d;
     }
 
-    /** svcmemo-verify-1114 (measurement only): the fresh answer to a request the memo just served, compared with the stored one. */
+    /** The shadow-verify (see {@link #VERIFY_DEFAULT}): the fresh answer to a request the memo just served, compared with the stored one. */
     private void verify(final Key key, final RlWire.Decision stored, final byte[] payload, final Sender sender,
             final boolean joined) throws IOException {
         final RlWire.Decision fresh = sender.send(payload);
@@ -187,7 +210,7 @@ public final class SvcMemo {
         // family and mode sit right after uid, index and seat in the DECIDE header (RlWire.encodeDecide)
         final java.nio.ByteBuffer hb = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         // the asker: a play-out's uid is its world's seed (the same for every candidate's play-out in that world)
-        System.err.println("[svcmemo-verify] MISMATCH " + (joined ? "join" : "hit") + " askerUid=" + Long.toUnsignedString(hb.getLong())
+        mismatchLog.accept("[svcmemo-verify] MISMATCH " + (joined ? "join" : "hit") + " askerUid=" + Long.toUnsignedString(hb.getLong())
                 + " askerDecIdx=" + hb.getInt() + " thread=" + Thread.currentThread().getName() + " storedUid="
                 + Long.toUnsignedString(stored.gameUid) + " storedDecIdx=" + stored.decIdx
                 + " kind=0x" + Integer.toHexString(key.kind) + " payloadSha=" + sha
