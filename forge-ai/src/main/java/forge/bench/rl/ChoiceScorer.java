@@ -152,6 +152,15 @@ public final class ChoiceScorer {
          */
         public int redealOwn = 0;
         /**
+         * sdcc-copycast-1114 (false = off, the default, and then nothing changes; acts only on a {@link #reachDiscards}
+         * ask): the seat's own discard whose resolution goes on to ask the seat again (a "draw two, discard two" spell that
+         * then untaps lands; the guard's "multiAnswer") is no longer refused. Its options (every single card, or the
+         * policy's set and its one-card swaps) are scored as the other own discards are; the later asks of the resolution
+         * are answered by Forge AI on each option's copy, the same way in every option. The hidden-card checks still run
+         * (an option that reads the opponent's hand is refused; an own-library read is re-dealt with {@link #redealOwn}).
+         */
+        public boolean discardTail = false;
+        /**
          * discard-guard-1113 (0 = off, the default): no departure from the policy's answer at an ask where an option has
          * no score. 1: when the ask ran over its budget (an option dropped unscored). 2: also when any option failed in
          * its copy or the menu was cut by the cap. The policy's own answer is always scored first; with the guard the
@@ -169,7 +178,7 @@ public final class ChoiceScorer {
                 // choice-search-1109 (lineOnly, relax), integrate-1110 (reachDiscards): ported by owner-misplays-1113, all off by default
                 "lineOnly", "check", "checkTop", "subsetCap", "relax", "relaxTop", "relaxMs", "relaxDraws", "reachDiscards",
                 // owner-misplays-1113, off by default
-                "redealOwn",
+                "redealOwn", "discardTail",
                 // discard-guard-1113, off by default
                 "departScored", "departFloor"));
 
@@ -251,6 +260,7 @@ public final class ChoiceScorer {
                 throw new IllegalArgumentException("choiceScorer: lineOnly / check together with reachAlpha or seqs is not defined");
             }
             if (o.has("reachDiscards")) c.reachDiscards = o.get("reachDiscards").getAsBoolean();
+            if (o.has("discardTail")) c.discardTail = o.get("discardTail").getAsBoolean();
             if (o.has("redealOwn")) c.redealOwn = o.get("redealOwn").getAsInt();
             if (c.redealOwn < 0 || c.redealOwn > 64) {
                 throw new IllegalArgumentException("choiceScorer: redealOwn must be 0..64");
@@ -337,6 +347,9 @@ public final class ChoiceScorer {
                 if (check != null) o.add("check", check);
                 o.addProperty("checkTop", checkTop);
                 o.addProperty("subsetCap", subsetCap);
+            }
+            if (discardTail) {
+                o.addProperty("discardTail", true); // sdcc-copycast-1114: only when on
             }
             if (redealOwn > 0) {
                 o.addProperty("redealOwn", redealOwn); // owner-misplays-1113: only when on
@@ -432,6 +445,13 @@ public final class ChoiceScorer {
         this.uid = uid;
     }
 
+    /** sdcc-copycast-1114 (the search's copyDungeon key; false = off): this scorer's copies carry a dungeon card. */
+    private boolean copyDungeon = false;
+
+    public void setCopyDungeon(final boolean on) {
+        this.copyDungeon = on;
+    }
+
     public Config config() {
         return cfg;
     }
@@ -439,6 +459,11 @@ public final class ChoiceScorer {
     /** The frame side over a live tracker. */
     private ChoiceApply.Frames frames(final RlKnowledge live, final int seatMask, final Scored s) {
         return new ChoiceApply.Frames() {
+            @Override
+            public boolean copyDungeon() {
+                return copyDungeon;
+            }
+
             @Override
             public Object onCopy(final Game copy, final Player me) {
                 final RlKnowledge k = live.forkFor(copy);
@@ -1323,9 +1348,10 @@ public final class ChoiceScorer {
         if (a.fail != null) {
             return null; // the options report their own failures
         }
-        if (a.tailAsks > 0) {
+        if (a.tailAsks > 0 && !(cfg.discardTail && guardProbe)) {
             return "multiAnswer";
         }
+        // sdcc-copycast-1114 (discardTail): an own discard with later asks in its resolution goes on to the hidden-card checks
         final boolean was = guardSwap;
         guardSwap = true;
         try {

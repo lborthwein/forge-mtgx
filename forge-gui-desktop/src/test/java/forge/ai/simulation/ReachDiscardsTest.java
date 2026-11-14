@@ -73,7 +73,8 @@ public class ReachDiscardsTest extends AITest {
         final StringBuilder sb = new StringBuilder("<pad>\t0\n<unk>\t1\n");
         int i = 2;
         for (String n : new String[] {"Doomsday", "Gush", "Thassa's Oracle", "Swamp", "Island", "Forest", "Mountain",
-            "Grizzly Bears", "Balduvian Bears", "Underground Sea", "Watery Grave", "Bazaar of Baghdad", "Tormenting Voice"}) {
+            "Grizzly Bears", "Balduvian Bears", "Underground Sea", "Watery Grave", "Bazaar of Baghdad", "Tormenting Voice",
+            "Frantic Search"}) {
             sb.append(n).append('\t').append(i++).append('\n');
         }
         return CardIndex.of(sb.toString().getBytes(StandardCharsets.UTF_8));
@@ -88,7 +89,15 @@ public class ReachDiscardsTest extends AITest {
      * true (null = none).
      */
     static ChoiceScorer scorer(final boolean on, final int redeal, final String[] solverExtra) {
+        return scorer(on, redeal, solverExtra, false);
+    }
+
+    /** sdcc-copycast-1114: {@code discardTail} = choiceScorer.discardTail. */
+    static ChoiceScorer scorer(final boolean on, final int redeal, final String[] solverExtra, final boolean discardTail) {
         final JsonObject o = JsonParser.parseString(BLOCK).getAsJsonObject();
+        if (discardTail) {
+            o.addProperty("discardTail", true);
+        }
         if (on) {
             o.addProperty("reachDiscards", true);
         }
@@ -554,5 +563,95 @@ public class ReachDiscardsTest extends AITest {
         Assert.assertEquals(a.s.redeal, 4);
         Assert.assertNotNull(a.alt, "the answer moves: " + a.dump());
         Assert.assertEquals(a.altNames, List.of("Badlands"), "the land is discarded, the Aura kept: " + a.dump());
+    }
+
+    // ------------------------------------------------------------------ sdcc-copycast-1114: a discard with later asks
+
+    /**
+     * A "draw two, discard two, then untap up to three lands" spell (the owner's NC05 ask: his deck's engine thrown away
+     * to its own loot spell), cast and posed in the live resolution. The policy discards Doomsday and a card it drew.
+     */
+    private static Ask drawTwoDiscardTwo(final boolean discardTail, final int redeal, final String lib) {
+        final Game g = game("Frantic Search;Doomsday;Grizzly Bears", "Island;Island;Island;Underground Sea;Watery Grave",
+                "Island;Island;" + lib, "MAIN1");
+        final Player me = g.getPlayers().get(0);
+        final ChoiceScorer sc = scorer(true, redeal, null, discardTail);
+        final RlKnowledge know = know(g);
+        final Ask[] out = new Ask[1];
+        me.dangerouslySetController(new PlayerControllerAi(g, me, me.getController().getLobbyPlayer()) {
+            @Override
+            public CardCollection chooseCardsToDiscardFrom(final Player p, final SpellAbility sa,
+                    final CardCollection validCards, final int min, final int max, final CardCollectionView visible) {
+                Assert.assertEquals(max, 2);
+                final RlCandidates.Menu m = RlCandidates.build(g, me, "chooseCardsToDiscardFrom", "discardFrom", body(min, max),
+                        new Object[] {validCards, sa, p});
+                final short[] greedy = steps(validCards, "Doomsday", "Island");
+                sc.setAskPlayer(p);
+                out[0] = ask(sc, g, me, m, greedy, know, sa, validCards, null);
+                final CardCollection live = new CardCollection();
+                final List<Card> cs = new ArrayList<>();
+                validCards.forEach(cs::add);
+                for (short x : greedy) {
+                    live.add(cs.get(x));
+                }
+                return live;
+            }
+        });
+        final SpellAbility cast = find(me, ZoneType.Hand, "Frantic Search").getFirstSpellAbility();
+        cast.setActivatingPlayer(me);
+        Assert.assertTrue(((PlayerControllerAi) me.getController()).playChosenSpellAbility(cast), "cast");
+        MyRandom.setRandom(new Random(42));
+        g.getStack().resolveStack();
+        Assert.assertNotNull(out[0], "the discard was asked");
+        // the copies never moved the live game: it took the policy's answer
+        Assert.assertEquals(ChoiceLineTest.names(me, ZoneType.Hand), "Grizzly Bears;Island");
+        return out[0];
+    }
+
+    @Test
+    public void aDiscardWhoseResolutionAsksAgainIsRefusedWithoutTheKey() {
+        final Ask a = drawTwoDiscardTwo(false, 4, KILL);
+        Assert.assertEquals(a.s.unsupported, "multiAnswer", "today: the later untap ask refuses the whole discard: " + a.dump());
+        Assert.assertTrue(a.s.options.isEmpty(), a.dump());
+        Assert.assertNull(a.alt);
+    }
+
+    @Test
+    public void withDiscardTailTheTwoCardDiscardIsScoredAndKeepsTheEngine() {
+        final Ask a = drawTwoDiscardTwo(true, 4, KILL);
+        Assert.assertNull(a.s.unsupported, a.dump());
+        Assert.assertEquals(a.s.redeal, 4, a.dump());
+        Assert.assertTrue(a.s.reachDiscards);
+        Assert.assertTrue(a.s.options.size() >= 3, "the policy's set and its one-card swaps: " + a.dump());
+        ChoiceScorer.Option own = null;
+        for (ChoiceScorer.Option o : a.s.options) {
+            Assert.assertNull(o.fail, o.label + ": " + a.dump());
+            if (o.policy) {
+                own = o;
+            }
+            if (o.label.contains("Doomsday")) {
+                Assert.assertEquals(reachOf(o), 0.0, 1e-9, o.label);
+            } else {
+                Assert.assertTrue(reachOf(o) > 0, "keep Doomsday has a line: " + o.label + "\n" + a.dump());
+            }
+        }
+        Assert.assertNotNull(own, a.dump());
+        Assert.assertNotNull(a.alt, "the answer moves: " + a.dump());
+        Assert.assertEquals(a.altNames.size(), 2);
+        Assert.assertFalse(a.altNames.contains("Doomsday"), "Doomsday is kept: " + a.altNames);
+    }
+
+    @Test
+    public void withDiscardTailAndNoRedealTheOwnLibraryGuardStillRefuses() {
+        final Ask a = drawTwoDiscardTwo(true, 0, KILL);
+        Assert.assertEquals(a.s.unsupported, "ownHidden", "the hidden-card checks still run: " + a.dump());
+        Assert.assertNull(a.alt);
+    }
+
+    @Test
+    public void discardTailIsOffByDefaultAndWrittenOnlyWhenOn() {
+        Assert.assertFalse(scorer(true).config().discardTail);
+        Assert.assertFalse(scorer(true).config().toJson().has("discardTail"));
+        Assert.assertTrue(scorer(true, 0, null, true).config().toJson().get("discardTail").getAsBoolean());
     }
 }

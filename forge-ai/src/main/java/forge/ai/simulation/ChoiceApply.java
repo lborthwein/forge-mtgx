@@ -32,6 +32,11 @@ public final class ChoiceApply {
 
         byte[] capture(Object ctx, Game g, Player me);
 
+        /** sdcc-copycast-1114: the copies carry a dungeon card with its room ({@link GameCopier#setCopyDungeon}). */
+        default boolean copyDungeon() {
+            return false;
+        }
+
         /** The seat arranged these cards going to its library (what the live bridge reports as a look). */
         default void onOrder(Object ctx, Game g, Player me, List<Card> cards) {
         }
@@ -329,8 +334,11 @@ public final class ChoiceApply {
         }
     }
 
-    private static GameCopier copier(final Game live, final int fidelity, final boolean stack) {
+    private static GameCopier copier(final Game live, final int fidelity, final boolean stack, final Frames frames) {
         final GameCopier c = new GameCopier(live, true);
+        if (frames != null && frames.copyDungeon()) {
+            c.setCopyDungeon(true); // sdcc-copycast-1114
+        }
         if (fidelity > 0) {
             c.setCopyFidelity(fidelity);
         }
@@ -372,7 +380,7 @@ public final class ChoiceApply {
             final Game g;
             final Player me;
             synchronized (live) {
-                final GameCopier copier = copier(live, 1, true);
+                final GameCopier copier = copier(live, 1, true, null);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
             }
@@ -462,7 +470,7 @@ public final class ChoiceApply {
             SpellAbility trig = null;
             final Object ctx;
             synchronized (live) {
-                final GameCopier copier = copier(live, fidelity, true);
+                final GameCopier copier = copier(live, fidelity, true, frames);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
                 if (liveWrap != null) {
@@ -636,7 +644,7 @@ public final class ChoiceApply {
             final Player me;
             final Object ctx;
             synchronized (live) {
-                final GameCopier copier = copier(live, fidelity, false);
+                final GameCopier copier = copier(live, fidelity, false, frames);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
                 ctx = frames.onCopy(g, me);
@@ -759,7 +767,7 @@ public final class ChoiceApply {
             final Player me;
             final Object ctx;
             synchronized (live) {
-                final GameCopier copier = copier(live, fidelity, false);
+                final GameCopier copier = copier(live, fidelity, false, frames);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
                 ctx = frames.onCopy(g, me);
@@ -837,7 +845,7 @@ public final class ChoiceApply {
             final Player me;
             final Object ctx;
             synchronized (live) {
-                final GameCopier copier = copier(live, fidelity, false);
+                final GameCopier copier = copier(live, fidelity, false, frames);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
                 ctx = frames.onCopy(g, me);

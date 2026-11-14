@@ -158,6 +158,16 @@ public class GameCopier {
 
     public void setCopyBackFace(boolean on) { this.copyBackFace = on; }
 
+    /**
+     * Lane sdcc-copycast-1114 (off by default, and then nothing changes): a dungeon card keeps its piece type and its
+     * current room in the copy. A dungeon is built from a token script and then marked a dungeon; rebuilt here from its
+     * paper card it came out a token, and a token in the command zone does not exist: no copy held the dungeon, a
+     * venture in a copy started it again at its first room, and a room's trigger had no host to be rebuilt from.
+     */
+    private boolean copyDungeon = false;
+
+    public void setCopyDungeon(boolean on) { this.copyDungeon = on; }
+
     public void setHistoryLki(boolean on) { this.historyLki = on; }
 
     public void setOffBattlefieldLimits(boolean on) {
@@ -597,6 +607,7 @@ public class GameCopier {
         newGame.offBattlefieldLimits = offBattlefieldLimits || origGame.offBattlefieldLimits;
         newGame.historyLki = historyLki || origGame.historyLki;
         newGame.copyBackFace = copyBackFace || origGame.copyBackFace;
+        newGame.copyDungeon = copyDungeon || origGame.copyDungeon;
         newGame.stackAbilityCopies = stackAbilityCopies || origGame.stackAbilityCopies;
         newGame.stackHistory = stackHistory || origGame.stackHistory;
 
@@ -2095,6 +2106,11 @@ public class GameCopier {
                 newCard.setOwner(newOwner);
             } else {
                 newCard = CardFactory.getCard(c.getPaperCard(), newOwner, c.getId(), newGame);
+                if ((copyDungeon || origGame.copyDungeon) && c.getType().isDungeon()) {
+                    // sdcc-copycast-1114: the dungeon stays a dungeon, in the room the seat stands in
+                    newCard.setGamePieceType(c.getGamePieceType());
+                    newCard.setCurrentRoom(c.getCurrentRoom());
+                }
             }
             newCard.setCommander(c.isCommander());
             return newCard;
