@@ -340,6 +340,7 @@ final class ForcedWinEngine {
         boolean offBattlefieldLimits = false;
         boolean historyLki = false;
         boolean copyBackFace = false;
+        boolean copyDungeon = false; // sdcc-copycast-1114
         boolean stackAbilityCopies = false;
         boolean stackHistory = false;
         /**
@@ -2056,6 +2057,7 @@ final class ForcedWinEngine {
                 copier.setOffBattlefieldLimits(lim.offBattlefieldLimits); // house p12
                 copier.setHistoryLki(lim.historyLki); // house p13
                 copier.setCopyBackFace(lim.copyBackFace); // house p15
+                copier.setCopyDungeon(lim.copyDungeon); // sdcc-copycast-1114
                 copier.setStackAbilityCopies(lim.stackAbilityCopies); // house p16
                 copier.setStackHistory(lim.stackHistory); // house p17
                 root.g = copier.makeCopy();
@@ -4947,6 +4949,7 @@ final class ForcedWinEngine {
                 copier.setOffBattlefieldLimits(lim.offBattlefieldLimits); // house p12
                 copier.setHistoryLki(lim.historyLki); // house p13
                 copier.setCopyBackFace(lim.copyBackFace); // house p15
+                copier.setCopyDungeon(lim.copyDungeon); // sdcc-copycast-1114
                 copier.setStackAbilityCopies(lim.stackAbilityCopies); // house p16
                 copier.setStackHistory(lim.stackHistory); // house p17
                 copyStackIf(copier, node.g, lim.stack); // R3-5
