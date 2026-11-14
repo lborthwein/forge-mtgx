@@ -71,6 +71,9 @@ public final class CardTableGen {
         }
         props.remove("cardTable");
         final ForcedWinSolver.Config cfg = ForcedWinSolver.Config.fromProps(props::get);
+        // ct2-live-1114: a work clock for the whole run, so every planner and probe budget (and the loop probes' window with
+        // forge.loopWorkClock) counts work, not wall time: the same jar, flags and pool give the same file on any host
+        forge.game.WorkClock.install(forge.game.WorkClock.newClock(1.0));
         final long t0 = System.nanoTime();
         RlActorBench.boot();
         final List<String> pool = new ArrayList<>();

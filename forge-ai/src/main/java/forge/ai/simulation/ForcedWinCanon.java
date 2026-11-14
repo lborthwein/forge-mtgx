@@ -778,7 +778,7 @@ public final class ForcedWinCanon {
                     return have;
                 }
                 final Base b = leanBase();
-                final long t0 = System.nanoTime();
+                final long t0 = ForcedWinSolver.loopNow(); // ct2-live-1114: the solver's loop-probe clock (work with forge.loopWorkClock)
                 final long seed = ForcedWinSolver.mix(SEED, loopKey(c, partner, fromHand, tag).hashCode());
                 final Boolean w = scoped(seed, () -> withCard(b, c, cc -> partner == null
                         ? Boolean.valueOf(ForcedWinProbe.sandboxWin(b.g, b.me, cc.getId(), -1, fromHand, lim, seed, budgetNanos))
@@ -787,7 +787,7 @@ public final class ForcedWinCanon {
                 if (w == null) {
                     return null; // a token: no canonical answer
                 }
-                if (!w && budgetNanos < fullNanos && System.nanoTime() - t0 >= budgetNanos - budgetNanos / 10) {
+                if (!w && budgetNanos < fullNanos && ForcedWinSolver.loopNow() - t0 >= budgetNanos - budgetNanos / 10) {
                     return null;
                 }
                 final String h = scriptHash(c.getName()) + "+" + (partner == null ? "" : scriptHash(partner.getName()));
@@ -984,7 +984,9 @@ public final class ForcedWinCanon {
             if (!"mtgx-card-table/1".equals(o.has("format") ? o.get("format").getAsString() : "") || !mine.equals(theirs)) {
                 REASON.put(key, "stamp " + theirs + " is not this build's " + mine);
                 System.err.println("[card-table] REFUSED " + path + ": stamp " + theirs + " is not this build's " + mine
-                        + " (regenerate the table with this jar and these flags); card models are learned as without the key");
+                        + " (regenerate the table with this jar and these flags); card models are learned as without the key; this JVM's"
+                        + " forge.* flags in the stamp: [" + flags().trim().replace('\n', ' ') + "]; the table's: ["
+                        + (o.has("flags") ? o.get("flags").getAsString().trim().replace('\n', ' ') : "none") + "]");
                 return REFUSED;
             }
             final Table t = new Table(path, mine);
