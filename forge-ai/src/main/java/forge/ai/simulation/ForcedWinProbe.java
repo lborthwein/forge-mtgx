@@ -156,6 +156,151 @@ public final class ForcedWinProbe {
 
     /** sdcc-tutorcast-1110: set by a tutorCast reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> TUTOR_CAST = ThreadLocal.withInitial(() -> false);
+    /** sdcc-untaps-1114: set by a planUntaps reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> PLAN_UNTAPS = ThreadLocal.withInitial(() -> false);
+    /** sdcc-untaps-1114: the lands an untap / boost sandbox puts into play at most (one per land name of ours first). */
+    static final int UNTAP_LANDS = 10;
+
+    /**
+     * sdcc-untaps-1114 (a planUntaps reader only): a spell whose script has an untap effect, or an effect that sets up a
+     * tapped-for-mana trigger (shapes only, no names), is cast in two more sandboxes with up to {@link #UNTAP_LANDS}
+     * lands of ours in play (one per land name of our cards first). All tapped: the lands untapped once it has
+     * resolved are an {@link EffKind#UNTAP_LANDS}. All untapped: each land name is tapped for mana after the spell has
+     * resolved, and what it adds beyond the same tap's own amount is an {@link EffKind#LAND_BOOST} for the names that
+     * gained. The effects join the ability's observed ones, last. Never throws.
+     */
+    static void learnUntaps(final Abil ab, final Game live, final Player me, final int id, final SpellAbility sa0,
+            final Setup inHand, final Act castIt, final long seed, final Stats st) {
+        boolean untap = false, boost = false;
+        try {
+            for (SpellAbility l = sa0; l != null; l = l.getSubAbility()) {
+                untap |= l.getApi() == forge.game.ability.ApiType.Untap || l.getApi() == forge.game.ability.ApiType.UntapAll;
+                if (l.getApi() == forge.game.ability.ApiType.Effect && l.hasParam("Triggers") && sa0.getHostCard() != null) {
+                    for (String name : l.getParam("Triggers").split(",")) {
+                        final String sv = sa0.getHostCard().getSVar(name.trim());
+                        boost |= sv != null && sv.contains("TapsForMana");
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (!untap && !boost) {
+            return;
+        }
+        for (int phase = 0; phase < 2; phase++) {
+            if (phase == 0 ? !untap : !boost) {
+                continue;
+            }
+            final boolean tapped = phase == 0;
+            final int[] untapped = {0};
+            final Map<String, int[]> gain = new java.util.TreeMap<>();
+            final Setup setup = (g, m, c) -> {
+                inHand.apply(g, m, c);
+                final java.util.Set<String> names = new java.util.HashSet<>();
+                int n = 0;
+                for (Card l : m.getCardsIn(ZoneType.Battlefield)) {
+                    if (l.isLand()) {
+                        names.add(l.getName());
+                        n++;
+                    }
+                }
+                for (int pass = 0; pass < 2; pass++) {
+                    for (ZoneType z : new ZoneType[] {ZoneType.Library, ZoneType.Graveyard}) {
+                        for (Card l : new ArrayList<>(m.getCardsIn(z))) {
+                            if (n < UNTAP_LANDS && l.isLand() && l.getId() != c.getId() && (pass == 1 || names.add(l.getName()))) {
+                                toBattlefield(g, m, l);
+                                n++;
+                            }
+                        }
+                    }
+                }
+                resolveAll(g);
+                for (Card l : m.getCardsIn(ZoneType.Battlefield)) {
+                    if (l.isLand()) {
+                        l.setTapped(tapped);
+                    }
+                }
+            };
+            final Act act = (g, m, c) -> {
+                final java.util.Set<Integer> were = new java.util.HashSet<>();
+                for (Card l : m.getCardsIn(ZoneType.Battlefield)) {
+                    if (l.isLand() && l.isTapped()) {
+                        were.add(l.getId());
+                    }
+                }
+                if (!castIt.apply(g, m, g.findById(c.getId()))) {
+                    return false;
+                }
+                resolveAll(g);
+                if (tapped) {
+                    for (Card l : m.getCardsIn(ZoneType.Battlefield)) {
+                        untapped[0] += l.isLand() && !l.isTapped() && were.contains(l.getId()) ? 1 : 0;
+                    }
+                    return true;
+                }
+                final java.util.Set<String> done = new java.util.HashSet<>();
+                for (Card l : new ArrayList<>(m.getCardsIn(ZoneType.Battlefield))) {
+                    if (!l.isLand() || l.isTapped() || !done.add(l.getName())) {
+                        continue;
+                    }
+                    for (SpellAbility ma : l.getManaAbilities()) {
+                        if (ma.getManaPart() == null || ma.getPayCosts() == null || !ma.getPayCosts().hasTapCost()
+                                || ma.getPayCosts().getCostParts().size() != 1) {
+                            continue;
+                        }
+                        ma.setActivatingPlayer(m);
+                        int own;
+                        try {
+                            own = Math.max(1, ma.amountOfManaGenerated(true));
+                        } catch (RuntimeException e) {
+                            own = 1;
+                        }
+                        final int[] before = pool(m);
+                        if (!play(g, m, ma)) {
+                            break;
+                        }
+                        resolveAll(g);
+                        final int[] after = pool(m);
+                        int total = 0, mask = 0, most = 0;
+                        for (int k = 0; k < 6; k++) {
+                            final int d = after[k] - before[k];
+                            total += d;
+                            if (d > most) {
+                                most = d;
+                            }
+                        }
+                        for (int k = 0; k < 6; k++) {
+                            mask |= after[k] - before[k] == most && most > 0 ? 1 << k : 0;
+                        }
+                        if (total > own) {
+                            gain.put(l.getName(), new int[] {total - own, mask});
+                        }
+                        break;
+                    }
+                }
+                return true;
+            };
+            final Obs o = run(live, me, id, setup, act, ForcedWinSolver.mix(seed, 0x554EL + phase), st);
+            if (o.error != null || !o.played) {
+                continue;
+            }
+            if (tapped && untapped[0] > 0) {
+                ab.effects.add(new Eff(EffKind.UNTAP_LANDS, untapped[0], 0));
+            } else if (!tapped && !gain.isEmpty()) {
+                // one effect per (amount, colour) seen; the names that gained it
+                final Map<String, java.util.Set<String>> by = new java.util.TreeMap<>();
+                for (Map.Entry<String, int[]> e : gain.entrySet()) {
+                    by.computeIfAbsent(e.getValue()[0] + ":" + e.getValue()[1], x -> new java.util.TreeSet<>()).add(e.getKey());
+                }
+                for (Map.Entry<String, java.util.Set<String>> e : by.entrySet()) {
+                    final String[] k = e.getKey().split(":");
+                    ab.effects.add(new Eff(EffKind.LAND_BOOST, Integer.parseInt(k[0]), Integer.parseInt(k[1]), 0, e.getValue()));
+                }
+            }
+        }
+    }
+
     /** sdcc-gycast-1114: set by a graveCasts reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> GRAVE_CASTS = ThreadLocal.withInitial(() -> false);
 
@@ -171,8 +316,11 @@ public final class ForcedWinProbe {
      */
     static ForcedWinModel.Grave graveGrant(final Card c) {
         try {
-            if (!c.isPermanent() || c.isLand()) {
+            if (c.isLand()) {
                 return null;
+            }
+            if (!c.isPermanent()) {
+                return graveGrantSpell(c);
             }
             ForcedWinModel.Grave out = null;
             for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {
@@ -209,6 +357,39 @@ public final class ForcedWinProbe {
         } catch (RuntimeException e) {
             return null;
         }
+    }
+
+    /**
+     * sdcc-gycast-1114: the same shape on a spell: its resolution creates an effect whose static ability affects cards in
+     * a graveyard and gives them a keyword or lets them be played, or gives the cards of a graveyard a keyword outright.
+     * The grant then lasts for the turn. Null = no such ability; what it allows is observed ({@link #graveCast}).
+     */
+    private static ForcedWinModel.Grave graveGrantSpell(final Card c) {
+        for (SpellAbility sa0 : c.getSpellAbilities()) {
+            if (!sa0.isSpell()) {
+                continue;
+            }
+            for (SpellAbility sa = sa0; sa != null; sa = sa.getSubAbility()) {
+                boolean hit = false;
+                if (sa.getApi() == forge.game.ability.ApiType.Effect && sa.hasParam("StaticAbilities")) {
+                    for (String name : sa.getParam("StaticAbilities").split(",")) {
+                        final String sv = c.getSVar(name.trim());
+                        hit |= sv != null && sv.contains("Graveyard") && sv.contains("AffectedZone")
+                                && (sv.contains("MayPlay") || sv.contains("AddKeyword"));
+                    }
+                } else if (sa.getApi() == forge.game.ability.ApiType.PumpAll && sa.hasParam("KW")
+                        && sa.getParamOrDefault("PumpZone", "").contains("Graveyard")) {
+                    hit = true;
+                }
+                if (hit) {
+                    final ForcedWinModel.Grave out = new ForcedWinModel.Grave();
+                    out.spell = true;
+                    out.endStep = true;
+                    return out;
+                }
+            }
+        }
+        return null;
     }
 
     /** sdcc-gycast-1114: the spells the engine lets {@code m} cast with {@code c} where it is, as description and cost text. */
@@ -273,6 +454,7 @@ public final class ForcedWinProbe {
     static ForcedWinModel.GraveCast graveCast(final Game live, final Player liveMe, final Card liveGrantor, final Card liveX,
             final long seed, final Stats st) {
         final int gid = liveGrantor.getId(), xid = liveX.getId();
+        final boolean bySpell = !liveGrantor.isPermanent();
         final java.util.Set<String> before = new java.util.HashSet<>();
         final ForcedWinModel.GraveCast[] cast = {null};
         final List<Abil> own = new ArrayList<>();
@@ -320,8 +502,38 @@ public final class ForcedWinProbe {
                 }
             }
             gr = g.findById(gid);
-            toBattlefield(g, m, gr);
-            resolveAll(g);
+            if (bySpell) {
+                // the granting spell is cast from our hand with floating mana and resolves (a player target: ourselves)
+                if (gid == xid) {
+                    return;
+                }
+                if (!gr.isInZone(ZoneType.Hand)) {
+                    g.getAction().moveToHand(gr, null);
+                    gr = g.findById(gid);
+                }
+                for (int col = 0; col < 6; col++) {
+                    for (int k = 0; k < 12; k++) {
+                        m.getManaPool().addMana(new Mana(ForcedWinModel.FORGE_COLOR[col], gr, null, m));
+                    }
+                }
+                for (SpellAbility sa : gr.getSpellAbilities()) {
+                    if (!sa.isSpell()) {
+                        continue;
+                    }
+                    sa.setActivatingPlayer(m);
+                    if (targetsPlayersOnly(sa, m) && !setPlayerTargets(sa, m, "self")) {
+                        continue;
+                    }
+                    if (play(g, m, sa)) {
+                        break;
+                    }
+                }
+                resolveAll(g);
+                m.getManaPool().resetPool();
+            } else {
+                toBattlefield(g, m, gr);
+                resolveAll(g);
+            }
             g.getAction().checkStaticAbilities();
         };
         final Act act = (g, m, c0) -> {
@@ -1397,6 +1609,9 @@ public final class ForcedWinProbe {
                                 run(live, me, id, inHand, castIt, runSeed, st), card.getName());
                 final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
                 objAttach(t, ab, objs, objRun);
+                if (PLAN_UNTAPS.get() && sa0.isSpell() && !ab.unplayable && objRun == null && sacCost == null) {
+                    learnUntaps(ab, live, me, id, sa0, inHand, castIt, ForcedWinSolver.mix(runSeed, 0x554E54L), st); // sdcc-untaps-1114
+                }
                 if (sacCost != null) {
                     t.unmodeled = true; // as before the key (its cost was outside the model): the engine search may use it
                 }

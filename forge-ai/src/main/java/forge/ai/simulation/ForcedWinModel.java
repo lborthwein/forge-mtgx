@@ -74,7 +74,18 @@ public final class ForcedWinModel {
          * that way in the sandbox (one run per card name of ours); {@link Eff#n} = 1: a searched card that is not cast
          * goes to our hand (observed), 0: it does not (such a pick is not planned).
          */
-        TUTOR_CAST
+        TUTOR_CAST,
+        /**
+         * sdcc-untaps-1114 (observed only by a planUntaps reader): up to n of our tapped lands untap (a sandbox with all
+         * our lands tapped saw n of them untapped once the spell had resolved).
+         */
+        UNTAP_LANDS,
+        /**
+         * sdcc-untaps-1114 (observed only by a planUntaps reader): until the turn ends, tapping one of the lands named
+         * in {@link Eff#names} for mana adds n more mana of {@link Eff#colors} (each of our land names was tapped in a
+         * sandbox after the spell had resolved, and its mana compared with the same tap before it).
+         */
+        LAND_BOOST
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
@@ -361,7 +372,7 @@ public final class ForcedWinModel {
 
     /**
      * sdcc-gycast-1114 (set only by a graveCasts reader; null otherwise, and then nothing changes): this permanent, while
-     * in play, lets its controller cast cards from the graveyard. Recognised from the card's script by shape alone (a
+     * in play (or this spell, for the turn it resolves in: {@link #spell}), lets its controller cast cards from the graveyard. Recognised from the card's script by shape alone (a
      * continuous static ability that affects cards in a graveyard and gives them a keyword or a permission to be
      * played); what it really allows is observed: {@link #names} holds the card names of ours a sandbox then cast from
      * the graveyard with it in play (one run per name, asked for the cards of the position being read), {@link #tried}
@@ -372,12 +383,17 @@ public final class ForcedWinModel {
         boolean endStep;
         /** The script's limit of such casts per turn (0 = none). */
         int perTurn;
+        /**
+         * The grant is a spell's effect, not a permanent's: once the spell has resolved, the cards that were in our
+         * graveyard then can be cast until the turn ends (a card that reaches the graveyard later is not counted).
+         */
+        boolean spell;
         final Map<String, GraveCast> names = new java.util.concurrent.ConcurrentSkipListMap<>();
         final java.util.Set<String> tried = new java.util.concurrent.ConcurrentSkipListSet<>();
 
         @Override
         public String toString() {
-            return "graveCasts" + names + (endStep ? " untilEndStep" : "") + (perTurn > 0 ? " perTurn" + perTurn : "");
+            return (spell ? "spell-" : "") + "graveCasts" + names + (endStep ? " untilEndStep" : "") + (perTurn > 0 ? " perTurn" + perTurn : "");
         }
     }
 
@@ -1121,8 +1137,9 @@ public final class ForcedWinModel {
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
             // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
-            // sdcc-gycast-1114: and a graveCasts reader ("gc|"), whose templates carry a permanent's cast-from-graveyard grant
-            final String key = (graveCasts ? "gc|" : "") + (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
+            // sdcc-gycast-1114: and a graveCasts reader ("pgc|"), whose templates carry a permanent's cast-from-graveyard grant
+            // sdcc-untaps-1114: and a planUntaps reader ("pub|"), whose probes also observe land untaps and mana boosts
+            final String key = (graveCasts ? "pgc|" : "") + (planUntaps ? "pub|" : "") + (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
                     + (probeSettle ? "settle|" : "") + c.getName();
             final boolean prevHide = ForcedWinProbe.HIDE.get();
             ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
@@ -1148,6 +1165,8 @@ public final class ForcedWinModel {
                 final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
                 final boolean prevGc = ForcedWinProbe.GRAVE_CASTS.get();
                 ForcedWinProbe.GRAVE_CASTS.set(graveCasts);
+                final boolean prevPu = ForcedWinProbe.PLAN_UNTAPS.get();
+                ForcedWinProbe.PLAN_UNTAPS.set(planUntaps);
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
@@ -1162,6 +1181,7 @@ public final class ForcedWinModel {
                     ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                     ForcedWinProbe.GRAVE_CASTS.set(prevGc);
+                    ForcedWinProbe.PLAN_UNTAPS.set(prevPu);
                 }
                 if (graveCasts) {
                     t.grave = ForcedWinProbe.graveGrant(c); // sdcc-gycast-1114 (the script's shape only; no sandbox here)
@@ -1236,6 +1256,13 @@ public final class ForcedWinModel {
          * position is tried under the grant once ({@link #graveFill}).
          */
         boolean graveCasts;
+
+        /**
+         * sdcc-untaps-1114 (solver key planUntaps; false = off, and then nothing changes): templates are learned under
+         * their own keys, and a spell whose script untaps permanents or sets up a tapped-for-mana trigger is played in
+         * two more sandboxes that observe how many of our lands it untaps and what our lands then tap for.
+         */
+        boolean planUntaps;
 
         /** sdcc-gycast-1114: the grant probes of the games in progress, by game scope (weak), then seat, grantor and card name. */
         private static final Map<Object, Map<String, Object>> GRAVE_CACHE =

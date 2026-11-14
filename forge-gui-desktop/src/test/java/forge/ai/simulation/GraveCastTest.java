@@ -160,10 +160,17 @@ public class GraveCastTest extends forge.ai.AITest {
         Assert.assertNotNull(cat.names.get(LED));
         Assert.assertEquals(cat.names.get(LED).exile, 0);
         Assert.assertFalse(cat.names.containsKey("Brainstorm"), "not a permanent: the engine does not offer it");
-        Assert.assertFalse(cat.names.containsKey("Yawgmoth's Will"));
+        // a sorcery that opens the graveyard for the turn: a spell grant; its casts end in exile and cost no cards
+        final ForcedWinModel.Grave will = model(on, g, "Yawgmoth's Will").grave;
+        Assert.assertNotNull(will, "a spell whose effect lets graveyard cards be played");
+        System.out.println("GYCAST spell grant " + will + " not=" + will.tried);
+        Assert.assertTrue(will.spell);
+        Assert.assertNotNull(will.names.get("Brainstorm"));
+        Assert.assertEquals(will.names.get("Brainstorm").exile, 0);
+        Assert.assertEquals(will.names.get("Brainstorm").to, ForcedWinModel.Abil.SELF_EXILE);
+        Assert.assertNotNull(will.names.get(LED));
         final ForcedWinModel.Grave lands = model(on, g, "Crucible of Worlds").grave;
         Assert.assertTrue(lands == null || lands.names.isEmpty(), "a grant of land plays casts nothing");
-        Assert.assertNull(model(on, g, "Yawgmoth's Will").grave);
         Assert.assertNull(model(on, g, "Grizzly Bears").grave);
     }
 
@@ -198,6 +205,27 @@ public class GraveCastTest extends forge.ai.AITest {
         final ForcedWinSolver.Screen bare = solver(noFuel.getPlayers().get(0), true).screenAt(noFuel,
                 List.of(), null, 30000, -1L, true, false);
         Assert.assertEquals(bare.lines, 0, "an empty graveyard and two library cards: nothing to exile");
+    }
+
+    /**
+     * A spell grant (the owner's G17 class): three rituals already cast from hand this turn, the sorcery that opens the
+     * graveyard in hand with a storm drain. Key on, the rituals are cast again from the graveyard and the drain is lethal.
+     */
+    @Test
+    public void aSpellGrantReplaysTheGraveyard() {
+        final String hand = "Yawgmoth's Will;Tendrils of Agony";
+        final String lands = "Swamp;Swamp;Swamp;Swamp;Swamp";
+        final String gy = "Dark Ritual;Dark Ritual;Dark Ritual;Cabal Ritual;Grizzly Bears";
+        final Game g = game(hand, lands, gy, LIB40, "", 20, 12);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver off = solver(me, false), on = solver(me, true);
+        final ForcedWinSolver.Screen a = off.screenAt(g, off.knownTop(g), null, 2000, -1L, true, true);
+        final ForcedWinSolver.Screen b = on.screenAt(g, on.knownTop(g), null, 2000, -1L, true, true);
+        System.out.println("GYCAST spell off lines=" + a.lines + " nodes=" + a.nodes + " | on lines=" + b.lines + " nodes=" + b.nodes
+                + " best=" + b.best);
+        Assert.assertEquals(a.lines, 0, "key off: five lands do not make a lethal drain (opponent at 12)");
+        Assert.assertTrue(b.lines > 0, "key on: the graveyard's rituals are cast again");
+        Assert.assertEquals(reach(on, g, 2000).p, 1.0, 1e-9);
     }
 
     /** The key's cost where it applies and where it does not: planner nodes of one screen, key off and on. */
@@ -338,6 +366,58 @@ public class GraveCastTest extends forge.ai.AITest {
         g.getStack().resolveStack();
         Assert.assertNotNull(out[0], "the discard was asked");
         return out[0];
+    }
+
+    /**
+     * NC05's real ask: the loot spell itself is cast (draw two, discard two) with the token maker in play, its trigger put
+     * on the stack and resolved first, as in a game. Measured and printed: whether the card scorer scores a discard of
+     * two cards at once ({@code seqs}), and what it answers, key off and on.
+     */
+    @Test
+    public void nc05RealAskDiscardTwoIsMeasured() {
+        for (boolean on : new boolean[] {false, true}) {
+            final Game g = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(
+                    "Swamp;Wheel of Fortune;Island;" + BREACH + ";Island;Frantic Search",
+                    "Xander's Lounge;Island;Mountain;Mountain;Young Pyromancer;Palantír of Orthanc", 12, "",
+                    "Wall of Roots;Esika's Chariot;Questing Beast", 16, "human")
+                    .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + NC05_LIB)
+                    .replace("humangraveyard=", "humangraveyard=Ancestral Recall;Firebolt"));
+            final Player me = g.getPlayers().get(0);
+            final ChoiceScorer sc = ReachDiscardsTest.scorer(true, 4, on ? new String[] {"planGraveCasts"} : null);
+            final RlKnowledge know = ReachDiscardsTest.know(g);
+            final ReachDiscardsTest.Ask[] out = new ReachDiscardsTest.Ask[1];
+            me.dangerouslySetController(new PlayerControllerAi(g, me, me.getController().getLobbyPlayer()) {
+                @Override
+                public CardCollection chooseCardsToDiscardFrom(final Player p, final SpellAbility sa,
+                        final CardCollection validCards, final int min, final int max, final CardCollectionView visible) {
+                    final RlCandidates.Menu m = RlCandidates.build(g, me, "chooseCardsToDiscardFrom", "discardFrom",
+                            ReachDiscardsTest.body(min, max), new Object[] {validCards, sa, p});
+                    final short[] greedy = ReachDiscardsTest.steps(validCards, "Mountain", BREACH);
+                    sc.setAskPlayer(p);
+                    out[0] = ReachDiscardsTest.ask(sc, g, me, m, greedy, know, sa, validCards, null);
+                    final CardCollection live = new CardCollection();
+                    live.add(ReachDiscardsTest.find(me, ZoneType.Hand, "Mountain"));
+                    live.add(ReachDiscardsTest.find(me, ZoneType.Hand, BREACH));
+                    return live;
+                }
+            });
+            SpellAbility loot = null;
+            for (SpellAbility sa : ReachDiscardsTest.find(me, ZoneType.Hand, "Frantic Search").getSpellAbilities()) {
+                if (sa.isSpell()) {
+                    loot = sa;
+                }
+            }
+            Assert.assertNotNull(loot);
+            loot.setActivatingPlayer(me);
+            Assert.assertTrue(((PlayerControllerAi) me.getController()).playChosenSpellAbility(loot), "cast the loot spell");
+            MyRandom.setRandom(new Random(42));
+            for (int i = 0; i < 6 && (g.getStack().addAllTriggeredAbilitiesToStack() || !g.getStack().isEmpty()); i++) {
+                g.getStack().resolveStack();
+            }
+            Assert.assertNotNull(out[0], "the discard was asked");
+            System.out.println("GYCAST NC05 real ask key=" + on + " unsupported=" + out[0].s.unsupported + " options="
+                    + out[0].s.options.size() + " alt=" + out[0].altNames);
+        }
     }
 
     /** The best reach among the options that keep the engine (their label, the discarded card, is another card), or discard it. */

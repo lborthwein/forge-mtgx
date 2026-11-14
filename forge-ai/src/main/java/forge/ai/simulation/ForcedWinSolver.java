@@ -328,6 +328,13 @@ public final class ForcedWinSolver {
          */
         public boolean planGraveCasts = false;
         /**
+         * sdcc-untaps-1114 (planUntaps; false = off, and then nothing changes): the seat's own reader observes, for a spell
+         * whose script untaps permanents or sets up a tapped-for-mana trigger, how many of our lands it untaps and what
+         * our lands then tap for ({@link ForcedWinModel.EffKind#UNTAP_LANDS}, {@link ForcedWinModel.EffKind#LAND_BOOST});
+         * every plan of the seat then counts them (the effects exist only in such a reader's templates).
+         */
+        public boolean planUntaps = false;
+        /**
          * sdcc-tutorcast-1110 (off by default, and then nothing changes): the width model knows a spell that searches our
          * library for a card and lets us cast it at once without paying its mana cost. The reader's probes observe the
          * effect ({@link ForcedWinModel.EffKind#TUTOR_CAST}: which of our cards the engine offers to cast, one sandbox
@@ -973,6 +980,7 @@ public final class ForcedWinSolver {
             c.planExpandCap = boolOrLive(get.apply("planExpandCap")); // live-fixes-1107: default forge.liveFixes; // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.planGraveCasts = "true".equals(get.apply("planGraveCasts")); // sdcc-gycast-1114
+            c.planUntaps = "true".equals(get.apply("planUntaps")); // sdcc-untaps-1114
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
@@ -1556,6 +1564,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.probeObjects) {
             this.reader.probeObjects = true; // sdcc-probeobj-1111: our own cards only (its own template keys)
+        }
+        if (cfg.planUntaps) {
+            this.reader.planUntaps = true; // sdcc-untaps-1114: our own cards only (its own template keys)
         }
         if (cfg.planGraveCasts) {
             this.reader.graveCasts = true; // sdcc-gycast-1114: our own cards only (its own template keys)

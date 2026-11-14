@@ -111,6 +111,8 @@ public final class RlLiveSeat {
                 // sdcc-gycast-1114 (absent = off, the seat as before): the planner screens plan casts from the graveyard
                 // under a permanent's observed grant (ForcedWinSolver.Config.planGraveCasts)
                 "planGraveCasts",
+                // sdcc-untaps-1114 (absent = off): the reader observes land untaps and mana boosts of the seat's spells
+                "planUntaps",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
                 "engineModeChoice"));
@@ -134,6 +136,8 @@ public final class RlLiveSeat {
                 // sdcc-gycast-1114 (absent = off, the seat as before): the planner screens plan casts from the graveyard
                 // under a permanent's observed grant (ForcedWinSolver.Config.planGraveCasts)
                 "planGraveCasts",
+                // sdcc-untaps-1114 (absent = off): the reader observes land untaps and mana boosts of the seat's spells
+                "planUntaps",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
                 "engineModeChoice"));

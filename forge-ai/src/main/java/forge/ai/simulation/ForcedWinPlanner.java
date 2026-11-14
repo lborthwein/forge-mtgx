@@ -658,10 +658,21 @@ public final class ForcedWinPlanner {
         int pendingFree = -1;
         /** sdcc-gycast-1114: casts from the graveyard this turn (counted only for a grant with a per-turn limit). */
         int graveUsed;
+        /**
+         * sdcc-gycast-1114: a spell's grant is on for this turn: the granting card, and the graveyard cards it opened
+         * (those in the graveyard when it resolved); -1 / null = none. Cleared at the pass.
+         */
+        int graveSpell = -1;
+        List<Integer> graveOpen;
+        /** sdcc-untaps-1114: the land boosts on for this turn (observed LAND_BOOST effects, in the order resolved); null = none. */
+        List<Eff> boosts;
 
         S copy() {
             final S s = new S();
             s.graveUsed = graveUsed;
+            s.graveSpell = graveSpell;
+            s.graveOpen = graveOpen == null ? null : new ArrayList<>(graveOpen);
+            s.boosts = boosts == null ? null : new ArrayList<>(boosts);
             s.pendingFree = pendingFree;
             s.turnIdx = turnIdx;
             s.sorcery = sorcery;
@@ -716,12 +727,21 @@ public final class ForcedWinPlanner {
                 sb.append(e == UNKNOWN ? "?" : e < 0 ? "*" : cards.get(e).name).append(',');
             }
             sb.append('R').append(names(remaining)).append('P').append(names(libPool)).append('G').append(names(gyPool));
+            if (boosts != null) {
+                sb.append('B').append(boosts.size()); // sdcc-untaps-1114 (never set without an observed LAND_BOOST)
+                for (Eff b : boosts) {
+                    sb.append(b.n).append(':').append(b.colors).append(',');
+                }
+            }
             if (graveActive) {
                 // sdcc-gycast-1114: the graveyard is a resource only then: the cards it holds that the model cannot name,
                 // and (under a per-turn limit) the casts made from it this turn
                 sb.append('X').append(gyExtra);
                 if (graveLimited) {
                     sb.append('u').append(graveUsed);
+                }
+                if (graveSpell >= 0) {
+                    sb.append('s').append(cards.get(graveSpell).name).append(names(graveOpen));
                 }
             }
             return sb.toString();
@@ -1133,10 +1153,19 @@ public final class ForcedWinPlanner {
                         : isWinny(a, ab) || ab.has(EffKind.PILE) ? first
                         : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
                                 || ab.has(EffKind.TUTOR_CAST) ? second : third;
+                final List<S> res = apply(s, hi, -1, a, ab);
+                if (into == lead && a.grave.spell) {
+                    // the spell's grant opens the cards in our graveyard now (the spell itself is not one of them)
+                    for (S x : res) {
+                        x.graveSpell = h;
+                        x.graveOpen = new ArrayList<>(x.gyPool);
+                        x.graveOpen.remove(Integer.valueOf(h));
+                    }
+                }
                 if (winFirst) {
-                    place(apply(s, hi, -1, a, ab), into, isWinny(a, ab) && !staysAsWin(a, ab), wins, late);
+                    place(res, into, isWinny(a, ab) && !staysAsWin(a, ab), wins, late);
                 } else {
-                    into.addAll(apply(s, hi, -1, a, ab));
+                    into.addAll(res);
                 }
             }
         }
@@ -1249,10 +1278,15 @@ public final class ForcedWinPlanner {
         String grName = null;
         for (Perm p : s.bf) {
             final ACard a = cards.get(p.card);
-            if (a.grave != null && !a.grave.names.isEmpty() && (grName == null || a.name.compareTo(grName) < 0)) {
+            if (a.grave != null && !a.grave.spell && !a.grave.names.isEmpty() && (grName == null || a.name.compareTo(grName) < 0)) {
                 gr = a.grave;
                 grName = a.name;
             }
+        }
+        // a spell's grant for this turn opens only the cards its resolution found in the graveyard
+        final boolean bySpell = gr == null && s.graveSpell >= 0 && s.graveOpen != null;
+        if (bySpell) {
+            gr = cards.get(s.graveSpell).grave;
         }
         if (gr == null || gr.perTurn > 0 && s.graveUsed >= gr.perTurn) {
             return;
@@ -1265,7 +1299,8 @@ public final class ForcedWinPlanner {
             }
             final ACard a = cards.get(g);
             final ForcedWinModel.GraveCast gc = gr.names.get(a.name);
-            if (gc == null || !seenNames.add(a.name) || s.gyPool.size() - 1 + s.gyExtra < gc.exile) {
+            if (gc == null || bySpell && !s.graveOpen.contains(g) || !seenNames.add(a.name)
+                    || s.gyPool.size() - 1 + s.gyExtra < gc.exile) {
                 continue;
             }
             if (a.permanent && !a.useful() && a.onBattlefield.isEmpty()) {
@@ -1281,6 +1316,9 @@ public final class ForcedWinPlanner {
                 step.expHandIdx = s.hand.stream().mapToInt(Integer::intValue).toArray();
                 step.expLibIdx = s.lib.subList(0, Math.min(6, s.lib.size())).stream().mapToInt(Integer::intValue).toArray();
                 n.gyPool.remove(gi);
+                if (bySpell && (a.permanent || gc.to != ForcedWinModel.Abil.SELF_GRAVEYARD)) {
+                    n.graveOpen.remove(Integer.valueOf(g));
+                }
                 exileFuel(n, gc.exile, gr);
                 n.graveUsed++;
                 if (!pay(n, ab, null, step)) {
@@ -1420,6 +1458,9 @@ public final class ForcedWinPlanner {
         if (ab.kind == AbilKind.SPELL && a.permanent) {
             return true;
         }
+        if (graveActive && a.grave != null && a.grave.spell && ab.kind == AbilKind.SPELL) {
+            return true; // sdcc-gycast-1114: a spell whose only effect in the model is its grant
+        }
         return !ab.effects.isEmpty();
     }
 
@@ -1553,6 +1594,7 @@ public final class ForcedWinPlanner {
                     final int colour = bestFloatColour(land.sourceColors);
                     p.tapped = true;
                     s.pool[colour] += Math.max(1, land.sourceAmount);
+                    addBoost(s, land); // sdcc-untaps-1114
                     s.steps.add(new Step(AbilKind.FLOAT, land, null, colour));
                 }
             }
@@ -1960,7 +2002,10 @@ public final class ForcedWinPlanner {
                 }
             }
             s.graveUsed = 0;
+            s.graveSpell = -1;
+            s.graveOpen = null;
         }
+        s.boosts = null; // sdcc-untaps-1114
         s.turnIdx++;
         s.sorcery = true;
         Arrays.fill(s.pool, 0);
@@ -2353,6 +2398,31 @@ public final class ForcedWinPlanner {
             }
             case EXILE_HAND: {
                 s.hand.clear();
+                resolve(s, effs, ei + 1, 0, ab, out);
+                return;
+            }
+            case UNTAP_LANDS: {
+                // sdcc-untaps-1114: up to n tapped lands untap: those that tap for the most first (boosted ones before plain)
+                final List<Perm> lands = new ArrayList<>();
+                for (Perm p : s.bf) {
+                    if (p.tapped && cards.get(p.card).land && cards.get(p.card).sourceColors != 0) {
+                        lands.add(p);
+                    }
+                }
+                lands.sort(Comparator.comparingInt((Perm p) -> -(Math.max(1, cards.get(p.card).sourceAmount) + boostOf(s, cards.get(p.card))))
+                        .thenComparingInt(p -> cards.get(p.card).id));
+                for (int i = 0; i < e.n && i < lands.size(); i++) {
+                    lands.get(i).tapped = false;
+                }
+                resolve(s, effs, ei + 1, 0, ab, out);
+                return;
+            }
+            case LAND_BOOST: {
+                // sdcc-untaps-1114: for the rest of the turn the named lands tap for more
+                if (s.boosts == null) {
+                    s.boosts = new ArrayList<>();
+                }
+                s.boosts.add(e);
                 resolve(s, effs, ei + 1, 0, ab, out);
                 return;
             }
@@ -2964,6 +3034,36 @@ public final class ForcedWinPlanner {
         return best;
     }
 
+    /** sdcc-untaps-1114: the extra mana a tap of {@code a} adds under this turn's boosts (0 with none). */
+    private static int boostOf(S s, ACard a) {
+        int n = 0;
+        if (s.boosts != null) {
+            for (Eff b : s.boosts) {
+                n += b.names != null && b.names.contains(a.name) ? b.n : 0;
+            }
+        }
+        return n;
+    }
+
+    /** sdcc-untaps-1114: a land tapped for mana under this turn's boosts adds each boost's mana to the pool. */
+    private static void addBoost(S s, ACard a) {
+        if (s.boosts == null) {
+            return;
+        }
+        for (Eff b : s.boosts) {
+            if (b.names != null && b.names.contains(a.name)) {
+                if (Integer.bitCount(b.colors) == 1) {
+                    s.pool[Integer.numberOfTrailingZeros(b.colors)] += b.n;
+                } else {
+                    s.pool[ForcedWinModel.ANY] += b.n;
+                    for (int i = 0; i < b.n; i++) {
+                        s.anyQueue.add(new int[] {s.steps.size() - 1, b.colors == 0 ? ForcedWinModel.ALL_COLORS : b.colors});
+                    }
+                }
+            }
+        }
+    }
+
     private void tapSource(S s, Perm p, int col) {
         final ACard a = cards.get(p.card);
         // solver-gaps-1015: the line floats exactly the sources the model paid with, in the colour it used, before the
@@ -2971,6 +3071,7 @@ public final class ForcedWinPlanner {
         s.steps.add(new Step(AbilKind.FLOAT, a, null, col));
         p.tapped = true;
         s.pool[col] += Math.max(1, a.sourceAmount);
+        addBoost(s, a); // sdcc-untaps-1114 (nothing without an observed boost this turn)
         if (a.sourceSac) {
             s.bf.remove(p);
             s.gyPool.add(p.card);
