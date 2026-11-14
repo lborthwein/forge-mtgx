@@ -4516,6 +4516,28 @@ public final class ForcedWinSolver {
     }
 
     /**
+     * gate-loop-window-1113: open a window for one read, as {@link #loopWindow}, and return the slot's value before it
+     * ({@code [null]} = the slot was empty) for {@link #returnLoopWindow}. The game's asks run one at a time.
+     */
+    public static Long[] borrowLoopWindow(final Game g, final long t0, final long budgetNanos) {
+        final Long[] lent = {LOOP_DEADLINE.get(loopScope(g))};
+        loopWindow(g, t0, budgetNanos);
+        return lent;
+    }
+
+    /** gate-loop-window-1113: put back the slot a {@link #borrowLoopWindow} replaced (null = nothing was borrowed). */
+    public static void returnLoopWindow(final Game g, final Long[] lent) {
+        if (lent == null) {
+            return;
+        }
+        if (lent[0] == null) {
+            LOOP_DEADLINE.remove(loopScope(g));
+        } else {
+            LOOP_DEADLINE.put(loopScope(g), lent[0]);
+        }
+    }
+
+    /**
      * loop-probe-1113: one sandbox probe within {@code end} (wall). TRUE / FALSE = its answer; null = no time for it, or
      * it was cut short of LOOP_NANOS without a win (not an answer: nothing is cached).
      */

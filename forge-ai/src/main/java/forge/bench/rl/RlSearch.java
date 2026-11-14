@@ -1621,7 +1621,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
         final DecisionClock ck = new DecisionClock("seat" + me.getId(), t0); // state-machines-1113: timing only
         clock = ck;
-        if (cfg.budgetMs > 0 && !gateWindowOpen) { // gate-loop-window-1113: the window opened at the gate stays
+        if (cfg.budgetMs > 0) {
             forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, cfg.budgetMs * 1_000_000L); // loop-probe-1113, loop-window-1113
         }
         final RlSearchClient.Scores sc;
@@ -2322,7 +2322,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final int greedy, final List<SpellAbility> menuObjs, final PlanSearch sb) {
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0);
-        if (cfg.budgetMs > 0 && !gateWindowOpen) { // gate-loop-window-1113: the window opened at decide0's gate stays
+        if (cfg.budgetMs > 0) {
             forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, cfg.budgetMs * 1_000_000L); // loop-probe-1113, loop-window-1113
         }
         if (cfg.valueSink != null && m.C() >= 2) {
@@ -2494,10 +2494,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final short keep = (short) m.keepIndex();
         final boolean would = greedy == null || greedy.length != 1 || greedy[0] != keep;
         boolean pot = false;
+        boolean ownWindow = false; // gate-loop-window-1113 (sdcc.reachLog row only)
         String err = null;
         if (would && keep >= 0) {
             keepGateAsks++;
-            openGateWindow(g); // gate-loop-window-1113 (off: nothing)
+            final Long[] lent = borrowGateWindow(g); // gate-loop-window-1113 (off: null, nothing borrowed)
+            ownWindow = lent != null;
             try {
                 final ReachCfg rc = reachCfg();
                 final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
@@ -2508,6 +2510,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                         .potential(g, new ArrayList<>(), o, rc.maxNames, rc.sig, 12_000L);
             } catch (RuntimeException e) {
                 err = String.valueOf(e);
+            } finally {
+                forge.ai.simulation.ForcedWinSolver.returnLoopWindow(g, lent); // gate-loop-window-1113
             }
             if (pot) {
                 keepGateKeeps++;
@@ -2521,6 +2525,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("kind", "keepGate");
             row.addProperty("would_mulligan", would);
             row.addProperty("potential", pot);
+            if (REACH_LOG) {
+                row.addProperty("keep_gate_own_window", ownWindow); // gate-loop-window-1113 (diagnosis only)
+            }
             if (err != null) {
                 row.addProperty("error", err);
             }
@@ -4187,39 +4194,40 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** loop-window-1113 (sdcc.reachLog only): this decision's gate check: {ran (0/1), loop probes, loop windows cut, probes that won}. */
     private long[] gateCheckLog;
 
-    /**
-     * gate-loop-window-1113: this decision (decide0, and provenOnlyDecide under it) opened its loop window at its reach
-     * gate; its search keeps that window. Set at every decide0, before the gate.
-     */
+    /** gate-loop-window-1113 (diagnosis only): this decision's reach gate read a window it opened itself. */
     private boolean gateWindowOpen;
 
     /**
-     * decide0's reach gate. gate-loop-window-1113: with {@code forge.gateLoopWindow} the decision opens its loop window
-     * here, before the gate reads the reach, and its search keeps it ({@link #gateWindowOpen}); off, the gate reads
-     * whatever window an earlier ask left.
+     * decide0's reach gate. gate-loop-window-1113: with the switch on ({@link #gateWindowOn}) the gate borrows the
+     * game's loop-window slot: it opens its own window, reads the reach, and puts the slot's old value back, so the
+     * decision's search, the other seat and every later read see exactly the windows they saw before. Off, the gate
+     * reads whatever window an earlier ask left.
      */
     void gateStep(final Game g, final Player me) {
-        gateWindowOpen = cfg.reach != null && openGateWindow(g); // off: false
+        final Long[] lent = cfg.reach != null ? borrowGateWindow(g) : null; // off: null
+        gateWindowOpen = lent != null;
         if (cfg.reach != null) {
             try {
                 reachGate(g, me);
             } catch (RuntimeException e) {
                 reachOn = true;
+            } finally {
+                forge.ai.simulation.ForcedWinSolver.returnLoopWindow(g, lent);
             }
         }
     }
 
     /**
-     * gate-loop-window-1113 ({@code forge.gateLoopWindow}): open this ask's loop window (a quarter of the decision budget,
-     * on this seat's clock) before it reads the reach, so the read never meets an earlier ask's window: on the real clock
-     * usually expired, on a work clock possibly the other pilot seat's. False (nothing opened) when off or without a budget.
+     * gate-loop-window-1113: borrow the game's loop-window slot for this ask's reach read: a window of a quarter of the
+     * decision budget from now, on this seat's clock (never an earlier ask's: on the real clock usually expired, on a work
+     * clock possibly the other pilot seat's). Return it with {@link forge.ai.simulation.ForcedWinSolver#returnLoopWindow}.
+     * Null (nothing borrowed) when the switch is off or there is no budget (det runs).
      */
-    private boolean openGateWindow(final Game g) {
+    private Long[] borrowGateWindow(final Game g) {
         if (!gateWindowOn() || cfg.budgetMs <= 0) {
-            return false;
+            return null;
         }
-        forge.ai.simulation.ForcedWinSolver.loopWindow(g, System.nanoTime(), cfg.budgetMs * 1_000_000L);
-        return true;
+        return forge.ai.simulation.ForcedWinSolver.borrowLoopWindow(g, System.nanoTime(), cfg.budgetMs * 1_000_000L);
     }
 
     /** gate-loop-window-1113: this seat's switch: spec key reach.gateWindow, else -Dforge.gateLoopWindow (needs cfg.reach). */

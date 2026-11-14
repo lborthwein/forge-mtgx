@@ -1,6 +1,8 @@
 package forge.ai.simulation;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Map;
 
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -20,7 +22,9 @@ import forge.game.player.Player;
  * previous ask's window has run out on the real clock (the opponent's turn passed in between). With the switch on (spec
  * key {@code reach.gateWindow}, else {@code -Dforge.gateLoopWindow}) the gate opens the decision's window first, so the
  * Kiki loop probe runs and the gate opens on this decision. Off, the probe is cut, nothing is cached, and the gate stays
- * shut for the rest of the turn and library size (reachGateKey), even once the decision's own window is open.
+ * shut for the rest of the turn and library size (reachGateKey), even once the decision's own window is open. The gate
+ * only borrows the game's window slot: afterwards it holds what it held before (the other seat, the decision's search
+ * and every later read see the windows they saw before).
  */
 public class GateLoopWindowTest extends forge.ai.AITest {
 
@@ -51,6 +55,15 @@ public class GateLoopWindowTest extends forge.ai.AITest {
         m.invoke(rs, g, me);
     }
 
+    /** The game's loop-window slot (null = empty). */
+    private static Long slot(final Game g) throws ReflectiveOperationException {
+        final Field f = ForcedWinSolver.class.getDeclaredField("LOOP_DEADLINE");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        final Map<Object, Long> m = (Map<Object, Long>) f.get(null);
+        return m.get(g.getRules());
+    }
+
     private static boolean gateOpen(final RlSearch rs) throws ReflectiveOperationException {
         final Method m = RlSearch.class.getDeclaredMethod("reachGateOpen");
         m.setAccessible(true);
@@ -74,9 +87,11 @@ public class GateLoopWindowTest extends forge.ai.AITest {
                 final RlSearch rs = seat(key);
                 try {
                     ForcedWinSolver.loopDeadline(g, System.nanoTime() - 1L); // the previous ask's window: run out
+                    final Long before = slot(g);
                     final long[] t0 = ForcedWinSolver.loopTally();
                     gateStep(rs, g, me);
                     final long[] t1 = ForcedWinSolver.loopTally();
+                    Assert.assertEquals(slot(g), before, what + ": the slot holds what it held before the gate");
                     final long probes = t1[0] - t0[0], cut = t1[1] - t0[1], found = t1[2] - t0[2];
                     System.out.println("GATELOOPWINDOW " + what + " open=" + gateOpen(rs) + " probes=" + probes + " cut=" + cut
                             + " found=" + found);
@@ -104,6 +119,25 @@ public class GateLoopWindowTest extends forge.ai.AITest {
             }
         } finally {
             EngineFixes.setGateLoopWindowForTest(was);
+            WorkClock.install(prev);
+        }
+    }
+
+    /** With no window in the slot (the game's first read), the gate's own window is not left behind either. */
+    @Test
+    public void anEmptySlotStaysEmpty() throws ReflectiveOperationException {
+        final WorkClock.Clock prev = WorkClock.install(null);
+        final Game g = kikiGame();
+        final RlSearch rs = seat(Boolean.TRUE);
+        try {
+            ForcedWinSolver.loopDeadline(g, 0L);
+            Assert.assertNull(slot(g));
+            gateStep(rs, g, g.getPlayers().get(0));
+            Assert.assertTrue(gateOpen(rs), "the gate's own window: the loop is found");
+            Assert.assertNull(slot(g), "the slot is empty again");
+        } finally {
+            ForcedWinSolver.loopDeadline(g, 0L);
+            rs.close();
             WorkClock.install(prev);
         }
     }
