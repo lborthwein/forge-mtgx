@@ -130,6 +130,35 @@ public class AbilityManaPart implements java.io.Serializable {
         // Do we need to copy over last mana produced somehow? Its kinda gross
     }
 
+    /** copy-pool-mana-1113: see {@link #detachedCopy}. */
+    private AbilityManaPart(final Card newSource, final AbilityManaPart old, final boolean spendEffects) {
+        this.sourceCard = newSource;
+        this.sVarHolder = newSource;
+        this.origProduced = old.origProduced;
+        this.manaRestrictions = old.manaRestrictions;
+        this.extraManaRestrictions = old.extraManaRestrictions;
+        this.cannotCounterSpell = spendEffects ? old.cannotCounterSpell : null;
+        this.addsKeywords = old.addsKeywords;
+        this.addsKeywordsType = old.addsKeywordsType;
+        this.addsKeywordsUntil = old.addsKeywordsUntil;
+        this.addsCounters = spendEffects ? old.addsCounters : null;
+        this.triggersWhenSpent = spendEffects ? old.triggersWhenSpent : null;
+        this.persistentMana = old.persistentMana;
+        this.combatMana = old.combatMana;
+    }
+
+    /**
+     * copy-pool-mana-1113: a game copy's own copy of {@code old}, for floating mana whose ability the copy cannot map to
+     * one of its cards' abilities. It keeps the restrictions (the extra one too) and every spend effect, on
+     * {@code newSource} (the copy's card; its SVars hold a spend trigger's script). With {@code spendEffects} false (the
+     * source is not in the copy, so {@code newSource} belongs to the original game) it drops the effects that act on the
+     * source's game when the mana is spent (can't be countered, counters, a spend trigger), so spending it in the copy
+     * never writes the original.
+     */
+    public static AbilityManaPart detachedCopy(final Card newSource, final AbilityManaPart old, final boolean spendEffects) {
+        return new AbilityManaPart(newSource, old, spendEffects);
+    }
+
     /**
      * <p>
      * produceMana.

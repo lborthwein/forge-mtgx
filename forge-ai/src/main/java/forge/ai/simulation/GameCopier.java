@@ -529,9 +529,11 @@ public class GameCopier {
         copyGameState(newGame, aiPlayer);
 
         if (forge.game.EngineFixes.copyPoolMana()) {
+            // one production adds one Mana object once per unit: the copy shares its copy the same way
+            final Map<Mana, Mana> copied = new java.util.IdentityHashMap<>();
             for (Map.Entry<Player, Player> e : playerMap.entrySet()) {
                 for (Mana m : e.getKey().getManaPool()) {
-                    e.getValue().getManaPool().addManaNoEvent(copyPoolMana(m, e.getValue()));
+                    e.getValue().getManaPool().addManaNoEvent(copied.computeIfAbsent(m, k -> copyPoolMana(k, e.getValue())));
                 }
             }
         }
@@ -2516,20 +2518,22 @@ public class GameCopier {
     /**
      * copy-pool-mana-1113: a floating mana of the original as the copy's own: the copy's player, the copy's card of its
      * source (by id; the original holds a last-known copy), and that card's mana ability at the same place
-     * ({@link #findManaPart}). When the source is not in the copy (a token that ceased to exist) it keeps the original's
-     * source and ability, still with the copy's player; when the ability is not found it keeps the original's ability.
+     * ({@link #findManaPart}) when it carries the same extra restriction. Otherwise the ability is the copy's own
+     * {@link AbilityManaPart#detachedCopy}: on the copy's card, or, when the source is not in the copy (a token that
+     * ceased to exist, a phased-out permanent), on the original's last-known source without the effects that act on its
+     * game when spent. The original's ability is never kept, so spending the mana in the copy never writes the original.
      */
     private Mana copyPoolMana(final Mana m, final Player newPlayer) {
         final Card src = m.getSourceCard();
         final Card newSrc = src == null ? null : cardMap.get(src);
-        AbilityManaPart part = m.getManaAbility();
-        if (newSrc != null && part != null) {
-            final AbilityManaPart mapped = findManaPart(part, newSrc);
-            if (mapped != null) {
-                part = mapped;
-            }
+        final AbilityManaPart part = m.getManaAbility();
+        AbilityManaPart newPart = null;
+        if (part != null) {
+            final AbilityManaPart mapped = newSrc == null ? null : findManaPart(part, newSrc);
+            newPart = mapped != null && mapped.getExtraManaRestriction().equals(part.getExtraManaRestriction()) ? mapped
+                    : AbilityManaPart.detachedCopy(newSrc != null ? newSrc : src, part, newSrc != null);
         }
-        return new Mana(m.getColor(), newSrc != null ? newSrc : src, part, newPlayer);
+        return new Mana(m.getColor(), newSrc != null ? newSrc : src, newPart, newPlayer);
     }
 
     /**
