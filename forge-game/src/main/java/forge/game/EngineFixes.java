@@ -6,7 +6,7 @@ package forge.game;
  *
  * <p><b>Live line (live-fixes-1107):</b> {@code -Dforge.liveFixes} (default {@code true} on this line only) is the one
  * switch that sets the DEFAULT of every selected bug fix for every seat: the JVM flags {@code forge.copyRobust},
- * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.copyPoolMana}, {@code forge.loopWorkClock}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
+ * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.copyPoolMana}, {@code forge.loopWorkClock}, {@code forge.leafChunks}, {@code forge.gateLoopWindow}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
  * ({@code forge.house.<key>}, read in LookaheadSearch), and the solver keys {@code staleStatics}, {@code turnLimits},
  * {@code lineUncapped} ({@code ForcedWinSolver.Config.fromProps}). An explicit flag or key still wins.
  * {@code -Dforge.liveFixes=false} is the live jar before these fixes, byte for byte.
@@ -38,7 +38,7 @@ public final class EngineFixes {
     /** The startup line: the switch and what each fix resolved to. */
     public static String describe() {
         return "[live-fixes] forge.liveFixes=" + liveFixes + " copyRobust=" + copyRobust + " copyAltCost=" + copyAltCost
-                + " researchFixes=" + researchFixes + " copyPoolMana=" + copyPoolMana + " loopWorkClock=" + loopWorkClock + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
+                + " researchFixes=" + researchFixes + " copyPoolMana=" + copyPoolMana + " loopWorkClock=" + loopWorkClock + " leafChunks=" + leafChunks + " gateLoopWindow=" + gateLoopWindow + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
                 + " house(beliefStatics,beliefPlayerStatics,copyTurnLimits,offBattlefieldLimits,beliefRememberedHand,copyBackFace,stackAbilityCopies)="
                 + flag("forge.house.beliefStatics") + "," + flag("forge.house.beliefPlayerStatics") + "," + flag("forge.house.copyTurnLimits")
                 + "," + flag("forge.house.offBattlefieldLimits") + "," + flag("forge.house.beliefRememberedHand") + ","
@@ -163,6 +163,48 @@ public final class EngineFixes {
     /** For tests. */
     public static void setLoopWorkClockForTest(final boolean on) {
         loopWorkClock = on;
+    }
+
+    /**
+     * leaf-chunks-1113 ({@code -Dforge.leafChunks}, a live fix: default {@link #liveFixes()}): RlSearchClient reads the
+     * service's chunked-LEAVES capability from its HELLO_ACK and sends a value-leaf batch larger than one wire frame as a
+     * chunked message (bvw-p3-batch-1023). Off (and {@code forge.researchFixes} unset, as on live before), such a batch
+     * threw building its frame, the search dropped the connection ("[rlsearch] LEAVES failed") and that decision used
+     * static leaf values. A batch within one frame is sent byte for byte as before either way.
+     */
+    private static boolean leafChunks = flag("forge.leafChunks");
+
+    public static boolean leafChunks() {
+        return leafChunks;
+    }
+
+    /** For tests. */
+    public static void setLeafChunksForTest(final boolean on) {
+        leafChunks = on;
+    }
+
+    /**
+     * gate-loop-window-1113 ({@code -Dforge.gateLoopWindow}, a live fix: default {@link #liveFixes()}): a pilot ask that
+     * reads the reach (the decision's reach gate, the mulligan's keep gate) reads it in a loop-probe window of its own,
+     * opened just before on its own seat's clock. Off, both read a window opened earlier: the previous ask's (on the real
+     * clock usually expired, so the gate's Kiki loop probes were cut and the gate stayed closed until the next draw or
+     * turn), or on a work-clock seat possibly the other pilot seat's, opened on that seat's clock. The gate borrows the
+     * game's window slot and puts its old value back, so the decision's search and the other seat see exactly the windows
+     * they saw before; only the gates' reads change. The probe time spent in the borrowed window is charged to the
+     * decision's budget (it starts that much earlier), so the fix adds no think time. One thing still reaches past the
+     * gate: the probe answers it caches (per game, by the probed seat), which an opponent's reach that screens this
+     * seat's cards reuses sooner. A seat's spec key
+     * {@code reach.gateWindow} overrides this default (RlSearch.ReachCfg#gateWindow).
+     */
+    private static boolean gateLoopWindow = flag("forge.gateLoopWindow");
+
+    public static boolean gateLoopWindow() {
+        return gateLoopWindow;
+    }
+
+    /** For tests. */
+    public static void setGateLoopWindowForTest(final boolean on) {
+        gateLoopWindow = on;
     }
 
     // ---- state-machines-1113: copy-fidelity fixes, OFF by default (not live fixes: forge.liveFixes does not turn them on).

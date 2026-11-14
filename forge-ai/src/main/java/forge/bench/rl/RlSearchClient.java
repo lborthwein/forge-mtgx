@@ -154,9 +154,17 @@ public final class RlSearchClient implements Closeable {
         return ack;
     }
 
+    /**
+     * The chunked-LEAVES path is on: the research line's key ({@code forge.researchFixes}, set) or the live fix
+     * {@code forge.leafChunks} (leaf-chunks-1113, default forge.liveFixes).
+     */
+    static boolean chunking() {
+        return forge.game.EngineFixes.researchClient() || forge.game.EngineFixes.leafChunks();
+    }
+
     /** Read the chunked-LEAVES capability of a HELLO_ACK (absent = an older service: single frames only). */
     void leavesCaps(final JsonObject a) throws RlClient.ServerError {
-        if (!forge.game.EngineFixes.researchClient()) {
+        if (!chunking()) {
             return; // unified-jar-1106: research's split LEAVES, keyed on this line: off, a big batch throws as before
         }
         try {
@@ -229,7 +237,7 @@ public final class RlSearchClient implements Closeable {
         final long bytes = leavesBytes(decidePayloads, 0, decidePayloads.size());
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // work-units-1107: one request + one per leaf
         forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC_ITEM, decidePayloads.size());
-        if (!forge.game.EngineFixes.researchClient() || LEAVES_FRAME_OVERHEAD + bytes <= frameLimit
+        if (!chunking() || LEAVES_FRAME_OVERHEAD + bytes <= frameLimit
                 && decidePayloads.size() <= leavesMax && bytes <= leavesBytesMax) {
             v = new float[decidePayloads.size()];
             send(T_LEAVES, 0, encodeLeaves(decidePayloads));

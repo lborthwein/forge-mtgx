@@ -113,6 +113,35 @@ public class RlLeafBatchTest {
         }
     }
 
+    /**
+     * leaf-chunks-1113: with the live fix off (and forge.researchFixes unset: the live line before), the service's
+     * chunked capability is not read and a batch larger than one frame throws building its frame, as before; on, the same
+     * batch is one chunked message.
+     */
+    @Test
+    public void offABigBatchThrowsAsBeforeOnItIsChunked() throws IOException {
+        final boolean was = forge.game.EngineFixes.leafChunks();
+        final boolean research = forge.game.EngineFixes.researchClient();
+        final List<byte[]> ps = leaves(1301, 512);
+        try {
+            forge.game.EngineFixes.setResearchFixesForTest(false);
+            forge.game.EngineFixes.setLeafChunksForTest(false);
+            try (FakeSearchService s = service(); RlSearchClient c = connect(s)) {
+                Assert.assertEquals(c.leavesChunked(), 0, "off: the ACK's capability is not read");
+                Assert.assertThrows(IllegalArgumentException.class, () -> c.values(ps));
+            }
+            forge.game.EngineFixes.setLeafChunksForTest(true);
+            try (FakeSearchService s = service(); RlSearchClient c = connect(s)) {
+                Assert.assertEquals(c.leavesChunked(), 1);
+                assertValues(c.values(ps), ps);
+                Assert.assertEquals(c.bigMessages, 1);
+            }
+        } finally {
+            forge.game.EngineFixes.setLeafChunksForTest(was);
+            forge.game.EngineFixes.setResearchFixesForTest(research);
+        }
+    }
+
     // ------------------------------------------------------------------------------------------------ chunking
 
     @DataProvider

@@ -4483,10 +4483,25 @@ public final class ForcedWinSolver {
         }
     }
 
-    /** loop-window-1113: this thread's loop probes run and loop-probe reads cut by their window (diagnosis only). */
-    private static final ThreadLocal<long[]> LOOP_TALLY = ThreadLocal.withInitial(() -> new long[2]);
+    /**
+     * loop-window-1113: this thread's loop probes run, loop-probe reads cut by their window and (gate-loop-window-1113)
+     * probes that found a win (diagnosis only).
+     */
+    private static final ThreadLocal<long[]> LOOP_TALLY = ThreadLocal.withInitial(() -> new long[3]);
 
-    /** loop-window-1113: this thread's {probes run, reads cut by the window} so far (a copy). */
+    /**
+     * gate-loop-window-1113: the time this thread's loop probes took, {real nanoseconds, virtual nanoseconds on this
+     * thread's work clock ({@code rawNow}: the read has no effect)} (the second is the first without a work clock). A gate that borrows its
+     * window charges its probes' time to the decision's budget from this.
+     */
+    private static final ThreadLocal<long[]> LOOP_SPENT = ThreadLocal.withInitial(() -> new long[2]);
+
+    /** gate-loop-window-1113: this thread's {real, work-clock} loop-probe nanoseconds so far (a copy). */
+    public static long[] loopSpent() {
+        return LOOP_SPENT.get().clone();
+    }
+
+    /** loop-window-1113: this thread's {probes run, reads cut by the window, probes that won} so far (a copy). */
     public static long[] loopTally() {
         return LOOP_TALLY.get().clone();
     }
@@ -4513,6 +4528,28 @@ public final class ForcedWinSolver {
     }
 
     /**
+     * gate-loop-window-1113: open a window for one read, as {@link #loopWindow}, and return the slot's value before it
+     * for {@link #returnLoopWindow}. An EMPTY slot is left alone ({@code []}: nothing borrowed): the read then opens its
+     * own default window ({@link #fillLoops}, LOOP_NANOS from now on its own clock) and leaves it, exactly as the old code
+     * does. The game's asks run one at a time.
+     */
+    public static Long[] borrowLoopWindow(final Game g, final long t0, final long budgetNanos) {
+        final Long prev = LOOP_DEADLINE.get(loopScope(g));
+        if (prev == null) {
+            return new Long[0];
+        }
+        loopWindow(g, t0, budgetNanos);
+        return new Long[] {prev};
+    }
+
+    /** gate-loop-window-1113: put back the slot a {@link #borrowLoopWindow} replaced (null or empty = nothing borrowed). */
+    public static void returnLoopWindow(final Game g, final Long[] lent) {
+        if (lent != null && lent.length == 1) {
+            LOOP_DEADLINE.put(loopScope(g), lent[0]);
+        }
+    }
+
+    /**
      * loop-probe-1113: one sandbox probe within {@code end} (wall). TRUE / FALSE = its answer; null = no time for it, or
      * it was cut short of LOOP_NANOS without a win (not an answer: nothing is cached).
      */
@@ -4525,9 +4562,18 @@ public final class ForcedWinSolver {
         final long budget = Math.min(LOOP_NANOS, end - now);
         LOOP_PROBES.incrementAndGet();
         LOOP_TALLY.get()[0]++;
+        // gate-loop-window-1113: metering only. rawNow, never WorkClock.nanoTime(): a read past the safety wall moves
+        // virtual time on, so a measuring read would change the search it measures
+        final forge.game.WorkClock.Clock wc = forge.game.WorkClock.current();
+        final long r0 = System.nanoTime(), k0 = wc == null ? r0 : wc.rawNow();
         final boolean w = ForcedWinProbe.sandboxWin(live, me, c.getId(), partner == null ? -1 : partner.getId(), aura, loopLimits(cfg),
                 seed, budget);
+        final long[] spent = LOOP_SPENT.get();
+        final long r1 = System.nanoTime();
+        spent[0] += r1 - r0;
+        spent[1] += (wc == null ? r1 : wc.rawNow()) - k0;
         if (w) {
+            LOOP_TALLY.get()[2]++; // gate-loop-window-1113
             return Boolean.TRUE;
         }
         // a search that stopped on a budget shorter than the full one did not finish: no answer
