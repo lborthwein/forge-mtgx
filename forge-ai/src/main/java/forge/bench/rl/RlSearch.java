@@ -1628,7 +1628,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final DecisionClock ck = new DecisionClock("seat" + me.getId(), t0); // state-machines-1113: timing only
         clock = ck;
         if (cfg.budgetMs > 0) {
-            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+            forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, cfg.budgetMs * 1_000_000L); // loop-probe-1113, loop-window-1113
         }
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
@@ -1943,6 +1943,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("v_root", sc.valueObs);
             if (cfg.reach != null && reachCfg().gate) {
                 row.addProperty("reach_on", reachOn);
+                if (REACH_LOG) {
+                    addGateCheck(row);
+                }
             }
             final JsonArray pr = new JsonArray();
             final JsonArray ix = new JsonArray();
@@ -2326,7 +2329,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0);
         if (cfg.budgetMs > 0) {
-            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+            forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, cfg.budgetMs * 1_000_000L); // loop-probe-1113, loop-window-1113
         }
         if (cfg.valueSink != null && m.C() >= 2) {
             try {
@@ -2975,7 +2978,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final long t0 = System.nanoTime();
         final ChoiceScorer sc = scorer();
         if (sc.config().budgetMs > 0) {
-            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + sc.config().budgetMs * 1_000_000L); // loop-probe-1113
+            forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, sc.config().budgetMs * 1_000_000L); // loop-probe-1113, loop-window-1113
         }
         if (sc.pileActive(g)) {
             return sc.pileAnswer(g, m);
@@ -3073,7 +3076,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final long t0 = System.nanoTime();
         final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
         if (cfg.budgetMs > 0) {
-            forge.ai.simulation.ForcedWinSolver.loopDeadline(g, t0 + cfg.budgetMs * 1_000_000L); // loop-probe-1113
+            forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, cfg.budgetMs * 1_000_000L); // loop-probe-1113, loop-window-1113
         }
         blockAsks++;
         lastProposeMs = -1;
@@ -4122,6 +4125,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** {@link ReachCfg#gate}: read the root's potential (once per change of the seat's zones) and set this decision's gate. */
     private void reachGate(final Game g, final Player me) {
+        final long[] tally0 = REACH_LOG ? forge.ai.simulation.ForcedWinSolver.loopTally() : null; // loop-window-1113
+        final int checks0 = reachGateChecks;
         final ReachCfg rc = reachCfg();
         if (!rc.gate) {
             reachOn = true;
@@ -4152,8 +4157,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         if (REACH_LOG) {
             // owner-misplays-1113: diagnosis only (-Dsdcc.reachLog=true; off by default, nothing decided from it)
+            // loop-window-1113: this check's loop probes on this thread, and whether its window cut one (a stale window)
+            final long[] tally1 = forge.ai.simulation.ForcedWinSolver.loopTally();
+            gateCheckLog = new long[] {reachGateChecks - checks0, tally1[0] - tally0[0], tally1[1] - tally0[1]};
             System.err.println("[reach-gate] turn=" + g.getPhaseHandler().getTurn() + " phase=" + g.getPhaseHandler().getPhase()
-                    + " open=" + reachOn + " checks=" + reachGateChecks + " ender=" + rc.gateEnder);
+                    + " open=" + reachOn + " checks=" + reachGateChecks + " ender=" + rc.gateEnder + " checked=" + (gateCheckLog[0] > 0)
+                    + " loopProbes=" + gateCheckLog[1] + " loopCut=" + (gateCheckLog[2] > 0));
+        }
+    }
+
+    /** loop-window-1113 (sdcc.reachLog only): this decision's gate check: {ran (0/1), loop probes, loop windows cut}. */
+    private long[] gateCheckLog;
+
+    /** loop-window-1113: the row fields of this decision's gate check (sdcc.reachLog only; never read to decide). */
+    private void addGateCheck(final JsonObject row) {
+        final long[] l = gateCheckLog;
+        if (l != null) {
+            row.addProperty("reach_gate_checked", l[0] > 0);
+            row.addProperty("reach_gate_loop_probes", l[1]);
+            row.addProperty("reach_gate_loop_cut", l[2] > 0);
         }
     }
 

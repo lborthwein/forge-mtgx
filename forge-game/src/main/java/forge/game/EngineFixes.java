@@ -6,7 +6,7 @@ package forge.game;
  *
  * <p><b>Live line (live-fixes-1107):</b> {@code -Dforge.liveFixes} (default {@code true} on this line only) is the one
  * switch that sets the DEFAULT of every selected bug fix for every seat: the JVM flags {@code forge.copyRobust},
- * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.copyPoolMana}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
+ * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.copyPoolMana}, {@code forge.loopWorkClock}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
  * ({@code forge.house.<key>}, read in LookaheadSearch), and the solver keys {@code staleStatics}, {@code turnLimits},
  * {@code lineUncapped} ({@code ForcedWinSolver.Config.fromProps}). An explicit flag or key still wins.
  * {@code -Dforge.liveFixes=false} is the live jar before these fixes, byte for byte.
@@ -38,7 +38,7 @@ public final class EngineFixes {
     /** The startup line: the switch and what each fix resolved to. */
     public static String describe() {
         return "[live-fixes] forge.liveFixes=" + liveFixes + " copyRobust=" + copyRobust + " copyAltCost=" + copyAltCost
-                + " researchFixes=" + researchFixes + " copyPoolMana=" + copyPoolMana + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
+                + " researchFixes=" + researchFixes + " copyPoolMana=" + copyPoolMana + " loopWorkClock=" + loopWorkClock + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
                 + " house(beliefStatics,beliefPlayerStatics,copyTurnLimits,offBattlefieldLimits,beliefRememberedHand,copyBackFace,stackAbilityCopies)="
                 + flag("forge.house.beliefStatics") + "," + flag("forge.house.beliefPlayerStatics") + "," + flag("forge.house.copyTurnLimits")
                 + "," + flag("forge.house.offBattlefieldLimits") + "," + flag("forge.house.beliefRememberedHand") + ","
@@ -144,6 +144,25 @@ public final class EngineFixes {
     /** For tests. */
     public static void setCopyPoolManaForTest(final boolean on) {
         copyPoolMana = on;
+    }
+
+    /**
+     * loop-window-1113 ({@code -Dforge.loopWorkClock}, a live fix: default {@link #liveFixes()}): the loop probe's window
+     * (a quarter of the decision's budget), each probe's budget and its "finished or cut" test read
+     * {@link WorkClock#nanoTime()}, the clock every other pilot budget reads. Off, they read {@link System#nanoTime()}:
+     * on a work-clock seat (spec key {@code workUnits}) a probe then ran on a work budget sized from real time and was
+     * judged finished by real time, so whether a Kiki seat's reach gate opened depended on host load. Without a work clock
+     * {@code WorkClock.nanoTime()} is {@code System.nanoTime()}: on and off read the same time.
+     */
+    private static boolean loopWorkClock = flag("forge.loopWorkClock");
+
+    public static boolean loopWorkClock() {
+        return loopWorkClock;
+    }
+
+    /** For tests. */
+    public static void setLoopWorkClockForTest(final boolean on) {
+        loopWorkClock = on;
     }
 
     // ---- state-machines-1113: copy-fidelity fixes, OFF by default (not live fixes: forge.liveFixes does not turn them on).

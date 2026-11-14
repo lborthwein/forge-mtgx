@@ -4483,25 +4483,55 @@ public final class ForcedWinSolver {
         }
     }
 
+    /** loop-window-1113: this thread's loop probes run and loop-probe reads cut by their window (diagnosis only). */
+    private static final ThreadLocal<long[]> LOOP_TALLY = ThreadLocal.withInitial(() -> new long[2]);
+
+    /** loop-window-1113: this thread's {probes run, reads cut by the window} so far (a copy). */
+    public static long[] loopTally() {
+        return LOOP_TALLY.get().clone();
+    }
+
+    /**
+     * loop-window-1113: the time the loop probe reads: {@link forge.game.WorkClock#nanoTime()} with
+     * {@code forge.loopWorkClock} (virtual on a work-clock seat, else the real time), {@link System#nanoTime()} off.
+     */
+    static long loopNow() {
+        return forge.game.EngineFixes.loopWorkClock() ? forge.game.WorkClock.nanoTime() : System.nanoTime();
+    }
+
+    /**
+     * loop-window-1113: open this decision's (or ask's) loop window: a decision that began at {@code t0} (System.nanoTime)
+     * with a budget of {@code budgetNanos}. With {@code forge.loopWorkClock} the window is a quarter of the budget from
+     * now on {@link #loopNow()}'s clock; off, exactly {@link #loopDeadline}{@code (g, t0 + budgetNanos)}.
+     */
+    public static void loopWindow(final Game g, final long t0, final long budgetNanos) {
+        if (!forge.game.EngineFixes.loopWorkClock()) {
+            loopDeadline(g, t0 + budgetNanos);
+            return;
+        }
+        LOOP_DEADLINE.put(loopScope(g), loopNow() + Math.max(0L, budgetNanos) / 4);
+    }
+
     /**
      * loop-probe-1113: one sandbox probe within {@code end} (wall). TRUE / FALSE = its answer; null = no time for it, or
      * it was cut short of LOOP_NANOS without a win (not an answer: nothing is cached).
      */
     private static Boolean loopProbe(final Config cfg, final Game live, final Player me, final Card c, final Card partner,
             final boolean aura, final long seed, final long end) {
-        final long now = System.nanoTime();
+        final long now = loopNow(); // loop-window-1113
         if (now >= end) {
             return null;
         }
         final long budget = Math.min(LOOP_NANOS, end - now);
         LOOP_PROBES.incrementAndGet();
+        LOOP_TALLY.get()[0]++;
         final boolean w = ForcedWinProbe.sandboxWin(live, me, c.getId(), partner == null ? -1 : partner.getId(), aura, loopLimits(cfg),
                 seed, budget);
         if (w) {
             return Boolean.TRUE;
         }
         // a search that stopped on a budget shorter than the full one did not finish: no answer
-        return budget >= LOOP_NANOS || System.nanoTime() - now < budget - budget / 10 ? Boolean.FALSE : null;
+        return budget >= LOOP_NANOS || loopNow() - now < budget - budget / 10 ? Boolean.FALSE : null;
     }
 
     /**
@@ -4607,8 +4637,9 @@ public final class ForcedWinSolver {
         final String base = me.getId() + "|" + c.getName() + "|" + aura + "|";
         final int probed = partners.size();
         final long t0 = System.nanoTime();
+        final long lt0 = loopNow(); // loop-window-1113: the window's clock (t0 off)
         // the window all of this decision's (or ask's) probes share; no caller known yet: one window of LOOP_NANOS
-        final long end = LOOP_DEADLINE.computeIfAbsent(match, x -> t0 + LOOP_NANOS);
+        final long end = LOOP_DEADLINE.computeIfAbsent(match, x -> lt0 + LOOP_NANOS);
         boolean cut = false;
         synchronized (byKey) {
             final long seed = mix(cfg.seed, 0x4C4F4F50L + c.getName().hashCode());
@@ -4642,6 +4673,7 @@ public final class ForcedWinSolver {
             }
         }
         if (cut) {
+            LOOP_TALLY.get()[1]++;
             t.loopChecked = false; // asked again at the template's next read, when there is time
         }
         if (RECEIPTS) {
