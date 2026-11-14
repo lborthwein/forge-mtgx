@@ -387,7 +387,7 @@ public final class ForcedWinSolver {
         }
 
         /** plantargets-1114: the slices this build knows. */
-        static final java.util.List<String> PLAN_TARGET_SLICES = java.util.List.of("face");
+        static final java.util.List<String> PLAN_TARGET_SLICES = java.util.List.of("face", "attackers");
         /**
          * sdcc-bridge-1111 (false = off, the default, and then nothing changes): the bridge from the width search to the
          * engine search. The width search also notes its setup lines ({@link ForcedWinPlanner.Setup}): modeled steps
@@ -1601,6 +1601,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.planTargets("face")) {
             this.reader.planFace = true; // plantargets-1114: our own cards only (its own template keys)
+        }
+        if (cfg.planTargets("attackers")) {
+            this.reader.planAttackers = true; // plantargets-1114, slice "attackers": our own cards and positions only
         }
         if (cfg.hideHidden()) {
             hideProbes(); // sdcc-leak-1111
@@ -3290,6 +3293,9 @@ public final class ForcedWinSolver {
         p.used.addAll(b.used);
         p.block.addAll(b.block);
         p.oppPowers.addAll(b.oppPowers);
+        p.oppIds = b.oppIds; // plantargets-1114 (null unless a planAttackers reader read the position; never changed after)
+        p.oppTough = b.oppTough;
+        p.tgtMask = b.tgtMask;
         p.devotionBlue = b.devotionBlue;
         p.emptyDrawWinLive = b.emptyDrawWinLive;
         p.library.addAll(b.library);

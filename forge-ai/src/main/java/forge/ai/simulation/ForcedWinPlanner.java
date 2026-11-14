@@ -545,6 +545,11 @@ public final class ForcedWinPlanner {
         /** ledger-sweep2-1107 (report only): the most resolve steps one expansion took; expansions cut by planExpandCap. */
         int maxExpand, expandStops;
         /**
+         * plantargets-1114, slice "attackers" (report only; 0 when off): removal moves the search played on an opposing
+         * attacker, and passes of the turn whose damage was counted with a target choice.
+         */
+        int tgtMoves, tgtPasses;
+        /**
          * planner-fixes-1110 (planOrder's ORDER_SHALLOW; report only, 0 when off): the deepest depth-limited pass that ran
          * to its end, the nodes the passes used, and the pass depth and node count at which the first line was found (0 =
          * none, or found by the depth-first search).
@@ -641,10 +646,21 @@ public final class ForcedWinPlanner {
         boolean dead;
         /** sdcc-tutorcast-1110: the card the ability being resolved casts for free once it has resolved (-1 = none). */
         int pendingFree = -1;
+        /**
+         * plantargets-1114, slice "attackers" (null / 0 unless the position holds target masks, and then nothing
+         * changes): the removal abilities played this turn whose target is still open, each {index of its step, mask of
+         * the opponent's attackers it may take}; and the attackers already taken off the opponent's clock by earlier
+         * turns' removal (a mask over {@link ForcedWinModel.Position#oppPowers}). The targets are chosen when the turn
+         * is passed ({@link #passTurn}): the choice that leaves the least unblocked damage.
+         */
+        List<int[]> rem;
+        int oppGone;
 
         S copy() {
             final S s = new S();
             s.pendingFree = pendingFree;
+            s.rem = rem == null ? null : new ArrayList<>(rem);
+            s.oppGone = oppGone;
             s.turnIdx = turnIdx;
             s.sorcery = sorcery;
             s.preMain = preMain;
@@ -698,6 +714,15 @@ public final class ForcedWinPlanner {
                 sb.append(e == UNKNOWN ? "?" : e < 0 ? "*" : cards.get(e).name).append(',');
             }
             sb.append('R').append(names(remaining)).append('P').append(names(libPool)).append('G').append(names(gyPool));
+            if (rem != null && !rem.isEmpty() || oppGone != 0) {
+                // plantargets-1114: open removals (their masks, in any order) and attackers already gone
+                final List<Integer> masks = new ArrayList<>();
+                for (int[] r : rem == null ? List.<int[]>of() : rem) {
+                    masks.add(r[1]);
+                }
+                java.util.Collections.sort(masks);
+                sb.append('T').append(oppGone).append(masks);
+            }
             return sb.toString();
         }
     }
@@ -805,6 +830,8 @@ public final class ForcedWinPlanner {
 
     /** blockers-1109: passes whose blocker count differs from the pre-fix count (every creature); diagnostic only. */
     private int blockerDiffs;
+    /** plantargets-1114 (report only): see {@link Result#tgtMoves}, {@link Result#tgtPasses}. */
+    private int tgtMoves, tgtUsed;
 
     Result run() {
         deadline = lim.ms < 0 ? Long.MAX_VALUE : forge.game.WorkClock.nanoTime() + lim.ms * 1_000_000L;
@@ -872,6 +899,8 @@ public final class ForcedWinPlanner {
         if (PROFILE) {
             profPrint();
         }
+        result.tgtMoves = tgtMoves;
+        result.tgtPasses = tgtUsed;
         if (blockerDiffs > 0) {
             // blockers-1109 (ledger row 81): this plan saw a pass where a tapped or can't-block creature no longer blocks
             System.err.println("FORCED_WIN blockers1109 diffs=" + blockerDiffs + " turn=" + pos.turn + " life=" + pos.life
@@ -1070,7 +1099,8 @@ public final class ForcedWinPlanner {
             }
             for (Abil ab : a.fromHand) {
                 final boolean objAb = objMove(ab) && !pending; // sdcc-probeobj-1111 (false when off)
-                if (ab.unplayable || ab.cardTargets && ab.kind != AbilKind.LAND && !objAb) {
+                final boolean tgtAb = !objAb && tgtMove(ab) && !pending; // plantargets-1114 (false when off)
+                if (ab.unplayable || ab.cardTargets && ab.kind != AbilKind.LAND && !objAb && !tgtAb) {
                     continue;
                 }
                 if (pending && ab.kind != AbilKind.SPELL) {
@@ -1081,6 +1111,7 @@ public final class ForcedWinPlanner {
                 }
                 final String k = a.name + "|" + ab.kind + "|" + ab.costKey + "|" + ab.desc + "|" + ab.targetVariant;
                 if (!tried.add(k) || !pending && !(objAb ? (s.sorcery || ab.instant) && handOk(s, ab) && hasObject(s, ab, -1)
+                        : tgtAb ? (s.sorcery || ab.instant) && handOk(s, ab) && tgtOpen(s, a, ab) != 0
                         : allowed(s, a, ab))) {
                     continue;
                 }
@@ -1145,11 +1176,13 @@ public final class ForcedWinPlanner {
             }
             for (Abil ab : a.onBattlefield) {
                 final boolean objAb = objMove(ab); // sdcc-probeobj-1111 (false when off)
-                if (ab.unplayable || ab.cardTargets && !objAb) {
+                final boolean tgtAb = !objAb && tgtMove(ab); // plantargets-1114 (false when off)
+                if (ab.unplayable || ab.cardTargets && !objAb && !tgtAb) {
                     continue;
                 }
                 final String k = "bf" + bi + "|" + ab.desc + "|" + ab.costKey + "|" + ab.targetVariant;
-                if (!tried.add(k) || !(objAb ? allowedBfCost(s, p, ab) && hasObject(s, ab, bi) : allowedBf(s, p, ab))) {
+                if (!tried.add(k) || !(objAb ? allowedBfCost(s, p, ab) && hasObject(s, ab, bi)
+                        : tgtAb ? allowedBfCost(s, p, ab) && tgtOpen(s, a, ab) != 0 : allowedBf(s, p, ab))) {
                     continue;
                 }
                 final List<S> into = ab.has(EffKind.DRAW) || ab.has(EffKind.WIN) ? second : third;
@@ -1298,6 +1331,81 @@ public final class ForcedWinPlanner {
             return false;
         }
         return true;
+    }
+
+    /** plantargets-1114, slice "attackers": the ability is planned on an opposing attacker (never with the key off). */
+    private boolean tgtMove(Abil ab) {
+        return pos.tgtMask != null && ab.tgt != null;
+    }
+
+    /**
+     * plantargets-1114: the opponent's attackers this ability can still take off their clock in {@code s}: those the
+     * engine let it target in the position, that it removes (damage at least the toughness left), and that are not
+     * gone already. 0 when there is no clock to shorten, or when as many removals are open as there are attackers left.
+     */
+    private int tgtOpen(S s, ACard a, Abil ab) {
+        if (s.oppLib <= 0 || pos.oppPowers.isEmpty() || pos.oppIds == null) {
+            return 0;
+        }
+        final Integer legal = pos.tgtMask.get(ForcedWinModel.Position.tgtKey(a.id, ab));
+        if (legal == null) {
+            return 0;
+        }
+        int mask = 0, left = 0;
+        for (int i = 0; i < pos.oppPowers.size() && i < 31; i++) {
+            if ((s.oppGone >> i & 1) != 0) {
+                continue;
+            }
+            left++;
+            if ((legal >> i & 1) != 0 && ab.tgt.removes(pos.oppTough.get(i))) {
+                mask |= 1 << i;
+            }
+        }
+        return s.rem != null && s.rem.size() >= left ? 0 : mask;
+    }
+
+    /**
+     * plantargets-1114: the unblocked combat damage of the opponent's attackers that are left, the {@code blockers}
+     * largest of them blocked (as {@link #passTurn} counted before the key: every attacker, largest first).
+     */
+    private int clock(int gone, int blockers) {
+        int damage = 0, seen = 0;
+        for (int i = 0; i < pos.oppPowers.size(); i++) {
+            if (i < 31 && (gone >> i & 1) != 0) {
+                continue;
+            }
+            if (seen++ >= blockers) {
+                damage += pos.oppPowers.get(i);
+            }
+        }
+        return damage;
+    }
+
+    /**
+     * plantargets-1114: choose the open removals' targets ({@code s.rem}, from index {@code k}) so that the least
+     * damage comes through; {@code best} = {damage, mask of the attackers taken}, {@code pick[k]} the attacker of
+     * removal k (-1: none of its targets is worth taking, it keeps the target its step was given).
+     */
+    private void assignTargets(S s, int k, int gone, int blockers, int[] cur, int[] best, int[] pick) {
+        if (k == s.rem.size()) {
+            final int d = clock(gone, blockers);
+            if (d < best[0]) {
+                best[0] = d;
+                best[1] = gone;
+                System.arraycopy(cur, 0, pick, 0, cur.length);
+            }
+            return;
+        }
+        cur[k] = -1;
+        assignTargets(s, k + 1, gone, blockers, cur, best, pick);
+        final int mask = s.rem.get(k)[1];
+        for (int i = 0; i < pos.oppPowers.size() && i < 31; i++) {
+            if ((mask >> i & 1) != 0 && (gone >> i & 1) == 0) {
+                cur[k] = i;
+                assignTargets(s, k + 1, gone | 1 << i, blockers, cur, best, pick);
+            }
+        }
+        cur[k] = -1;
     }
 
     /** sdcc-probeobj-1111: the ability is planned through its observed object need (never with the key off). */
@@ -1548,6 +1656,20 @@ public final class ForcedWinPlanner {
     private void afterPay(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, boolean free, List<S> out,
             List<Eff> pre) {
         s.steps.add(step);
+        if (tgtMove(ab) && !free && !objMove(ab)) {
+            // plantargets-1114: the removal's target stays open until the turn is passed; meanwhile the step aims at the
+            // largest attacker it can take (a line that never passes still plays a legal target)
+            final int open = tgtOpen(s, a, ab);
+            if (open != 0) {
+                if (s.rem == null) {
+                    s.rem = new ArrayList<>();
+                }
+                s.rem.add(new int[] {s.steps.size() - 1, open});
+                tgtMoves++;
+                step.objTarget = pos.oppIds.get(Integer.numberOfTrailingZeros(open));
+                step.objLink = ab.tgt.link;
+            }
+        }
         if (handIdx >= 0) {
             s.hand.remove(Integer.valueOf(host));
         }
@@ -1790,8 +1912,31 @@ public final class ForcedWinPlanner {
                 blockerDiffs++; // blockers-1109: a pass where the old count (every creature) differs; logged once per plan
             }
             int damage = 0;
-            for (int i = blockers; i < pos.oppPowers.size(); i++) {
-                damage += pos.oppPowers.get(i);
+            if (s.oppGone == 0 && (s.rem == null || s.rem.isEmpty())) {
+                for (int i = blockers; i < pos.oppPowers.size(); i++) {
+                    damage += pos.oppPowers.get(i);
+                }
+            } else {
+                // plantargets-1114: the open removals take the attackers that leave the least unblocked damage
+                final int n = s.rem == null ? 0 : s.rem.size();
+                final int[] best = {Integer.MAX_VALUE, s.oppGone}, pick = new int[n];
+                Arrays.fill(pick, -1);
+                if (n == 0) {
+                    best[0] = clock(s.oppGone, blockers);
+                } else {
+                    assignTargets(s, 0, s.oppGone, blockers, new int[n], best, pick);
+                }
+                for (int k = 0; k < n; k++) {
+                    if (pick[k] >= 0) {
+                        s.steps.get(s.rem.get(k)[0]).objTarget = pos.oppIds.get(pick[k]);
+                    }
+                }
+                damage = best[0];
+                s.oppGone = best[1];
+                tgtUsed++;
+            }
+            if (s.rem != null) {
+                s.rem.clear();
             }
             if (damage >= s.life) {
                 return out;

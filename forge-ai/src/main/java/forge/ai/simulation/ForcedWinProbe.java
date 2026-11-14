@@ -196,6 +196,18 @@ public final class ForcedWinProbe {
     static final ThreadLocal<Boolean> PLAN_TARGETS = ThreadLocal.withInitial(() -> false);
 
     /**
+     * plantargets-1114, slice "attackers" (solver key {@code planTargets} naming it; false = off, and then nothing
+     * changes). An ability of ours with exactly one targeting link that accepts a creature the opponent controls is also
+     * played, in sandboxes of its own, on a stand-in creature the opponent owns ({@link #learnAttacker}); what the engine
+     * did to the stand-in becomes the ability's {@link ForcedWinModel.TgtNeed}. Templates learned this way live under
+     * their own keys ("pta|").
+     */
+    static final ThreadLocal<Boolean> PLAN_ATTACKERS = ThreadLocal.withInitial(() -> false);
+
+    /** plantargets-1114 (null = none, the default: nothing changes): called with the sandbox once a run has resolved. */
+    private static final ThreadLocal<java.util.function.Consumer<Game>> AFTER_RUN = new ThreadLocal<>();
+
+    /**
      * ledger-sweep-1107, ledger row 45 ({@code -Dforge.probeEmptyDraw=true}, off by default). A probe runs in a copy of
      * the position. When our library there is empty, an ability that draws ("mill two, then draw a card") is replaced by
      * the permanent that turns an empty-library draw into a win, so the run is won with no card moved: the template got
@@ -569,6 +581,10 @@ public final class ForcedWinProbe {
             final int[] poolCast = pool(me);
             resolveAll(g, PLAN_TARGETS.get() ? me : null); // plantargets-1114 (null without the key: as before)
             o.libAfter = me.getCardsIn(ZoneType.Library).size();
+            final java.util.function.Consumer<Game> afterRun = AFTER_RUN.get();
+            if (afterRun != null) {
+                afterRun.accept(g); // plantargets-1114 (a learnAttacker run only)
+            }
             final int[] poolAfter = pool(me);
             for (int c = 0; c < 6; c++) {
                 o.produced[c] = Math.max(0, poolAfter[c] - Math.min(poolCast[c], poolBefore[c]));
@@ -1323,6 +1339,13 @@ public final class ForcedWinProbe {
                     searchCast(ab, o, live, me, card, avoid -> inHand, castIt, null, ForcedWinSolver.mix(seed, id * 59L + 11), st);
                 }
                 t.fromHand.add(ab);
+                if ((v == null || "opp".equals(v)) && objRun == null && sacCost == null) {
+                    // plantargets-1114, slice "attackers" (null without the key: nothing runs, nothing changes)
+                    final TgtRun tr = learnAttacker(live, me, card, sa0, base, false, inHand, ForcedWinSolver.mix(runSeed, 0x505441L), st);
+                    if (tr != null) {
+                        attackerAbil(t.fromHand, ab, v == null, tr, base, id, sa0, handMask);
+                    }
+                }
                 if (o.won && !o.libraryEmptied && t.permanent) {
                     t.winsOnEntry = true;
                 }
@@ -1487,6 +1510,13 @@ public final class ForcedWinProbe {
                         unmodeled(t, "unmapped", sa0);
                     }
                     t.onBattlefield.add(ab);
+                    if ((v == null || "opp".equals(v)) && objRun == null && sacCost == null) {
+                        // plantargets-1114, slice "attackers" (null without the key: nothing runs, nothing changes)
+                        final TgtRun tr = learnAttacker(live, me, card, sa0, base, true, onBattlefield, ForcedWinSolver.mix(runSeed, 0x505441L), st);
+                        if (tr != null) {
+                            attackerAbil(t.onBattlefield, ab, v == null, tr, base, id, sa0, handMask);
+                        }
+                    }
                 }
             }
             // sacrifice: what happens when it goes to our graveyard from the battlefield (Chromatic Star draws)
@@ -2941,6 +2971,220 @@ public final class ForcedWinProbe {
             AiCache.installScope(prevCache);
             MyRandom.setThreadRandom(prev);
         }
+    }
+
+    /**
+     * plantargets-1114, slice "attackers": the ability as the width search plays it on an opposing attacker: its cost,
+     * the effects the stand-in run observed, and the {@link ForcedWinModel.TgtNeed}. {@code inPlace}: the ability
+     * {@code ab} had a card target only (never planned before): it becomes that ability. Otherwise ({@code ab} is a
+     * player-target variant, which stays as it is) the attacker form is added to {@code list} as an ability of its own.
+     */
+    private static void attackerAbil(final List<Abil> list, final Abil ab, final boolean inPlace, final TgtRun tr,
+            final Abil base, final int hostId, final SpellAbility sa0, final int handMask) {
+        final Abil x = withEffects(base, tr.obs, hostId, sa0, null);
+        if (x.unplayable) {
+            return;
+        }
+        final Abil into = inPlace ? ab : x;
+        if (inPlace) {
+            ab.effects.clear();
+            ab.effects.addAll(x.effects);
+            ab.unplayable = false;
+            ab.probeNote = "";
+        } else {
+            x.handMask = handMask;
+            x.selfTo = ab.selfTo;
+            list.add(x);
+        }
+        into.cardTargets = true;
+        into.tgt = tr.need;
+    }
+
+    /** plantargets-1114: the stand-in's toughness in a {@link #learnAttacker} sandbox (damage below it leaves it in play). */
+    private static final int TGT_TOUGHNESS = 40;
+
+    /** plantargets-1114: what a {@link #learnAttacker} run saw. */
+    static final class TgtRun {
+        ForcedWinModel.TgtNeed need;
+        Obs obs;
+        /** How many different stand-ins gave this answer (1 or 2). */
+        int standIns;
+    }
+
+    /**
+     * plantargets-1114, slice "attackers": the one targeting link of {@code sa} that can take a permanent on the
+     * battlefield, or -1 (no target, several targeting links, a divided or multi-target effect, a target elsewhere).
+     * From the engine's target restrictions alone.
+     */
+    static int attackerLink(final SpellAbility sa) {
+        int link = -1, i = 0;
+        for (SpellAbility l = sa; l != null; l = l.getSubAbility(), i++) {
+            if (!l.usesTargeting()) {
+                continue;
+            }
+            if (link >= 0 || l.isDividedAsYouChoose() || l.getMinTargets() > 1 || l.getMaxTargets() < 1
+                    || l.getTargetRestrictions() == null || !l.getTargetRestrictions().getZone().contains(ZoneType.Battlefield)) {
+                return -1;
+            }
+            link = i;
+        }
+        return link;
+    }
+
+    /**
+     * plantargets-1114, slice "attackers" ({@link #PLAN_ATTACKERS} only; otherwise null and nothing runs): play the
+     * ability on a creature the opponent owns and read what the engine did to it. Stand-ins are the opponent's creatures
+     * in play, then creature cards of their graveyard put into play for the run (both public; never a card of their
+     * hand or library, never one of ours: its moves would be read as our own). The stand-in's base toughness is raised
+     * first, so damage or a toughness loss shows as a number. Up to two stand-ins of different names are tried; the
+     * need is kept only when they agree on the kind, the number and the ability's other effects, so the template does
+     * not depend on the stand-in. Null when the ability has no such target, could not be played, did nothing to the
+     * stand-in, or the two runs differ.
+     */
+    static TgtRun learnAttacker(final Game live, final Player me, final Card card, final SpellAbility sa0, final Abil base,
+            final boolean battlefield, final Setup hostSetup, final long seed, final Stats st) {
+        if (!PLAN_ATTACKERS.get() || base == null || base.usesX) {
+            return null;
+        }
+        final int link = attackerLink(sa0);
+        if (link < 0) {
+            return null;
+        }
+        final String desc = sa0.getDescription(), costKey = base.costKey;
+        final int id = card.getId();
+        TgtRun first = null;
+        String firstName = null, firstEffects = null;
+        for (int k = 0; k < 2; k++) {
+            final String avoid = firstName;
+            final int[] target = {-1};
+            final int[] tough0 = {0};
+            final String[] name = {null};
+            final int[] seen = {0, 0}; // kind, n
+            // the stand-in is chosen and put in place before the run starts recording: nothing of it is read as an effect
+            final Setup setup = (g, m, c) -> {
+                if (hostSetup != null) {
+                    hostSetup.apply(g, m, c);
+                }
+                Player other = null;
+                for (Player p : m.getOpponents()) {
+                    other = p;
+                }
+                if (other == null) {
+                    return;
+                }
+                final List<Card> cands = new ArrayList<>();
+                for (Card y : other.getCreaturesInPlay()) {
+                    if (y.getOwner() == other) {
+                        cands.add(y);
+                    }
+                }
+                cands.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                final List<Card> gy = new ArrayList<>();
+                for (Card y : other.getCardsIn(ZoneType.Graveyard)) {
+                    if (y.getOwner() == other && y.isCreature()) {
+                        gy.add(y);
+                    }
+                }
+                gy.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                cands.addAll(gy);
+                final java.util.Set<String> names = new java.util.HashSet<>();
+                for (Card y0 : cands) {
+                    if (y0.getName().equals(avoid) || !names.add(y0.getName())) {
+                        continue;
+                    }
+                    Card y = y0;
+                    if (!y.isInPlay()) {
+                        g.getTriggerHandler().setSuppressAllTriggers(true);
+                        try {
+                            g.getAction().moveToPlay(y, other, null, null);
+                        } finally {
+                            g.getTriggerHandler().setSuppressAllTriggers(false);
+                        }
+                        y = g.findById(y0.getId());
+                        if (y == null || !y.isInPlay() || !y.isCreature()) {
+                            continue;
+                        }
+                    }
+                    final Card host = g.findById(c.getId());
+                    final SpellAbility sa = host == null ? null : locate(host, m, desc, costKey, battlefield);
+                    if (sa == null) {
+                        return;
+                    }
+                    final SpellAbility probe = sa.copy(m);
+                    probe.setActivatingPlayer(m);
+                    y.setBaseToughness(TGT_TOUGHNESS);
+                    g.getAction().checkStaticAbilities();
+                    if (!setObjectTarget(probe, link, y)) {
+                        continue;
+                    }
+                    target[0] = y.getId();
+                    name[0] = y.getName();
+                    tough0[0] = y.getNetToughness();
+                    return;
+                }
+            };
+            final Act act = (g, m, c) -> {
+                final Card y = target[0] < 0 ? null : g.findById(target[0]);
+                final Card host = g.findById(c.getId());
+                final SpellAbility sa = host == null || y == null ? null : locate(host, m, desc, costKey, battlefield);
+                if (sa == null) {
+                    return false;
+                }
+                sa.setActivatingPlayer(m);
+                if (!setObjectTarget(sa, link, y)) {
+                    return false;
+                }
+                final Player owner = y.getController();
+                AFTER_RUN.set(gg -> {
+                    final Card t = gg.findById(target[0]);
+                    if (t == null || !t.isInPlay()) {
+                        seen[0] = t != null && t.isInZone(ZoneType.Hand) ? ForcedWinModel.TgtNeed.BOUNCE : ForcedWinModel.TgtNeed.GONE;
+                    } else if (t.getController() == owner) {
+                        final int n = Math.max(t.getDamage(), tough0[0] - t.getNetToughness());
+                        if (n > 0) {
+                            seen[0] = ForcedWinModel.TgtNeed.DAMAGE;
+                            seen[1] = n;
+                        }
+                    }
+                });
+                return play(g, m, sa);
+            };
+            final Obs o;
+            try {
+                o = run(live, me, id, setup, act, ForcedWinSolver.mix(seed, 0x545354L + k), st);
+            } finally {
+                AFTER_RUN.remove();
+            }
+            if (o.error != null || !o.played || o.unmapped > 0 || seen[0] == 0 || o.won || o.lost) {
+                if (k == 0) {
+                    return null;
+                }
+                // a second stand-in could not be played on (none of another name the engine accepts): the first stands
+                break;
+            }
+            final Abil probe = withEffects(base, o, id, sa0, null);
+            final String effects = probe.unplayable ? "?" : probe.effects.toString();
+            if (k == 0) {
+                first = new TgtRun();
+                first.need = new ForcedWinModel.TgtNeed();
+                first.need.link = link;
+                first.need.kind = seen[0];
+                first.need.n = seen[1];
+                first.obs = o;
+                first.standIns = 1;
+                firstName = name[0];
+                firstEffects = effects;
+                if (probe.unplayable) {
+                    return null;
+                }
+            } else {
+                if (seen[0] != first.need.kind || seen[1] != first.need.n || !effects.equals(firstEffects)) {
+                    return null; // the answer depends on the stand-in: not a context-free template
+                }
+                first.standIns = 2;
+            }
+        }
+        return first;
     }
 
     private static void toBattlefield(Game g, Player m, Card c) {

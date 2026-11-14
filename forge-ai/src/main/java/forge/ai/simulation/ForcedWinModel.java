@@ -327,6 +327,36 @@ public final class ForcedWinModel {
         }
     }
 
+    /**
+     * plantargets-1114, slice "attackers" (set only by a planAttackers reader; null otherwise, and then nothing changes):
+     * the ability takes one target that may be a creature the opponent controls, and what the engine did to such a
+     * creature in a sandbox. Context-free: the template keeps the targeting link, the kind and a number, never the
+     * sandbox's stand-in. Kinds are read from where the stand-in ended and from the damage or toughness it lost, not
+     * from the card's text or name.
+     */
+    static final class TgtNeed {
+        /** The creature left play for good (destroyed, exiled, put into a library or graveyard). */
+        static final int GONE = 1;
+        /** The creature went back to its owner's hand: it does not attack on the one opposing turn the model spans. */
+        static final int BOUNCE = 2;
+        /** The creature took {@link #n} damage, or lost that much toughness: it leaves when n is at least its toughness left. */
+        static final int DAMAGE = 3;
+        /** Which link of the ability's chain targets (0 = the ability itself). */
+        int link;
+        int kind;
+        int n;
+
+        /** The effect removes an attacker with {@code toughnessLeft} from the opponent's clock. */
+        boolean removes(final int toughnessLeft) {
+            return kind == GONE || kind == BOUNCE || kind == DAMAGE && n >= toughnessLeft;
+        }
+
+        @Override
+        public String toString() {
+            return "attacker:" + (kind == GONE ? "gone" : kind == BOUNCE ? "bounce" : "damage" + n) + "@" + link;
+        }
+    }
+
     /** ENGINE: a step found by the engine search (any legal action, targets recorded); ATTACK: attack with everything. */
     /** REPEAT (search-bones-1015): a loop body found by the engine search's cycle table, repeated a number of times. */
     enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK, REPEAT, MAIN }
@@ -390,6 +420,8 @@ public final class ForcedWinModel {
         boolean alt;
         /** sdcc-probeobj-1111 (set only by a probeObjects reader; null otherwise, and then nothing changes). */
         ObjNeed obj;
+        /** plantargets-1114, slice "attackers" (set only by a planAttackers reader; null otherwise, and then nothing changes). */
+        TgtNeed tgt;
 
         boolean has(EffKind k) {
             for (Eff e : effects) {
@@ -853,6 +885,20 @@ public final class ForcedWinModel {
          * the turn must survive it (our creatures each block one attacker).
          */
         final List<Integer> oppPowers = new ArrayList<>();
+        /**
+         * plantargets-1114, slice "attackers" (filled only by a planAttackers reader; null = off, and then nothing
+         * changes): parallel to {@link #oppPowers}, each attacker's card id and the toughness it has left; and per
+         * targeting ability of ours with a {@link TgtNeed} (key {@link #tgtKey}) the attackers the engine lets it target
+         * here, as a bit mask over {@link #oppPowers} (at most {@link #TGT_CAP} bits: the largest attackers first). Only
+         * the opponent's battlefield is read: public.
+         */
+        List<Integer> oppIds, oppTough;
+        Map<String, Integer> tgtMask;
+        static final int TGT_CAP = 3;
+
+        static String tgtKey(final int cardId, final Abil ab) {
+            return cardId + "|" + ab.desc + "|" + ab.costKey;
+        }
         int devotionBlue;
         boolean emptyDrawWinLive;
         /**
@@ -1133,7 +1179,7 @@ public final class ForcedWinModel {
         }
 
         private String templateKey(Card c) {
-            return (planFace ? "ptf|" : "") + (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
+            return (planAttackers ? "pta|" : "") + (planFace ? "ptf|" : "") + (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
                     + (probeSettle ? "settle|" : "") + c.getName();
         }
 
@@ -1150,6 +1196,8 @@ public final class ForcedWinModel {
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
                 final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get(), prevPt = ForcedWinProbe.PLAN_TARGETS.get();
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
+                final boolean prevPa = ForcedWinProbe.PLAN_ATTACKERS.get();
+                ForcedWinProbe.PLAN_ATTACKERS.set(planAttackers); // plantargets-1114, slice "attackers"
                 ForcedWinProbe.PLAN_TARGETS.set(planFace); // plantargets-1114 (the canonical learn below runs on this thread too)
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
@@ -1167,6 +1215,7 @@ public final class ForcedWinModel {
                     ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                     ForcedWinProbe.PLAN_TARGETS.set(prevPt);
+                    ForcedWinProbe.PLAN_ATTACKERS.set(prevPa);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     synchronized (templates) {
@@ -1237,6 +1286,13 @@ public final class ForcedWinModel {
          * ({@link ForcedWinProbe#PLAN_TARGETS}), under its own template keys ("ptf|").
          */
         boolean planFace;
+        /**
+         * plantargets-1114, slice "attackers" (solver key planTargets naming it; false = off, and then nothing changes):
+         * an ability of ours that takes one target which may be an opposing creature is also learned on a stand-in the
+         * opponent controls ({@link ForcedWinProbe#PLAN_ATTACKERS}, {@link TgtNeed}), under its own template keys
+         * ("pta|"), and {@link #read} adds the opponent's attackers' ids, toughness and the legal-target masks.
+         */
+        boolean planAttackers;
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
         interface LoopProbe {
@@ -1511,13 +1567,27 @@ public final class ForcedWinModel {
             }
             p.oppLife = opp.getLife();
             p.oppLibrary = opp.getCardsIn(ZoneType.Library).size();
+            final List<Card> attackers = new ArrayList<>(); // plantargets-1114 (used only by a planAttackers reader)
             for (Card c : opp.getCreaturesInPlay()) {
                 final int dmg = Math.max(0, c.getNetCombatDamage());
                 if (dmg > 0) {
                     p.oppPowers.add(dmg);
+                    attackers.add(c);
                 }
             }
             p.oppPowers.sort(java.util.Collections.reverseOrder());
+            if (planAttackers && viewer == null) {
+                // the same order as oppPowers (largest combat damage first; ties by toughness left, then id)
+                attackers.sort(java.util.Comparator.comparingInt((Card c) -> -Math.max(0, c.getNetCombatDamage()))
+                        .thenComparingInt(c -> -(c.getNetToughness() - c.getDamage())).thenComparingInt(Card::getId));
+                p.oppIds = new ArrayList<>();
+                p.oppTough = new ArrayList<>();
+                for (Card c : attackers) {
+                    p.oppIds.add(c.getId());
+                    p.oppTough.add(Math.max(1, c.getNetToughness() - c.getDamage()));
+                }
+                p.tgtMask = new java.util.HashMap<>();
+            }
             p.turn = live.getPhaseHandler().getTurn();
             p.sorcerySpeed = me.canCastSorcery();
             p.landDrop = live.getPhaseHandler().isPlayerTurn(me) && me.getLandsPlayedThisTurn() < me.getMaxLandPlays();
@@ -1619,7 +1689,58 @@ public final class ForcedWinModel {
             }
             p.graveyardSize = me.getCardsIn(ZoneType.Graveyard).size();
             p.canDraw = me.canDraw();
+            if (p.tgtMask != null && !attackers.isEmpty()) {
+                tgtMasks(p, live, me, attackers); // plantargets-1114, slice "attackers"
+            }
             return p;
+        }
+
+        /**
+         * plantargets-1114, slice "attackers": for each ability of a card of ours in the position that holds a
+         * {@link TgtNeed}, the opponent's attackers the engine lets it target now (its own {@code canTarget} on the live
+         * game: hexproof, protection, type and colour filters are the engine's answer), the largest first, at most
+         * {@link Position#TGT_CAP}. Asked on a copy of the ability: nothing of the live game changes.
+         */
+        private void tgtMasks(final Position p, final Game live, final Player me, final List<Card> attackers) {
+            final List<List<ACard>> zones = List.of(p.hand, p.battlefield, p.knownTop, p.library, p.graveyard);
+            for (int z = 0; z < zones.size(); z++) {
+                for (ACard a : zones.get(z)) {
+                    for (int from = 0; from < 2; from++) {
+                        for (Abil ab : from == 0 ? a.fromHand : a.onBattlefield) {
+                            if (ab.tgt == null || ab.unplayable) {
+                                continue;
+                            }
+                            final String key = Position.tgtKey(a.id, ab);
+                            if (p.tgtMask.containsKey(key)) {
+                                continue;
+                            }
+                            int mask = 0;
+                            try {
+                                final Card c = live.findById(a.id);
+                                final SpellAbility found = c == null ? null : ForcedWinProbe.locate(c, me, ab.desc, ab.costKey, from == 1);
+                                if (found != null) {
+                                    final SpellAbility sa = found.copy(me);
+                                    sa.setActivatingPlayer(me);
+                                    SpellAbility l = sa;
+                                    for (int i = 0; i < ab.tgt.link && l != null; i++) {
+                                        l = l.getSubAbility();
+                                    }
+                                    int n = 0;
+                                    for (int i = 0; i < attackers.size() && i < 31 && n < Position.TGT_CAP && l != null; i++) {
+                                        if (l.usesTargeting() && l.canTarget(attackers.get(i))) {
+                                            mask |= 1 << i;
+                                            n++;
+                                        }
+                                    }
+                                }
+                            } catch (RuntimeException e) {
+                                mask = 0; // not known: never planned on a target the engine did not accept
+                            }
+                            p.tgtMask.put(key, mask);
+                        }
+                    }
+                }
+            }
         }
     }
 }
