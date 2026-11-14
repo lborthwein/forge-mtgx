@@ -417,6 +417,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * copies carry a dungeon card with its current room. false = off, and then nothing changes.
          */
         public boolean copyDungeon = false;
+        /** Lane sdcc-copycast-1114 ({@link LookaheadSearch.Config#copyStaleRefs}); false = off, nothing changes. */
+        public boolean copyStaleRefs = false;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -426,7 +428,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
+                "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "copyStaleRefs", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
@@ -604,6 +606,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("replayMayPlayLoose")) c.replayMayPlayLoose = o.get("replayMayPlayLoose").getAsBoolean();
             if (o.has("copyCast")) c.copyCast = o.get("copyCast").getAsBoolean();
             if (o.has("copyDungeon")) c.copyDungeon = o.get("copyDungeon").getAsBoolean();
+            if (o.has("copyStaleRefs")) c.copyStaleRefs = o.get("copyStaleRefs").getAsBoolean();
             c.check();
             return c;
         }
@@ -879,6 +882,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (copyDungeon) {
                 o.addProperty("copyDungeon", true); // sdcc-copycast-1114: only when on
+            }
+            if (copyStaleRefs) {
+                o.addProperty("copyStaleRefs", true); // sdcc-copycast-1114: only when on
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -1210,6 +1216,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.replayMayPlayLoose = cfg.replayMayPlayLoose; // step3-playout-fixes-1028
         lc.copyCast = cfg.copyCast; // sdcc-copycast-1114
         lc.copyDungeon = cfg.copyDungeon; // sdcc-copycast-1114
+        lc.copyStaleRefs = cfg.copyStaleRefs; // sdcc-copycast-1114
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
             lc.stack = true;
@@ -2870,6 +2877,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (scorer == null) {
             scorer = new ChoiceScorer(ChoiceScorer.Config.parse(cfg.choiceScorer), index, obsVersion, uid);
             scorer.setCopyDungeon(cfg.copyDungeon); // sdcc-copycast-1114
+            scorer.setCopyStaleRefs(cfg.copyStaleRefs); // sdcc-copycast-1114
             final ChoiceScorer.Config sc = scorer.config();
             if (sc.screenNodes > 0 || sc.pile) {
                 sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();

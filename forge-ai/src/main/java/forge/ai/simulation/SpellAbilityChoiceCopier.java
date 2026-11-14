@@ -48,6 +48,9 @@ final class SpellAbilityChoiceCopier {
             }
             for (GameObject sourceTarget : sourceAbility.getTargets()) {
                 GameObject destinationTarget = gameObjectMapper.apply(sourceTarget);
+                if (destinationTarget == null) {
+                    continue; // sdcc-copycast-1114: a mapper may leave a target out (GameCopier copyStaleRefs); none did before
+                }
                 destinationAbility.getTargets().add(destinationTarget);
                 if (sourceAbility.isDividedAsYouChoose()) {
                     destinationAbility.addDividedAllocation(destinationTarget, sourceAbility.getDividedValue(sourceTarget));

@@ -168,6 +168,23 @@ public class GameCopier {
 
     public void setCopyDungeon(boolean on) { this.copyDungeon = on; }
 
+    /**
+     * Lane sdcc-copycast-1114 (off by default, and then nothing changes): a stack entry that still refers to an object
+     * the game no longer holds is copied without that reference instead of failing the whole copy. A TARGET card that
+     * has left the game (a token that ceased to exist: in no zone, so the copy has no card for it and the target is
+     * illegal in the live game too) is left out of the copied entry; a PAID token that has ceased to exist is left out
+     * of the copied paid list. A card the live game still holds is never skipped (a card that only changed zones maps
+     * by its id, as before); failing to map a held card stays an error.
+     */
+    private boolean copyStaleRefs = false;
+
+    public void setCopyStaleRefs(boolean on) { this.copyStaleRefs = on; }
+
+    /** copyStaleRefs: {@code o} is a card object the original game no longer holds (replaced by a newer object, or gone). */
+    private boolean staleCard(GameObject o) {
+        return o instanceof Card && !cardMap.containsKey(o) && origGame.findById(((Card) o).getId()) != o;
+    }
+
     public void setHistoryLki(boolean on) { this.historyLki = on; }
 
     public void setOffBattlefieldLimits(boolean on) {
@@ -396,7 +413,12 @@ public class GameCopier {
                     sub.resetTargets();
                 }
             }
-            SpellAbilityChoiceCopier.copyTargets(orig, copy, this::findWithStack);
+            if (copyStaleRefs) {
+                // sdcc-copycast-1114: a stale card target is left out (null = skipped by copyTargets)
+                SpellAbilityChoiceCopier.copyTargets(orig, copy, o -> staleCard(o) ? null : findWithStack(o));
+            } else {
+                SpellAbilityChoiceCopier.copyTargets(orig, copy, this::findWithStack);
+            }
             copy.setActivatingPlayer(activator);
             // Paid objects (sacrificed, discarded, tapped...) by id: the copy holds the same cards (an LKI object maps
             // to its card's current copy). One that is not in the copied game fails the copy.
@@ -406,7 +428,7 @@ public class GameCopier {
                     final forge.game.card.CardCollection mapped = new forge.game.card.CardCollection();
                     for (Card pc : cell.getValue()) {
                         final Card m = newGame.findById(pc.getId());
-                        if (m == null && skipResolvingTrigger && pc.isToken()) {
+                        if (m == null && (skipResolvingTrigger || copyStaleRefs) && pc.isToken()) {
                             // Tutor ranking: a sacrificed token has ceased to exist; the replayed resolution does not
                             // need it (the copy's paid list simply lacks it).
                             continue;
