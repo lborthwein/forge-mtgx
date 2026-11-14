@@ -1090,12 +1090,26 @@ public final class ForcedWinPlanner {
             if (lim.loops && !pending && !quiet && a.loopFromHand && !a.loopWith.isEmpty() && s.sorcery) {
                 // planLoops: an Aura cast on a partner in play since before this turn (it must tap): pay it, then the loop
                 boolean partner = false;
+                int partnerId = -1;
                 for (Perm q : s.bf) {
-                    partner |= !q.fresh && a.loopWith.contains(cards.get(q.card).name);
+                    if (!q.fresh && a.loopWith.contains(cards.get(q.card).name)) {
+                        partner = true;
+                        partnerId = partnerId < 0 ? cards.get(q.card).id : partnerId;
+                    }
                 }
                 for (Abil ab : a.fromHand) {
                     if (partner && ab.kind == AbilKind.SPELL && tried.add(a.name + "|loop|" + ab.costKey)) {
-                        for (S n : apply(s, hi, -1, a, ab)) {
+                        // sdcc-probeobj-loop-1114 (only a probeObjects plan; -1 otherwise, and then nothing changes): the
+                        // cast's object is the loop partner, whatever a sandbox saw the cast do there
+                        loopObj = objMove(ab) && ForcedWinModel.ObjNeed.TARGET.equals(ab.obj.role)
+                                && !"Graveyard".equals(ab.obj.zone) ? partnerId : -1;
+                        final List<S> cast;
+                        try {
+                            cast = apply(s, hi, -1, a, ab);
+                        } finally {
+                            loopObj = -1;
+                        }
+                        for (S n : cast) {
                             if (!n.dead) {
                                 n.won = true;
                                 n.how = "loop";
@@ -1684,6 +1698,15 @@ public final class ForcedWinPlanner {
      */
     private void afterCost(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, boolean free, List<S> out) {
         if (objMove(ab) && !free) {
+            if (loopObj >= 0) {
+                // sdcc-probeobj-loop-1114: the planLoops cast onto its partner (an Aura whose grant no effect expresses
+                // has no usable object, and objBranches would drop the loop the key-off plan finds): one branch, the
+                // partner as the target the follower sets
+                step.objTarget = loopObj;
+                step.objLink = ab.obj.link;
+                afterPay(s, step, self, host, handIdx, a, ab, false, out, null);
+                return;
+            }
             objBranches(s, step, self, host, handIdx, a, ab, out); // sdcc-probeobj-1111
             return;
         }
@@ -2993,6 +3016,8 @@ public final class ForcedWinPlanner {
 
     /** The payment order in use (0 = greedy; the payment search tries the others). */
     private int payPolicy;
+    /** sdcc-probeobj-loop-1114: the id of the loop partner a planLoops cast is aimed at while it is applied; -1 otherwise. */
+    private int loopObj = -1;
 
     /**
      * A source's rank in the payment order (lower is tapped first). 0: least flexible first, one-shot sources last (the
