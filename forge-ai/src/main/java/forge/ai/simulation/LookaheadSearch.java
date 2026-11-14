@@ -438,6 +438,16 @@ public final class LookaheadSearch {
          * level-2 pass does, after the exact and prefix matches failed.
          */
         public boolean replayMayPlayLoose = false;
+        /**
+         * Lane sdcc-copycast-1114 (false = off, and then nothing changes): a candidate whose cast or land play is
+         * permitted by an effect (a may-play grant: from the graveyard, from exile, from the top of the library) carries
+         * the grant's structure ({@link #maySig}): the granting card's id, how its mana cost is paid, its alternative
+         * cost and the ability's own text. A copy prints such an ability with another source name than the live game
+         * does, so the description match fails (candidate_not_in_copy); with the key the copies ({@link #locate}) and
+         * the play-out seat's menu ({@link FirstAction#matchesMaySig}) match it by that structure, after the
+         * description matches failed. The first pass itself finds it: no second search of the decision.
+         */
+        public boolean copyCast = false;
 
         /** S2T: the belief is the co-draft deck prior. */
         public boolean codraft() {
@@ -649,6 +659,9 @@ public final class LookaheadSearch {
             }
             if (replayMayPlayLoose) {
                 o.addProperty("replayMayPlayLoose", true); // step3-playout-fixes-1028: only when on
+            }
+            if (copyCast) {
+                o.addProperty("copyCast", true); // sdcc-copycast-1114: only when on
             }
             if (rankerOn()) {
                 final JsonObject r = new JsonObject();
@@ -1271,6 +1284,12 @@ public final class LookaheadSearch {
          * its play-out rewinds the copy to the end of declare attackers and the play-out seat declares it.
          */
         final BlockPlan block;
+        /**
+         * Lane sdcc-copycast-1114 ({@link Config#copyCast}; null = off or not a may-play ability): the structure of the
+         * may-play grant behind this cast or land play ({@link LookaheadSearch#maySig}), and its paid optional costs.
+         * Never part of {@link #key}.
+         */
+        String maySig, mayOpt;
 
         /** block-search-1019: a block assignment candidate; {@code label} names it, its blocks are its key. */
         Cand(BlockPlan block, String label, boolean isDefault) {
@@ -1317,6 +1336,8 @@ public final class LookaheadSearch {
             this.macro = null;
             this.plan = null;
             this.block = null;
+            this.maySig = base.maySig;
+            this.mayOpt = base.mayOpt;
         }
 
         /** S-t: {@code base} played out with a forced-answer schedule for its choice asks (a macro candidate). */
@@ -1333,6 +1354,8 @@ public final class LookaheadSearch {
             this.macro = macro;
             this.plan = null;
             this.block = null;
+            this.maySig = base.maySig;
+            this.mayOpt = base.mayOpt;
         }
 
         Cand(SpellAbility sa, boolean isDefault) {
@@ -1505,6 +1528,8 @@ public final class LookaheadSearch {
          * play-out seat accepts it only when exactly one menu entry matches.
          */
         public boolean mayPlayUnique = false;
+        /** Lane sdcc-copycast-1114: the candidate's may-play structure and optional costs (null = off / not may-play). */
+        public final String maySig, mayOpt;
         /** Lane search-bones-1015 (S-b): the turn-plan this play-out follows (null = a single first action). */
         public final Object plan;
         /** S-b: what became of the plan in this play-out: 0 = not finished, 1 = played to its end, 2 = broke. */
@@ -1528,6 +1553,18 @@ public final class LookaheadSearch {
             this.schedule = c.schedule;
             this.plan = c.plan;
             this.block = c.block;
+            this.maySig = c.maySig;
+            this.mayOpt = c.mayOpt;
+        }
+
+        /**
+         * Lane sdcc-copycast-1114 (only with {@link Config#copyCast}): {@code sa} is the same card's may-play ability
+         * with this candidate's grant structure; with {@code withOpt} its paid optional costs are the candidate's too.
+         */
+        public boolean matchesMaySig(SpellAbility sa, boolean withOpt) {
+            return maySig != null && sa != null && !pass && sa.getHostCard() != null && sa.getHostCard().getId() == hostId
+                    && sa.isLandAbility() == land && maySig.equals(LookaheadSearch.maySig(sa))
+                    && (!withOpt || java.util.Objects.equals(mayOpt, LookaheadSearch.mayOpt(sa)));
         }
 
         /**
@@ -3090,7 +3127,7 @@ public final class LookaheadSearch {
         final List<Integer> allAt = new ArrayList<>();
         final Set<String> seen = new HashSet<>();
         for (int i = 0; i < given.size(); i++) {
-            final Cand c = new Cand(given.get(i), false);
+            final Cand c = cand(given.get(i), false);
             if (seen.add(c.key())) {
                 all.add(c);
                 allAt.add(i);
@@ -5210,7 +5247,7 @@ public final class LookaheadSearch {
     List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv,
                          JsonObject[] beliefRoot, JsonObject[] labelRoot) {
         final List<Cand> out = new ArrayList<>();
-        out.add(new Cand(defSa, true));
+        out.add(cand(defSa, true));
         if (defSa != null) {
             out.add(new Cand(null, false));
         }
@@ -5629,7 +5666,57 @@ public final class LookaheadSearch {
                 }
             }
         }
+        if (c.maySig != null) {
+            // sdcc-copycast-1114 (copyCast): the same may-play grant on the same card, whatever its source prints as
+            for (SpellAbility sa : all) {
+                if (sa.isLandAbility() == c.land && c.maySig.equals(maySig(sa))) {
+                    return sa;
+                }
+            }
+        }
         return null;
+    }
+
+    /**
+     * Lane sdcc-copycast-1114: the structure of a may-play ability (a cast or land play an effect permits: from the
+     * graveyard, from exile, ...), equal in the live game and in every copy of it: the granting card's id, how the mana
+     * cost is paid (as printed, none, another cost), flash, the ability's alternative cost, and its own text up to the
+     * may-play suffix (the suffix names the grant's source, which a copy prints differently). Null if {@code sa} is not
+     * a may-play ability.
+     */
+    static String maySig(SpellAbility sa) {
+        if (sa == null) {
+            return null;
+        }
+        final forge.game.card.CardPlayOption o = sa.getMayPlayOption();
+        if (o == null || o.getHost() == null) {
+            return null;
+        }
+        final String d = String.valueOf(sa.getDescription());
+        final int i = d.indexOf(" by ");
+        return o.getHost().getId() + "|" + o.getPayManaCost() + "|" + o.getAltManaCost() + "|" + o.isWithFlash() + "|"
+                + sa.getAlternativeCost() + "|" + (sa.isLandAbility() ? "L" : "S") + "|" + (i >= 0 ? d.substring(0, i) : d);
+    }
+
+    /** sdcc-copycast-1114: the paid optional costs of {@code sa}, in a fixed order ("" = none). */
+    static String mayOpt(SpellAbility sa) {
+        final java.util.TreeSet<String> s = new java.util.TreeSet<>();
+        if (sa != null) {
+            for (forge.game.spellability.OptionalCost c : sa.getOptionalCosts()) {
+                s.add(c.name());
+            }
+        }
+        return String.join(",", s);
+    }
+
+    /** A candidate of this search: with {@link Config#copyCast} it carries its may-play structure. */
+    Cand cand(SpellAbility sa, boolean isDefault) {
+        final Cand c = new Cand(sa, isDefault);
+        if (cfg.copyCast && sa != null) {
+            c.maySig = maySig(sa);
+            c.mayOpt = c.maySig == null ? null : mayOpt(sa);
+        }
+        return c;
     }
 
     /**
