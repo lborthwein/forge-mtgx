@@ -327,6 +327,7 @@ public final class RlLiveSeat {
                     case "seatTimeoutMs": s.seatTimeoutMs = Integer.parseInt(v); break;
                     case "capActions": s.capActions = Integer.parseInt(v); break;
                     case "maxDecisions": s.maxDecisions = Integer.parseInt(v); break;
+                    case "svcMemo": c.svcMemo = !"0".equals(v) && !"false".equals(v) && !"off".equals(v); break; // svcmemo-1114 (absent = off)
                     case "loopGuard": s.loopGuard = Integer.parseInt(v); break;
                     case "aiFixes0928": s.aiFixes0928 = AiFixes.Mode.parse(v); break;
                     case "log": s.log = !"0".equals(v); break;
