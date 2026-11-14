@@ -459,6 +459,12 @@ public final class LookaheadSearch {
          * play-out fails as copy_error "Couldn't map ..." / "stack copy: paid ... not in the copy").
          */
         public boolean copyStaleRefs = false;
+        /**
+         * Lane sdcc-copycast-1114 (false = off, and then nothing changes): a priority decision made while a triggered
+         * ability waits on the stack is searched; the copies rebuild the trigger from its host
+         * ({@link GameCopier#setCopyTriggers}). Without it such a decision is refused ("trigger") and the default stands.
+         */
+        public boolean copyTriggers = false;
 
         /** S2T: the belief is the co-draft deck prior. */
         public boolean codraft() {
@@ -679,6 +685,9 @@ public final class LookaheadSearch {
             }
             if (copyStaleRefs) {
                 o.addProperty("copyStaleRefs", true); // sdcc-copycast-1114: only when on
+            }
+            if (copyTriggers) {
+                o.addProperty("copyTriggers", true); // sdcc-copycast-1114: only when on
             }
             if (rankerOn()) {
                 final JsonObject r = new JsonObject();
@@ -2127,7 +2136,7 @@ public final class LookaheadSearch {
                 stats.stackSkipped++;
                 return def;
             }
-            final String why = GameCopier.stackUnsupported(live);
+            final String why = GameCopier.stackUnsupported(live, false, cfg.copyTriggers);
             if (why != null) {
                 stats.stackSkipped++;
                 stats.stackUnsupported++;
@@ -2555,6 +2564,8 @@ public final class LookaheadSearch {
         public int chosen = -1;
         /** unsearched | stack | uncontested | kept | departed | loop-guard | capped | failed. */
         public String outcome = "unsearched";
+        /** Measurement only (-Dsdcc.stackNote=true; null otherwise): the stack this decision was made on. */
+        public JsonObject stackNote;
         /** The searched candidates as indices into the given list (default first), and their mean values (NaN = a world failed). */
         public int[] givenIndex = new int[0];
         public double[] ev = new double[0];
@@ -3072,14 +3083,20 @@ public final class LookaheadSearch {
                 res.outcome = "stack";
                 return res;
             }
-            final String why = GameCopier.stackUnsupported(live);
+            final String why = GameCopier.stackUnsupported(live, false, cfg.copyTriggers);
             if (why != null) {
                 stats.stackSkipped++;
                 stats.stackUnsupported++;
                 stats.givenStackSkipped++;
                 stats.stackWhy.merge(why, 1L, Long::sum);
                 res.outcome = "stack";
+                if (STACK_NOTE) {
+                    res.stackNote = stackNote(live, me, why);
+                }
                 return res;
+            }
+            if (STACK_NOTE && cfg.copyTriggers) {
+                res.stackNote = stackNote(live, me, "searched");
             }
         }
         final PhaseHandler ph = live.getPhaseHandler();
@@ -6657,6 +6674,7 @@ public final class LookaheadSearch {
         if (cfg.copyBackFace) c.setCopyBackFace(true);
         if (cfg.copyDungeon) c.setCopyDungeon(true); // sdcc-copycast-1114
         if (cfg.copyStaleRefs) c.setCopyStaleRefs(true); // sdcc-copycast-1114
+        if (cfg.copyTriggers) c.setCopyTriggers(true); // sdcc-copycast-1114
         if (cfg.stackAbilityCopies) c.setStackAbilityCopies(true);
         if (cfg.stackHistory) c.setStackHistory(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {
@@ -8113,6 +8131,38 @@ public final class LookaheadSearch {
         stats.tutorDeparted++;
         entry.addProperty("outcome", "departed");
         return rep.get(cands.get(best));
+    }
+
+    /** Measurement only (-Dsdcc.stackNote=true): a decision row for a non-empty stack says what was on it. */
+    static final boolean STACK_NOTE = Boolean.getBoolean("sdcc.stackNote");
+
+    /**
+     * Measurement only: the stack at a priority decision, top first (kind, host, whose), whose turn it is, and the
+     * copier's reason for refusing it (or "searched").
+     */
+    static JsonObject stackNote(Game live, Player me, String why) {
+        final JsonObject o = new JsonObject();
+        o.addProperty("why", why);
+        o.addProperty("active", live.getPhaseHandler().getPlayerTurn() == me ? "me" : "opp");
+        final JsonArray es = new JsonArray();
+        for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
+            final SpellAbility sa = si.getSpellAbility();
+            final JsonObject e = new JsonObject();
+            e.addProperty("kind", si.isTrigger() || sa.isTrigger() || sa.isWrapper() ? "trigger" : sa.isSpell() ? "spell" : "ability");
+            e.addProperty("host", sa.getHostCard() == null ? "?" : sa.getHostCard().getName());
+            e.addProperty("who", sa.getActivatingPlayer() == me ? "me" : "opp");
+            if (sa instanceof forge.game.trigger.WrappedAbility w) {
+                final forge.game.trigger.Trigger t = w.getTrigger();
+                e.addProperty("mode", t == null ? "?" : String.valueOf(t.getMode()));
+                e.addProperty("own_trigger", t != null && triggerIndex(w.getHostCard(), t) >= 0);
+                e.addProperty("optional", sa.isOptionalTrigger());
+                e.addProperty("targets", w.getWrappedAbility() != null && w.getWrappedAbility().usesTargeting());
+            }
+            es.add(e);
+        }
+        o.add("stack", es);
+        o.addProperty("would", String.valueOf(GameCopier.stackUnsupported(live, false, true)));
+        return o;
     }
 
     /** The trigger's position among its host's triggers (-1 if absent). */

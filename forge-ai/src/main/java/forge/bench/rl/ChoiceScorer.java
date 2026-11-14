@@ -459,6 +459,13 @@ public final class ChoiceScorer {
         this.copyStaleRefs = on;
     }
 
+    /** sdcc-copycast-1114 (the search's copyTriggers key; false = off): a trigger waiting under the resolving effect is copied. */
+    private boolean copyTriggers = false;
+
+    public void setCopyTriggers(final boolean on) {
+        this.copyTriggers = on;
+    }
+
     public Config config() {
         return cfg;
     }
@@ -474,6 +481,11 @@ public final class ChoiceScorer {
             @Override
             public boolean copyStaleRefs() {
                 return copyStaleRefs;
+            }
+
+            @Override
+            public boolean copyTriggers() {
+                return copyTriggers;
             }
 
             @Override
@@ -1224,7 +1236,7 @@ public final class ChoiceScorer {
         }
         // choice-search-1109: the cleanup's discard to hand size is replayed on a copy of the step, not of a resolution
         cleanupMode = mech && "chooseCardsToDiscardToMaximumHandSize".equals(m.method) && ChoiceApply.cleanupAsk(g, me);
-        s.unsupported = costMode ? ChoiceApply.castUnsupported(g, me, castSa) : cleanupMode ? null : ChoiceApply.unsupported(g, null);
+        s.unsupported = costMode ? ChoiceApply.castUnsupported(g, me, castSa) : cleanupMode ? null : ChoiceApply.unsupported(g, null, copyTriggers);
         if (s.unsupported != null) {
             return;
         }
