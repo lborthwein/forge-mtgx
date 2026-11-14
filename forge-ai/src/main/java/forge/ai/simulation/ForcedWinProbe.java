@@ -182,6 +182,20 @@ public final class ForcedWinProbe {
     static final ThreadLocal<Boolean> PROBE_SETTLE = ThreadLocal.withInitial(() -> false);
 
     /**
+     * plantargets-1114 (solver key {@code planTargets}, slice "face"; false = off, and then nothing changes). A permanent's enters
+     * trigger (or any other triggered ability of ours raised in a sandbox run) that deals damage to a target is aimed by
+     * the sandbox's Forge AI, which takes a creature when the sandbox holds one: the run then shows no damage to the
+     * opponent, and the template loses it (the canonical sandbox always holds such a creature; a lazy sandbox holds
+     * whatever the position does). With the key, a triggered damage ability of ours whose every targeting link accepts
+     * the opposing player is aimed at that player before it resolves ({@link #facePlayer}): the template records the
+     * damage to the player, as an ability we cast ourselves already does through its "opp" variant
+     * ({@link #setPlayerTargets}). Which abilities qualify comes from the engine alone: the ability is a trigger, each
+     * targeting link's effect type is damage, and the engine's target check accepts the player. Templates learned this
+     * way live under their own keys ("ptf|").
+     */
+    static final ThreadLocal<Boolean> PLAN_TARGETS = ThreadLocal.withInitial(() -> false);
+
+    /**
      * ledger-sweep-1107, ledger row 45 ({@code -Dforge.probeEmptyDraw=true}, off by default). A probe runs in a copy of
      * the position. When our library there is empty, an ability that draws ("mill two, then draw a card") is replaced by
      * the permanent that turns an empty-library draw into a win, so the run is won with no card moved: the template got
@@ -553,7 +567,7 @@ public final class ForcedWinProbe {
                 return o;
             }
             final int[] poolCast = pool(me);
-            resolveAll(g);
+            resolveAll(g, PLAN_TARGETS.get() ? me : null); // plantargets-1114 (null without the key: as before)
             o.libAfter = me.getCardsIn(ZoneType.Library).size();
             final int[] poolAfter = pool(me);
             for (int c = 0; c < 6; c++) {
@@ -608,6 +622,14 @@ public final class ForcedWinProbe {
 
     /** Resolve the whole stack, triggers included, with every player passing. */
     static void resolveAll(Game g) {
+        resolveAll(g, null);
+    }
+
+    /**
+     * As above. plantargets-1114: {@code face} (null = off, and then exactly the loop above) is the probing player; a
+     * triggered damage ability of theirs on top of the stack is aimed at the opposing player before it resolves.
+     */
+    static void resolveAll(Game g, Player face) {
         for (int i = 0; i < 200 && !g.isGameOver(); i++) {
             g.getAction().checkStateEffects(true);
             if (g.isGameOver()) {
@@ -619,8 +641,52 @@ public final class ForcedWinProbe {
             if (g.getStack().isEmpty()) {
                 return;
             }
+            if (face != null) {
+                facePlayer(g.getStack().peekAbility(), face);
+            }
             g.getStack().resolveStack();
         }
+    }
+
+    /**
+     * plantargets-1114: aim a triggered damage ability of {@code me} at the opposing player. Only when the ability is a
+     * trigger {@code me} controls, it has a targeting link, every targeting link's effect type is damage with one
+     * target, undivided, and the engine's target check accepts the opposing player for each. Returns whether the targets
+     * were set. Anything else is left as the sandbox's controller aimed it.
+     */
+    static boolean facePlayer(SpellAbility top, Player me) {
+        if (top == null || !top.isTrigger() || top.getActivatingPlayer() != me) {
+            return false;
+        }
+        final SpellAbility sa = top instanceof forge.game.trigger.WrappedAbility w ? w.getWrappedAbility() : top;
+        Player opp = null;
+        for (Player p : me.getOpponents()) {
+            opp = p;
+        }
+        if (opp == null) {
+            return false;
+        }
+        boolean any = false;
+        for (SpellAbility l = sa; l != null; l = l.getSubAbility()) {
+            if (!l.usesTargeting()) {
+                continue;
+            }
+            if (l.getApi() != forge.game.ability.ApiType.DealDamage || l.isDividedAsYouChoose() || l.getMinTargets() > 1
+                    || l.hasParam("TargetingPlayer") || !l.canTarget(opp)) {
+                return false;
+            }
+            any = true;
+        }
+        if (!any) {
+            return false;
+        }
+        for (SpellAbility l = sa; l != null; l = l.getSubAbility()) {
+            if (l.usesTargeting()) {
+                l.resetTargets();
+                l.getTargets().add(opp);
+            }
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------ locating an ability in a copy

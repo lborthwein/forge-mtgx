@@ -364,6 +364,31 @@ public final class ForcedWinSolver {
          */
         public boolean probeObjects = false;
         /**
+         * plantargets-1114 (null = off, the default, and then nothing changes): target choice in the planner, a
+         * comma-separated list of slices, each with its own template-key prefix so models of different slice sets never
+         * mix. Slice {@code face} (prefix "ptf|"): our own cards' models are learned with a triggered damage ability
+         * that may target the opposing player aimed at that player ({@link ForcedWinProbe#PLAN_TARGETS}); the reach and
+         * choice screens then count that damage. Other slices add their own name and prefix; a name this build does not
+         * know turns nothing on (one log line).
+         */
+        public String planTargets = null;
+
+        /** plantargets-1114: is {@code slice} named in {@link #planTargets}? */
+        public boolean planTargets(final String slice) {
+            if (planTargets == null) {
+                return false;
+            }
+            for (String s : planTargets.split(",")) {
+                if (s.trim().equals(slice)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** plantargets-1114: the slices this build knows. */
+        static final java.util.List<String> PLAN_TARGET_SLICES = java.util.List.of("face");
+        /**
          * sdcc-bridge-1111 (false = off, the default, and then nothing changes): the bridge from the width search to the
          * engine search. The width search also notes its setup lines ({@link ForcedWinPlanner.Setup}): modeled steps
          * (a land, mana, a tutor, casting a piece) after which we can pay for an ability whose outcome the model cannot
@@ -978,6 +1003,14 @@ public final class ForcedWinSolver {
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
             c.probeObjects = "true".equals(get.apply("probeObjects")); // sdcc-probeobj-1111
+            c.planTargets = get.apply("planTargets"); // plantargets-1114 (absent = null = off)
+            if (c.planTargets != null) {
+                for (String s : c.planTargets.split(",")) {
+                    if (!PLAN_TARGET_SLICES.contains(s.trim())) {
+                        System.err.println("[plan-targets] unknown slice '" + s.trim() + "' ignored (known: " + PLAN_TARGET_SLICES + ")");
+                    }
+                }
+            }
             c.planBridge = "true".equals(get.apply("planBridge")); // sdcc-bridge-1111
             c.planBridgeMax = intOr(get.apply("planBridgeMax"), c.planBridgeMax);
             c.planBridgeMs = intOr(get.apply("planBridgeMs"), (int) c.planBridgeMs);
@@ -1064,6 +1097,7 @@ public final class ForcedWinSolver {
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
                 + (sourceLeaves ? " sourceLeaves" : "")
                 + (probeObjects ? " probeObjects" : "") // sdcc-probeobj-1111
+                + (planTargets != null ? " planTargets=" + planTargets : "") // plantargets-1114
                 + (planBridge ? " planBridge max=" + planBridgeMax + " ms=" + planBridgeMs : ""); // sdcc-bridge-1111
         }
     }
@@ -1564,6 +1598,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.probeObjects) {
             this.reader.probeObjects = true; // sdcc-probeobj-1111: our own cards only (its own template keys)
+        }
+        if (cfg.planTargets("face")) {
+            this.reader.planFace = true; // plantargets-1114: our own cards only (its own template keys)
         }
         if (cfg.hideHidden()) {
             hideProbes(); // sdcc-leak-1111

@@ -794,6 +794,7 @@ public final class ForcedWinCanon {
         r.tutorCast = prefix.contains("tc|");
         r.planScry = prefix.contains("scry|");
         r.probeSettle = prefix.contains("settle|");
+        r.planFace = prefix.contains("ptf|"); // plantargets-1114 (slice "face")
         r.table = tb;
         r.card(b.g, b.me, c);
         return tb.entries.containsKey(prefix + name);

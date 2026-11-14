@@ -1133,7 +1133,7 @@ public final class ForcedWinModel {
         }
 
         private String templateKey(Card c) {
-            return (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
+            return (planFace ? "ptf|" : "") + (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
                     + (probeSettle ? "settle|" : "") + c.getName();
         }
 
@@ -1148,8 +1148,9 @@ public final class ForcedWinModel {
             if (t == null) {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
-                final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
+                final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get(), prevPt = ForcedWinProbe.PLAN_TARGETS.get();
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
+                ForcedWinProbe.PLAN_TARGETS.set(planFace); // plantargets-1114 (the canonical learn below runs on this thread too)
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
                 ForcedWinProbe.TUTOR_CAST.set(tutorCast);
@@ -1165,6 +1166,7 @@ public final class ForcedWinModel {
                     ForcedWinProbe.TUTOR_CAST.set(prevTc);
                     ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
+                    ForcedWinProbe.PLAN_TARGETS.set(prevPt);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     synchronized (templates) {
@@ -1228,6 +1230,13 @@ public final class ForcedWinModel {
          * per card name) and keeps what the engine accepted and did ({@link ObjNeed}), under its own template keys.
          */
         boolean probeObjects;
+
+        /**
+         * plantargets-1114 (solver key planTargets, slice "face"; false = off, and then nothing changes): a triggered
+         * damage ability of ours that may target the opposing player is learned aimed at that player
+         * ({@link ForcedWinProbe#PLAN_TARGETS}), under its own template keys ("ptf|").
+         */
+        boolean planFace;
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
         interface LoopProbe {
