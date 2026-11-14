@@ -103,6 +103,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /**
+     * svcmemo-1114: the memo's counters on a searched decision's log row, only with the key on (off: the row is
+     * untouched): {@code memoHits} = play-out policy requests answered from this decision's memo, {@code memoMisses} =
+     * those sent. Hit rate = memoHits / (memoHits + memoMisses).
+     */
+    public static void memoRow(final JsonObject row, final SvcMemo memo) {
+        if (memo != null) {
+            row.addProperty("memoHits", memo.hits.get());
+            row.addProperty("memoMisses", memo.misses.get());
+        }
+    }
+
     /** The arm's search spec (RlActorBench config key {@code search}). */
     public static final class Config {
         public int worlds = 8;
@@ -173,6 +185,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * worlds it has).
          */
         public int race = 0;
+        /**
+         * svcmemo-1114 (default false = off, and then nothing changes): the play-out seats' greedy policy DECIDEs of one
+         * searched decision are answered from that decision's own memo when the same request (kind + every payload byte
+         * after the game uid and the decision index) was already asked in it ({@link SvcMemo}). Sampled asks
+         * ({@code playoutSample}) bypass it.
+         */
+        public boolean svcMemo = false;
         public double workScale = 1.0;
         public long workWallMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
@@ -439,7 +458,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
-                "blockSampleSeed", "race", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
+                "blockSampleSeed", "race", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
 
@@ -510,6 +529,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("workUnits")) c.workUnits = o.get("workUnits").getAsBoolean(); // work-units-1107
             if (o.has("blockSampleSeed")) c.blockSampleSeed = o.get("blockSampleSeed").getAsBoolean();
             if (o.has("race")) c.race = o.get("race").getAsInt();
+            if (o.has("svcMemo")) c.svcMemo = o.get("svcMemo").getAsBoolean(); // svcmemo-1114
             if (o.has("workScale")) c.workScale = o.get("workScale").getAsDouble();
             if (o.has("workWallMs")) c.workWallMs = o.get("workWallMs").getAsLong();
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
@@ -765,6 +785,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (race > 0) {
                 o.addProperty("race", race); // searchspeed-1113: only when on
             }
+            if (svcMemo) {
+                o.addProperty("svcMemo", true); // svcmemo-1114: only when on
+            }
             if (workUnits) {
                 // work-units-1107: only when on, so every other spec's JSON is unchanged
                 o.addProperty("workUnits", true);
@@ -922,6 +945,50 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private final java.util.concurrent.atomic.AtomicInteger budgetStops = new java.util.concurrent.atomic.AtomicInteger();
     /** Search-service connections, one per thread (the game thread and the look-ahead's pool threads). */
     private final ThreadLocal<RlSearchClient> client = new ThreadLocal<>();
+    /**
+     * svcmemo-1114: the memo of the searched decision in progress (null: key off, or no searched decision in progress).
+     * Set and cleared by the deciding thread ({@link #memoBegin} / {@link #memoEnd}); a play-out seat takes the
+     * reference when it is built, so a play-out never reads another decision's memo.
+     */
+    private volatile SvcMemo memo;
+    private int memoDepth;
+    /** The seat's totals (search summary). */
+    private final java.util.concurrent.atomic.AtomicLong memoHitsTotal = new java.util.concurrent.atomic.AtomicLong(),
+            memoMissesTotal = new java.util.concurrent.atomic.AtomicLong();
+
+    /** svcmemo-1114: a searched decision begins on the deciding thread (key off: nothing). */
+    private void memoBegin() {
+        if (cfg.svcMemo && memoDepth++ == 0) {
+            memo = new SvcMemo();
+        }
+    }
+
+    /** svcmemo-1114: the searched decision ends; its memo is dropped (key off: nothing). */
+    private void memoEnd() {
+        if (cfg.svcMemo && --memoDepth == 0) {
+            final SvcMemo m = memo;
+            memo = null;
+            if (m != null) {
+                memoHitsTotal.addAndGet(m.hits.get());
+                memoMissesTotal.addAndGet(m.misses.get());
+                if (forge.ai.simulation.SearchProf.ON) {
+                    forge.ai.simulation.SearchProf.note("memoHits", m.hits.get());
+                    forge.ai.simulation.SearchProf.note("memoMisses", m.misses.get());
+                }
+            }
+        }
+    }
+
+    /**
+     * svcmemo-1114: a play-out seat's policy DECIDE. Without a memo, or for a sampled ask, exactly the send as before;
+     * with one, a greedy request already asked in this searched decision is answered from the memo.
+     */
+    RlWire.Decision playoutDecide(final SvcMemo m, final byte[] p) throws IOException {
+        if (m == null || cfg.playoutSample) {
+            return client().decide(p, cfg.playoutSample);
+        }
+        return m.decide(p, false, q -> client().decide(q, false));
+    }
     private final List<RlSearchClient> clients = Collections.synchronizedList(new ArrayList<>());
     private final List<JsonObject> rows = new ArrayList<>();
     public String voided;
@@ -1583,12 +1650,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             forge.ai.simulation.ForcedWinCanon.DECISION.incrementAndGet(); // searchspeed-1113 (measurement only)
         }
         if (!forge.ai.simulation.SearchProf.ON) {
-            return decideP(g, me, m, frame, greedy, menuObjs);
+            if (!cfg.svcMemo) {
+                return decideP(g, me, m, frame, greedy, menuObjs);
+            }
+            memoBegin(); // svcmemo-1114: this decision's own memo, dropped when it ends
+            try {
+                return decideP(g, me, m, frame, greedy, menuObjs);
+            } finally {
+                memoEnd();
+            }
         }
         forge.ai.simulation.SearchProf.begin("priority", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        memoBegin(); // svcmemo-1114 (key off: nothing)
         try {
             return decideP(g, me, m, frame, greedy, menuObjs);
         } finally {
+            memoEnd();
             forge.ai.simulation.SearchProf.end(cfg.threads);
         }
     }
@@ -2078,6 +2155,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             row.add("values", vw);
             raceRow(row, cfg.race, r); // searchspeed-1113 (race off: nothing)
+            memoRow(row, memo); // svcmemo-1114 (key off: null, nothing)
             if (cfg.choices > 0) {
                 // S-t: per searched candidate, its macro (-1 = a base candidate), and every macro's schedule
                 final JsonArray mi = new JsonArray();
@@ -2989,12 +3067,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             forge.ai.simulation.ForcedWinCanon.DECISION.incrementAndGet(); // searchspeed-1113 (measurement only)
         }
         if (!forge.ai.simulation.SearchProf.ON) {
-            return decideChoiceP(g, me, m, frame, greedy, objs);
+            if (!cfg.svcMemo) {
+                return decideChoiceP(g, me, m, frame, greedy, objs);
+            }
+            memoBegin(); // svcmemo-1114: this decision's own memo, dropped when it ends
+            try {
+                return decideChoiceP(g, me, m, frame, greedy, objs);
+            } finally {
+                memoEnd();
+            }
         }
         forge.ai.simulation.SearchProf.begin("choice", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        memoBegin(); // svcmemo-1114 (key off: nothing)
         try {
             return decideChoiceP(g, me, m, frame, greedy, objs);
         } finally {
+            memoEnd();
             forge.ai.simulation.SearchProf.end(cfg.threads);
         }
     }
@@ -3158,12 +3246,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             forge.ai.simulation.ForcedWinCanon.DECISION.incrementAndGet(); // searchspeed-1113 (measurement only)
         }
         if (!forge.ai.simulation.SearchProf.ON) {
-            return decideBlocksP(g, me, m, frame, greedy, objs);
+            if (!cfg.svcMemo) {
+                return decideBlocksP(g, me, m, frame, greedy, objs);
+            }
+            memoBegin(); // svcmemo-1114: this decision's own memo, dropped when it ends
+            try {
+                return decideBlocksP(g, me, m, frame, greedy, objs);
+            } finally {
+                memoEnd();
+            }
         }
         forge.ai.simulation.SearchProf.begin("blocks", g.getPhaseHandler().getTurn(), String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), me.getId());
+        memoBegin(); // svcmemo-1114 (key off: nothing)
         try {
             return decideBlocksP(g, me, m, frame, greedy, objs);
         } finally {
+            memoEnd();
             forge.ai.simulation.SearchProf.end(cfg.threads);
         }
     }
@@ -3809,6 +3907,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         o.addProperty("search_cpu_ms", Math.round(searchCpuMs));
         o.addProperty("pool_cpu_ms", Math.round(poolCpuMs));
         o.addProperty("playout_first_ambiguous", playoutFirstAmbiguous);
+        if (cfg.svcMemo) {
+            // svcmemo-1114: only with the key, so every other summary is unchanged
+            o.addProperty("memoHits", memoHitsTotal.get());
+            o.addProperty("memoMisses", memoMissesTotal.get());
+        }
         if (budgetStops.get() > 0) {
             // sc-wallguard-1009: only when the budget stopped a play-out seat, so an unbudgeted summary is unchanged
             o.addProperty("playout_budget_stops", budgetStops.get());
@@ -4775,12 +4878,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ctl[s] = s == seat ? "rl:playout" : "forge";
         }
         final RlSeat.Config sc = playoutSeatConfig(first);
+        final SvcMemo seatMemo = memo; // svcmemo-1114: the memo of the searched decision this play-out belongs to (or null)
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
                 budgetStop(first);
                 try {
-                    return client().decide(p, cfg.playoutSample);
+                    return playoutDecide(seatMemo, p); // svcmemo-1114 (no memo: the send as before)
                 } catch (IOException | RuntimeException e) {
                     drop();
                     throw e;
@@ -4999,6 +5103,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final RlFeaturizer feat = new RlFeaturizer(index);
         feat.setVersion(obsVersion);
         feat.setKnowledge(cc.know);
+        final SvcMemo seatMemo = memo; // svcmemo-1114: the memo of the searched decision this play-out belongs to (or null)
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
@@ -5006,7 +5111,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     budgetStop(first);
                 }
                 try {
-                    return client().decide(p, cfg.playoutSample);
+                    return playoutDecide(seatMemo, p); // svcmemo-1114 (no memo: the send as before)
                 } catch (IOException | RuntimeException e) {
                     drop();
                     throw e;

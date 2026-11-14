@@ -331,6 +331,7 @@ public final class RlLiveSeat {
                     case "capActions": s.capActions = Integer.parseInt(v); break;
                     case "maxDecisions": s.maxDecisions = Integer.parseInt(v); break;
                     case "race": c.race = Integer.parseInt(v); break; // searchspeed-1113 (absent = 0 = off)
+                    case "svcMemo": c.svcMemo = !"0".equals(v) && !"false".equals(v) && !"off".equals(v); break; // svcmemo-1114 (absent = off)
                     case "loopGuard": s.loopGuard = Integer.parseInt(v); break;
                     case "aiFixes0928": s.aiFixes0928 = AiFixes.Mode.parse(v); break;
                     case "log": s.log = !"0".equals(v); break;
