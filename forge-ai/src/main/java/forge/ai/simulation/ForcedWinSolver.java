@@ -335,6 +335,13 @@ public final class ForcedWinSolver {
          */
         public boolean planUntaps = false;
         /**
+         * sdcc-untaps-1114 (probeDiscardCount; false = off, and then nothing changes): the seat's own reader reads an
+         * observed discard as "the whole hand" only when the same resolution did not first add cards to the hand (a
+         * "draw two, discard two" first seen with two other cards in hand was read as "discard the hand"). Its own
+         * template keys ("pdc|").
+         */
+        public boolean probeDiscardCount = false;
+        /**
          * sdcc-tutorcast-1110 (off by default, and then nothing changes): the width model knows a spell that searches our
          * library for a card and lets us cast it at once without paying its mana cost. The reader's probes observe the
          * effect ({@link ForcedWinModel.EffKind#TUTOR_CAST}: which of our cards the engine offers to cast, one sandbox
@@ -981,6 +988,7 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.planGraveCasts = "true".equals(get.apply("planGraveCasts")); // sdcc-gycast-1114
             c.planUntaps = "true".equals(get.apply("planUntaps")); // sdcc-untaps-1114
+            c.probeDiscardCount = "true".equals(get.apply("probeDiscardCount")); // sdcc-untaps-1114
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
@@ -1564,6 +1572,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.probeObjects) {
             this.reader.probeObjects = true; // sdcc-probeobj-1111: our own cards only (its own template keys)
+        }
+        if (cfg.probeDiscardCount) {
+            this.reader.probeDiscardCount = true; // sdcc-untaps-1114: our own cards only (its own template keys)
         }
         if (cfg.planUntaps) {
             this.reader.planUntaps = true; // sdcc-untaps-1114: our own cards only (its own template keys)
@@ -6980,11 +6991,18 @@ public final class ForcedWinSolver {
      * does. Installed once, at the first line this solver follows; without an active line every answer is null.
      */
     private forge.ai.LineAnswers liveLine;
+    /**
+     * sdcc-untaps-1114 (test switch; true unless -Dforge.ai.forcedWin.untapBind=false): a planUntaps follower answers
+     * the engine's untap choice with the plan's lands. Without planUntaps nothing reads it.
+     */
+    /** sdcc-untaps-1114 (report only): untap asks answered with a followed line's lands, every follower of the JVM. */
+    static final java.util.concurrent.atomic.AtomicInteger UNTAP_ANSWERS = new java.util.concurrent.atomic.AtomicInteger();
+    static final boolean UNTAP_BIND = !"false".equals(System.getProperty("forge.ai.forcedWin.untapBind"));
     /** owner-misplays-1113 (report only): mode asks of the live seat answered with the followed line's recorded set. */
     public int lineModeAnswers;
 
     private void liveAnswers() {
-        if (!cfg.tutorCast && !cfg.probeObjects && !cfg.engineModeChoice) {
+        if (!cfg.tutorCast && !cfg.probeObjects && !cfg.engineModeChoice && !(cfg.planUntaps && UNTAP_BIND)) {
             return;
         }
         final PlayerControllerAi pc = PlayerControllerAi.cacOf(me);
@@ -7015,6 +7033,16 @@ public final class ForcedWinSolver {
             public CardCollectionView costCards(final SpellAbility sa, final String part, final CardCollectionView valid,
                     final int amount) {
                 return active == null ? null : active.costCards(sa, valid, amount);
+            }
+
+            @Override
+            public CardCollectionView untapCards(final SpellAbility sa, final CardCollectionView valid, final int max) {
+                final CardCollectionView r = active == null ? null : active.untapCards(sa, valid, max);
+                if (r != null) {
+                    receipt("FORCED_WIN line-untap" + tag() + " turn=" + me.getGame().getPhaseHandler().getTurn() + " card="
+                            + (sa.getHostCard() == null ? "?" : sa.getHostCard().getName()) + " lands=" + r.size() + "/" + valid.size());
+                }
+                return r;
             }
 
             @Override
@@ -7198,6 +7226,7 @@ public final class ForcedWinSolver {
             fo.putBackKeep = cfg.putBackKeep; // line-adoption-1107
             fo.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
             fo.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
+            fo.planUntaps = cfg.planUntaps && UNTAP_BIND; // sdcc-untaps-1114
             return fo;
         }
 
@@ -7236,6 +7265,33 @@ public final class ForcedWinSolver {
             }
             final List<String> out = new ArrayList<>(own == null ? List.of() : own);
             out.addAll(free);
+            return out;
+        }
+
+        /** sdcc-untaps-1114 (planUntaps; false = off): an untap effect of a step of ours untaps the lands the plan counted. */
+        boolean planUntaps;
+        /** sdcc-untaps-1114 (report only): untap asks answered with the line's lands. */
+        int untapAnswers;
+
+        /**
+         * sdcc-untaps-1114: the lands the plan untapped at this step's untap effect, among the valid ones (at most
+         * {@code max}; a planned land that is not offered is left out); null = not a step of ours, or none recorded.
+         */
+        CardCollectionView untapCards(final SpellAbility sa, final CardCollectionView valid, final int max) {
+            final Step st = planUntaps ? stepOf(sa) : null;
+            if (st == null || st.untapIds == null || valid == null) {
+                return null;
+            }
+            final CardCollection out = new CardCollection();
+            for (int id : st.untapIds) {
+                for (Card c : valid) {
+                    if (c.getId() == id && out.size() < max && !out.contains(c)) {
+                        out.add(c);
+                    }
+                }
+            }
+            untapAnswers++;
+            UNTAP_ANSWERS.incrementAndGet();
             return out;
         }
 
@@ -7878,7 +7934,7 @@ public final class ForcedWinSolver {
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
             this.f = f;
-            if (f.tutorCast || f.probeObjects) {
+            if (f.tutorCast || f.probeObjects || f.planUntaps) {
                 // sdcc-tutorcast-1110: the line's free cast, its card and its cost cards, through the controller's own seam
                 // (the live seat's controller gets the same answers from the solver: ForcedWinSolver#liveAnswers). A
                 // re-planned follower (verifyReplan) is read through the field, so the answers follow it.
@@ -7891,6 +7947,11 @@ public final class ForcedWinSolver {
                     @Override
                     public Card playChoice(final SpellAbility sa, final Iterable<? extends forge.game.GameEntity> options) {
                         return LineAi.this.f.playChoice(sa, options);
+                    }
+
+                    @Override
+                    public CardCollectionView untapCards(final SpellAbility sa, final CardCollectionView valid, final int max) {
+                        return LineAi.this.f.untapCards(sa, valid, max); // sdcc-untaps-1114
                     }
 
                     @Override

@@ -546,6 +546,13 @@ public class PlayerControllerAi extends PlayerController {
     }
 
     private CardCollectionView chooseCardsForEffectAi(CardCollectionView sourceList, SpellAbility sa, String title, int min, int max, boolean isOptional, Map<String, Object> params) {
+        if (lineAnswers != null && sa != null && sa.getApi() == ApiType.Untap) {
+            // sdcc-untaps-1114 (null answers = no line, or not the line's step: as before): the followed line's lands
+            final CardCollectionView line = lineAnswers.untapCards(sa, sourceList, max);
+            if (line != null) {
+                return line;
+            }
+        }
         return brains.chooseCardsForEffect(sourceList, sa, min, max, isOptional, params);
     }
 

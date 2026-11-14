@@ -113,6 +113,8 @@ public final class RlLiveSeat {
                 "planGraveCasts",
                 // sdcc-untaps-1114 (absent = off): the reader observes land untaps and mana boosts of the seat's spells
                 "planUntaps",
+                // sdcc-untaps-1114 (absent = off): an observed discard is "the whole hand" only when nothing was drawn first
+                "probeDiscardCount",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
                 "engineModeChoice"));
@@ -138,6 +140,8 @@ public final class RlLiveSeat {
                 "planGraveCasts",
                 // sdcc-untaps-1114 (absent = off): the reader observes land untaps and mana boosts of the seat's spells
                 "planUntaps",
+                // sdcc-untaps-1114 (absent = off): an observed discard is "the whole hand" only when nothing was drawn first
+                "probeDiscardCount",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
                 "engineModeChoice"));

@@ -158,6 +158,8 @@ public final class ForcedWinProbe {
     static final ThreadLocal<Boolean> TUTOR_CAST = ThreadLocal.withInitial(() -> false);
     /** sdcc-untaps-1114: set by a planUntaps reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> PLAN_UNTAPS = ThreadLocal.withInitial(() -> false);
+    /** sdcc-untaps-1114: set by a probeDiscardCount reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> DISCARD_COUNT = ThreadLocal.withInitial(() -> false);
     /** sdcc-untaps-1114: the lands an untap / boost sandbox puts into play at most (one per land name of ours first). */
     static final int UNTAP_LANDS = 10;
 
@@ -1450,7 +1452,19 @@ public final class ForcedWinProbe {
                     out.remove(i--);
                 }
             } else if (e.kind == EffKind.DISCARD && e.n >= 2 && e.n == o.handBefore) {
-                out.set(i, new Eff(EffKind.DISCARD, ForcedWinModel.ALL, 0));
+                // sdcc-untaps-1114 (probeDiscardCount; off = as before): "the whole hand" only when the cards the same
+                // resolution drew or fetched before the discard do not make the hand larger than the discard (a "draw
+                // two, discard two" seen with two other cards in hand is a discard of two, not of the hand)
+                int gained = 0;
+                if (DISCARD_COUNT.get()) {
+                    for (int j = mark; j < i; j++) {
+                        final Eff d = out.get(j);
+                        gained += (d.kind == EffKind.DRAW || d.kind == EffKind.TUTOR) && d.n > 0 && d.n != ForcedWinModel.ALL ? d.n : 0;
+                    }
+                }
+                if (gained == 0) {
+                    out.set(i, new Eff(EffKind.DISCARD, ForcedWinModel.ALL, 0));
+                }
             } else if (e.kind == EffKind.TUTOR && tutorNames != null && !viaExile.contains(e)) {
                 out.set(i, new Eff(EffKind.TUTOR, e.n, 0, 0, tutorNames));
             }

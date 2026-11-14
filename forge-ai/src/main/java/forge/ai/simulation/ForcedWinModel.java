@@ -1139,7 +1139,8 @@ public final class ForcedWinModel {
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
             // sdcc-gycast-1114: and a graveCasts reader ("pgc|"), whose templates carry a permanent's cast-from-graveyard grant
             // sdcc-untaps-1114: and a planUntaps reader ("pub|"), whose probes also observe land untaps and mana boosts
-            final String key = (graveCasts ? "pgc|" : "") + (planUntaps ? "pub|" : "") + (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
+            // sdcc-untaps-1114: and a probeDiscardCount reader ("pdc|"), whose probes count the hand at the discard
+            final String key = (graveCasts ? "pgc|" : "") + (planUntaps ? "pub|" : "") + (probeDiscardCount ? "pdc|" : "") + (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
                     + (probeSettle ? "settle|" : "") + c.getName();
             final boolean prevHide = ForcedWinProbe.HIDE.get();
             ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
@@ -1167,6 +1168,8 @@ public final class ForcedWinModel {
                 ForcedWinProbe.GRAVE_CASTS.set(graveCasts);
                 final boolean prevPu = ForcedWinProbe.PLAN_UNTAPS.get();
                 ForcedWinProbe.PLAN_UNTAPS.set(planUntaps);
+                final boolean prevDc = ForcedWinProbe.DISCARD_COUNT.get();
+                ForcedWinProbe.DISCARD_COUNT.set(probeDiscardCount);
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
@@ -1182,6 +1185,7 @@ public final class ForcedWinModel {
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                     ForcedWinProbe.GRAVE_CASTS.set(prevGc);
                     ForcedWinProbe.PLAN_UNTAPS.set(prevPu);
+                    ForcedWinProbe.DISCARD_COUNT.set(prevDc);
                 }
                 if (graveCasts) {
                     t.grave = ForcedWinProbe.graveGrant(c); // sdcc-gycast-1114 (the script's shape only; no sandbox here)
@@ -1263,6 +1267,13 @@ public final class ForcedWinModel {
          * two more sandboxes that observe how many of our lands it untaps and what our lands then tap for.
          */
         boolean planUntaps;
+
+        /**
+         * sdcc-untaps-1114 (solver key probeDiscardCount; false = off, and then nothing changes): templates are learned
+         * under their own keys, and an observed discard is read as "the whole hand" only when the same resolution did
+         * not first add cards to the hand.
+         */
+        boolean probeDiscardCount;
 
         /** sdcc-gycast-1114: the grant probes of the games in progress, by game scope (weak), then seat, grantor and card name. */
         private static final Map<Object, Map<String, Object>> GRAVE_CACHE =

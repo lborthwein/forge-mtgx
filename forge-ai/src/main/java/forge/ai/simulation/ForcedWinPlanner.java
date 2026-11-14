@@ -156,6 +156,12 @@ public final class ForcedWinPlanner {
         int objTarget = -1, objLink;
         /** sdcc-gycast-1114: the spell is cast from our graveyard under a permanent's grant (screens only: never followed). */
         boolean fromGrave;
+        /**
+         * sdcc-untaps-1114 (set only by a planUntaps plan; null otherwise, and then nothing changes): the ids of the lands
+         * of ours the plan untapped when this step's untap effect resolved, in the plan's order. The follower answers
+         * the engine's "untap up to N" ask with them, so the lands the line floats next are the ones untapped.
+         */
+        List<Integer> untapIds;
 
         Step(AbilKind kind, ACard host, Abil ab, int floatColor) {
             this.kind = kind;
@@ -224,6 +230,7 @@ public final class ForcedWinPlanner {
             s.objTarget = objTarget;
             s.objLink = objLink;
             s.fromGrave = fromGrave;
+            s.untapIds = untapIds == null ? null : new ArrayList<>(untapIds);
             s.cacPlayed = cacPlayed == null ? null : new ArrayList<>(cacPlayed);
             s.payFloats = payFloats == null ? null : new ArrayList<>(payFloats);
             if (body != null) {
@@ -333,6 +340,7 @@ public final class ForcedWinPlanner {
             return (free ? "FREE-" : "") + (fromGrave ? "GRAVE-" : "") + kind + ":" + hostName + (floatColor >= 0 ? "->" + ForcedWinModel.SHORT[floatColor] : "")
                     + (optCosts == null ? "" : "+" + optCosts) + (sacIds.isEmpty() ? "" : " sac" + sacIds)
                     + (castFree >= 0 ? " cast" + castFree : "") + (objTarget >= 0 ? " on[" + objTarget + "]" : "")
+                    + (untapIds == null ? "" : " untap" + untapIds)
                     + (targetRefs.isEmpty() ? "" : "->" + targetRefs) + (triggerRef == null ? "" : " trigger->" + triggerRef)
                     + (pickName == null ? "" : " pick=" + pickName)
                     + (targetVariant != null ? "@" + targetVariant : "")
@@ -2411,8 +2419,17 @@ public final class ForcedWinPlanner {
                 }
                 lands.sort(Comparator.comparingInt((Perm p) -> -(Math.max(1, cards.get(p.card).sourceAmount) + boostOf(s, cards.get(p.card))))
                         .thenComparingInt(p -> cards.get(p.card).id));
+                // the cast step records them: the follower answers the engine's choice with these lands
+                final Step ust = s.steps.isEmpty() ? null : s.steps.get(s.steps.size() - 1);
+                final boolean bind = ust != null && !ust.pass && (ust.kind == AbilKind.SPELL || ust.kind == AbilKind.ACTIVATE);
                 for (int i = 0; i < e.n && i < lands.size(); i++) {
                     lands.get(i).tapped = false;
+                    if (bind) {
+                        if (ust.untapIds == null) {
+                            ust.untapIds = new ArrayList<>();
+                        }
+                        ust.untapIds.add(cards.get(lands.get(i).card).id);
+                    }
                 }
                 resolve(s, effs, ei + 1, 0, ab, out);
                 return;

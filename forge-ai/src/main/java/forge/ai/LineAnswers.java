@@ -32,4 +32,12 @@ public interface LineAnswers {
     default <T> java.util.List<T> modes(SpellAbility sa, java.util.List<T> possible, int min, int num) {
         return null;
     }
+
+    /**
+     * sdcc-untaps-1114 (the solver's planUntaps): the lands an untap effect of a step of the line untaps, among
+     * {@code valid} (at most {@code max} of them), as the line was planned with; null = not the line's.
+     */
+    default CardCollectionView untapCards(SpellAbility sa, CardCollectionView valid, int max) {
+        return null;
+    }
 }
