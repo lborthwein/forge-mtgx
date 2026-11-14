@@ -29,6 +29,8 @@ public class PlanTargetsTest extends AITest {
     /** Enters: 4 damage to target creature. */
     static final String CREATURE_ONLY = "Flametongue Kavu";
     static final String SPELL = "Lightning Bolt";
+    /** Enters: damage to any target equal to a computed amount (its power, a count of the graveyards). */
+    static final String COMPUTED = "Pyrogoyf";
 
     private static String shape(final ACard a) {
         return new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(a.instance(0));
@@ -122,6 +124,16 @@ public class PlanTargetsTest extends AITest {
         }
         Assert.assertEquals(drain(learn(game(CREATURE_ONLY, "Plains;Grizzly Bears"), CREATURE_ONLY, true)), 0,
                 "a creature-only damage never becomes damage to the player");
+    }
+
+    @Test
+    public void aComputedDamageAmountIsLeftToTheSandbox() {
+        // the amount depends on the position (here the graveyards): the key must not save a sandbox's number as the card's
+        for (String opp : new String[] {"Plains", "Plains;Grizzly Bears;Llanowar Elves"}) {
+            final ACard on = learn(game(COMPUTED, opp), COMPUTED, true);
+            final ACard off = learn(game(COMPUTED, opp), COMPUTED, false);
+            Assert.assertEquals(shape(on), shape(off), COMPUTED + " against " + opp);
+        }
     }
 
     @Test

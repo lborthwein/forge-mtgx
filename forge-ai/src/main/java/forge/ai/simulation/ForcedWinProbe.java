@@ -667,7 +667,8 @@ public final class ForcedWinProbe {
     /**
      * plantargets-1114: aim a triggered damage ability of {@code me} at the opposing player. Only when the ability is a
      * trigger {@code me} controls, it has a targeting link, every targeting link's effect type is damage with one
-     * target, undivided, and the engine's target check accepts the opposing player for each. Returns whether the targets
+     * target, undivided, of a constant amount (an integer in the script, not a computed value), and the engine's
+     * target check accepts the opposing player for each. Returns whether the targets
      * were set. Anything else is left as the sandbox's controller aimed it.
      */
     static boolean facePlayer(SpellAbility top, Player me) {
@@ -689,6 +690,12 @@ public final class ForcedWinProbe {
             }
             if (l.getApi() != forge.game.ability.ApiType.DealDamage || l.isDividedAsYouChoose() || l.getMinTargets() > 1
                     || l.hasParam("TargetingPlayer") || !l.canTarget(opp)) {
+                return false;
+            }
+            // a constant amount only: an amount the script computes (a count, another card's power) would be saved as
+            // whatever this sandbox makes it, and the model must hold the card, not the sandbox
+            final String amount = l.getParam("NumDmg");
+            if (amount == null || !amount.matches("\\d+")) {
                 return false;
             }
             any = true;
