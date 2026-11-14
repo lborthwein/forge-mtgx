@@ -272,6 +272,24 @@ public class CopierTriggersTest extends SimulationTest {
         }
     }
 
+    /** A room trigger of the Undercity (its host sits in the command zone, not copied): refused, not a failed copy. */
+    @Test(timeOut = 600000)
+    public void aDungeonRoomTriggerIsRefused() {
+        final Game game = board();
+        final Player a = game.getPlayers().get(0);
+        game.getAction().takeInitiative(a, "CLB");
+        triggersToStack(game);
+        // the initiative's venture trigger, then (resolved) the first room's trigger: both hosted in the command zone
+        for (int step = 0; step < 2; step++) {
+            Assert.assertFalse(game.getStack().isEmpty(), "a trigger is on the stack, step " + step);
+            final Card host = game.getStack().peekAbility().getHostCard();
+            Assert.assertTrue(host.isInZone(ZoneType.Command), "hosted in the command zone: " + host);
+            Assert.assertEquals(GameCopier.stackUnsupported(game, false, true), "trigger-host");
+            game.getStack().resolveStack();
+            triggersToStack(game);
+        }
+    }
+
     /** A trigger that is not one of its host's own (a delayed trigger) and an unmapped triggering object: refused. */
     @Test(timeOut = 600000)
     public void aDelayedTriggerAndAnUnmappedTriggeringObjectAreRefused() {

@@ -399,6 +399,10 @@ public class GameCopier {
         if (t == null || inner == null || host == null || g.findById(host.getId()) == null) {
             return "trigger-host";
         }
+        // a host in the command zone (a dungeon's room, an effect such as the monarch) is not rebuilt in the copy
+        if (host.isInZone(ZoneType.Command)) {
+            return "trigger-host";
+        }
         if (inner.isCopied() || t.isStatic() || LookaheadSearch.triggerIndex(host, t) < 0
                 || (t.getOverridingAbility() == null && !t.hasParam("Execute"))) {
             return "trigger-kind";
