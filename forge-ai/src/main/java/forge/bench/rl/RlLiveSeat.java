@@ -316,6 +316,7 @@ public final class RlLiveSeat {
                     case "margin": c.margin = Double.parseDouble(v); break;
                     case "leaf": c.leaf = v; break;
                     case "playout": c.playout = v; break;
+                    case "opponent": c.opponent = v; break; // e2-live-1114: forge (default) | policy; c.check() refuses others and policy without playout=policy
                     case "deadEtb": c.deadEtb = v; break;
                     case "zeroX": c.zeroX = v; break;
                     case "crewNoop": c.crewNoop = v; break;
