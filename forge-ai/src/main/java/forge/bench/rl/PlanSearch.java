@@ -1122,6 +1122,15 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     final List<Double> likelyBelief = new ArrayList<>();
 
     /** What the plan stage decided before (or instead of) S-c's play-outs. */
+    /**
+     * plantargets-1114 (report only): this seat's solver counters {removal moves its width searches played, proposed
+     * lines containing one}, both cumulative; null when there is no solver.
+     */
+    long[] tgtCounters() {
+        final ForcedWinSolver solver = driver == null ? null : driver.solver();
+        return solver == null ? null : new long[] {solver.tgtMoves.get(), solver.tgtLines.get()};
+    }
+
     static final class Stage {
         /** The search hands the priority to the hook (a proven line was adopted). */
         boolean hook;

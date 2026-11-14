@@ -2885,8 +2885,35 @@ public final class ForcedWinSolver {
         }
     }
 
+    /**
+     * plantargets-1114, slice "attackers" (report only; both stay 0 with the slice off): the removal moves this seat's
+     * width searches played on an opposing attacker, and the lines {@link #propose} returned that contain one.
+     */
+    public final java.util.concurrent.atomic.AtomicLong tgtMoves = new java.util.concurrent.atomic.AtomicLong(),
+            tgtLines = new java.util.concurrent.atomic.AtomicLong();
+
+    private List<Proposal> countTgt(final List<Proposal> props) {
+        if (reader.planAttackers && props != null) {
+            for (Proposal p : props) {
+                if (p.line instanceof ForcedWinPlanner.Line l) {
+                    for (ForcedWinPlanner.Step st : l.steps) {
+                        if (st.tgt) {
+                            tgtLines.incrementAndGet();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        return props;
+    }
+
     /** searchspeed-1113: the body of {@link #propose} (the wrapper only reads clocks, and only with -Dsdcc.searchProf). */
     private List<Proposal> proposeP(Game live) {
+        return countTgt(proposeQ(live));
+    }
+
+    private List<Proposal> proposeQ(Game live) {
         final List<Proposal> out = new ArrayList<>();
         lastCap = null; // rollout-budget-1101
         final PhaseHandler ph = live.getPhaseHandler();
@@ -4541,6 +4568,7 @@ public final class ForcedWinSolver {
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
+        lim.tgtSink = reader.planAttackers ? tgtMoves : null; // plantargets-1114 (report only)
         return lim;
     }
 

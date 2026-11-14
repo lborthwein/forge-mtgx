@@ -217,12 +217,30 @@ public class PlanAttackersTest extends AITest {
             final ForcedWinPlanner.Result on = plan(true, removal, giant);
             Assert.assertFalse(on.lines.isEmpty(), removal + ": with the key the attacker is removed first");
             Assert.assertTrue(on.tgtMoves > 0 && on.tgtPasses > 0);
-            boolean aimed = false;
+            boolean aimed = false, marked = false;
             for (ForcedWinPlanner.Step st : on.lines.get(0).steps) {
                 aimed |= st.objTarget == giant[0];
+                marked |= st.tgt;
             }
+            Assert.assertTrue(marked, removal + ": the removal step is marked for the report counters");
             Assert.assertTrue(aimed, removal + ": the line's removal step names the attacker for the follower: " + on.lines.get(0).steps);
         }
+    }
+
+    @Test
+    public void theSolversReportCountersFollowItsWidthSearches() {
+        final Game g = game("Lightning Bolt;Lightning Bolt;" + DESTROY, "Mountain;Swamp;Swamp;Swamp;Island", 3, "Plains;Hill Giant", 6);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver off = new ForcedWinSolver(me, ForcedWinSolver.Config.fromProps(k -> null));
+        Assert.assertNull(off.limits().tgtSink, "no sink without the slice");
+        final ForcedWinSolver on = new ForcedWinSolver(me, ForcedWinSolver.Config.fromProps(k -> "planTargets".equals(k) ? "attackers" : null));
+        final ForcedWinPlanner.Limits lim = on.limits();
+        Assert.assertSame(lim.tgtSink, on.tgtMoves);
+        final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(on.reader.read(g, me, null, true), lim);
+        Assert.assertTrue(res.tgtMoves > 0);
+        Assert.assertEquals(on.tgtMoves.get(), res.tgtMoves, "the search's removal moves are added to the seat's counter");
+        Assert.assertEquals(off.tgtMoves.get(), 0);
+        Assert.assertEquals(off.tgtLines.get(), 0);
     }
 
     @Test

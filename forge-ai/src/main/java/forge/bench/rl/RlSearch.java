@@ -2566,6 +2566,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
         if (PLAN_BOARD_LOG) {
             row.add("board", boardCounts(g, me)); // plantargets-1114 (-Dsdcc.planBoardLog; off: the row is as before)
+            final PlanSearch seatPlans = planSearches.isEmpty() ? null : planSearches.get(me.getId());
+            final long[] tc = seatPlans == null ? null : seatPlans.tgtCounters();
+            if (tc != null) {
+                // cumulative for this seat: removal moves its width searches played on an opposing attacker, and
+                // proposed lines containing one (both 0 with the planTargets slice "attackers" off)
+                row.addProperty("tgt_moves", tc[0]);
+                row.addProperty("tgt_lines", tc[1]);
+            }
         }
         addRow(row);
     }

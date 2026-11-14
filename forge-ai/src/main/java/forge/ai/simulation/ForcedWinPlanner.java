@@ -154,6 +154,8 @@ public final class ForcedWinPlanner {
          * that target). A permanent sacrificed as the step's cost is in {@link #sacIds}.
          */
         int objTarget = -1, objLink;
+        /** plantargets-1114, slice "attackers" (report only; false otherwise): the step is a removal played on an opposing attacker. */
+        boolean tgt;
 
         Step(AbilKind kind, ACard host, Abil ab, int floatColor) {
             this.kind = kind;
@@ -221,6 +223,7 @@ public final class ForcedWinPlanner {
             s.free = free;
             s.objTarget = objTarget;
             s.objLink = objLink;
+            s.tgt = tgt;
             s.cacPlayed = cacPlayed == null ? null : new ArrayList<>(cacPlayed);
             s.payFloats = payFloats == null ? null : new ArrayList<>(payFloats);
             if (body != null) {
@@ -400,6 +403,8 @@ public final class ForcedWinPlanner {
     }
 
     static final class Limits {
+        /** plantargets-1114 (report only; null = none): the removal moves a search played are added here. */
+        java.util.concurrent.atomic.AtomicLong tgtSink;
         int nodes = 30_000;
         int depth = 18;
         int maxLines = 120;
@@ -901,6 +906,9 @@ public final class ForcedWinPlanner {
         }
         result.tgtMoves = tgtMoves;
         result.tgtPasses = tgtUsed;
+        if (lim.tgtSink != null && tgtMoves > 0) {
+            lim.tgtSink.addAndGet(tgtMoves); // plantargets-1114 (report only)
+        }
         if (blockerDiffs > 0) {
             // blockers-1109 (ledger row 81): this plan saw a pass where a tapped or can't-block creature no longer blocks
             System.err.println("FORCED_WIN blockers1109 diffs=" + blockerDiffs + " turn=" + pos.turn + " life=" + pos.life
@@ -1740,6 +1748,7 @@ public final class ForcedWinPlanner {
                 tgtMoves++;
                 step.objTarget = pos.oppIds.get(Integer.numberOfTrailingZeros(open));
                 step.objLink = ab.tgt.link;
+                step.tgt = true;
             }
         }
         if (handIdx >= 0) {
