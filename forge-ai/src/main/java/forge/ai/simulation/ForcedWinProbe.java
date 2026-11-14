@@ -3032,6 +3032,23 @@ public final class ForcedWinProbe {
     }
 
     /**
+     * plantargets-1114, slice "attackers": the damage (or toughness loss) {@code n} a stand-in took is a constant of the
+     * card: some link of the ability deals damage, or lowers toughness, by an amount written as an integer literal equal
+     * to n. An amount the engine computes (a count of permanents, a power, X) is the sandbox's value, never learned.
+     */
+    static boolean literalAmount(final SpellAbility sa, final int n) {
+        for (SpellAbility l = sa; l != null; l = l.getSubAbility()) {
+            final forge.game.ability.ApiType api = l.getApi();
+            final String p = api == forge.game.ability.ApiType.DealDamage ? l.getParam("NumDmg")
+                    : api == forge.game.ability.ApiType.Pump ? l.getParam("NumDef") : null;
+            if (p != null && p.trim().matches("[+-]?\\d+") && Math.abs(Integer.parseInt(p.trim().replace("+", ""))) == n) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * plantargets-1114, slice "attackers" ({@link #PLAN_ATTACKERS} only; otherwise null and nothing runs): play the
      * ability on a creature the opponent owns and read what the engine did to it. Stand-ins are the opponent's creatures
      * in play, then creature cards of their graveyard put into play for the run (both public; never a card of their
@@ -3154,6 +3171,9 @@ public final class ForcedWinProbe {
                 o = run(live, me, id, setup, act, ForcedWinSolver.mix(seed, 0x545354L + k), st);
             } finally {
                 AFTER_RUN.remove();
+            }
+            if (seen[0] == ForcedWinModel.TgtNeed.DAMAGE && !literalAmount(sa0, seen[1])) {
+                return null; // the amount is the sandbox's (a count, a power): not a constant of the card
             }
             if (o.error != null || !o.played || o.unmapped > 0 || seen[0] == 0 || o.won || o.lost) {
                 if (k == 0) {

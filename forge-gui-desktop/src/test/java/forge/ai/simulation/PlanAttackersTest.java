@@ -145,6 +145,21 @@ public class PlanAttackersTest extends AITest {
         }
     }
 
+    /** Damage equal to a count of our lands; damage equal to a count of cards in our hand. */
+    static final String[] SANDBOX_VALUED = {"Corrupt", "Sudden Impact"};
+
+    @Test
+    public void anAmountTheEngineComputesIsNeverLearnedAsAConstant() {
+        for (String name : SANDBOX_VALUED) {
+            final ACard on = learn(game(name, LANDS, 20, BOARD_A, 20), name, true);
+            Assert.assertNull(need(on), name + ": its damage is the sandbox's count, not the card's: " + shape(on));
+        }
+        Assert.assertTrue(ForcedWinProbe.literalAmount(
+                ForcedWinSolverTest.inZone(game(DAMAGE, LANDS, 20, BOARD_A, 20).getPlayers().get(0), ZoneType.Hand, DAMAGE).getFirstSpellAbility(), 4));
+        Assert.assertFalse(ForcedWinProbe.literalAmount(
+                ForcedWinSolverTest.inZone(game(DAMAGE, LANDS, 20, BOARD_A, 20).getPlayers().get(0), ZoneType.Hand, DAMAGE).getFirstSpellAbility(), 3));
+    }
+
     @Test
     public void anAbilityThatCannotTakeAnOpposingCreatureIsUnchanged() {
         for (String name : UNCHANGED) {
