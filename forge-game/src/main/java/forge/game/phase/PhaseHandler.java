@@ -1067,6 +1067,7 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
     }
 
     public void mainGameLoop() {
+        game.getTriggerHandler().claimLoopThread(); // mtgx trigger-owner-1113 (diagnostic; off = nothing)
         // MAIN GAME LOOP
         while (!game.isGameOver() && !(game.getAge() == GameStage.RestartedByKarn)) {
             mainLoopStep();
