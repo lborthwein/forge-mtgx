@@ -460,6 +460,100 @@ public class GraveCastTest extends forge.ai.AITest {
         Assert.assertTrue(bestReach(on, true) >= bestReach(on, false) - 1e-9, "keeping the engine is never the worse reach: " + on.dump());
     }
 
+    // ------------------------------------------------------------------ NC05's real ask with choiceScorer.discardTail
+
+    /**
+     * NC05's real ask (the loot spell cast: draw two, discard two, then untap lands) scored by the card scorer.
+     * {@code discardTail} = choiceScorer.discardTail (lane sdcc-copycast-1114); {@code solverExtra} = solver keys set true.
+     * The policy discards a land and the engine, as in the recorded game.
+     */
+    private static ReachDiscardsTest.Ask nc05Real(final String hand, final String library, final String[] solverExtra,
+            final boolean discardTail) {
+        final Game g = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(hand,
+                "Xander's Lounge;Island;Mountain;Mountain;Young Pyromancer;Palantír of Orthanc", 12, "",
+                "Wall of Roots;Esika's Chariot;Questing Beast", 16, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + library)
+                .replace("humangraveyard=", "humangraveyard=Ancestral Recall;Firebolt"));
+        final Player me = g.getPlayers().get(0);
+        final ChoiceScorer sc = ReachDiscardsTest.scorer(true, 4, solverExtra, discardTail);
+        final RlKnowledge know = ReachDiscardsTest.know(g);
+        final ReachDiscardsTest.Ask[] out = new ReachDiscardsTest.Ask[1];
+        me.dangerouslySetController(new PlayerControllerAi(g, me, me.getController().getLobbyPlayer()) {
+            @Override
+            public CardCollection chooseCardsToDiscardFrom(final Player p, final SpellAbility sa,
+                    final CardCollection validCards, final int min, final int max, final CardCollectionView visible) {
+                Assert.assertEquals(max, 2, "the loot spell's discard of two");
+                final RlCandidates.Menu m = RlCandidates.build(g, me, "chooseCardsToDiscardFrom", "discardFrom",
+                        ReachDiscardsTest.body(min, max), new Object[] {validCards, sa, p});
+                final short[] greedy = ReachDiscardsTest.steps(validCards, "Mountain", BREACH);
+                sc.setAskPlayer(p);
+                out[0] = ReachDiscardsTest.ask(sc, g, me, m, greedy, know, sa, validCards, null);
+                final CardCollection live = new CardCollection();
+                live.add(ReachDiscardsTest.find(me, ZoneType.Hand, "Mountain"));
+                live.add(ReachDiscardsTest.find(me, ZoneType.Hand, BREACH));
+                return live;
+            }
+        });
+        SpellAbility loot = null;
+        for (SpellAbility sa : ReachDiscardsTest.find(me, ZoneType.Hand, "Frantic Search").getSpellAbilities()) {
+            if (sa.isSpell()) {
+                loot = sa;
+            }
+        }
+        Assert.assertNotNull(loot);
+        loot.setActivatingPlayer(me);
+        Assert.assertTrue(((PlayerControllerAi) me.getController()).playChosenSpellAbility(loot), "cast the loot spell");
+        MyRandom.setRandom(new Random(42));
+        for (int i = 0; i < 6 && (g.getStack().addAllTriggeredAbilitiesToStack() || !g.getStack().isEmpty()); i++) {
+            g.getStack().resolveStack();
+        }
+        Assert.assertNotNull(out[0], "the discard was asked");
+        return out[0];
+    }
+
+    static final String[] NC05_KEYS = {"planGraveCasts", "planUntaps", "probeDiscardCount"};
+
+    /**
+     * NC05's real ask with fuel in sight (the engine, the storm finisher and a zero-cost mana artifact in hand). Without
+     * discardTail the ask is refused whole (the resolution's later untap ask: "multiAnswer"), whatever the planner keys.
+     * With discardTail and the planner keys the two-card discard is scored, the sets that keep the engine have reach,
+     * and the answer no longer discards it.
+     */
+    @Test
+    public void nc05RealAskWithDiscardTailKeepsTheEngineWhenFuelExists() {
+        final String hand = "Swamp;Wheel of Fortune;" + BREACH + ";" + FREEZE + ";Black Lotus;Frantic Search";
+        final String lib = NC05_LIB.replace("Black Lotus;Brain Freeze;", "");
+        final ReachDiscardsTest.Ask off = nc05Real(hand, lib, NC05_KEYS, false);
+        Assert.assertEquals(off.s.unsupported, "multiAnswer", "discardTail off: refused, as in the recorded game: " + off.dump());
+        Assert.assertTrue(off.s.options.isEmpty());
+        Assert.assertNull(off.alt);
+        final ReachDiscardsTest.Ask on = nc05Real(hand, lib, NC05_KEYS, true);
+        System.out.println("GYCAST NC05 real ask, discardTail + planner keys: " + on.dump());
+        Assert.assertNull(on.s.unsupported, on.dump());
+        Assert.assertTrue(on.s.options.size() >= 3, on.dump());
+        Assert.assertTrue(bestReach(on, true) > 0, "keeping the engine has reach: " + on.dump());
+        Assert.assertTrue(bestReach(on, true) > bestReach(on, false), on.dump());
+        Assert.assertNotNull(on.alt, "the answer moves: " + on.dump());
+        Assert.assertEquals(on.altNames.size(), 2);
+        Assert.assertFalse(on.altNames.contains(BREACH), "the engine is kept: " + on.dump());
+        // the planner keys are what gives the reach: with discardTail alone the ask is scored but nothing separates the sets
+        final ReachDiscardsTest.Ask plain = nc05Real(hand, lib, null, true);
+        System.out.println("GYCAST NC05 real ask, discardTail alone: " + plain.dump());
+        Assert.assertNull(plain.s.unsupported, plain.dump());
+        Assert.assertEquals(bestReach(plain, true), bestReach(plain, false), 1e-9, "no planner keys: no reach either way: " + plain.dump());
+    }
+
+    /** NC05's real ask as recorded (no finisher, no fast mana in hand): measured and printed with discardTail and the keys. */
+    @Test
+    public void nc05RealAskAsRecordedWithDiscardTailIsMeasured() {
+        final ReachDiscardsTest.Ask a = nc05Real("Swamp;Wheel of Fortune;Island;" + BREACH + ";Island;Frantic Search", NC05_LIB,
+                NC05_KEYS, true);
+        System.out.println("GYCAST NC05 real ask as recorded, discardTail + planner keys: keep=" + bestReach(a, true) + " discard="
+                + bestReach(a, false) + " alt=" + a.altNames + " | " + a.dump());
+        Assert.assertNull(a.s.unsupported, a.dump());
+        Assert.assertTrue(bestReach(a, true) >= bestReach(a, false) - 1e-9, "keeping the engine is never the worse reach: " + a.dump());
+    }
+
     // ------------------------------------------------------------------ the key
 
     @Test
