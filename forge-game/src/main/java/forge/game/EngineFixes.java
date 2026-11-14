@@ -6,7 +6,7 @@ package forge.game;
  *
  * <p><b>Live line (live-fixes-1107):</b> {@code -Dforge.liveFixes} (default {@code true} on this line only) is the one
  * switch that sets the DEFAULT of every selected bug fix for every seat: the JVM flags {@code forge.copyRobust},
- * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.copyPoolMana}, {@code forge.loopWorkClock}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
+ * {@code forge.copyAltCost}, {@code forge.researchFixes}, {@code forge.copyPoolMana}, {@code forge.loopWorkClock}, {@code forge.leafChunks}, {@code forge.probeEmptyDraw} (ForcedWinProbe), {@code forge.ai.belief.basicsByType}, the house look-ahead keys
  * ({@code forge.house.<key>}, read in LookaheadSearch), and the solver keys {@code staleStatics}, {@code turnLimits},
  * {@code lineUncapped} ({@code ForcedWinSolver.Config.fromProps}). An explicit flag or key still wins.
  * {@code -Dforge.liveFixes=false} is the live jar before these fixes, byte for byte.
@@ -38,7 +38,7 @@ public final class EngineFixes {
     /** The startup line: the switch and what each fix resolved to. */
     public static String describe() {
         return "[live-fixes] forge.liveFixes=" + liveFixes + " copyRobust=" + copyRobust + " copyAltCost=" + copyAltCost
-                + " researchFixes=" + researchFixes + " copyPoolMana=" + copyPoolMana + " loopWorkClock=" + loopWorkClock + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
+                + " researchFixes=" + researchFixes + " copyPoolMana=" + copyPoolMana + " loopWorkClock=" + loopWorkClock + " leafChunks=" + leafChunks + " probeEmptyDraw=" + flag("forge.probeEmptyDraw") + " basicsByType=" + flag("forge.ai.belief.basicsByType")
                 + " house(beliefStatics,beliefPlayerStatics,copyTurnLimits,offBattlefieldLimits,beliefRememberedHand,copyBackFace,stackAbilityCopies)="
                 + flag("forge.house.beliefStatics") + "," + flag("forge.house.beliefPlayerStatics") + "," + flag("forge.house.copyTurnLimits")
                 + "," + flag("forge.house.offBattlefieldLimits") + "," + flag("forge.house.beliefRememberedHand") + ","
@@ -163,6 +163,24 @@ public final class EngineFixes {
     /** For tests. */
     public static void setLoopWorkClockForTest(final boolean on) {
         loopWorkClock = on;
+    }
+
+    /**
+     * leaf-chunks-1113 ({@code -Dforge.leafChunks}, a live fix: default {@link #liveFixes()}): RlSearchClient reads the
+     * service's chunked-LEAVES capability from its HELLO_ACK and sends a value-leaf batch larger than one wire frame as a
+     * chunked message (bvw-p3-batch-1023). Off (and {@code forge.researchFixes} unset, as on live before), such a batch
+     * threw building its frame, the search dropped the connection ("[rlsearch] LEAVES failed") and that decision used
+     * static leaf values. A batch within one frame is sent byte for byte as before either way.
+     */
+    private static boolean leafChunks = flag("forge.leafChunks");
+
+    public static boolean leafChunks() {
+        return leafChunks;
+    }
+
+    /** For tests. */
+    public static void setLeafChunksForTest(final boolean on) {
+        leafChunks = on;
     }
 
     // ---- state-machines-1113: copy-fidelity fixes, OFF by default (not live fixes: forge.liveFixes does not turn them on).
