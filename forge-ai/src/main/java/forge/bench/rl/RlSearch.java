@@ -97,6 +97,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (memo != null) {
             row.addProperty("memoHits", memo.hits.get());
             row.addProperty("memoMisses", memo.misses.get());
+            if (SvcMemo.VERIFY) {
+                // svcmemo-verify-1114 (measurement only): hits that were also sent, and those whose fresh answer differed
+                row.addProperty("memoVerified", memo.verified.get());
+                row.addProperty("memoVerifiedJoins", memo.verifiedJoins.get());
+                row.addProperty("memoMismatches", memo.mismatches.get());
+            }
         }
     }
 

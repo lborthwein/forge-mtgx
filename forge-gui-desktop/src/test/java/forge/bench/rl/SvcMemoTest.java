@@ -355,4 +355,25 @@ public class SvcMemoTest {
         a.steps[0] = 8;
         Assert.assertTrue(java.util.Arrays.equals(m2.decide(payload(2L, 1, 0.2f), false, sender).steps, new short[] {3, 1}));
     }
+
+    /** svcmemo-verify-1114 (measurement only): without -Dsdcc.svcMemoVerify the switch is off and a hit sends nothing. */
+    @Test
+    public void theVerifySwitchIsOffByDefaultAndThenAHitSendsNothing() throws Exception {
+        Assert.assertFalse(SvcMemo.VERIFY, "run this class without -Dsdcc.svcMemoVerify");
+        final SvcMemo m = new SvcMemo();
+        final AtomicInteger sends = new AtomicInteger();
+        final byte[] p = payload(1L, 0, 0.1f);
+        for (int i = 0; i < 5; i++) {
+            m.decide(p, false, q -> {
+                sends.incrementAndGet();
+                return answer(q, 7, RlWire.ST_OK);
+            });
+        }
+        Assert.assertEquals(sends.get(), 1);
+        Assert.assertEquals(m.verified.get(), 0);
+        Assert.assertEquals(m.mismatches.get(), 0);
+        final JsonObject row = new JsonObject();
+        RlSearch.memoRow(row, m);
+        Assert.assertFalse(row.has("memoVerified"), "no verify fields on the row with the switch off");
+    }
 }

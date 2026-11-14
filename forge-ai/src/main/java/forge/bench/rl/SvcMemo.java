@@ -81,6 +81,15 @@ public final class SvcMemo {
     /** The policy version of the stored entries (-1: none stored yet). */
     private long version = -1;
     public final AtomicInteger hits = new AtomicInteger(), misses = new AtomicInteger(), versionDrops = new AtomicInteger();
+    /**
+     * svcmemo-verify-1114 (MEASUREMENT ONLY, never for shipping; -Dsdcc.svcMemoVerify=true, default off and then nothing
+     * changes): on every hit the request is ALSO sent, and the fresh answer is compared with the stored one. The play-out
+     * still gets the STORED answer, so the game is the memo arm's; the send ticks the work clock once, in place of the
+     * hit's own tick, so the work accounting is the memo arm's too. Every mismatch is one {@code [svcmemo-verify]} line
+     * on stderr. A mismatch means the service gave two different greedy answers to byte-identical requests.
+     */
+    static final boolean VERIFY = Boolean.getBoolean("sdcc.svcMemoVerify");
+    public final AtomicInteger verified = new AtomicInteger(), verifiedJoins = new AtomicInteger(), mismatches = new AtomicInteger();
 
     /** The kind of a greedy DECIDE request: the frame type and its flags (0 = greedy). */
     public static int kindOf(final int frameType, final int flags) {
@@ -99,6 +108,7 @@ public final class SvcMemo {
         final CompletableFuture<RlWire.Decision> mine = new CompletableFuture<>();
         final CompletableFuture<RlWire.Decision> first = map.putIfAbsent(key, mine);
         if (first != null) {
+            final boolean joined = !first.isDone(); // the first asker's send was still in flight (verify line only)
             RlWire.Decision d = null;
             try {
                 d = first.get();
@@ -109,7 +119,11 @@ public final class SvcMemo {
             }
             if (d != null) {
                 hits.incrementAndGet();
-                forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // as the send it replaces (no clock = no-op)
+                if (VERIFY) {
+                    verify(key, d, payload, sender, joined); // sends (and so ticks the work clock once, as the hit would)
+                } else {
+                    forge.game.WorkClock.tick(forge.game.WorkClock.Site.SVC); // as the send it replaces (no clock = no-op)
+                }
                 return readdress(d, payload);
             }
             misses.incrementAndGet();
@@ -144,6 +158,44 @@ public final class SvcMemo {
         // d.steps when a schedule, a plan or a search overrides the policy's answer), and no later asker may see that.
         mine.complete(copy(d));
         return d;
+    }
+
+    /** svcmemo-verify-1114 (measurement only): the fresh answer to a request the memo just served, compared with the stored one. */
+    private void verify(final Key key, final RlWire.Decision stored, final byte[] payload, final Sender sender,
+            final boolean joined) throws IOException {
+        final RlWire.Decision fresh = sender.send(payload);
+        verified.incrementAndGet();
+        if (joined) {
+            verifiedJoins.incrementAndGet();
+        }
+        if (fresh.status == stored.status && Arrays.equals(fresh.steps, stored.steps)) {
+            return;
+        }
+        mismatches.incrementAndGet();
+        String sha;
+        try {
+            final java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            md.update(payload, UID_BYTES, payload.length - UID_BYTES);
+            final StringBuilder sb = new StringBuilder();
+            for (byte b : md.digest()) {
+                sb.append(String.format("%02x", b));
+            }
+            sha = sb.substring(0, 16);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            sha = "?";
+        }
+        // family and mode sit right after uid, index and seat in the DECIDE header (RlWire.encodeDecide)
+        final java.nio.ByteBuffer hb = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        // the asker: a play-out's uid is its world's seed (the same for every candidate's play-out in that world)
+        System.err.println("[svcmemo-verify] MISMATCH " + (joined ? "join" : "hit") + " askerUid=" + Long.toUnsignedString(hb.getLong())
+                + " askerDecIdx=" + hb.getInt() + " thread=" + Thread.currentThread().getName() + " storedUid="
+                + Long.toUnsignedString(stored.gameUid) + " storedDecIdx=" + stored.decIdx
+                + " kind=0x" + Integer.toHexString(key.kind) + " payloadSha=" + sha
+                + " bytes=" + payload.length + " seat=" + (payload[12] & 0xff) + " family=" + (payload[13] & 0xff)
+                + " mode=" + (payload[14] & 0xff) + " stored{steps=" + Arrays.toString(stored.steps) + ",logp=" + stored.logp
+                + ",value=" + stored.valueObs + ",version=" + stored.policyVersion + ",status=" + stored.status + "} fresh{steps="
+                + Arrays.toString(fresh.steps) + ",logp=" + fresh.logp + ",value=" + fresh.valueObs + ",version="
+                + fresh.policyVersion + ",status=" + fresh.status + "}");
     }
 
     /** A stored answer for another asker: the same steps, logp, value and version under the asker's uid and index. */
