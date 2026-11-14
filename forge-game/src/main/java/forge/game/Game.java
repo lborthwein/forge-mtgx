@@ -71,6 +71,8 @@ public class Game {
     public boolean historyLki = false;
     /** Default-off preservation of physical back-face orientation in search copies. */
     public boolean copyBackFace = false;
+    /** Default off (sdcc-copycast-1114): a dungeon card and its current room are carried into copies of this game. */
+    public boolean copyDungeon = false;
     /** Default-off independent ability objects for copied stack entries. */
     public boolean stackAbilityCopies = false;
     /** Default off: remap observed stack-history targets when knowledge is forked into a copy. */
