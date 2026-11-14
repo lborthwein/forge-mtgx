@@ -356,24 +356,129 @@ public class SvcMemoTest {
         Assert.assertTrue(java.util.Arrays.equals(m2.decide(payload(2L, 1, 0.2f), false, sender).steps, new short[] {3, 1}));
     }
 
-    /** svcmemo-verify-1114 (measurement only): without -Dsdcc.svcMemoVerify the switch is off and a hit sends nothing. */
+    /** The shadow-verify debug flag is off by default, and then a hit sends nothing, counts nothing and logs nothing. */
     @Test
-    public void theVerifySwitchIsOffByDefaultAndThenAHitSendsNothing() throws Exception {
-        Assert.assertFalse(SvcMemo.VERIFY, "run this class without -Dsdcc.svcMemoVerify");
+    public void theVerifyFlagIsOffByDefaultAndThenAHitSendsAndLogsNothing() throws Exception {
+        Assert.assertFalse(SvcMemo.VERIFY_DEFAULT, "run this class without -Dsdcc.svcMemoVerify");
         final SvcMemo m = new SvcMemo();
+        Assert.assertFalse(m.verifying());
+        final List<String> lines = new ArrayList<>();
+        m.mismatchLog = lines::add;
         final AtomicInteger sends = new AtomicInteger();
         final byte[] p = payload(1L, 0, 0.1f);
         for (int i = 0; i < 5; i++) {
             m.decide(p, false, q -> {
-                sends.incrementAndGet();
-                return answer(q, 7, RlWire.ST_OK);
+                // a service that would answer differently every time: with the flag off nobody asks it twice
+                final RlWire.Decision d = answer(q, 7, RlWire.ST_OK);
+                d.steps = new short[] {(short) sends.incrementAndGet()};
+                return d;
             });
         }
         Assert.assertEquals(sends.get(), 1);
         Assert.assertEquals(m.verified.get(), 0);
         Assert.assertEquals(m.mismatches.get(), 0);
+        Assert.assertTrue(lines.isEmpty());
         final JsonObject row = new JsonObject();
         RlSearch.memoRow(row, m);
-        Assert.assertFalse(row.has("memoVerified"), "no verify fields on the row with the switch off");
+        Assert.assertFalse(row.has("memoVerified"), "no verify fields on the row with the flag off");
+        Assert.assertEquals(row.size(), 2, "memoHits and memoMisses only");
+    }
+
+    /**
+     * The shadow-verify on: every memo answer is also sent; the asker still gets the STORED answer; equal fresh answers
+     * are counted and silent; a fresh answer that differs is one MISMATCH line. The second half reproduces what the
+     * fault of 11-14 looked like to the verify: the entry holds something other than the policy's answer to those bytes
+     * (then: the first asker's override, written through the shared object), and the verify says so on the next ask.
+     */
+    @Test
+    public void theVerifyFlagSendsEveryMemoAnswerAgainAndLogsAnAnswerThatDiffers() throws Exception {
+        final SvcMemo m = new SvcMemo(true);
+        final List<String> lines = new ArrayList<>();
+        m.mismatchLog = lines::add;
+        final AtomicInteger sends = new AtomicInteger();
+        final SvcMemo.Sender policy = q -> {
+            sends.incrementAndGet();
+            final RlWire.Decision d = answer(q, 7, RlWire.ST_OK);
+            d.steps = new short[] {3, 1};
+            return d;
+        };
+        final byte[] p = payload(1L, 0, 0.1f);
+        m.decide(p, false, policy);
+        final RlWire.Decision hit = m.decide(payload(2L, 4, 0.1f), false, policy);
+        Assert.assertEquals(sends.get(), 2, "the hit was also sent");
+        Assert.assertEquals(m.hits.get(), 1);
+        Assert.assertEquals(m.verified.get(), 1);
+        Assert.assertEquals(m.mismatches.get(), 0);
+        Assert.assertTrue(lines.isEmpty(), "an equal fresh answer is silent");
+        Assert.assertEquals(hit.gameUid, 2L);
+        final JsonObject row = new JsonObject();
+        RlSearch.memoRow(row, m);
+        Assert.assertEquals(row.get("memoVerified").getAsInt(), 1);
+        Assert.assertEquals(row.get("memoMismatches").getAsInt(), 0);
+        // an entry that holds something other than the policy's answer (as the shared object did after an override)
+        final SvcMemo bad = new SvcMemo(true);
+        bad.mismatchLog = lines::add;
+        final byte[] q0 = payload(5L, 0, 0.3f);
+        bad.decide(q0, false, q -> {
+            final RlWire.Decision d = answer(q, 7, RlWire.ST_OK);
+            d.steps = new short[] {9};   // what the first asker's override had left in the entry
+            return d;
+        });
+        final RlWire.Decision served = bad.decide(payload(6L, 2, 0.3f), false, policy);
+        Assert.assertTrue(java.util.Arrays.equals(served.steps, new short[] {9}), "the asker still gets the stored answer");
+        Assert.assertEquals(bad.mismatches.get(), 1);
+        Assert.assertEquals(lines.size(), 1);
+        final String line = lines.get(0);
+        Assert.assertTrue(line.startsWith("[svcmemo-verify] MISMATCH hit askerUid=6 askerDecIdx=2"), line);
+        Assert.assertTrue(line.contains("storedUid=5 storedDecIdx=0"), line);
+        Assert.assertTrue(line.contains("stored{steps=[9]") && line.contains("fresh{steps=[3, 1]"), line);
+    }
+
+    /** With the shadow-verify on, a JOIN (the first asker's send still in flight) is verified too, and counted as one. */
+    @Test
+    public void theVerifyFlagCoversJoins() throws Exception {
+        final SvcMemo m = new SvcMemo(true);
+        final List<String> lines = new ArrayList<>();
+        m.mismatchLog = lines::add;
+        final AtomicInteger sends = new AtomicInteger();
+        final CountDownLatch inFlight = new CountDownLatch(1), release = new CountDownLatch(1);
+        final Thread owner = new Thread(() -> {
+            try {
+                m.decide(payload(1L, 0, 0.1f), false, q -> {
+                    sends.incrementAndGet();
+                    inFlight.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException e) {
+                        throw new IOException(e);
+                    }
+                    return answer(q, 7, RlWire.ST_OK);
+                });
+            } catch (IOException e) {
+                // fails the assertions below
+            }
+        });
+        owner.start();
+        inFlight.await();
+        final Thread joiner = new Thread(() -> {
+            try {
+                m.decide(payload(2L, 3, 0.1f), false, q -> {
+                    sends.incrementAndGet();
+                    return answer(q, 7, RlWire.ST_OK);
+                });
+            } catch (IOException e) {
+                // fails the assertions below
+            }
+        });
+        joiner.start();
+        Thread.sleep(200);
+        release.countDown();
+        owner.join(10_000);
+        joiner.join(10_000);
+        Assert.assertEquals(m.hits.get(), 1);
+        Assert.assertEquals(m.verified.get(), 1);
+        Assert.assertEquals(m.verifiedJoins.get(), 1, "the join was verified and counted as a join");
+        Assert.assertEquals(sends.get(), 2);
+        Assert.assertTrue(lines.isEmpty());
     }
 }
