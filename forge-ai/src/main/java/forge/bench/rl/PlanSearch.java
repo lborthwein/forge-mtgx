@@ -130,6 +130,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         public boolean unified = false;
         /** Preserve the priority answer's announced X in sampled plans; absent means legacy matching. */
         public boolean exactActions = false;
+        /**
+         * proven-turn-1114 (false = off, the default, and then nothing changes): a solver line is taken at once as proven
+         * only when it wins this turn (winTurn 0), before the opponent has a turn of its own. A proven line that passes
+         * the turn rests on the belief worlds' Forge AI opponent playing that turn with a sampled hand; it joins S-c's
+         * candidates as a non-proven line instead (maxLines), beside the menu, so S-c's worlds and its own proof decide.
+         */
+        public boolean provenThisTurn = false;
         public boolean lineFloorAlways = false;
         /** kill-line-1106 (off by default): with lineChoices=forge, a followed line's discards keep its reserved cards. */
         public boolean lineKeep = false;
@@ -176,7 +183,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 "samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
                 "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lookFloorMs", "lineFloorAlways", "lineDuel", "unified", "planX",
-                "lineHorizon", "exactActions"));
+                "lineHorizon", "exactActions", "provenThisTurn"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -211,6 +218,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("planX")) s.planX = o.get("planX").getAsBoolean();
             if (o.has("lineHorizon")) s.lineHorizon = o.get("lineHorizon").getAsBoolean();
             if (o.has("exactActions")) s.exactActions = o.get("exactActions").getAsBoolean();
+            if (o.has("provenThisTurn")) s.provenThisTurn = o.get("provenThisTurn").getAsBoolean();
             if (o.has("setup")) s.setup = o.get("setup").getAsBoolean();
             if (o.has("setupNodes")) s.setupNodes = o.get("setupNodes").getAsInt();
             if (o.has("setupMaxNodes")) s.setupMaxNodes = o.get("setupMaxNodes").getAsLong();
@@ -1166,6 +1174,15 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return st != null && st.setup >= 0 && spec.setupBreadth > 0 ? Math.min(breadth, spec.setupBreadth) : breadth;
     }
 
+    /**
+     * proven-turn-1114: is a solver line taken at once, before any play-out? A proven line, and with
+     * {@code thisTurnOnly} (plans.provenThisTurn) only one that wins this turn ({@code winTurn} 0); a proven line that
+     * passes the turn is then searched as a candidate like any other line.
+     */
+    static boolean takenAtOnce(final boolean proven, final int winTurn, final boolean thisTurnOnly) {
+        return proven && (!thisTurnOnly || winTurn == 0);
+    }
+
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
     Stage propose(final Game g, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs, final long t0) {
         return propose(g, p, m, objs, t0, t0);
@@ -1210,7 +1227,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             solverMs.add(st.solverMs);
             ForcedWinSolver.Proposal proven = null;
             for (ForcedWinSolver.Proposal pr : props) {
-                if (pr.proven(spec.unified ? 1 : spec.minProvenWorlds) && (proven == null || pr.steps < proven.steps)) {
+                if (takenAtOnce(pr.proven(spec.unified ? 1 : spec.minProvenWorlds), pr.winTurn, spec.provenThisTurn)
+                        && (proven == null || pr.steps < proven.steps)) {
                     proven = pr;
                 }
             }
