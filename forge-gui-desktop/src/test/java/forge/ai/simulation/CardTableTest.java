@@ -197,6 +197,60 @@ public class CardTableTest extends AITest {
     }
 
     /**
+     * ct2-live-1114: the generator's condition filter. A card whose canonical model depends on the sandbox (a threshold
+     * mana spell: more mana with seven cards in our graveyard) is refused in every variant, listed, and learned as without
+     * the key at run time; a plain creature is kept. The refused list survives a save and a load.
+     */
+    @Test
+    public void theConditionFilterRefusesAPositionDependentCardAndKeepsAPlainOne() throws Exception {
+        final List<String> pool = new ArrayList<>(POOL);
+        pool.add("Cabal Ritual");
+        final ForcedWinCanon.Table tb = ForcedWinCanon.newTable(pool);
+        for (String v : VARIANTS) {
+            for (String n : new String[] {"Cabal Ritual", "Grizzly Bears"}) {
+                Assert.assertTrue(ForcedWinCanon.generate(tb, v, n), v + n);
+            }
+        }
+        String why = null;
+        for (String v : VARIANTS) {
+            Assert.assertNull(ForcedWinCanon.varies(tb, v, "Grizzly Bears"), "a plain creature is the same in every condition (" + v + ")");
+            why = why != null ? why : ForcedWinCanon.varies(tb, v, "Cabal Ritual");
+        }
+        System.err.println("FILTER Cabal Ritual: " + why);
+        Assert.assertNotNull(why, "the threshold card's model depends on the graveyard");
+        ForcedWinCanon.refuse(tb, "Cabal Ritual");
+        Assert.assertTrue(tb.refused("Cabal Ritual"));
+        for (String v : VARIANTS) {
+            Assert.assertNull(tb.entries.get(v + "Cabal Ritual"));
+            Assert.assertNotNull(tb.entries.get(v + "Grizzly Bears"));
+        }
+        final Path p = saved(tb);
+        try {
+            ForcedWinCanon.forgetForTest();
+            final ForcedWinCanon.Table loaded = ForcedWinCanon.open(p.toString());
+            Assert.assertTrue(loaded.refused("Cabal Ritual"));
+            final Game g = game("Cabal Ritual;Grizzly Bears", "Swamp;Forest", "Plains");
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinModel.Reader with = new ForcedWinModel.Reader(), without = new ForcedWinModel.Reader();
+            with.table = loaded;
+            for (Card c : me.getCardsIn(ZoneType.Hand)) {
+                final ACard a = with.card(g, me, c);
+                if (c.getName().equals("Cabal Ritual")) {
+                    Assert.assertEquals(JsonParser.parseString(shape(a)), JsonParser.parseString(shape(without.card(g, me, c))),
+                            "a refused card is learned from the position, as without the key");
+                }
+            }
+            Assert.assertEquals(loaded.refusedLookups.get(), 1);
+            Assert.assertEquals(loaded.learned.get(), 0, "nothing learned canonically");
+            Assert.assertFalse(Files.exists(Path.of(p + ".add.jsonl")), "nothing appended for a refused card");
+        } finally {
+            ForcedWinCanon.forgetForTest();
+            Files.deleteIfExists(p);
+            Files.deleteIfExists(Path.of(p + ".add.jsonl"));
+        }
+    }
+
+    /**
      * ct2-live-1114: cardTable=auto loads the file named for the jar's sha and the flags from the jar's directory, learns
      * a miss in memory only (nothing written, no additions read), and prints a summary; no such file is off with a reason.
      */

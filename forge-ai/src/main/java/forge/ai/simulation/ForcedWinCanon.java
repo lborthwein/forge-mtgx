@@ -281,6 +281,18 @@ public final class ForcedWinCanon {
      * 2 and 3 of every type. Hands: picks 4 and 5. A bucket with too few cards wraps around.
      */
     static String frame(final List<String> pool) {
+        return frame(pool, "");
+    }
+
+    /**
+     * ct2-live-1114: the sandbox conditions a kept model must not depend on. Each changes one thing on our side of the
+     * canonical position: {@code gy0} an empty graveyard, {@code land1} one basic land instead of five (and no non-basic
+     * land), {@code life5} 5 life instead of 20, {@code hand0} an empty hand.
+     */
+    public static final String[] CONDITIONS = {"gy0", "land1", "life5", "hand0"};
+
+    /** The frame of {@code pool} under condition {@code cond} ("" = the canonical position; see {@link #CONDITIONS}). */
+    static String frame(final List<String> pool, final String cond) {
         final Map<String, List<String>> by = new HashMap<>();
         final Map<String, Integer> w = new HashMap<>();
         final Map<String, String> loyalty = new HashMap<>();
@@ -325,16 +337,19 @@ public final class ForcedWinCanon {
             return String.join(";", out);
         };
         final List<String> basics = new ArrayList<>(List.of(BeliefSampler.basics()));
-        final List<String> ourField = picks.apply(PERMANENT, 0), theirField = picks.apply(PERMANENT, 1);
-        ourField.addAll(basics);
+        final List<String> ourField = picks.apply("land1".equals(cond)
+                ? new String[] {"creature", "artifact", "enchantment", "planeswalker"} : PERMANENT, 0);
+        final List<String> theirField = picks.apply(PERMANENT, 1);
+        ourField.addAll("land1".equals(cond) ? basics.subList(0, 1) : basics);
         theirField.addAll(basics);
         final List<String> theirLibrary = new ArrayList<>();
         for (int i = 0; i < 4; i++) {
             theirLibrary.addAll(basics);
         }
-        return "[state]\nturn=5\nactiveplayer=human\nactivephase=MAIN1\nhumanlife=20\nailife=20\nhumanlandsplayed=0\nailandsplayed=0\n"
-                + "humanhand=" + String.join(";", picks.apply(ANY, 4)) + "\nhumanlibrary=\nhumangraveyard="
-                + String.join(";", picks.apply(ANY, 2)) + "\nhumanexile=\nhumanbattlefield=" + field.apply(ourField)
+        return "[state]\nturn=5\nactiveplayer=human\nactivephase=MAIN1\nhumanlife=" + ("life5".equals(cond) ? 5 : 20)
+                + "\nailife=20\nhumanlandsplayed=0\nailandsplayed=0\n"
+                + "humanhand=" + ("hand0".equals(cond) ? "" : String.join(";", picks.apply(ANY, 4))) + "\nhumanlibrary=\nhumangraveyard="
+                + ("gy0".equals(cond) ? "" : String.join(";", picks.apply(ANY, 2))) + "\nhumanexile=\nhumanbattlefield=" + field.apply(ourField)
                 + "\naihand=" + String.join(";", picks.apply(ANY, 5)) + "\nailibrary=" + String.join(";", theirLibrary)
                 + "\naigraveyard=" + String.join(";", picks.apply(ANY, 3)) + "\naiexile=\naibattlefield=" + field.apply(theirField)
                 + "\n";
@@ -375,6 +390,11 @@ public final class ForcedWinCanon {
      * copies the game at every node: with the pool in the library a probe did not finish inside its budget.
      */
     static Base build(final List<String> pool, final boolean lean) {
+        return build(pool, lean, "");
+    }
+
+    /** As above, under sandbox condition {@code cond} ({@link #CONDITIONS}; "" = the canonical position). */
+    static Base build(final List<String> pool, final boolean lean, final String cond) {
         return scoped(SEED, () -> {
             final Base b = new Base();
             final List<String> names = new ArrayList<>();
@@ -402,7 +422,7 @@ public final class ForcedWinCanon {
             final Match match = new Match(rules, players, "Canon");
             final Game game = new Game(players, rules, match);
             game.setAge(GameStage.Play);
-            b.frame = frame(names);
+            b.frame = frame(names, cond);
             final NowState gs = new NowState();
             gs.parse(java.util.Arrays.asList(b.frame.split("\\R")));
             gs.applyNow(game);
@@ -650,6 +670,19 @@ public final class ForcedWinCanon {
         public final AtomicLong hits = new AtomicLong(), learned = new AtomicLong(), stale = new AtomicLong(), tokens = new AtomicLong();
         /** cardtable2-1114: lookups of a card that is not in the table's pool (learned as without the key, never appended). */
         public final AtomicLong outside = new AtomicLong();
+        /**
+         * ct2-live-1114: pool cards whose canonical model depends on the sandbox's conditions (the generator found it
+         * differ across {@link #CONDITIONS}): no entry, and at run time they are learned from the real position, exactly
+         * as without the key (counter {@code refusedLookups}); their loop probes are the position's too.
+         */
+        final java.util.Set<String> refused = ConcurrentHashMap.newKeySet();
+        public final AtomicLong refusedLookups = new AtomicLong();
+
+        /** ct2-live-1114: is {@code name} a pool card the generator refused (see {@link #refused})? */
+        public boolean refused(final String name) {
+            return refused.contains(name);
+        }
+
         /** cardtable2-1114: the names the table knows (its pool list, the basic lands, every name it holds a model of). */
         private volatile java.util.Set<String> known;
 
@@ -723,6 +756,10 @@ public final class ForcedWinCanon {
          * under {@code key}. Null for a card with no paper card (a token), which the caller learns as without the key.
          */
         ACard learn(final String key, final Card c, final ForcedWinProbe.Stats st) {
+            if (refused.contains(c.getName())) {
+                refusedLookups.incrementAndGet();
+                return null; // ct2-live-1114: its model depends on the position: the caller learns it as without the key
+            }
             if (!inPool(c.getName())) {
                 outside.incrementAndGet();
                 return null; // cardtable2-1114: not a pool card: the caller learns it as without the key
@@ -826,6 +863,11 @@ public final class ForcedWinCanon {
             final JsonArray p = new JsonArray();
             pool.forEach(p::add);
             o.add("pool", p);
+            if (!refused.isEmpty()) {
+                final JsonArray rf = new JsonArray();
+                new java.util.TreeSet<>(refused).forEach(rf::add);
+                o.add("refused", rf);
+            }
             o.addProperty("frame", base().frame);
             final JsonObject es = new JsonObject();
             new TreeMap<>(entries).forEach((k, e) -> {
@@ -853,8 +895,9 @@ public final class ForcedWinCanon {
          */
         public String summary() {
             return "loaded=" + loadedModels + " loadedLoops=" + loadedLoops + " entries=" + entries.size() + " loops=" + loops.size()
-                    + " hits=" + hits.get() + " misses=" + (learned.get() + outside.get() + tokens.get()) + " learned=" + learned.get()
-                    + " outside=" + outside.get() + " staleScripts=" + stale.get() + " tokens=" + tokens.get()
+                    + " hits=" + hits.get() + " misses=" + (learned.get() + outside.get() + tokens.get() + refusedLookups.get()) + " learned=" + learned.get()
+                    + " outside=" + outside.get() + " refused=" + refused.size() + " refusedLookups=" + refusedLookups.get()
+                    + " staleScripts=" + stale.get() + " tokens=" + tokens.get()
                     + " additions=" + (additions == null ? "off" : "on");
         }
     }
@@ -895,6 +938,91 @@ public final class ForcedWinCanon {
         r.table = tb;
         r.card(b.g, b.me, c);
         return tb.entries.containsKey(prefix + name);
+    }
+
+    private static final Map<Table, Map<String, Table>> SCRATCH = new java.util.IdentityHashMap<>();
+
+    /**
+     * ct2-live-1114, generator: does the model of {@code name} under the flags of {@code prefix} (already learned in
+     * {@code tb} by {@link #generate}) change when it is learned in each of {@link #CONDITIONS}? Null = the same in every
+     * condition; else "cond: field ..." (the first condition that differed and the first differing model fields).
+     */
+    public static String varies(final Table tb, final String prefix, final String name) {
+        final Entry e = tb.entries.get(prefix + name);
+        if (e == null) {
+            return null;
+        }
+        final JsonObject ref = shapeOf(e.card);
+        final Map<String, Table> sc;
+        synchronized (SCRATCH) {
+            sc = SCRATCH.computeIfAbsent(tb, x -> new LinkedHashMap<>());
+        }
+        for (String cond : CONDITIONS) {
+            final Table s = sc.computeIfAbsent(cond, k -> {
+                final Table t = new Table(null, tb.stamp);
+                t.pool.addAll(tb.pool);
+                synchronized (LOCK) {
+                    t.base = build(t.pool, false, k);
+                }
+                return t;
+            });
+            final Base b = s.base();
+            final Card c = b.byName.get(name);
+            if (c == null) {
+                return cond + ": not in the condition's position";
+            }
+            final ForcedWinModel.Reader r = new ForcedWinModel.Reader();
+            r.sourceLeaves = prefix.contains("sl|");
+            r.tutorCast = prefix.contains("tc|");
+            r.planScry = prefix.contains("scry|");
+            r.probeSettle = prefix.contains("settle|");
+            r.table = s;
+            r.card(b.g, b.me, c);
+            final Entry x = s.entries.get(prefix + name);
+            if (x == null) {
+                return cond + ": not learned";
+            }
+            final JsonObject got = shapeOf(x.card);
+            if (!ref.equals(got)) {
+                final List<String> diff = new ArrayList<>();
+                diffFields("", ref, got, diff);
+                return cond + ": " + String.join(" ", diff.subList(0, Math.min(3, diff.size())));
+            }
+        }
+        return null;
+    }
+
+    private static JsonObject shapeOf(final ACard a) {
+        return JsonParser.parseString(GSON.toJson(a.instance(0))).getAsJsonObject();
+    }
+
+    private static void diffFields(final String path, final JsonElement a, final JsonElement b, final List<String> out) {
+        if (a != null && b != null && a.isJsonObject() && b.isJsonObject()) {
+            final java.util.TreeSet<String> ks = new java.util.TreeSet<>(a.getAsJsonObject().keySet());
+            ks.addAll(b.getAsJsonObject().keySet());
+            for (String k : ks) {
+                diffFields(path.isEmpty() ? k : path + "." + k, a.getAsJsonObject().get(k), b.getAsJsonObject().get(k), out);
+            }
+        } else if (a != null && b != null && a.isJsonArray() && b.isJsonArray() && a.getAsJsonArray().size() == b.getAsJsonArray().size()) {
+            for (int i = 0; i < a.getAsJsonArray().size(); i++) {
+                diffFields(path + "[" + i + "]", a.getAsJsonArray().get(i), b.getAsJsonArray().get(i), out);
+            }
+        } else if (a == null ? b != null : !a.equals(b)) {
+            out.add(path + "=" + a + "|" + b);
+        }
+    }
+
+    /**
+     * ct2-live-1114, generator: refuse {@code name}: every entry of it (all variants) and every loop probe that names it
+     * are dropped, and it is listed as refused (learned from the real position at run time).
+     */
+    public static void refuse(final Table tb, final String name) {
+        tb.refused.add(name);
+        tb.entries.keySet().removeIf(k -> k.substring(k.lastIndexOf('|') + 1).equals(name));
+        tb.loops.keySet().removeIf(k -> {
+            final String[] p = k.split("\\|", -1);
+            return p.length >= 4 && (p[1].equals(name) || p[3].equals(name));
+        });
     }
 
     /** Generator: the loop probes of {@code name} with every creature of the pool (planLoops; nothing for other cards). */
@@ -992,6 +1120,11 @@ public final class ForcedWinCanon {
             final Table t = new Table(path, mine);
             for (JsonElement e : o.getAsJsonArray("pool")) {
                 t.pool.add(e.getAsString());
+            }
+            if (o.has("refused")) {
+                for (JsonElement e : o.getAsJsonArray("refused")) {
+                    t.refused.add(e.getAsString());
+                }
             }
             for (Map.Entry<String, JsonElement> e : o.getAsJsonObject("entries").entrySet()) {
                 final JsonObject x = e.getValue().getAsJsonObject();

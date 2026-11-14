@@ -4688,10 +4688,10 @@ public final class ForcedWinSolver {
         // in the canonical sandbox and saved); only a pair with a card that has no paper card (a token) is left to the
         // position's own probe below
         final ForcedWinCanon.Table table = ForcedWinCanon.open(cfg.cardTable);
-        if (table != null && !c.isToken() && c.getPaperCard() != null) {
+        if (table != null && !c.isToken() && c.getPaperCard() != null && !table.refused(c.getName())) {
             final List<Card> saved = new ArrayList<>();
             for (Card p : partners) {
-                if (!p.isToken() && p.getPaperCard() != null) {
+                if (!p.isToken() && p.getPaperCard() != null && !table.refused(p.getName())) { // ct2-live-1114: refused = the position's probe
                     saved.add(p);
                 }
             }

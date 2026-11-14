@@ -31,6 +31,11 @@ import forge.ai.simulation.ForcedWinSolver;
  * (so the order the lists are given in does not matter). The table's note names each list by its sha256, not its path,
  * so the same jar, flags and lists give the same file bytes on any host. {@code --out DIR/} (a trailing slash) writes the
  * file under the name {@code cardTable=auto} loads ({@link ForcedWinCanon#autoName}).
+ * ct2-live-1114 (the condition filter, on unless {@code --no-filter}): every learned card is learned again in each of
+ * {@link ForcedWinCanon#CONDITIONS} (empty graveyard, one land, low life, empty hand) under every variant; a card whose
+ * model differs anywhere gets no entry and is listed as refused (learned from the real position at run time). The note
+ * records the counts and each refusal with the first condition and fields that differed. Loop probes are generated for
+ * kept cards only, and none naming a refused card is kept.
  */
 public final class CardTableGen {
     private CardTableGen() {
@@ -39,7 +44,7 @@ public final class CardTableGen {
     public static void main(final String[] argv) throws Exception {
         System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.err), true, StandardCharsets.UTF_8));
         String out = null, cube = BeliefSampler.LIVE_CUBE, variants = ",sl|tc|settle|", spec = null, solver = null, only = null;
-        boolean loops = true;
+        boolean loops = true, filter = true;
         for (int i = 0; i < argv.length; i++) {
             switch (argv[i]) {
                 case "--out": out = argv[++i]; break;
@@ -49,6 +54,7 @@ public final class CardTableGen {
                 case "--solver": solver = argv[++i]; break;
                 case "--only": only = argv[++i]; break;
                 case "--no-loops": loops = false; break;
+                case "--no-filter": filter = false; break;
                 default: throw new IllegalArgumentException(argv[i]);
             }
         }
@@ -134,13 +140,50 @@ public final class CardTableGen {
                 }
             }
         }
+        String filterNote = "; filter off";
+        if (filter) {
+            filterNote = "; " + filterNote(tb, names, pick, variants);
+        }
         final byte[] file = tb.toJson("cube sha256 " + String.join(",", cubeShas) + "; variants '" + variants + "'; solver "
-                + new java.util.TreeMap<>(props)).getBytes(StandardCharsets.UTF_8);
+                + new java.util.TreeMap<>(props) + filterNote).getBytes(StandardCharsets.UTF_8);
         Files.write(Paths.get(out), file);
         System.err.println("[card-table-gen] DONE learned=" + ok + " notLearned=" + miss + " loopProbes=" + lp + " ms="
                 + (System.nanoTime() - t0) / 1_000_000 + " -> " + out + " sha256 " + sha256(file) + " auto name "
                 + ForcedWinCanon.autoName());
         System.exit(0);
+    }
+
+    /** ct2-live-1114: the condition filter over the learned table (loop probes included); returns the note's text. */
+    private static String filterNote(final ForcedWinCanon.Table tb, final List<String> names, final java.util.Set<String> pick,
+            final String variants) {
+        final long tf = System.nanoTime();
+        final java.util.TreeMap<String, String> refusedWhy = new java.util.TreeMap<>();
+        final java.util.TreeMap<String, Integer> byCond = new java.util.TreeMap<>();
+        int checked = 0;
+        for (String n : names) {
+            if (pick != null && !pick.contains(n)) {
+                continue;
+            }
+            checked++;
+            for (String v : variants.split(",", -1)) {
+                final String why = ForcedWinCanon.varies(tb, v, n);
+                if (why != null) {
+                    refusedWhy.put(n, "'" + v + "' " + why);
+                    byCond.merge(why.substring(0, why.indexOf(':')), 1, Integer::sum);
+                    break;
+                }
+            }
+        }
+        for (String n : refusedWhy.keySet()) {
+            ForcedWinCanon.refuse(tb, n);
+            System.err.println("[card-table-gen] refused " + n + ": " + refusedWhy.get(n));
+        }
+        final StringBuilder sb = new StringBuilder("filter conditions " + String.join("/", ForcedWinCanon.CONDITIONS) + ": checked "
+                + checked + ", kept " + (checked - refusedWhy.size()) + ", refused " + refusedWhy.size() + " " + byCond);
+        refusedWhy.forEach((n, w) -> sb.append("; refused ").append(n).append(" (").append(w).append(')'));
+        System.err.println("[card-table-gen] filter done in " + (System.nanoTime() - tf) / 1_000_000 + " ms: checked " + checked + ", kept "
+                + (checked - refusedWhy.size()) + ", refused " + refusedWhy.size() + " " + byCond);
+        return sb.toString();
     }
 
     private static String sha256(final byte[] b) throws java.security.NoSuchAlgorithmException {
