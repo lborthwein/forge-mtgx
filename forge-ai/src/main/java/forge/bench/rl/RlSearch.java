@@ -4194,6 +4194,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return cfg.reach == null ? 0.0 : reachCfg().depart;
     }
 
+    @Override
+    public String logTag() {
+        return "uid=" + Long.toUnsignedString(uid) + " seat=" + sinkSeat + " dec=" + sinkDecIdx + " turn=" + sinkTurn; // reach-diag-1113
+    }
+
     /** {@link #reachOf}'s full result (with its cost counters). */
     forge.ai.simulation.ForcedWinSolver.Reach reachFull(final RlKnowledge k, final Game g, final Player p) {
         final ReachCfg rc = reachCfg();

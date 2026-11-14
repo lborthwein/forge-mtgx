@@ -885,6 +885,43 @@ public final class ForcedWinModel {
     static final class Reader {
         /** Learned templates by key; every read and write holds this map's own monitor (state-machines-1113). */
         final Map<String, ACard> templates = new HashMap<>();
+
+        /**
+         * reach-diag-1113 (diagnosis only: {@code -Dsdcc.readerPerCopy=true}, off by default): templates are learned and
+         * kept per GAME (the live one and each play-out's copy), never shared across games; each game's table starts with
+         * the preloaded (canonical) templates only. Off, a reader shared by parallel play-outs learns each name from
+         * whichever copy asks first. Slow; for a determinism read only.
+         */
+        static final boolean PER_COPY = Boolean.getBoolean("sdcc.readerPerCopy");
+
+        static {
+            if (PER_COPY) {
+                System.err.println("[reach-diag] sdcc.readerPerCopy=true: card templates per game copy (diagnosis only)");
+            }
+        }
+
+        /** reach-diag-1113: the per-game tables (by game identity; weak) and the preloaded keys they start with. */
+        private final Map<Game, Map<String, ACard>> perCopy = PER_COPY ? java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>()) : null;
+        private final java.util.Set<String> preloaded = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+        /** reach-diag-1113: the table {@code live}'s reads use (off: {@link #templates}). */
+        private Map<String, ACard> tmap(final Game live) {
+            if (!PER_COPY || live == null) {
+                return templates;
+            }
+            return perCopy.computeIfAbsent(live, x -> {
+                final Map<String, ACard> m = new HashMap<>();
+                synchronized (templates) {
+                    for (String k : preloaded) {
+                        final ACard t = templates.get(k);
+                        if (t != null) {
+                            m.put(k, t);
+                        }
+                    }
+                }
+                return m;
+            });
+        }
         /** Report only; probes count into a per-call Stats that is added here under this object's monitor ({@link #addStats}). */
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
         /**
@@ -1033,6 +1070,7 @@ public final class ForcedWinModel {
                 for (Map.Entry<String, ACard> e : m.entrySet()) {
                     if (e.getValue() != null && templates.putIfAbsent(e.getKey(), e.getValue()) == null) {
                         n++;
+                        preloaded.add(e.getKey()); // reach-diag-1113
                     }
                 }
             }
@@ -1081,8 +1119,9 @@ public final class ForcedWinModel {
 
         private ACard card0(Game live, Player me, Card c, String key, ForcedWinProbe.Stats st) {
             ACard t;
-            synchronized (templates) {
-                t = templates.get(key);
+            final Map<String, ACard> tm = tmap(live); // reach-diag-1113 (off: templates)
+            synchronized (tm) {
+                t = tm.get(key);
             }
             if (t == null) {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
@@ -1103,8 +1142,8 @@ public final class ForcedWinModel {
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                 }
                 if (!forge.ai.AiWork.spent()) {
-                    synchronized (templates) {
-                        templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                    synchronized (tm) {
+                        tm.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
                     }
                 }
             } else if (probeObjects && t.hasObj && !forge.ai.AiWork.spent()) {

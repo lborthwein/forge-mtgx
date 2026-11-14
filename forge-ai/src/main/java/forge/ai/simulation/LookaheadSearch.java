@@ -1677,6 +1677,11 @@ public final class LookaheadSearch {
         }
 
         /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
+        /** reach-diag-1113 (diagnosis only): the decision's identity for a log line (game uid, seat, decision index). */
+        default String logTag() {
+            return "";
+        }
+
         default String leafError() {
             return null;
         }
@@ -3681,6 +3686,13 @@ public final class LookaheadSearch {
     /** solver-distill-cc-1109: the last valued decision's reach part per candidate and world (null = the rule is off). */
     private double[][] reachPart;
 
+    /**
+     * reach-diag-1113 (diagnosis only: {@code -Dsdcc.leafLog=true}, off by default): one stderr line per valued leaf
+     * of the plain value path (game uid, seat, decision, world, candidate, the value model's base, the reach parts, the
+     * combined value; a terminal leaf's value).
+     */
+    static final boolean LEAF_LOG = Boolean.getBoolean("sdcc.leafLog");
+
     private void valueLeaves(double[][] values, Rollout[][] outs, boolean[] ok, int k) {
         if (cfg.leafOpp) {
             valueLeavesS2t(values, outs, ok, k, null);
@@ -3737,6 +3749,9 @@ public final class LookaheadSearch {
                 final Rollout r = outs[c][w];
                 if (ok[c] && r != null && r.ok && !Double.isNaN(r.pTerminal)) {
                     values[c][w] = r.pTerminal;
+                    if (LEAF_LOG) {
+                        System.err.println("[leaf-value] " + hooks.logTag() + " w=" + w + " c=" + c + " terminal=" + r.pTerminal);
+                    }
                 }
             }
         }
@@ -3744,6 +3759,10 @@ public final class LookaheadSearch {
             final int c = where.get(i)[0], w = where.get(i)[1];
             final double[] rr = outs[c][w].leafReach;
             values[c][w] = rr == null ? p[i] : hooks.combineReach(p[i], rr);
+            if (LEAF_LOG) {
+                System.err.println("[leaf-value] " + hooks.logTag() + " w=" + w + " c=" + c + " base=" + p[i]
+                        + " reach=" + (rr == null ? "none" : java.util.Arrays.toString(rr)) + " value=" + values[c][w]);
+            }
             if (rr != null) {
                 stats.noteReach(rr);
                 hooks.noteLeaf(outs[c][w].leafPayload, p[i], rr);
