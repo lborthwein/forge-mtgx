@@ -35,8 +35,15 @@ public class GateLoopWindowTest extends forge.ai.AITest {
         return ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
     }
 
-    /** A search seat with the reach gate on, the loop screens on, an 8 s budget and {@code reach.gateWindow} as given (null = absent). */
+    /**
+     * A search seat with the reach gate on, the loop screens on, a 40 s budget (a 10 s window: the probes never race a
+     * loaded host) and {@code reach.gateWindow} as given (null = absent).
+     */
     private static RlSearch seat(final Boolean gateWindow) {
+        return seat(gateWindow, 40_000);
+    }
+
+    private static RlSearch seat(final Boolean gateWindow, final int budgetMs) {
         final StringBuilder screens = new StringBuilder();
         for (String k : new String[] {"cycles", "engineLoopReach", "engineLongLoops", "engineLoopBisect", "engineLoopHoist",
                 "engineMoves", "engineTriggerTargets", "turnLimits", "stackAbilityCopies", "stackHistory", "historyLki",
@@ -44,7 +51,7 @@ public class GateLoopWindowTest extends forge.ai.AITest {
             screens.append(screens.length() == 0 ? "" : ",").append('"').append(k).append("\":\"true\"");
         }
         final JsonObject spec = JsonParser.parseString("{\"server\":\"127.0.0.1:1\",\"leaf\":\"value\",\"playout\":\"policy\","
-                + "\"budgetMs\":8000,\"reach\":{\"gate\":true" + (gateWindow == null ? "" : ",\"gateWindow\":" + gateWindow)
+                + "\"budgetMs\":" + budgetMs + ",\"reach\":{\"gate\":true" + (gateWindow == null ? "" : ",\"gateWindow\":" + gateWindow)
                 + "},\"plans\":{\"solverCfg\":{" + screens + "}}}").getAsJsonObject();
         return new RlSearch(RlSearch.Config.parse(spec), 1L, 2L, null, null, "test", "t");
     }
@@ -123,18 +130,53 @@ public class GateLoopWindowTest extends forge.ai.AITest {
         }
     }
 
-    /** With no window in the slot (the game's first read), the gate's own window is not left behind either. */
+    /**
+     * With no window in the slot yet (the game's first reads, at the mulligans) nothing is borrowed: on and off alike,
+     * the read opens a fresh default window of its own and leaves it for the reads after it, as the old code does.
+     */
     @Test
-    public void anEmptySlotStaysEmpty() throws ReflectiveOperationException {
+    public void anEmptySlotIsReadAsTheOldCodeReadsIt() throws ReflectiveOperationException {
+        final WorkClock.Clock prev = WorkClock.install(null);
+        try {
+            for (final Boolean key : new Boolean[] {Boolean.TRUE, Boolean.FALSE}) {
+                final Game g = kikiGame();
+                final RlSearch rs = seat(key);
+                try {
+                    ForcedWinSolver.loopDeadline(g, 0L);
+                    Assert.assertNull(slot(g));
+                    final long[] t0 = ForcedWinSolver.loopTally();
+                    gateStep(rs, g, g.getPlayers().get(0));
+                    final long[] t1 = ForcedWinSolver.loopTally();
+                    Assert.assertTrue(gateOpen(rs), key + ": a fresh default window: the loop is found");
+                    Assert.assertEquals(t1[0] - t0[0], 3L, key + ": alone and two partners probed");
+                    Assert.assertEquals(t1[1] - t0[1], 0L, key + ": nothing cut");
+                    Assert.assertNotNull(slot(g), key + ": the read's default window stays, as off");
+                } finally {
+                    ForcedWinSolver.loopDeadline(g, 0L);
+                    rs.close();
+                }
+            }
+        } finally {
+            WorkClock.install(prev);
+        }
+    }
+
+    /** Without a budget (det runs: budgetMs=0) the switch does nothing: the gate reads the stale window as before. */
+    @Test
+    public void withoutABudgetTheSwitchDoesNothing() throws ReflectiveOperationException {
         final WorkClock.Clock prev = WorkClock.install(null);
         final Game g = kikiGame();
-        final RlSearch rs = seat(Boolean.TRUE);
+        final RlSearch rs = seat(Boolean.TRUE, 0);
         try {
-            ForcedWinSolver.loopDeadline(g, 0L);
-            Assert.assertNull(slot(g));
+            ForcedWinSolver.loopDeadline(g, System.nanoTime() - 1L);
+            final Long before = slot(g);
+            final long[] t0 = ForcedWinSolver.loopTally();
             gateStep(rs, g, g.getPlayers().get(0));
-            Assert.assertTrue(gateOpen(rs), "the gate's own window: the loop is found");
-            Assert.assertNull(slot(g), "the slot is empty again");
+            final long[] t1 = ForcedWinSolver.loopTally();
+            Assert.assertEquals(t1[0] - t0[0], 0L, "nothing probed");
+            Assert.assertTrue(t1[1] - t0[1] > 0, "the stale window cuts the read, as off");
+            Assert.assertFalse(gateOpen(rs));
+            Assert.assertEquals(slot(g), before);
         } finally {
             ForcedWinSolver.loopDeadline(g, 0L);
             rs.close();
@@ -145,6 +187,8 @@ public class GateLoopWindowTest extends forge.ai.AITest {
     @Test
     public void theSpecKeyTakesTrueFalseOrOneZeroAndNothingElse() {
         Assert.assertNull(RlSearch.ReachCfg.parse(JsonParser.parseString("{\"gate\":true}").getAsJsonObject()).gateWindow);
+        Assert.assertNull(RlSearch.ReachCfg.parse(JsonParser.parseString("{\"gateWindow\":null}").getAsJsonObject()).gateWindow,
+                "null = absent");
         for (String v : new String[] {"true", "1", "1.0"}) {
             Assert.assertEquals(RlSearch.ReachCfg.parse(JsonParser.parseString("{\"gateWindow\":" + v + "}").getAsJsonObject()).gateWindow,
                     Boolean.TRUE, v);

@@ -4084,7 +4084,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("leafGfFree")) c.leafGfFree = o.get("leafGfFree").getAsBoolean();
             if (o.has("leafGfNodes")) c.leafGfNodes = o.get("leafGfNodes").getAsInt();
             if (o.has("leafGfMaxNodes")) c.leafGfMaxNodes = o.get("leafGfMaxNodes").getAsLong();
-            if (o.has("gateWindow")) c.gateWindow = flag01("gateWindow", o.get("gateWindow")); // gate-loop-window-1113
+            if (o.has("gateWindow") && !o.get("gateWindow").isJsonNull()) {
+                c.gateWindow = flag01("gateWindow", o.get("gateWindow")); // gate-loop-window-1113 (null = absent)
+            }
             return c;
         }
     }
@@ -4221,10 +4223,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * gate-loop-window-1113: borrow the game's loop-window slot for this ask's reach read: a window of a quarter of the
      * decision budget from now, on this seat's clock (never an earlier ask's: on the real clock usually expired, on a work
      * clock possibly the other pilot seat's). Return it with {@link forge.ai.simulation.ForcedWinSolver#returnLoopWindow}.
-     * Null (nothing borrowed) when the switch is off or there is no budget (det runs).
+     * Null (nothing borrowed) when the switch is off or there is no budget (det runs). An empty slot is not borrowed
+     * (the read opens its own default window there, as off) but still counts as the gate's own window.
      */
     private Long[] borrowGateWindow(final Game g) {
-        if (!gateWindowOn() || cfg.budgetMs <= 0) {
+        if (cfg.budgetMs <= 0 || !gateWindowOn()) {
             return null;
         }
         return forge.ai.simulation.ForcedWinSolver.borrowLoopWindow(g, System.nanoTime(), cfg.budgetMs * 1_000_000L);
