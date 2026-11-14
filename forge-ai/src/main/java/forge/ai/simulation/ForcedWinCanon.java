@@ -623,7 +623,7 @@ public final class ForcedWinCanon {
             if (k == null) {
                 k = ConcurrentHashMap.newKeySet();
                 k.addAll(pool);
-                k.addAll(BeliefSampler.basics());
+                k.addAll(java.util.Arrays.asList(BeliefSampler.basics()));
                 for (String key : entries.keySet()) {
                     k.add(key.substring(key.lastIndexOf('|') + 1));
                 }
