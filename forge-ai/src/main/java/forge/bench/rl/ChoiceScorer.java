@@ -452,6 +452,13 @@ public final class ChoiceScorer {
         this.copyDungeon = on;
     }
 
+    /** sdcc-copycast-1114 (the search's copyStaleRefs key; false = off). */
+    private boolean copyStaleRefs = false;
+
+    public void setCopyStaleRefs(final boolean on) {
+        this.copyStaleRefs = on;
+    }
+
     public Config config() {
         return cfg;
     }
@@ -462,6 +469,11 @@ public final class ChoiceScorer {
             @Override
             public boolean copyDungeon() {
                 return copyDungeon;
+            }
+
+            @Override
+            public boolean copyStaleRefs() {
+                return copyStaleRefs;
             }
 
             @Override

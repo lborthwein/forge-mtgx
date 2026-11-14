@@ -453,6 +453,12 @@ public final class LookaheadSearch {
          * its current room ({@link GameCopier#setCopyDungeon}). Without it no copy holds the dungeon.
          */
         public boolean copyDungeon = false;
+        /**
+         * Lane sdcc-copycast-1114 (false = off, and then nothing changes): the search's copies leave out a stack entry's
+         * stale card target or gone paid token instead of failing ({@link GameCopier#setCopyStaleRefs}; today such a
+         * play-out fails as copy_error "Couldn't map ..." / "stack copy: paid ... not in the copy").
+         */
+        public boolean copyStaleRefs = false;
 
         /** S2T: the belief is the co-draft deck prior. */
         public boolean codraft() {
@@ -670,6 +676,9 @@ public final class LookaheadSearch {
             }
             if (copyDungeon) {
                 o.addProperty("copyDungeon", true); // sdcc-copycast-1114: only when on
+            }
+            if (copyStaleRefs) {
+                o.addProperty("copyStaleRefs", true); // sdcc-copycast-1114: only when on
             }
             if (rankerOn()) {
                 final JsonObject r = new JsonObject();
@@ -6647,6 +6656,7 @@ public final class LookaheadSearch {
         if (cfg.historyLki) c.setHistoryLki(true);
         if (cfg.copyBackFace) c.setCopyBackFace(true);
         if (cfg.copyDungeon) c.setCopyDungeon(true); // sdcc-copycast-1114
+        if (cfg.copyStaleRefs) c.setCopyStaleRefs(true); // sdcc-copycast-1114
         if (cfg.stackAbilityCopies) c.setStackAbilityCopies(true);
         if (cfg.stackHistory) c.setStackHistory(true);
         if (cfg.copyEot == AiFixes.Mode.ON) {

@@ -336,6 +336,7 @@ public final class RlLiveSeat {
                     case "copyFidelity": c.copyFidelity = Integer.parseInt(v); break;
                     case "copyCast": c.copyCast = !"0".equals(v) && !"false".equals(v); break; // sdcc-copycast-1114
                     case "copyDungeon": c.copyDungeon = !"0".equals(v) && !"false".equals(v); break; // sdcc-copycast-1114
+                    case "copyStaleRefs": c.copyStaleRefs = !"0".equals(v) && !"false".equals(v); break; // sdcc-copycast-1114
                     // block-search-1019: the look-ahead over declare-blockers asks (absent = off, S-c / S-b unchanged)
                     case "blocks": c.blocks = blockKey(k, v, 0, 1); break;
                     case "blocks.samples": c.blockSamples = blockKey(k, v, 0, 64); break;

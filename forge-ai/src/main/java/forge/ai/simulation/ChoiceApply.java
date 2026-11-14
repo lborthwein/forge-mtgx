@@ -37,6 +37,11 @@ public final class ChoiceApply {
             return false;
         }
 
+        /** sdcc-copycast-1114: the copies leave out stale stack references ({@link GameCopier#setCopyStaleRefs}). */
+        default boolean copyStaleRefs() {
+            return false;
+        }
+
         /** The seat arranged these cards going to its library (what the live bridge reports as a look). */
         default void onOrder(Object ctx, Game g, Player me, List<Card> cards) {
         }
@@ -338,6 +343,9 @@ public final class ChoiceApply {
         final GameCopier c = new GameCopier(live, true);
         if (frames != null && frames.copyDungeon()) {
             c.setCopyDungeon(true); // sdcc-copycast-1114
+        }
+        if (frames != null && frames.copyStaleRefs()) {
+            c.setCopyStaleRefs(true); // sdcc-copycast-1114
         }
         if (fidelity > 0) {
             c.setCopyFidelity(fidelity);
