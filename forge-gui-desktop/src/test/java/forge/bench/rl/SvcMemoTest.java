@@ -320,4 +320,39 @@ public class SvcMemoTest {
         Assert.assertEquals(w[0].gameUid, 2L);
         Assert.assertEquals(sends.get(), 2);
     }
+
+    /**
+     * The fault found on 11-14: the first asker got the very object the memo stored, and a seat replaces its answer's
+     * steps when a schedule, a plan or a search overrides the policy, so later askers were served the override. Every
+     * asker, the first one included, must hold an answer that shares nothing with the memo's or with another asker's.
+     */
+    @Test
+    public void noAskerCanChangeWhatAnotherAskerIsServed() throws Exception {
+        final SvcMemo m = new SvcMemo();
+        final AtomicInteger sends = new AtomicInteger();
+        final SvcMemo.Sender sender = q -> {
+            sends.incrementAndGet();
+            final RlWire.Decision d = answer(q, 7, RlWire.ST_OK);
+            d.steps = new short[] {3, 1};
+            return d;
+        };
+        final RlWire.Decision first = m.decide(payload(1L, 0, 0.1f), false, sender);
+        // the first asker's seat overrides the policy: it replaces the steps, and (another way to do the same) writes into them
+        first.steps = new short[] {9};
+        final RlWire.Decision second = m.decide(payload(2L, 5, 0.1f), false, sender);
+        Assert.assertTrue(java.util.Arrays.equals(second.steps, new short[] {3, 1}), "the policy's answer, not the first asker's override");
+        second.steps[0] = 7;
+        second.logp = 99f;
+        second.status = RlWire.ST_DELEGATE;
+        final RlWire.Decision third = m.decide(payload(3L, 6, 0.1f), false, sender);
+        Assert.assertTrue(java.util.Arrays.equals(third.steps, new short[] {3, 1}), "nor the second asker's");
+        Assert.assertTrue(Float.compare(third.logp, -0.25f) == 0);
+        Assert.assertEquals(third.status, RlWire.ST_OK);
+        Assert.assertEquals(sends.get(), 1);
+        // writing into the array the sender returned (the first asker's own object) is not seen either
+        final SvcMemo m2 = new SvcMemo();
+        final RlWire.Decision a = m2.decide(payload(1L, 0, 0.2f), false, sender);
+        a.steps[0] = 8;
+        Assert.assertTrue(java.util.Arrays.equals(m2.decide(payload(2L, 1, 0.2f), false, sender).steps, new short[] {3, 1}));
+    }
 }
