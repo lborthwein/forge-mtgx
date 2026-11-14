@@ -4609,7 +4609,7 @@ public final class LookaheadSearch {
      * the decision's pooled variance, so a thin sample carries the uncertainty the rest of the decision shows.
      * With every world finished this is {@link #argmax}.
      */
-    static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP) {
+    public static int chooseAnytime(double[][] v, boolean[][] f, boolean[] ok, int n, int k, double z, double margin, double rootP) {
         return chooseAnytime(v, f, ok, n, k, z, margin, rootP, null, 0.0, null);
     }
 

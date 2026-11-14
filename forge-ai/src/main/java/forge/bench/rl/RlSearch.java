@@ -111,6 +111,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean stack = false;
         /** Also search pass (second, after the default), as K8's candidate set does, whatever its prior. */
         public boolean includePass = false;
+        /**
+         * sdcc-floor-1114 (off by default; written to JSON only when on): a menu entry whose policy prior is below
+         * {@link #priorFloorMin} is not offered to the look-ahead as a departure (the policy's own answer always is), and
+         * a sampled policy plan whose first step is such an entry is dropped. The solver's lines (a plan or proven line)
+         * are not filtered, so a move one of them backs is still offered, as that line.
+         */
+        public boolean priorFloor = false;
+        public double priorFloorMin = 0.05;
         /** host:port of tools/ml/rl/search_server.py. */
         public String server;
         public int readTimeoutMs = 120_000;
@@ -429,7 +437,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit", "priorFloor", "priorFloorMin"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -488,6 +496,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
             if (o.has("includePass")) c.includePass = o.get("includePass").getAsBoolean();
+            if (o.has("priorFloor")) c.priorFloor = o.get("priorFloor").getAsBoolean();
+            if (o.has("priorFloorMin")) c.priorFloorMin = o.get("priorFloorMin").getAsDouble();
             if (o.has("server") && !o.get("server").isJsonNull()) c.server = o.get("server").getAsString();
             if (o.has("readTimeoutMs")) c.readTimeoutMs = o.get("readTimeoutMs").getAsInt();
             if (o.has("cpuCapMs")) c.cpuCapMs = o.get("cpuCapMs").getAsLong();
@@ -709,6 +719,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 throw new IllegalArgumentException("search.playoutLoopGuard / playoutMaxDecisions / replayMayPlayLoose "
                         + "need playout=policy");
             }
+            if (!(priorFloorMin > 0 && priorFloorMin < 1)) {
+                throw new IllegalArgumentException("search.priorFloorMin must be in (0, 1), not " + priorFloorMin);
+            }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
             AiFixes.Mode.parse(zeroX);
@@ -739,6 +752,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("departMedian", departMedian);
             o.addProperty("stack", stack);
             o.addProperty("includePass", includePass);
+            if (priorFloor) {
+                o.addProperty("priorFloor", true); // sdcc-floor-1114: only when on
+                o.addProperty("priorFloorMin", priorFloorMin);
+            }
             o.addProperty("cpuCapMs", cpuCapMs);
             o.addProperty("seedSalt", seedSalt);
             if (policySha != null) {
@@ -1442,6 +1459,55 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 + sa.getDescription();
     }
 
+    /** sdcc-floor-1114: the decision's count of entries and sampled plans {@link Config#priorFloor} set aside (0 = off). */
+    private int floorDropped;
+
+    /**
+     * sdcc-floor-1114 ({@link Config#priorFloor}): removes from {@code rest} (the entries after the policy's own, which is
+     * never in it) every entry whose summed policy prior ({@code by.get(entry)[0]}) is below {@code min}. Returns how many.
+     */
+    static int priorFloor(final List<Integer> rest, final Map<Integer, double[]> by, final double min) {
+        final int n0 = rest.size();
+        rest.removeIf(e -> {
+            final double[] a = by.get(e);
+            return a != null && a[0] < min;
+        });
+        return n0 - rest.size();
+    }
+
+    /**
+     * sdcc-floor-1114 ({@link Config#priorFloor}): drops each sampled policy plan whose first step is a menu entry with a
+     * summed policy prior below {@code min} (with its label). The solver's lines are kept whatever their first step: a
+     * move a plan or proven line backs is still offered, as that line. Returns how many were dropped.
+     */
+    static int priorFloorSamples(final PlanSearch.Stage st, final RlCandidates.Menu m, final List<SpellAbility> objs,
+            final Map<Integer, double[]> by, final Map<String, Integer> entryOf, final double min) {
+        int dropped = 0;
+        for (int i = st.plans.size() - 1; i >= 0; i--) {
+            if (!(st.plans.get(i) instanceof PlanSearch.PolicyPlan) || ((PlanSearch.PolicyPlan) st.plans.get(i)).steps.isEmpty()) {
+                continue;
+            }
+            final int c = PlanSearch.match(m, objs, ((PlanSearch.PolicyPlan) st.plans.get(i)).steps.get(0));
+            final int ch = c < 0 ? -1 : choiceOf(m, c);
+            if (ch < 0 || ch > objs.size()) {
+                continue;
+            }
+            final Integer e = entryOf.get(actionKey(ch == 0 ? null : objs.get(ch - 1)));
+            final double[] a = e == null ? null : by.get(e);
+            if (a != null && a[0] < min) {
+                st.plans.remove(i);
+                if (i < st.labels.size()) {
+                    st.labels.remove(i);
+                }
+                if (st.setup > i) {
+                    st.setup--;
+                }
+                dropped++;
+            }
+        }
+        return dropped;
+    }
+
     /** The bridge menu entry (1-based; 0 = pass) and the announced X (-1 = none) of a PRIORITY candidate. */
     static int choiceOf(final RlCandidates.Menu m, final int i) {
         final JsonElement f = m.cands.get(i).frag;
@@ -1722,6 +1788,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final int k = Double.compare(by.get(y)[0], by.get(x)[0]);
             return k != 0 ? k : Integer.compare(x, y);
         });
+        floorDropped = cfg.priorFloor ? priorFloor(rest, by, cfg.priorFloorMin) : 0;
         if (respond) {
             // (d): the counters right after the default, so the breadth holds them
             final List<Integer> counters = new ArrayList<>();
@@ -1764,6 +1831,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 tap("proven_line", stage, null, order.size(), RlSeat.PrioritySearch.HOOK);
                 return RlSeat.PrioritySearch.HOOK;
             }
+            if (cfg.priorFloor) {
+                floorDropped += priorFloorSamples(stage, m, menuObjs, by, entryOf, cfg.priorFloorMin);
+            }
+        }
+        if (cfg.priorFloor && floorDropped > 0) {
+            System.err.println("[prior-floor] turn=" + g.getPhaseHandler().getTurn() + " phase=" + g.getPhaseHandler().getPhase()
+                    + " dropped=" + floorDropped + " min=" + cfg.priorFloorMin);
         }
         armForce(mark());
         if (cfg.anytime && "value".equals(cfg.leaf)) {
@@ -1960,6 +2034,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("turn", g.getPhaseHandler().getTurn());
             row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
             row.addProperty("C", c);
+            if (cfg.priorFloor) {
+                row.addProperty("floor_dropped", floorDropped); // sdcc-floor-1114: only when on
+            }
             row.addProperty("entries", by.size());
             row.addProperty("v_root", sc.valueObs);
             if (cfg.reach != null && reachCfg().gate) {
@@ -2455,6 +2532,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
         row.addProperty("kind", "plan");
         row.addProperty("propose_ms", Math.round(st.ms * 10) / 10.0);
+        if (cfg.priorFloor) {
+            row.addProperty("floor_dropped", floorDropped); // sdcc-floor-1114: only when on
+        }
         row.addProperty("note", st.note);
         final JsonArray labels = new JsonArray();
         for (String l : st.labels) {

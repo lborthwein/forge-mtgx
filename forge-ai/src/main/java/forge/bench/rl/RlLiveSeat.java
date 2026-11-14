@@ -326,6 +326,8 @@ public final class RlLiveSeat {
                     case "maxSteps": c.maxSteps = Integer.parseInt(v); break;
                     case "leafExtraSteps": c.leafExtraSteps = Integer.parseInt(v); break;
                     case "departZ": c.departZ = Double.parseDouble(v); break;
+                    case "priorFloor": c.priorFloor = Boolean.parseBoolean(v); break; // sdcc-floor-1114 (live default off)
+                    case "priorFloorMin": c.priorFloorMin = Double.parseDouble(v); break;
                     case "anytime": c.anytime = Boolean.parseBoolean(v); break;
                     case "margin": c.margin = Double.parseDouble(v); break;
                     case "leaf": c.leaf = v; break;
