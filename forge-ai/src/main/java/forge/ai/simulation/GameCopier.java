@@ -2020,6 +2020,25 @@ public class GameCopier {
         }
         gameObjectMap = new CopiedGameObjectMap(newGame);
 
+        if (copyDungeon || origGame.copyDungeon) {
+            // sdcc-copycast-1114: the dungeons a player has completed (the cards left every zone; "if you've completed
+            // a dungeon" reads this list)
+            for (Map.Entry<Player, Player> e : playerMap.entrySet()) {
+                for (Card d : e.getKey().getCompletedDungeons()) {
+                    Card nd = cardMap.get(d);
+                    if (nd == null && d.getPaperCard() != null) {
+                        nd = CardFactory.getCard(d.getPaperCard(), playerMap.get(d.getOwner()), d.getId(), newGame);
+                        nd.setGamePieceType(d.getGamePieceType());
+                        nd.setCurrentRoom(d.getCurrentRoom());
+                        cardMap.put(d, nd);
+                    }
+                    if (nd != null) {
+                        e.getValue().addCompletedDungeon(nd);
+                    }
+                }
+            }
+        }
+
         for (Card card : cardsToCopy(ZoneType.Battlefield)) {
             Card otherCard = cardMap.get(card);
             otherCard.setGameTimestamp(card.getGameTimestamp());

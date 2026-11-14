@@ -138,6 +138,45 @@ public class CopierDungeonTest extends SimulationTest {
         }
     }
 
+    /** A completed dungeon (the card has left every zone) is on the copy's list of completed dungeons with the key. */
+    @Test(timeOut = 600000)
+    public void aCompletedDungeonIsCarriedWithTheKey() {
+        initAndCreateGame();
+        final Game g = ForcedWinSolverTest.game("Default", "Default", FRAME);
+        final Player me = g.getPlayers().get(0);
+        venture(g, me);
+        final Card d = dungeonOf(me);
+        g.getAction().completeDungeon(me, d);
+        Assert.assertEquals(me.getCompletedDungeons().size(), 1);
+        Assert.assertNull(dungeonOf(me));
+        final LookaheadSearch off = search(false), on = search(true);
+        try {
+            Assert.assertEquals(off.copierOf(g).makeCopy().getPlayers().get(0).getCompletedDungeons().size(), 0, "off (today)");
+            final Game cp = on.copierOf(g).makeCopy();
+            final Player cme = cp.getPlayers().get(0);
+            Assert.assertEquals(cme.getCompletedDungeons().size(), 1, "on: the completed dungeon is known in the copy");
+            Assert.assertEquals(cme.getCompletedDungeons().get(0).getName(), d.getName());
+            Assert.assertNotSame(cme.getCompletedDungeons().get(0), d);
+            Assert.assertNull(dungeonOf(cme), "it is not back in the command zone");
+            Assert.assertEquals(cp.getPlayers().get(1).getCompletedDungeons().size(), 0);
+            Assert.assertEquals(new GameCopier(cp, true).makeCopy().getPlayers().get(0).getCompletedDungeons().size(), 1);
+        } finally {
+            off.shutdown();
+            on.shutdown();
+        }
+    }
+
+    /** The solver's own copies take the key from its config (plans.solverCfg.copyDungeon). */
+    @Test
+    public void theSolverConfigCarriesTheKey() {
+        final java.util.Map<String, String> m = new java.util.HashMap<>();
+        Assert.assertFalse(ForcedWinSolver.Config.fromProps(m::get).copyDungeon);
+        m.put("copyDungeon", "true");
+        Assert.assertTrue(ForcedWinSolver.Config.fromProps(m::get).copyDungeon);
+        final String live = "server=127.0.0.1:1,cardIndex=/x,policySha=" + "0".repeat(64);
+        Assert.assertNotNull(forge.bench.rl.RlLiveSeat.Spec.parse(live + ",plans.solverCfg.hideOwnLibrary=true,plans.solverCfg.copyDungeon=true"));
+    }
+
     @Test
     public void theKeyIsOffByDefaultAndWrittenOnlyWhenOn() {
         final LookaheadSearch.Config c = new LookaheadSearch.Config();
