@@ -131,7 +131,9 @@ public final class EngineFixes {
      * copy's. Off, a copy shares the original's {@code Mana} objects, so spending floating mana in a play-out raises the
      * ORIGINAL player's mana-spent count and holds a ManaExpend trigger on the ORIGINAL game's waiting list, from the
      * play-out's thread (the "wt is null" crash in TriggerHandler.collectTriggerForWaiting), and mana whose ability adds
-     * an effect when spent (can't be countered, counters) adds it to the original game.
+     * an effect when spent (can't be countered, counters) adds it to the original game. On, play-outs count their own
+     * spend and hold their own ManaExpend triggers, so search decisions change in positions with floating mana: a new
+     * engine id for corpora under the heuristic training contract.
      */
     private static boolean copyPoolMana = flag("forge.copyPoolMana");
 
