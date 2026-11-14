@@ -431,6 +431,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * level-2 pass does; only after the exact and prefix matches failed. false = off.
          */
         public boolean replayMayPlayLoose = false;
+        /**
+         * Lane sdcc-copycast-1114 ({@link LookaheadSearch.Config#copyCast}): the copies and the play-out seat's menu
+         * find a candidate cast or land play that an effect permits (from the graveyard, from exile) by the grant's
+         * structure when its description differs. false = off, and then nothing changes.
+         */
+        public boolean copyCast = false;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -440,7 +446,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
-                "playoutMaxDecisions", "replayMayPlayLoose", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
+                "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit"));
@@ -617,6 +623,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("playoutLoopGuard")) c.playoutLoopGuard = o.get("playoutLoopGuard").getAsInt();
             if (o.has("playoutMaxDecisions")) c.playoutMaxDecisions = o.get("playoutMaxDecisions").getAsInt();
             if (o.has("replayMayPlayLoose")) c.replayMayPlayLoose = o.get("replayMayPlayLoose").getAsBoolean();
+            if (o.has("copyCast")) c.copyCast = o.get("copyCast").getAsBoolean();
             c.check();
             return c;
         }
@@ -889,6 +896,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (replayMayPlayLoose) {
                 o.addProperty("replayMayPlayLoose", true);
+            }
+            if (copyCast) {
+                o.addProperty("copyCast", true); // sdcc-copycast-1114: only when on
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -1258,6 +1268,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.leafSym = cfg.leafSym;
         lc.leafOpp = cfg.leafSym;
         lc.replayMayPlayLoose = cfg.replayMayPlayLoose; // step3-playout-fixes-1028
+        lc.copyCast = cfg.copyCast; // sdcc-copycast-1114
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
             lc.stack = true;
@@ -4919,6 +4930,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                         final int ch = m.cands.get(i).kind <= 0 ? -1 : choiceOf(m, i);
                         if (ch > 0 && ch <= objs.size() && first.matchesMayPlay(objs.get(ch - 1))) {
                             match.add(i);
+                        }
+                    }
+                }
+                if (match.isEmpty() && first.maySig != null) {
+                    // sdcc-copycast-1114 (copyCast): the same may-play grant on the same card; first with the
+                    // candidate's optional costs, then whatever they are
+                    for (int pass = 0; pass < 2 && match.isEmpty(); pass++) {
+                        for (int i = 0; i < m.C(); i++) {
+                            final int ch = m.cands.get(i).kind <= 0 ? -1 : choiceOf(m, i);
+                            if (ch > 0 && ch <= objs.size() && first.matchesMaySig(objs.get(ch - 1), pass == 0)) {
+                                match.add(i);
+                            }
                         }
                     }
                 }
