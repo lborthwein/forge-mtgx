@@ -154,6 +154,8 @@ public final class ForcedWinPlanner {
          * that target). A permanent sacrificed as the step's cost is in {@link #sacIds}.
          */
         int objTarget = -1, objLink;
+        /** sdcc-gycast-1114: the spell is cast from our graveyard under a permanent's grant (screens only: never followed). */
+        boolean fromGrave;
 
         Step(AbilKind kind, ACard host, Abil ab, int floatColor) {
             this.kind = kind;
@@ -221,6 +223,7 @@ public final class ForcedWinPlanner {
             s.free = free;
             s.objTarget = objTarget;
             s.objLink = objLink;
+            s.fromGrave = fromGrave;
             s.cacPlayed = cacPlayed == null ? null : new ArrayList<>(cacPlayed);
             s.payFloats = payFloats == null ? null : new ArrayList<>(payFloats);
             if (body != null) {
@@ -327,7 +330,7 @@ public final class ForcedWinPlanner {
             if (kind == AbilKind.REPEAT) {
                 return "REPEAT" + times + "x" + body;
             }
-            return (free ? "FREE-" : "") + kind + ":" + hostName + (floatColor >= 0 ? "->" + ForcedWinModel.SHORT[floatColor] : "")
+            return (free ? "FREE-" : "") + (fromGrave ? "GRAVE-" : "") + kind + ":" + hostName + (floatColor >= 0 ? "->" + ForcedWinModel.SHORT[floatColor] : "")
                     + (optCosts == null ? "" : "+" + optCosts) + (sacIds.isEmpty() ? "" : " sac" + sacIds)
                     + (castFree >= 0 ? " cast" + castFree : "") + (objTarget >= 0 ? " on[" + objTarget + "]" : "")
                     + (targetRefs.isEmpty() ? "" : "->" + targetRefs) + (triggerRef == null ? "" : " trigger->" + triggerRef)
@@ -503,6 +506,18 @@ public final class ForcedWinPlanner {
          * and its lines are unchanged.
          */
         boolean bridge;
+        /**
+         * sdcc-gycast-1114 (solverCfg planGraveCasts; false = off, the default, and then nothing changes; with it on,
+         * nothing changes either unless a card of the position carries a grant, {@link ForcedWinModel.Grave}): while a
+         * permanent with a grant is in play, each card of our known graveyard whose name a sandbox cast under it is a
+         * move: its printed spell, paid as from hand, plus the observed added cost (other graveyard cards exiled: cards
+         * the position did not read first, then the least useful). The card then goes where the sandbox left it (back
+         * to the graveyard, to exile, or into play). Our graveyard is counted: cards milled from an unknown library
+         * join it, and a storm spell's mill of our own library repeats per spell cast. A granting permanent with an
+         * end-step sacrifice leaves at the pass. Screens only (as {@link #loops}): the solver's root plan never asks
+         * for it, so no such step is ever followed.
+         */
+        boolean graveCasts;
     }
 
     /**
@@ -641,9 +656,12 @@ public final class ForcedWinPlanner {
         boolean dead;
         /** sdcc-tutorcast-1110: the card the ability being resolved casts for free once it has resolved (-1 = none). */
         int pendingFree = -1;
+        /** sdcc-gycast-1114: casts from the graveyard this turn (counted only for a grant with a per-turn limit). */
+        int graveUsed;
 
         S copy() {
             final S s = new S();
+            s.graveUsed = graveUsed;
             s.pendingFree = pendingFree;
             s.turnIdx = turnIdx;
             s.sorcery = sorcery;
@@ -698,6 +716,14 @@ public final class ForcedWinPlanner {
                 sb.append(e == UNKNOWN ? "?" : e < 0 ? "*" : cards.get(e).name).append(',');
             }
             sb.append('R').append(names(remaining)).append('P').append(names(libPool)).append('G').append(names(gyPool));
+            if (graveActive) {
+                // sdcc-gycast-1114: the graveyard is a resource only then: the cards it holds that the model cannot name,
+                // and (under a per-turn limit) the casts made from it this turn
+                sb.append('X').append(gyExtra);
+                if (graveLimited) {
+                    sb.append('u').append(graveUsed);
+                }
+            }
             return sb.toString();
         }
     }
@@ -803,6 +829,9 @@ public final class ForcedWinPlanner {
         System.err.println("FORCED_WIN planprofile byLastMove: " + profTop(profLast, 30));
     }
 
+    /** sdcc-gycast-1114: the key is on and a card of this plan carries a grant; one of the grants has a per-turn limit. */
+    private boolean graveActive, graveLimited;
+
     /** blockers-1109: passes whose blocker count differs from the pre-fix count (every creature); diagnostic only. */
     private int blockerDiffs;
 
@@ -847,6 +876,13 @@ public final class ForcedWinPlanner {
         }
         for (int i = pos.knownTop.size(); i < pos.librarySize; i++) {
             s.lib.add(UNKNOWN);
+        }
+        if (lim.graveCasts) {
+            // sdcc-gycast-1114: on only when a card the plan can see carries a grant (else exactly the search without the key)
+            for (ACard a : cards) {
+                graveActive |= a.grave != null;
+                graveLimited |= a.grave != null && a.grave.perTurn > 0;
+            }
         }
         nodeCap = lim.nodes;
         depthCap = lim.depth;
@@ -1035,6 +1071,15 @@ public final class ForcedWinPlanner {
         final Set<String> tried = new HashSet<>();
         final boolean pending = pos.pendingId >= 0 && s.steps.isEmpty();
         final boolean quiet = !pending && s.turnIdx < lim.quietTurns; // GOLDFISH: lands and the pass only
+        if (graveActive && s.oppLib <= 0 && !pending && !s.preMain && s.turnIdx < lim.horizon - 1) {
+            // sdcc-gycast-1114: the opponent's library is empty in the plan: the pass wins, and is the node's only move
+            // (off, the pass is tried last, after every other move's subtree)
+            final S n = s.copy();
+            n.steps.add(Step.PASS);
+            return passTurn(n);
+        }
+        // sdcc-gycast-1114: casts of a granting permanent from hand: after the moves that win at once, before the rest
+        final List<S> lead = new ArrayList<>();
         if (lim.bridge && !pending && !quiet) {
             bridgeMoves(s); // sdcc-bridge-1111 (notes setup lines; the node's own moves are unchanged)
         }
@@ -1084,7 +1129,8 @@ public final class ForcedWinPlanner {
                         : allowed(s, a, ab))) {
                     continue;
                 }
-                final List<S> into = isWinny(a, ab) || ab.has(EffKind.PILE) ? first
+                final List<S> into = graveActive && a.grave != null && ab.kind == AbilKind.SPELL ? lead
+                        : isWinny(a, ab) || ab.has(EffKind.PILE) ? first
                         : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
                                 || ab.has(EffKind.TUTOR_CAST) ? second : third;
                 if (winFirst) {
@@ -1160,7 +1206,11 @@ public final class ForcedWinPlanner {
                 }
             }
         }
+        if (graveActive && !pending && !quiet) {
+            graveMoves(s, first, second, third, wins, late, winFirst); // sdcc-gycast-1114
+        }
         final List<S> out = new ArrayList<>(wins);
+        out.addAll(lead);
         out.addAll(first);
         out.addAll(second);
         out.addAll(third);
@@ -1186,6 +1236,96 @@ public final class ForcedWinPlanner {
             out.addAll(passTurn(n));
         }
         return out;
+    }
+
+    /**
+     * sdcc-gycast-1114 ({@link Limits#graveCasts}): the casts from our graveyard open at {@code s}: with a granting
+     * permanent in play, one move per card name of the known graveyard a sandbox cast under that grant and per printed
+     * spell of it (as a free cast's: no alternative or optional cost, no card target), when the graveyard holds the
+     * added cost's other cards and we can pay the spell.
+     */
+    private void graveMoves(S s, List<S> first, List<S> second, List<S> third, List<S> wins, List<S> late, boolean winFirst) {
+        ForcedWinModel.Grave gr = null;
+        String grName = null;
+        for (Perm p : s.bf) {
+            final ACard a = cards.get(p.card);
+            if (a.grave != null && !a.grave.names.isEmpty() && (grName == null || a.name.compareTo(grName) < 0)) {
+                gr = a.grave;
+                grName = a.name;
+            }
+        }
+        if (gr == null || gr.perTurn > 0 && s.graveUsed >= gr.perTurn) {
+            return;
+        }
+        final Set<String> seenNames = new HashSet<>();
+        for (int gi = 0; gi < s.gyPool.size(); gi++) {
+            final int g = s.gyPool.get(gi);
+            if (g <= 0) {
+                continue; // an unseen card
+            }
+            final ACard a = cards.get(g);
+            final ForcedWinModel.GraveCast gc = gr.names.get(a.name);
+            if (gc == null || !seenNames.add(a.name) || s.gyPool.size() - 1 + s.gyExtra < gc.exile) {
+                continue;
+            }
+            if (a.permanent && !a.useful() && a.onBattlefield.isEmpty()) {
+                continue; // a permanent the model can do nothing with: not worth its cards
+            }
+            for (Abil ab : freeSpells(a)) {
+                if (!allowed(s, a, ab) || !affordable(s, ab)) {
+                    continue;
+                }
+                final S n = s.copy();
+                final Step step = new Step(AbilKind.SPELL, a, ab, -1);
+                step.fromGrave = true;
+                step.expHandIdx = s.hand.stream().mapToInt(Integer::intValue).toArray();
+                step.expLibIdx = s.lib.subList(0, Math.min(6, s.lib.size())).stream().mapToInt(Integer::intValue).toArray();
+                n.gyPool.remove(gi);
+                exileFuel(n, gc.exile, gr);
+                n.graveUsed++;
+                if (!pay(n, ab, null, step)) {
+                    continue;
+                }
+                final List<S> res = new ArrayList<>();
+                afterPay(n, step, null, g, -1, a, ab, false, res, null);
+                if (!a.permanent && gc.to == ForcedWinModel.Abil.SELF_GRAVEYARD && !ab.has(EffKind.SELF_TO_LIBRARY)) {
+                    for (S x : res) {
+                        x.gyPool.add(g); // it resolved into the graveyard again (observed): castable once more
+                    }
+                }
+                final List<S> into = isWinny(a, ab) || ab.has(EffKind.PILE) ? first
+                        : ab.has(EffKind.DRAW) || ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                                || ab.has(EffKind.TUTOR_CAST) ? second : third;
+                if (winFirst) {
+                    place(res, into, isWinny(a, ab) && !staysAsWin(a, ab), wins, late);
+                } else {
+                    into.addAll(res);
+                }
+            }
+        }
+    }
+
+    /**
+     * sdcc-gycast-1114: {@code n} cards leave our graveyard as a cast's added cost: first cards the model cannot name
+     * (unread or unseen ones), then lands and cards the grant cannot cast, then the least useful (the card being cast is
+     * already out of the list).
+     */
+    private void exileFuel(S s, int n, ForcedWinModel.Grave gr) {
+        for (; n > 0 && s.gyExtra > 0; n--) {
+            s.gyExtra--;
+        }
+        while (n > 0 && s.gyPool.remove(Integer.valueOf(unknownCard))) {
+            n--;
+        }
+        if (n <= 0) {
+            return;
+        }
+        final List<Integer> rest = new ArrayList<>(s.gyPool);
+        rest.sort(Comparator.comparingInt((Integer c) -> gr.names.containsKey(cards.get(c).name) ? 1 : 0)
+                .thenComparingInt(c -> -cards.get(c).order()).thenComparingInt(c -> -cards.get(c).id));
+        for (int i = 0; i < n && i < rest.size(); i++) {
+            s.gyPool.remove(rest.get(i));
+        }
     }
 
     private static boolean isWinny(ACard a, Abil ab) {
@@ -1810,6 +1950,17 @@ public final class ForcedWinPlanner {
             // next-turn-1107: permanents a verification world lost in the opponent's turn are not there on our next turn
             s.bf.removeIf(p -> lim.goneAtPass.contains(cards.get(p.card).id));
         }
+        if (graveActive) {
+            // sdcc-gycast-1114: a granting permanent with an end-step sacrifice is in our graveyard on our next turn
+            for (int i = s.bf.size() - 1; i >= 0; i--) {
+                final ACard a = cards.get(s.bf.get(i).card);
+                if (a.grave != null && a.grave.endStep) {
+                    s.gyPool.add(s.bf.remove(i).card);
+                    s.devotion -= a.bluePips;
+                }
+            }
+            s.graveUsed = 0;
+        }
         s.turnIdx++;
         s.sorcery = true;
         Arrays.fill(s.pool, 0);
@@ -1904,8 +2055,14 @@ public final class ForcedWinPlanner {
                 return;
             }
             case MILL: {
-                for (int i = 0; i < e.n && !s.lib.isEmpty(); i++) {
+                // sdcc-gycast-1114 (only while a grant is in the plan): a storm spell's own-library mill repeats per spell,
+                // and an unseen card milled is one more card in our graveyard
+                final int mills = e.n * (graveActive && ab != null && ab.storm ? Math.max(1, s.storm) : 1);
+                for (int i = 0; i < mills && !s.lib.isEmpty(); i++) {
                     final int top = s.lib.remove(0);
+                    if (top == UNKNOWN && graveActive) {
+                        s.gyExtra++;
+                    }
                     if (top <= LAZY && top != UNKNOWN) {
                         final int f = leftover(s.remaining);
                         if (f >= 0) {

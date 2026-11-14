@@ -320,6 +320,14 @@ public final class ForcedWinSolver {
          */
         public boolean planLoops = false;
         /**
+         * sdcc-gycast-1114 (planGraveCasts; false = off, and then nothing changes): the seat's own reader recognises a
+         * permanent that lets its controller cast cards from the graveyard and observes, per card of ours, what that
+         * cast costs and leaves ({@link ForcedWinModel.Grave}); the screens (reach, goldfish, the reach gate; never the
+         * root plan) then plan such casts with the graveyard as a counted resource
+         * ({@link ForcedWinPlanner.Limits#graveCasts}). The defense's reader of the opponent's cards is unchanged.
+         */
+        public boolean planGraveCasts = false;
+        /**
          * sdcc-tutorcast-1110 (off by default, and then nothing changes): the width model knows a spell that searches our
          * library for a card and lets us cast it at once without paying its mana cost. The reader's probes observe the
          * effect ({@link ForcedWinModel.EffKind#TUTOR_CAST}: which of our cards the engine offers to cast, one sandbox
@@ -964,6 +972,7 @@ public final class ForcedWinSolver {
             c.stackHistory = "true".equals(get.apply("stackHistory")); // house p17
             c.planExpandCap = boolOrLive(get.apply("planExpandCap")); // live-fixes-1107: default forge.liveFixes; // ledger-sweep2-1107
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
+            c.planGraveCasts = "true".equals(get.apply("planGraveCasts")); // sdcc-gycast-1114
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
@@ -1547,6 +1556,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.probeObjects) {
             this.reader.probeObjects = true; // sdcc-probeobj-1111: our own cards only (its own template keys)
+        }
+        if (cfg.planGraveCasts) {
+            this.reader.graveCasts = true; // sdcc-gycast-1114: our own cards only (its own template keys)
         }
         if (cfg.hideHidden()) {
             hideProbes(); // sdcc-leak-1111
@@ -5571,6 +5583,8 @@ public final class ForcedWinSolver {
             lim.horizon = Math.max(1, horizon);
             lim.quietTurns = Math.max(0, quiet);
             lim.loops = cfg.planLoops;
+            lim.graveCasts = cfg.planGraveCasts; // sdcc-gycast-1114
+            reader.graveFill(g, me, pos); // (the cards added to the position above; nothing without the key)
             final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
             s.nodes = r.nodes;
             s.exhausted = r.exhausted;
@@ -5713,6 +5727,8 @@ public final class ForcedWinSolver {
             lim.payPolicies = 1;
             lim.horizon = onePass && cfg.horizon >= 2 ? cfg.horizon : 1;
             lim.loops = cfg.planLoops;
+            lim.graveCasts = cfg.planGraveCasts; // sdcc-gycast-1114
+            reader.graveFill(g, me, pos); // (the cards added to the position above; nothing without the key)
             ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
             s.nodes = r.nodes;
             s.exhausted = r.exhausted;

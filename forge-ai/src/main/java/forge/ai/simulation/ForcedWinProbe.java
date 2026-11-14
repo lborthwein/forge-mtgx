@@ -156,6 +156,216 @@ public final class ForcedWinProbe {
 
     /** sdcc-tutorcast-1110: set by a tutorCast reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> TUTOR_CAST = ThreadLocal.withInitial(() -> false);
+    /** sdcc-gycast-1114: set by a graveCasts reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> GRAVE_CASTS = ThreadLocal.withInitial(() -> false);
+
+    /** sdcc-gycast-1114: the most library cards a grant sandbox puts into our graveyard as cards to pay an added cost with. */
+    static final int GRAVE_FILL = 8;
+
+    /**
+     * sdcc-gycast-1114: the cast-from-graveyard grant of the permanent {@code c}, by the shape of its script alone (no
+     * card or keyword names): a continuous static ability that affects cards in a graveyard and either gives them a
+     * keyword or lets them be played. Null = no such ability. What the grant really allows is not read here: each
+     * card is tried in a sandbox ({@link #graveCast}). Also read from the script: a limit of such plays per turn, and an
+     * end-step trigger that sacrifices the permanent itself (the engine's own end-of-turn mark, or the trigger's shape).
+     */
+    static ForcedWinModel.Grave graveGrant(final Card c) {
+        try {
+            if (!c.isPermanent() || c.isLand()) {
+                return null;
+            }
+            ForcedWinModel.Grave out = null;
+            for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {
+                final String zone = st.getParam("AffectedZone");
+                if (!st.checkMode(forge.game.staticability.StaticAbilityMode.Continuous) || zone == null
+                        || !zone.contains("Graveyard") || !(st.hasParam("MayPlay") || st.hasParam("AddKeyword"))) {
+                    continue;
+                }
+                out = out != null ? out : new ForcedWinModel.Grave();
+                if (st.hasParam("MayPlayLimit")) {
+                    try {
+                        out.perTurn = Math.max(out.perTurn, Integer.parseInt(st.getParam("MayPlayLimit").trim()));
+                    } catch (NumberFormatException e) {
+                        out.perTurn = Math.max(out.perTurn, 1);
+                    }
+                }
+            }
+            if (out == null) {
+                return null;
+            }
+            out.endStep = c.hasSVar("EndOfTurnLeavePlay");
+            for (Trigger t : c.getTriggers()) {
+                final String phase = t.getParam("Phase");
+                if (t.getMode() != TriggerType.Phase || phase == null || !phase.contains("End of Turn")) {
+                    continue;
+                }
+                final SpellAbility ex = t.ensureAbility();
+                if (ex != null && ex.getApi() == forge.game.ability.ApiType.Sacrifice
+                        && "Self".equals(ex.getParamOrDefault("SacValid", "Self"))) {
+                    out.endStep = true;
+                }
+            }
+            return out;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** sdcc-gycast-1114: the spells the engine lets {@code m} cast with {@code c} where it is, as description and cost text. */
+    private static List<SpellAbility> castable(final Card c, final Player m) {
+        final List<SpellAbility> out = new ArrayList<>();
+        for (SpellAbility sa : c.getAllPossibleAbilities(m, true)) {
+            if (sa != null && sa.isSpell()) {
+                out.add(sa);
+            }
+        }
+        return out;
+    }
+
+    private static String castKey(final SpellAbility sa) {
+        return sa.getDescription() + "|" + (sa.getPayCosts() == null ? "" : sa.getPayCosts().toString());
+    }
+
+    /**
+     * sdcc-gycast-1114: the added cost of a granted cast, when the model holds it: mana (which must be the card's own
+     * spell's: {@code own}), and at most one part "exile N other cards from your graveyard". Null = any other cost.
+     */
+    private static ForcedWinModel.GraveCast graveCost(final SpellAbility sa, final List<Abil> own) {
+        final forge.game.cost.Cost cost = sa.getPayCosts();
+        final ForcedWinModel.GraveCast out = new ForcedWinModel.GraveCast();
+        final Abil mana = new Abil();
+        if (cost != null) {
+            for (forge.game.cost.CostPart p : cost.getCostParts()) {
+                if (p instanceof forge.game.cost.CostPartMana) {
+                    continue;
+                }
+                if (p instanceof forge.game.cost.CostExile ex && out.exile == 0 && !ex.payCostFromSource()
+                        && ex.getFrom().size() == 1 && ex.getFrom().get(0) == ZoneType.Graveyard && ex.convertAmount() != null) {
+                    out.exile = ex.convertAmount();
+                    continue;
+                }
+                return null;
+            }
+            ForcedWinModel.readMana(mana, cost.getTotalMana());
+        }
+        if (mana.usesX) {
+            return null;
+        }
+        for (Abil ab : own) {
+            if (ab.kind == AbilKind.SPELL && !ab.alt && ab.optCosts == null && ab.generic == mana.generic
+                    && java.util.Arrays.equals(ab.pips, mana.pips) && java.util.Arrays.equals(ab.phyrexian, mana.phyrexian)
+                    && ab.hybrid.equals(mana.hybrid)) {
+                return out;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * sdcc-gycast-1114: is the card {@code liveX} of ours castable from our graveyard because the permanent
+     * {@code liveGrantor} is in play, and what does that cast cost and leave? One sandbox: the card and up to
+     * {@link #GRAVE_FILL} library cards are put into our graveyard with the permanent out of play, and the spells the
+     * engine offers for the card are noted; then the permanent is put into play and the first spell offered only now,
+     * whose cost the model holds ({@link #graveCost}), is cast with the usual floating mana (a player target: the
+     * opponent). Null = no such spell, or it could not be cast, or the card ended somewhere the plan has no place for.
+     * Nothing but that answer leaves the sandbox. Never throws.
+     */
+    static ForcedWinModel.GraveCast graveCast(final Game live, final Player liveMe, final Card liveGrantor, final Card liveX,
+            final long seed, final Stats st) {
+        final int gid = liveGrantor.getId(), xid = liveX.getId();
+        final java.util.Set<String> before = new java.util.HashSet<>();
+        final ForcedWinModel.GraveCast[] cast = {null};
+        final List<Abil> own = new ArrayList<>();
+        try {
+            for (SpellAbility sa : liveX.getSpellAbilities()) {
+                if (sa.isSpell()) {
+                    final Abil ab = ForcedWinModel.readCost(sa.copy(liveMe), AbilKind.SPELL);
+                    if (ab != null) {
+                        own.add(ab);
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        if (own.isEmpty()) {
+            return null;
+        }
+        final Setup setup = (g, m, c0) -> {
+            Card gr = g.findById(gid);
+            if (gr == null) {
+                return;
+            }
+            if (gr.isInPlay()) {
+                g.getAction().moveToHand(gr, null);
+            }
+            if (gid != xid && !g.findById(xid).isInZone(ZoneType.Graveyard)) {
+                g.getAction().moveToGraveyard(g.findById(xid), null);
+            }
+            int fill = 0;
+            for (Card f : new ArrayList<>(m.getCardsIn(ZoneType.Library))) {
+                if (fill >= GRAVE_FILL) {
+                    break;
+                }
+                if (f.getId() != gid && f.getId() != xid) {
+                    g.getAction().moveToGraveyard(f, null);
+                    fill++;
+                }
+            }
+            g.getAction().checkStaticAbilities();
+            final Card x = g.findById(xid);
+            if (x != null && x.isInZone(ZoneType.Graveyard)) {
+                for (SpellAbility sa : castable(x, m)) {
+                    before.add(castKey(sa));
+                }
+            }
+            gr = g.findById(gid);
+            toBattlefield(g, m, gr);
+            resolveAll(g);
+            g.getAction().checkStaticAbilities();
+        };
+        final Act act = (g, m, c0) -> {
+            final Card x = g.findById(xid);
+            if (x == null || !x.isInZone(ZoneType.Graveyard) || gid == xid) {
+                return false;
+            }
+            for (SpellAbility sa : castable(x, m)) {
+                if (before.contains(castKey(sa))) {
+                    continue;
+                }
+                final ForcedWinModel.GraveCast gc = graveCost(sa, own);
+                if (gc == null) {
+                    continue;
+                }
+                sa.setActivatingPlayer(m);
+                if (targetsPlayersOnly(sa, m)) {
+                    if (!setPlayerTargets(sa, m, "opp")) {
+                        continue;
+                    }
+                } else if (targetsAnything(sa)) {
+                    if (((PlayerControllerAi) m.getController()).getAi().canPlaySa(sa) != forge.ai.AiPlayDecision.WillPlay
+                            && !sa.isTargetNumberValid()) {
+                        continue;
+                    }
+                }
+                if (play(g, m, sa)) {
+                    cast[0] = gc;
+                    return true;
+                }
+            }
+            return false;
+        };
+        final Obs o = run(live, liveMe, xid, setup, act, seed, st);
+        if (cast[0] == null || !o.played || o.error != null) {
+            return null;
+        }
+        cast[0].to = o.entered ? 0 : o.hostEnd;
+        if (!o.entered && cast[0].to != Abil.SELF_GRAVEYARD && cast[0].to != Abil.SELF_EXILE) {
+            return null;
+        }
+        return cast[0];
+    }
+
     /** sdcc-tutorcast-1110: set by a sourceLeaves reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> SOURCE_LEAVES = ThreadLocal.withInitial(() -> false);
     /** sdcc-tutorcast-1110: the most cards a search-and-cast spell is observed with (one sandbox each), and of those tried first. */
@@ -1049,6 +1259,9 @@ public final class ForcedWinProbe {
             final Eff e = out.get(i);
             if (e.kind == EffKind.MILL_OPP && instances > 1) {
                 out.set(i, new Eff(EffKind.MILL_OPP, Math.max(1, e.n / instances), 0));
+            } else if (e.kind == EffKind.MILL && instances > 1 && GRAVE_CASTS.get()) {
+                // sdcc-gycast-1114 (a graveCasts reader only): a storm spell's mill of our own library, per instance too
+                out.set(i, new Eff(EffKind.MILL, Math.max(1, e.n / instances), 0));
             }
         }
         final int life = o.lifeDelta + (ab == null ? 0 : ab.life);

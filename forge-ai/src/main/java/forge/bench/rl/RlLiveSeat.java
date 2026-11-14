@@ -108,6 +108,9 @@ public final class RlLiveSeat {
                 // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
                 // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
                 "planLoops",
+                // sdcc-gycast-1114 (absent = off, the seat as before): the planner screens plan casts from the graveyard
+                // under a permanent's observed grant (ForcedWinSolver.Config.planGraveCasts)
+                "planGraveCasts",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
                 "engineModeChoice"));
@@ -128,6 +131,9 @@ public final class RlLiveSeat {
                 // owner-misplays-1113 (absent = off, the seat as before): the planner screens (reach, goldfish, the reach
                 // gate; never the root plan) count a copy loop the engine found in a sandbox (ForcedWinSolver.Config.planLoops)
                 "planLoops",
+                // sdcc-gycast-1114 (absent = off, the seat as before): the planner screens plan casts from the graveyard
+                // under a permanent's observed grant (ForcedWinSolver.Config.planGraveCasts)
+                "planGraveCasts",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
                 "engineModeChoice"));

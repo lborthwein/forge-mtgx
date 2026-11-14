@@ -106,7 +106,7 @@ public class ReachDiscardsTest extends AITest {
         return new ChoiceScorer(cfg, index(), 2, 77L);
     }
 
-    private static RlKnowledge know(final Game g) {
+    static RlKnowledge know(final Game g) {
         final RlKnowledge k = new RlKnowledge(g);
         k.v2 = true;
         k.attach();
@@ -119,7 +119,7 @@ public class ReachDiscardsTest extends AITest {
                 .replace("activephase=MAIN1", "activephase=" + phase));
     }
 
-    private static Card find(final Player p, final ZoneType z, final String name) {
+    static Card find(final Player p, final ZoneType z, final String name) {
         for (Card c : p.getCardsIn(z)) {
             if (c.getName().equals(name)) {
                 return c;
@@ -129,7 +129,7 @@ public class ReachDiscardsTest extends AITest {
     }
 
     /** The menu indices of the first cards of {@code pool} with these names, each card once. */
-    private static short[] steps(final Iterable<Card> pool, final String... names) {
+    static short[] steps(final Iterable<Card> pool, final String... names) {
         final List<Card> cs = new ArrayList<>();
         for (Card c : pool) {
             cs.add(c);
@@ -162,7 +162,7 @@ public class ReachDiscardsTest extends AITest {
         return out;
     }
 
-    private static JsonObject body(final int min, final int max) {
+    static JsonObject body(final int min, final int max) {
         final JsonObject b = new JsonObject();
         b.addProperty("min", min);
         b.addProperty("max", max);
@@ -191,7 +191,7 @@ public class ReachDiscardsTest extends AITest {
     }
 
     /** enumerate + choose as RlSearch.decideChoice0 runs them; {@code value}: the leaf value of option i (null: 0.5 each). */
-    private static Ask ask(final ChoiceScorer sc, final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy,
+    static Ask ask(final ChoiceScorer sc, final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy,
             final RlKnowledge know, final SpellAbility askSa, final Iterable<Card> pool, final double[] value) {
         final Ask a = new Ask();
         a.family = forge.bench.rl.RlSchema.familyName(m.family);
@@ -214,7 +214,7 @@ public class ReachDiscardsTest extends AITest {
         return a;
     }
 
-    private static double reachOf(final ChoiceScorer.Option o) {
+    static double reachOf(final ChoiceScorer.Option o) {
         return o.screen == null || Double.isNaN(o.screen.reach) ? 0.0 : o.screen.reach;
     }
 

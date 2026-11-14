@@ -97,6 +97,8 @@ public final class ForcedWinModel {
 
     private static final java.util.Set<String> SIG_SKIP = java.util.Set.of("id", "name", "note", "desc", "costKey",
             "probeNote", "again"); // sdcc-bridge-1111: again orders setup lines only, never a card's class
+    /** sdcc-gycast-1114: fields left out of a signature while null (a card with no grant keeps the signature it had). */
+    private static final java.util.Set<String> SIG_SKIP_NULL = java.util.Set.of("grave");
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, java.lang.reflect.Field[]> SIG_FIELDS =
             new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -182,11 +184,21 @@ public final class ForcedWinModel {
         }
         sb.append(c.getSimpleName()).append('(');
         for (java.lang.reflect.Field f : sigFields(c)) {
-            sb.append(f.getName()).append('=');
+            Object v = null;
+            boolean failed = false;
             try {
-                sigAppend(sb, f.get(o), depth + 1);
+                v = f.get(o);
             } catch (IllegalAccessException e) {
+                failed = true;
+            }
+            if (v == null && !failed && SIG_SKIP_NULL.contains(f.getName())) {
+                continue; // sdcc-gycast-1114
+            }
+            sb.append(f.getName()).append('=');
+            if (failed) {
                 sb.append('!');
+            } else {
+                sigAppend(sb, v, depth + 1);
             }
             sb.append(';');
         }
@@ -324,6 +336,48 @@ public final class ForcedWinModel {
         @Override
         public String toString() {
             return "needs " + role + ":" + zone + " seen=" + seen + (opp ? " +opp" : "") + " valid=" + valid.size();
+        }
+    }
+
+    /**
+     * sdcc-gycast-1114 (set only by a graveCasts reader): one card name's cast from our graveyard under a grant, as a
+     * sandbox saw it: the engine offered the spell only with the granting permanent in play, its mana was the card's own
+     * spell's, and it was cast there.
+     */
+    static final class GraveCast {
+        /** Other cards of our graveyard exiled as the added cost (0 = none). */
+        int exile;
+        /**
+         * Where the card was once it had resolved: 0 = on the battlefield (a permanent), {@link Abil#SELF_GRAVEYARD} our
+         * graveyard (it can be cast again), {@link Abil#SELF_EXILE} exile.
+         */
+        int to;
+
+        @Override
+        public String toString() {
+            return "exile" + exile + (to == 0 ? ">play" : to == Abil.SELF_GRAVEYARD ? ">graveyard" : ">exile");
+        }
+    }
+
+    /**
+     * sdcc-gycast-1114 (set only by a graveCasts reader; null otherwise, and then nothing changes): this permanent, while
+     * in play, lets its controller cast cards from the graveyard. Recognised from the card's script by shape alone (a
+     * continuous static ability that affects cards in a graveyard and gives them a keyword or a permission to be
+     * played); what it really allows is observed: {@link #names} holds the card names of ours a sandbox then cast from
+     * the graveyard with it in play (one run per name, asked for the cards of the position being read), {@link #tried}
+     * those it could not.
+     */
+    static final class Grave {
+        /** The script's end-step trigger takes the permanent out of play (it is gone when our turn ends). */
+        boolean endStep;
+        /** The script's limit of such casts per turn (0 = none). */
+        int perTurn;
+        final Map<String, GraveCast> names = new java.util.concurrent.ConcurrentSkipListMap<>();
+        final java.util.Set<String> tried = new java.util.concurrent.ConcurrentSkipListSet<>();
+
+        @Override
+        public String toString() {
+            return "graveCasts" + names + (endStep ? " untilEndStep" : "") + (perTurn > 0 ? " perTurn" + perTurn : "");
         }
     }
 
@@ -530,6 +584,8 @@ public final class ForcedWinModel {
         boolean loopFromHand;
         /** sdcc-probeobj-1111: an ability of it holds an {@link ObjNeed} (false unless a probeObjects reader learned it). */
         boolean hasObj;
+        /** sdcc-gycast-1114: the cast-from-graveyard grant of this permanent (null unless a graveCasts reader found one). */
+        Grave grave;
 
         ACard instance(int newId) {
             final ACard a = new ACard();
@@ -561,6 +617,7 @@ public final class ForcedWinModel {
             a.loopHaste = loopHaste;
             a.loopFromHand = loopFromHand;
             a.hasObj = hasObj;
+            a.grave = grave; // shared with the template: the names observed later reach every instance
             return a;
         }
 
@@ -1064,7 +1121,8 @@ public final class ForcedWinModel {
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
             // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
-            final String key = (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
+            // sdcc-gycast-1114: and a graveCasts reader ("gc|"), whose templates carry a permanent's cast-from-graveyard grant
+            final String key = (graveCasts ? "gc|" : "") + (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
                     + (probeSettle ? "settle|" : "") + c.getName();
             final boolean prevHide = ForcedWinProbe.HIDE.get();
             ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
@@ -1088,6 +1146,8 @@ public final class ForcedWinModel {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
                 final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
+                final boolean prevGc = ForcedWinProbe.GRAVE_CASTS.get();
+                ForcedWinProbe.GRAVE_CASTS.set(graveCasts);
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
@@ -1101,6 +1161,10 @@ public final class ForcedWinModel {
                     ForcedWinProbe.TUTOR_CAST.set(prevTc);
                     ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
+                    ForcedWinProbe.GRAVE_CASTS.set(prevGc);
+                }
+                if (graveCasts) {
+                    t.grave = ForcedWinProbe.graveGrant(c); // sdcc-gycast-1114 (the script's shape only; no sandbox here)
                 }
                 if (!forge.ai.AiWork.spent()) {
                     synchronized (templates) {
@@ -1164,6 +1228,109 @@ public final class ForcedWinModel {
          * per card name) and keeps what the engine accepted and did ({@link ObjNeed}), under its own template keys.
          */
         boolean probeObjects;
+
+        /**
+         * sdcc-gycast-1114 (solver key planGraveCasts; false = off, and then nothing changes): templates are learned under
+         * their own keys and carry a permanent's cast-from-graveyard grant ({@link Grave}); a position that holds such a
+         * permanent (hand, battlefield, known top, library as read) reads our graveyard's cards, and each card name of the
+         * position is tried under the grant once ({@link #graveFill}).
+         */
+        boolean graveCasts;
+
+        /** sdcc-gycast-1114: the grant probes of the games in progress, by game scope (weak), then seat, grantor and card name. */
+        private static final Map<Object, Map<String, Object>> GRAVE_CACHE =
+                java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+        private static final Object GRAVE_NONE = new Object();
+        /** sdcc-gycast-1114 (tests, reports): grant sandboxes run in this JVM. */
+        static final java.util.concurrent.atomic.AtomicLong GRAVE_PROBES = new java.util.concurrent.atomic.AtomicLong();
+
+        /**
+         * sdcc-gycast-1114 (a graveCasts reader only): when the position holds a permanent with a grant, our graveyard's
+         * cards are read (if they were not) and every card name of the position not yet tried under that grant is cast
+         * from the graveyard in a sandbox ({@link ForcedWinProbe#graveCast}). Only cards the position already names are
+         * asked about: nothing here looks at a card the reader did not read. An answer found past the decision's Forge AI
+         * work cap is not kept; the name is asked again at a later read.
+         */
+        void graveFill(final Game live, final Player me, final Position p) {
+            if (!graveCasts || p == null) {
+                return;
+            }
+            final Map<String, ACard> grantors = new java.util.TreeMap<>();
+            for (List<ACard> zone : java.util.Arrays.asList(p.hand, p.battlefield, p.knownTop, p.library)) {
+                for (ACard a : zone) {
+                    if (a.grave != null) {
+                        grantors.putIfAbsent(a.name, a);
+                    }
+                }
+            }
+            if (grantors.isEmpty()) {
+                return;
+            }
+            if (p.graveyard.isEmpty()) {
+                final List<Card> gy = new ArrayList<>(me.getCardsIn(ZoneType.Graveyard));
+                gy.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                for (Card c : gy) {
+                    p.graveyard.add(card(live, me, c));
+                }
+            }
+            final Map<String, ACard> named = new java.util.TreeMap<>();
+            for (List<ACard> zone : java.util.Arrays.asList(p.hand, p.battlefield, p.knownTop, p.library, p.graveyard)) {
+                for (ACard a : zone) {
+                    if (!a.land && a.id >= 0) {
+                        named.putIfAbsent(a.name, a);
+                    }
+                }
+            }
+            final Object scope = live.getRules() != null ? live.getRules() : GRAVE_CACHE;
+            final Map<String, Object> known = GRAVE_CACHE.computeIfAbsent(scope, x -> new java.util.concurrent.ConcurrentHashMap<>());
+            final boolean prevHide = ForcedWinProbe.HIDE.get();
+            ForcedWinProbe.HIDE.set(hideLibrary);
+            final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
+            try {
+                for (ACard ga : grantors.values()) {
+                    final Grave gr = ga.grave;
+                    synchronized (gr) {
+                        Card gc = null;
+                        for (ACard a : named.values()) {
+                            if (gr.names.containsKey(a.name) || gr.tried.contains(a.name)) {
+                                continue;
+                            }
+                            final String key = me.getId() + "|" + ga.name + "|" + a.name;
+                            Object hit = known.get(key);
+                            if (hit == null) {
+                                if (forge.ai.AiWork.spent()) {
+                                    continue;
+                                }
+                                gc = gc != null ? gc : live.findById(ga.id);
+                                final Card x = live.findById(a.id);
+                                if (gc == null || x == null || gc.getOwner() != me || x.getOwner() != me) {
+                                    continue; // not a card of this game (a screen's granted copy)
+                                }
+                                final GraveCast seen = ForcedWinProbe.graveCast(live, me, gc, x,
+                                        ForcedWinSolver.mix(seed, 0x47594341L * 31 + key.hashCode()), st);
+                                GRAVE_PROBES.incrementAndGet();
+                                if (forge.ai.AiWork.spent()) {
+                                    continue;
+                                }
+                                hit = seen == null ? GRAVE_NONE : seen;
+                                known.put(key, hit);
+                            }
+                            if (hit == GRAVE_NONE) {
+                                gr.tried.add(a.name);
+                            } else {
+                                gr.names.put(a.name, (GraveCast) hit);
+                            }
+                        }
+                    }
+                    if (ForcedWinSolver.RECEIPTS) {
+                        ForcedWinSolver.receipt("FORCED_WIN grave-grant " + ga.name + " " + gr + " not=" + gr.tried);
+                    }
+                }
+            } finally {
+                ForcedWinProbe.HIDE.set(prevHide);
+                addStats(st);
+            }
+        }
 
         /** solver-distill-cc-1109 (planLoops): fills a template's loop partners, once (null = off, the default). */
         interface LoopProbe {
@@ -1546,6 +1713,9 @@ public final class ForcedWinModel {
             }
             p.graveyardSize = me.getCardsIn(ZoneType.Graveyard).size();
             p.canDraw = me.canDraw();
+            if (graveCasts && (viewer == null || viewer == me)) {
+                graveFill(live, me, p); // sdcc-gycast-1114
+            }
             return p;
         }
     }
