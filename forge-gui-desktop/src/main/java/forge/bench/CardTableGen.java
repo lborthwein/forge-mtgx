@@ -23,10 +23,14 @@ import forge.ai.simulation.ForcedWinSolver;
  * is refused by any other build. Every card of the pool is learned in the canonical sandbox once per template-key
  * variant, then the loop probes of the cards planLoops would probe, with every creature of the pool.
  *
- * <pre>usage: CardTableGen --out TABLE.json [--cube PATH|classpath:...] [--variants ",sl|tc|settle|"]
+ * <pre>usage: CardTableGen --out TABLE.json|DIR/ [--cube PATH|classpath:...[,PATH...]] [--variants ",sl|tc|settle|"]
  *        [--spec BENCH-SPEC.json | --solver "k=v,k=v"] [--no-loops] [--only NAME;NAME]</pre>
  * {@code --variants}: comma-separated template-key flag prefixes (empty = the plain keys of the defender's reader).
  * {@code --spec}: a bench search spec whose plans.solverCfg gives the loop probes' engine settings.
+ * ct2-live-1114: {@code --cube} takes a comma-separated list; with more than one the pool is their union, sorted by name
+ * (so the order the lists are given in does not matter). The table's note names each list by its sha256, not its path,
+ * so the same jar, flags and lists give the same file bytes on any host. {@code --out DIR/} (a trailing slash) writes the
+ * file under the name {@code cardTable=auto} loads ({@link ForcedWinCanon#autoName}).
  */
 public final class CardTableGen {
     private CardTableGen() {
@@ -70,9 +74,29 @@ public final class CardTableGen {
         final long t0 = System.nanoTime();
         RlActorBench.boot();
         final List<String> pool = new ArrayList<>();
-        final JsonObject c = JsonParser.parseString(new String(BeliefSampler.readCubeBytes(cube), StandardCharsets.UTF_8)).getAsJsonObject();
-        for (JsonElement e : c.getAsJsonArray("cards")) {
-            pool.add(e.getAsJsonObject().get("name").getAsString());
+        final String[] cubes = cube.split(",");
+        final List<String> cubeShas = new ArrayList<>();
+        for (String cp : cubes) {
+            final byte[] bytes = BeliefSampler.readCubeBytes(cp);
+            cubeShas.add(sha256(bytes));
+            final JsonObject c = JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8)).getAsJsonObject();
+            for (JsonElement e : c.getAsJsonArray("cards")) {
+                final String n = e.getAsJsonObject().get("name").getAsString();
+                if (cubes.length == 1 || !pool.contains(n)) {
+                    pool.add(n);
+                }
+            }
+        }
+        if (cubes.length > 1) {
+            java.util.Collections.sort(pool); // ct2-live-1114: the union's order does not depend on the lists' order
+            java.util.Collections.sort(cubeShas);
+        }
+        if (out.endsWith("/")) {
+            final String an = ForcedWinCanon.autoName();
+            if (an == null) {
+                throw new IllegalStateException("--out DIR/: the generator's classes are not in a jar (no auto name)");
+            }
+            out = out + an;
         }
         final ForcedWinCanon.Table tb = ForcedWinCanon.newTable(pool);
         final List<String> names = ForcedWinCanon.poolOf(tb);
@@ -107,9 +131,20 @@ public final class CardTableGen {
                 }
             }
         }
-        Files.write(Paths.get(out), tb.toJson("cube " + cube + "; variants '" + variants + "'; solver " + new java.util.TreeMap<>(props)).getBytes(StandardCharsets.UTF_8));
+        final byte[] file = tb.toJson("cube sha256 " + String.join(",", cubeShas) + "; variants '" + variants + "'; solver "
+                + new java.util.TreeMap<>(props)).getBytes(StandardCharsets.UTF_8);
+        Files.write(Paths.get(out), file);
         System.err.println("[card-table-gen] DONE learned=" + ok + " notLearned=" + miss + " loopProbes=" + lp + " ms="
-                + (System.nanoTime() - t0) / 1_000_000 + " -> " + out);
+                + (System.nanoTime() - t0) / 1_000_000 + " -> " + out + " sha256 " + sha256(file) + " auto name "
+                + ForcedWinCanon.autoName());
         System.exit(0);
+    }
+
+    private static String sha256(final byte[] b) throws java.security.NoSuchAlgorithmException {
+        final StringBuilder sb = new StringBuilder();
+        for (byte x : java.security.MessageDigest.getInstance("SHA-256").digest(b)) {
+            sb.append(String.format("%02x", x));
+        }
+        return sb.toString();
     }
 }

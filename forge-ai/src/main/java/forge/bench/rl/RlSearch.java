@@ -3876,6 +3876,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** Per-game summary for the tape and GAME_END. */
     public JsonObject summary() {
+        cardTableLine(); // ct2-live-1114 (key absent: nothing)
         final JsonObject o = new JsonObject();
         o.add("spec", cfg.toJson());
         o.addProperty("priority_asks", priorityAsks);
@@ -4046,6 +4047,24 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.add("blocks", bl);
         }
         return o;
+    }
+
+    /**
+     * ct2-live-1114: with the solver key cardTable, the game-end {@code [card-table] summary ...} line on stderr (the
+     * JVM's table counters, or why it is off) for the Node side to forward. Key absent: nothing.
+     */
+    private void cardTableLine() {
+        if (cfg.plans == null || !cfg.plans.has("solverCfg") || !cfg.plans.get("solverCfg").isJsonObject()) {
+            return;
+        }
+        final JsonObject sc = cfg.plans.getAsJsonObject("solverCfg");
+        if (!sc.has("cardTable")) {
+            return;
+        }
+        final String line = forge.ai.simulation.ForcedWinCanon.summaryLine(sc.get("cardTable").getAsString());
+        if (line != null) {
+            System.err.println(line);
+        }
     }
 
     /**

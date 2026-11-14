@@ -197,6 +197,67 @@ public class CardTableTest extends AITest {
     }
 
     /**
+     * ct2-live-1114: cardTable=auto loads the file named for the jar's sha and the flags from the jar's directory, learns
+     * a miss in memory only (nothing written, no additions read), and prints a summary; no such file is off with a reason.
+     */
+    @Test
+    public void autoLoadsTheTableNamedForThisBuildAndNeverWrites() throws Exception {
+        final Path dir = Files.createTempDirectory("card-table-auto");
+        ForcedWinCanon.forgetForTest();
+        ForcedWinCanon.setStampForTest("0123456789abcdef0123456789abcdef:fedcba9876543210");
+        ForcedWinCanon.setAutoDirForTest(dir);
+        try {
+            Assert.assertEquals(ForcedWinCanon.autoName(), "card-table-0123456789abcdef-fedcba9876543210.json");
+            Assert.assertEquals(ForcedWinSolver.Config.fromProps(k -> "cardTable".equals(k) ? "auto" : null).cardTable, "auto");
+            // no file: off, with the reason in the summary line
+            Assert.assertNull(ForcedWinCanon.open("auto"));
+            final String offLine = ForcedWinCanon.summaryLine("auto");
+            Assert.assertTrue(offLine.startsWith("[card-table] summary key=auto off reason=cardTable=auto: no card-table-0123456789abcdef-"), offLine);
+            Assert.assertNull(ForcedWinCanon.summaryLine(null));
+            // the file next to the jar: loaded
+            final Path p = dir.resolve(ForcedWinCanon.autoName());
+            Files.write(p, generated(POOL.subList(0, 4)).toJson("test").getBytes(StandardCharsets.UTF_8));
+            final Path add = Path.of(p + ".add.jsonl");
+            ForcedWinCanon.forgetForTest();
+            final ForcedWinCanon.Table tb = ForcedWinCanon.open("auto");
+            Assert.assertNotNull(tb);
+            Assert.assertNull(tb.additions, "auto never writes");
+            final int n0 = tb.entries.size();
+            final Game g = game("Swords to Plowshares;Demonic Tutor;Lightning Bolt", "Plains;Swamp;Mountain", "Plains");
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinModel.Reader r = new ForcedWinModel.Reader();
+            r.table = tb;
+            for (Card c : me.getCardsIn(ZoneType.Hand)) {
+                r.card(g, me, c);
+            }
+            Assert.assertEquals(tb.learned.get(), 3, "three pool cards the file lacks, learned canonically");
+            Assert.assertEquals(tb.entries.size(), n0 + 3, "kept in memory for the JVM's readers");
+            Assert.assertFalse(Files.exists(add), "no additions file written");
+            try (java.util.stream.Stream<Path> ls = Files.list(dir)) {
+                Assert.assertEquals(ls.count(), 1L, "the directory holds the table only");
+            }
+            final String line = ForcedWinCanon.summaryLine("auto");
+            Assert.assertTrue(line.startsWith("[card-table] summary key=auto table=" + ForcedWinCanon.autoName() + " loaded=" + n0), line);
+            Assert.assertTrue(line.contains(" misses=3 ") && line.contains(" additions=off") && line.endsWith(" refusal=none"), line);
+            // classes in a directory (no jar hash): auto has no name and is off
+            ForcedWinCanon.forgetForTest();
+            ForcedWinCanon.setStampForTest("dir:fedcba9876543210");
+            Assert.assertNull(ForcedWinCanon.autoName());
+            Assert.assertNull(ForcedWinCanon.open("auto"));
+        } finally {
+            ForcedWinCanon.setStampForTest(null);
+            ForcedWinCanon.setAutoDirForTest(null);
+            ForcedWinCanon.forgetForTest();
+            try (java.util.stream.Stream<Path> ls = Files.list(dir)) {
+                for (Path x : (Iterable<Path>) ls::iterator) {
+                    Files.deleteIfExists(x);
+                }
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
      * cardtable2-1114: a card that is not in the table's pool (a card a booster-opening effect made, in read R3) is
      * learned exactly as without the key, kept by the reader only, and never appended.
      */

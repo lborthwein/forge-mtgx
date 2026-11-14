@@ -325,6 +325,8 @@ public final class ForcedWinSolver {
          * does not hold in the canonical sandbox instead of a copy of the position, and read planLoops' loop probes from
          * it. A table stamped by another build is refused (one log line) and the solver is as without the key. This
          * changes what a model holds (the sandbox is no longer the position at first sight): a behaviour key.
+         * ct2-live-1114: the value {@code auto} (live) is the table named for this jar and its flags in the jar's own
+         * directory ({@link ForcedWinCanon#autoName}); none there = off, and nothing is ever written.
          */
         public String cardTable = null;
         /**

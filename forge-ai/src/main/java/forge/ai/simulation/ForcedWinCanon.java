@@ -64,6 +64,12 @@ import forge.util.MyRandom;
  * reader of the JVM, and appended once to {@code <table>.add.jsonl} (stamp and script hash on every line), which the
  * next JVM start loads read-only. Loop probes (planLoops) are saved per card pair the same way.</p>
  *
+ * <p>ct2-live-1114: the key's value {@code auto} (live) loads {@code card-table-<jar sha16>-<flags16>.json} from the
+ * directory of the running jar ({@link #autoName}); no such file = off, with one {@code [card-table]} line. With
+ * {@code auto} nothing is ever written: a miss is learned canonically and kept in memory for the JVM's readers only, and
+ * no additions file is read. A value starting with {@code /} is a path, as before (bench hosts). Each seat's game-end
+ * summary prints one {@code [card-table] summary} line ({@link #summaryLine}).</p>
+ *
  * <p>Also here, measurement only: {@code -Dsdcc.readerStats} (why a model is unmodeled, how often it is read) and the
  * {@code -Dsdcc.readerDump} registry of every reader a JVM made.</p>
  */
@@ -488,9 +494,8 @@ public final class ForcedWinCanon {
         if (stampCache == null) {
             String jar = "dir";
             try {
-                final java.security.CodeSource cs = ForcedWinSolver.class.getProtectionDomain().getCodeSource();
-                final Path p = cs == null ? null : Paths.get(cs.getLocation().toURI());
-                if (p != null && Files.isRegularFile(p)) {
+                final Path p = jarFile();
+                if (p != null) {
                     final java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
                     try (java.io.InputStream in = Files.newInputStream(p)) {
                         final byte[] buf = new byte[1 << 16];
@@ -506,6 +511,41 @@ public final class ForcedWinCanon {
             stampCache = jar + ":" + flagsDigest();
         }
         return stampCache;
+    }
+
+    /** The jar file the solver's classes were loaded from (CodeSource), or null (classes in a directory, or unknown). */
+    static Path jarFile() {
+        try {
+            final java.security.CodeSource cs = ForcedWinSolver.class.getProtectionDomain().getCodeSource();
+            final Path p = cs == null ? null : Paths.get(cs.getLocation().toURI());
+            return p != null && Files.isRegularFile(p) ? p : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** ct2-live-1114: the key's one enum value; anything else is a path (it must start with "/"). */
+    public static final String AUTO = "auto";
+    private static volatile Path autoDirOverride;
+
+    /** Tests: the directory {@code auto} looks in (null = the running jar's). */
+    static void setAutoDirForTest(final Path dir) {
+        autoDirOverride = dir;
+    }
+
+    /**
+     * ct2-live-1114: the file name {@code auto} loads, {@code card-table-<sha16>-<flags16>.json}: sha16 = the first 16 hex
+     * of the running jar's sha256, flags16 = the {@code forge.*} flags digest of {@link #stamp} (16 hex). Null when the
+     * stamp has no jar hash (classes in a directory).
+     */
+    public static String autoName() {
+        final String st = stamp();
+        final int colon = st.indexOf(':');
+        final String jar = colon < 0 ? st : st.substring(0, colon);
+        if (!jar.matches("[0-9a-f]{16,}")) {
+            return null;
+        }
+        return "card-table-" + jar.substring(0, 16) + "-" + st.substring(colon + 1) + ".json";
     }
 
     /** The flags part of {@link #stamp}, readable: sorted {@code key=value} lines. */
@@ -603,8 +643,10 @@ public final class ForcedWinCanon {
         /** Loop probes: "card|fromHand|partner" (partner "" = alone) -> script hashes "h1+h2" and the answer. */
         final ConcurrentHashMap<String, String[]> loops = new ConcurrentHashMap<>();
         private Base base;
-        /** Null = nothing is appended (a table made in memory, or the generator's). */
+        /** Null = nothing is appended (a table made in memory, the generator's, or one loaded by {@code auto}). */
         Path additions;
+        /** ct2-live-1114: models and loop probes the file (and its additions, path form only) held at load. */
+        int loadedModels, loadedLoops;
         public final AtomicLong hits = new AtomicLong(), learned = new AtomicLong(), stale = new AtomicLong(), tokens = new AtomicLong();
         /** cardtable2-1114: lookups of a card that is not in the table's pool (learned as without the key, never appended). */
         public final AtomicLong outside = new AtomicLong();
@@ -804,9 +846,16 @@ public final class ForcedWinCanon {
             return GSON.toJson(o);
         }
 
+        /**
+         * Counters since load. ct2-live-1114: {@code loaded} = models read from the file at load, {@code misses} = lookups
+         * the table could not serve ({@code learned} canonically + {@code outside} the pool + {@code tokens}; a stale
+         * script is counted in {@code staleScripts} and then learned).
+         */
         public String summary() {
-            return "entries=" + entries.size() + " loops=" + loops.size() + " hits=" + hits.get() + " learned=" + learned.get()
-                    + " staleScripts=" + stale.get() + " tokens=" + tokens.get();
+            return "loaded=" + loadedModels + " loadedLoops=" + loadedLoops + " entries=" + entries.size() + " loops=" + loops.size()
+                    + " hits=" + hits.get() + " misses=" + (learned.get() + outside.get() + tokens.get()) + " learned=" + learned.get()
+                    + " outside=" + outside.get() + " staleScripts=" + stale.get() + " tokens=" + tokens.get()
+                    + " additions=" + (additions == null ? "off" : "on");
         }
     }
 
@@ -863,6 +912,8 @@ public final class ForcedWinCanon {
 
     private static final ConcurrentHashMap<String, Object> OPEN = new ConcurrentHashMap<>();
     private static final Object REFUSED = new Object();
+    /** ct2-live-1114: per key value, why its table is off (one reason, logged once per JVM). */
+    private static final ConcurrentHashMap<String, String> REASON = new ConcurrentHashMap<>();
 
     /**
      * The table at {@code path}, loaded once per JVM; null when it is refused (missing, unreadable, or stamped by another
@@ -872,24 +923,66 @@ public final class ForcedWinCanon {
         if (path == null || path.isEmpty()) {
             return null;
         }
-        final Object o = OPEN.computeIfAbsent(path, ForcedWinCanon::load);
+        final Object o = OPEN.computeIfAbsent(path, k -> AUTO.equals(k) ? loadAuto() : load(k, k, true));
         return o == REFUSED ? null : (Table) o;
+    }
+
+    /** ct2-live-1114: {@code auto}: the table named {@link #autoName} next to the running jar, never written to. */
+    private static Object loadAuto() {
+        final String name = autoName();
+        final Path dir = autoDirOverride != null ? autoDirOverride : jarFile() == null ? null : jarFile().toAbsolutePath().getParent();
+        if (name == null || dir == null) {
+            return off(AUTO, "cardTable=auto: the solver's classes are not in a jar (stamp " + stamp() + ")");
+        }
+        final Path p = dir.resolve(name);
+        if (!Files.isRegularFile(p)) {
+            return off(AUTO, "cardTable=auto: no " + name + " in " + dir);
+        }
+        return load(AUTO, p.toString(), false);
+    }
+
+    private static Object off(final String key, final String reason) {
+        REASON.put(key, reason);
+        System.err.println("[card-table] off: " + reason + "; card models are learned as without the key");
+        return REFUSED;
+    }
+
+    /**
+     * ct2-live-1114: the seat's game-end line for key value {@code key} (null = the key is absent: null): the table's
+     * counters ({@link Table#summary}), or {@code off reason=...}. The table is the JVM's, so its counters are the JVM's
+     * since load.
+     */
+    public static String summaryLine(final String key) {
+        if (key == null || key.isEmpty()) {
+            return null;
+        }
+        final Table t = open(key);
+        if (t == null) {
+            return "[card-table] summary key=" + key + " off reason=" + REASON.getOrDefault(key, "unknown");
+        }
+        return "[card-table] summary key=" + key + " table=" + Paths.get(t.path).getFileName() + " " + t.summary() + " refusal=none";
     }
 
     /** Tests: forget the tables opened so far. */
     static void forgetForTest() {
         OPEN.clear();
+        REASON.clear();
         synchronized (ForcedWinCanon.class) {
             stampCache = null;
         }
     }
 
-    private static Object load(final String path) {
+    /**
+     * Load the table file {@code path} for key value {@code key}. {@code persist} (the path form): misses are appended to
+     * {@code <path>.add.jsonl}, which is also read here; false ({@code auto}): neither.
+     */
+    private static Object load(final String key, final String path, final boolean persist) {
         final String mine = stamp();
         try {
             final JsonObject o = JsonParser.parseString(Files.readString(Paths.get(path))).getAsJsonObject();
             final String theirs = o.has("stamp") ? o.get("stamp").getAsString() : "none";
             if (!"mtgx-card-table/1".equals(o.has("format") ? o.get("format").getAsString() : "") || !mine.equals(theirs)) {
+                REASON.put(key, "stamp " + theirs + " is not this build's " + mine);
                 System.err.println("[card-table] REFUSED " + path + ": stamp " + theirs + " is not this build's " + mine
                         + " (regenerate the table with this jar and these flags); card models are learned as without the key");
                 return REFUSED;
@@ -909,9 +1002,9 @@ public final class ForcedWinCanon {
                 }
             }
             final int n0 = t.entries.size(), l0 = t.loops.size();
-            t.additions = Paths.get(path + ".add.jsonl");
+            t.additions = persist ? Paths.get(path + ".add.jsonl") : null;
             int skipped = 0;
-            if (Files.isRegularFile(t.additions)) {
+            if (t.additions != null && Files.isRegularFile(t.additions)) {
                 for (String line : Files.readAllLines(t.additions, StandardCharsets.UTF_8)) {
                     if (line.isBlank()) {
                         continue;
@@ -932,10 +1025,14 @@ public final class ForcedWinCanon {
                     }
                 }
             }
-            System.err.println("[card-table] loaded " + path + " stamp " + mine + ": " + n0 + " models, " + l0 + " loop probes; additions "
-                    + (t.entries.size() - n0) + " models, " + (t.loops.size() - l0) + " loop probes, " + skipped + " lines skipped");
+            t.loadedModels = t.entries.size();
+            t.loadedLoops = t.loops.size();
+            System.err.println("[card-table] loaded " + path + " stamp " + mine + ": " + n0 + " models, " + l0 + " loop probes; "
+                    + (persist ? "additions " + (t.entries.size() - n0) + " models, " + (t.loops.size() - l0) + " loop probes, "
+                            + skipped + " lines skipped" : "additions off (" + key + ": misses are learned in memory only)"));
             return t;
         } catch (IOException | RuntimeException e) {
+            REASON.put(key, String.valueOf(e));
             System.err.println("[card-table] REFUSED " + path + ": " + e + "; card models are learned as without the key");
             return REFUSED;
         }
