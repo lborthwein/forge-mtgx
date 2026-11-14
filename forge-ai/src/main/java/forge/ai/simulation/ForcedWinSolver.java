@@ -4489,6 +4489,18 @@ public final class ForcedWinSolver {
      */
     private static final ThreadLocal<long[]> LOOP_TALLY = ThreadLocal.withInitial(() -> new long[3]);
 
+    /**
+     * gate-loop-window-1113: the time this thread's loop probes took, {real nanoseconds, virtual nanoseconds on this
+     * thread's work clock ({@code rawNow}: the read has no effect)} (the second is the first without a work clock). A gate that borrows its
+     * window charges its probes' time to the decision's budget from this.
+     */
+    private static final ThreadLocal<long[]> LOOP_SPENT = ThreadLocal.withInitial(() -> new long[2]);
+
+    /** gate-loop-window-1113: this thread's {real, work-clock} loop-probe nanoseconds so far (a copy). */
+    public static long[] loopSpent() {
+        return LOOP_SPENT.get().clone();
+    }
+
     /** loop-window-1113: this thread's {probes run, reads cut by the window, probes that won} so far (a copy). */
     public static long[] loopTally() {
         return LOOP_TALLY.get().clone();
@@ -4550,8 +4562,16 @@ public final class ForcedWinSolver {
         final long budget = Math.min(LOOP_NANOS, end - now);
         LOOP_PROBES.incrementAndGet();
         LOOP_TALLY.get()[0]++;
+        // gate-loop-window-1113: metering only. rawNow, never WorkClock.nanoTime(): a read past the safety wall moves
+        // virtual time on, so a measuring read would change the search it measures
+        final forge.game.WorkClock.Clock wc = forge.game.WorkClock.current();
+        final long r0 = System.nanoTime(), k0 = wc == null ? r0 : wc.rawNow();
         final boolean w = ForcedWinProbe.sandboxWin(live, me, c.getId(), partner == null ? -1 : partner.getId(), aura, loopLimits(cfg),
                 seed, budget);
+        final long[] spent = LOOP_SPENT.get();
+        final long r1 = System.nanoTime();
+        spent[0] += r1 - r0;
+        spent[1] += (wc == null ? r1 : wc.rawNow()) - k0;
         if (w) {
             LOOP_TALLY.get()[2]++; // gate-loop-window-1113
             return Boolean.TRUE;

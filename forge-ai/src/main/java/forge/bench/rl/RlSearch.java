@@ -1617,8 +1617,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return f;
             }
         }
-        final long t0 = System.nanoTime();
-        final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        final long t0 = System.nanoTime() - gateChargeReal; // gate-loop-window-1113: the gate's own probes are this decision's (0 off)
+        final long bt0 = budgetStart(t0) - gateChargeOnClock(); // work-units-1107: the budget's start (t0 when off)
         final DecisionClock ck = new DecisionClock("seat" + me.getId(), t0); // state-machines-1113: timing only
         clock = ck;
         if (cfg.budgetMs > 0) {
@@ -2320,8 +2320,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      */
     private int provenOnlyDecide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
             final int greedy, final List<SpellAbility> menuObjs, final PlanSearch sb) {
-        final long t0 = System.nanoTime();
-        final long bt0 = budgetStart(t0);
+        final long t0 = System.nanoTime() - gateChargeReal; // gate-loop-window-1113: decide0's gate probes are this decision's
+        final long bt0 = budgetStart(t0) - gateChargeOnClock();
         if (cfg.budgetMs > 0) {
             forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, cfg.budgetMs * 1_000_000L); // loop-probe-1113, loop-window-1113
         }
@@ -4208,15 +4208,37 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     void gateStep(final Game g, final Player me) {
         final Long[] lent = cfg.reach != null ? borrowGateWindow(g) : null; // off: null
         gateWindowOpen = lent != null;
+        gateChargeReal = 0L;
+        gateChargeWork = 0L;
         if (cfg.reach != null) {
+            // only a borrowed window is charged: with an empty slot the read runs as off does (and is not charged there)
+            final long[] s0 = lent != null && lent.length == 1 ? forge.ai.simulation.ForcedWinSolver.loopSpent() : null;
             try {
                 reachGate(g, me);
             } catch (RuntimeException e) {
                 reachOn = true;
             } finally {
                 forge.ai.simulation.ForcedWinSolver.returnLoopWindow(g, lent);
+                if (s0 != null) {
+                    final long[] s1 = forge.ai.simulation.ForcedWinSolver.loopSpent();
+                    gateChargeReal = s1[0] - s0[0];
+                    gateChargeWork = s1[1] - s0[1];
+                }
             }
         }
+    }
+
+    /**
+     * gate-loop-window-1113: the loop-probe time this decision's gate spent in its borrowed window ({real, work-clock}
+     * nanoseconds), charged to the decision's budget: decide0 (and provenOnlyDecide) start their budget that much
+     * earlier, so the fix adds no think time and a paired on/off read compares equal compute. 0 when off, without a
+     * budget, with an empty slot, or when the gate probed nothing.
+     */
+    private long gateChargeReal, gateChargeWork;
+
+    /** gate-loop-window-1113: the gate's charge on the budget clock: work-clock time on a workUnits seat, else 0 (t0 carries it). */
+    private long gateChargeOnClock() {
+        return cfg.workUnits && forge.game.WorkClock.active() ? gateChargeWork : 0L;
     }
 
     /**
@@ -4248,6 +4270,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("reach_gate_loop_cut", l[2] > 0);
             row.addProperty("reach_gate_loop_found", l[3]); // gate-loop-window-1113: probes here that found a win
             row.addProperty("reach_gate_own_window", gateWindowOpen); // gate-loop-window-1113
+            row.addProperty("reach_gate_charge_ms", gateChargeReal / 1_000_000L); // gate-loop-window-1113: real ms charged
         }
     }
 

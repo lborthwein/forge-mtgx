@@ -190,10 +190,10 @@ public final class EngineFixes {
      * clock usually expired, so the gate's Kiki loop probes were cut and the gate stayed closed until the next draw or
      * turn), or on a work-clock seat possibly the other pilot seat's, opened on that seat's clock. The gate borrows the
      * game's window slot and puts its old value back, so the decision's search and the other seat see exactly the windows
-     * they saw before; only the gates' reads change. Two things still reach past the gate: the probe answers it caches
-     * (per game, by the probed seat; an opponent's reach that screens this seat's cards reuses them sooner), and its
-     * probe time, which is not charged to the decision's budget (at most a quarter of it, once per uncached copier and
-     * partner; on a workUnits seat it comes out of the real-time safety wall). A seat's spec key
+     * they saw before; only the gates' reads change. The probe time spent in the borrowed window is charged to the
+     * decision's budget (it starts that much earlier), so the fix adds no think time. One thing still reaches past the
+     * gate: the probe answers it caches (per game, by the probed seat), which an opponent's reach that screens this
+     * seat's cards reuses sooner. A seat's spec key
      * {@code reach.gateWindow} overrides this default (RlSearch.ReachCfg#gateWindow).
      */
     private static boolean gateLoopWindow = flag("forge.gateLoopWindow");
