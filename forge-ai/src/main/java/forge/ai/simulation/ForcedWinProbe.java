@@ -1346,11 +1346,12 @@ public final class ForcedWinProbe {
                     searchCast(ab, o, live, me, card, avoid -> inHand, castIt, null, ForcedWinSolver.mix(seed, id * 59L + 11), st);
                 }
                 t.fromHand.add(ab);
-                if ((v == null || "opp".equals(v)) && objRun == null && sacCost == null) {
-                    // plantargets-1114, slice "attackers" (null without the key: nothing runs, nothing changes)
+                if ((v == null || "opp".equals(v)) && sacCost == null) {
+                    // plantargets-1114, slice "attackers" (null without the key: nothing runs, nothing changes). An ability a
+                    // probeObjects reader plays on objects of ours keeps that form; the attacker form is one more ability
                     final TgtRun tr = learnAttacker(live, me, card, sa0, base, false, inHand, ForcedWinSolver.mix(runSeed, 0x505441L), st);
                     if (tr != null) {
-                        attackerAbil(t.fromHand, ab, v == null, tr, base, id, sa0, handMask);
+                        attackerAbil(t.fromHand, ab, v == null && objRun == null && ab.obj == null, tr, base, id, sa0, handMask);
                     }
                 }
                 if (o.won && !o.libraryEmptied && t.permanent) {
@@ -1517,11 +1518,11 @@ public final class ForcedWinProbe {
                         unmodeled(t, "unmapped", sa0);
                     }
                     t.onBattlefield.add(ab);
-                    if ((v == null || "opp".equals(v)) && objRun == null && sacCost == null) {
+                    if ((v == null || "opp".equals(v)) && sacCost == null) {
                         // plantargets-1114, slice "attackers" (null without the key: nothing runs, nothing changes)
                         final TgtRun tr = learnAttacker(live, me, card, sa0, base, true, onBattlefield, ForcedWinSolver.mix(runSeed, 0x505441L), st);
                         if (tr != null) {
-                            attackerAbil(t.onBattlefield, ab, v == null, tr, base, id, sa0, handMask);
+                            attackerAbil(t.onBattlefield, ab, v == null && objRun == null && ab.obj == null, tr, base, id, sa0, handMask);
                         }
                     }
                 }

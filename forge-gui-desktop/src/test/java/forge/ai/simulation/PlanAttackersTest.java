@@ -243,6 +243,59 @@ public class PlanAttackersTest extends AITest {
         Assert.assertEquals(off.tgtLines.get(), 0);
     }
 
+    /**
+     * planTargets and probeObjects together (their own template keys: pta| before po|). A removal that may also take a
+     * creature of ours keeps the form probeObjects plays on our objects and gains the attacker form as one more ability;
+     * the width search with both keys still removes the attacker, and the step's target is the attacker, not an object
+     * of ours.
+     */
+    @Test
+    public void planTargetsAndProbeObjectsCompose() {
+        for (String removal : new String[] {DESTROY, BOUNCE}) {
+            final Game g = game("Lightning Bolt;Lightning Bolt;" + removal, "Mountain;Swamp;Swamp;Swamp;Island;Runeclaw Bear", 3,
+                    "Plains;Hill Giant;Craw Wurm", 6);
+            final Player me = g.getPlayers().get(0);
+            final int bear = ForcedWinSolverTest.inZone(me, ZoneType.Battlefield, "Runeclaw Bear").getId();
+            final ForcedWinModel.Reader r = new ForcedWinModel.Reader();
+            r.planAttackers = true;
+            r.probeObjects = true;
+            final Card c = ForcedWinSolverTest.inZone(me, ZoneType.Hand, removal);
+            final ACard a = r.card(g, me, c);
+            Assert.assertTrue(r.templates.containsKey("pta|po|" + removal), "both prefixes, pta| first: " + r.templates.keySet());
+            System.err.println("PA both " + removal + " " + shape(a));
+            Assert.assertNotNull(need(a), removal + ": the attacker form is learned beside the object form");
+            for (Abil ab : a.fromHand) {
+                Assert.assertFalse(ab.tgt != null && ab.obj != null, removal + ": one ability holds one of the two needs");
+            }
+            // our Bear blocks the Wurm (the largest), the Giant's 3 comes through at 3 life: lethal unless it is removed
+            final ForcedWinModel.Position pos = r.read(g, me, null, true);
+            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            lim.probeObjects = true;
+            final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+            System.err.println("PA both plan " + removal + " lines=" + res.lines.size() + " nodes=" + res.nodes + " tgtMoves=" + res.tgtMoves
+                    + (res.lines.isEmpty() ? "" : " first=" + res.lines.get(0).steps));
+            Assert.assertFalse(res.lines.isEmpty(), removal + ": a line with both keys on");
+            boolean attacker = false;
+            for (ForcedWinPlanner.Step st : res.lines.get(0).steps) {
+                if (st.tgt) {
+                    attacker = true;
+                    Assert.assertTrue(pos.oppIds.contains(st.objTarget), removal + ": the removal step's target is an opposing attacker");
+                    Assert.assertNotEquals(st.objTarget, bear, removal + ": never our own creature");
+                }
+            }
+            Assert.assertTrue(attacker, removal + ": the line holds the removal: " + res.lines.get(0).steps);
+            // with probeObjects alone the same position has no line through the opposing turn
+            final ForcedWinModel.Reader po = new ForcedWinModel.Reader();
+            po.probeObjects = true;
+            final Game h = game("Lightning Bolt;Lightning Bolt;" + removal, "Mountain;Swamp;Swamp;Swamp;Island;Runeclaw Bear", 3,
+                    "Plains;Hill Giant;Craw Wurm", 6);
+            final ForcedWinPlanner.Limits lim2 = new ForcedWinPlanner.Limits();
+            lim2.probeObjects = true;
+            Assert.assertTrue(ForcedWinPlanner.plan(po.read(h, h.getPlayers().get(0), null, true), lim2).lines.isEmpty(),
+                    removal + ": probeObjects alone does not remove the attacker");
+        }
+    }
+
     @Test
     public void damageRemovesOnlyWhatItKills() {
         // Shock (2 damage) cannot take a 3-toughness attacker off the clock: no line, with or without the key
