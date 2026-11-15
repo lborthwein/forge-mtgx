@@ -584,6 +584,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     private int lastPointTurn = -1;
     private String lastPointPhase = "";
     private boolean pointAgain;
+    /** sdcc-leakswap-1115 (diagnostics; false unless -Dsdcc.leakSwap is set): {@link #propose} adopts no line. */
+    boolean leakDryRun = false;
     final ForcedWinSolver.Config followCfg;
     /** (d): the opponent check (null = off). */
     final forge.ai.simulation.ThreatCheck threat;
@@ -1214,6 +1216,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     proven = pr;
                 }
             }
+            if (proven != null && leakDryRun) {
+                // sdcc-leakswap-1115 (diagnostics): a repeat of the decision only reports the proven line, adopts nothing
+                st.hook = true;
+                st.note = "proven-line " + proven.text;
+                st.ms = (System.nanoTime() - t0) / 1e6;
+                return st;
+            }
             if (proven != null) {
                 // (b) a proven node: take it, no play-outs
                 solver.adopt(proven.line);
@@ -1238,6 +1247,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                                         || pr.pBelief == likely.pBelief && pr.steps < likely.steps)) {
                             likely = pr;
                         }
+                    }
+                    if (likely != null && leakDryRun) {
+                        st.hook = true; // sdcc-leakswap-1115 (diagnostics): report only, adopt nothing
+                        st.ms = (System.nanoTime() - t0) / 1e6;
+                        return st;
                     }
                     if (likely != null) {
                         solver.adopt(likely.line);

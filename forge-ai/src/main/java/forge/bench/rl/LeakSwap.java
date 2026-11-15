@@ -1,0 +1,257 @@
+package forge.bench.rl;
+
+import com.google.gson.JsonObject;
+import forge.ai.simulation.InfoStates;
+import forge.game.Game;
+import forge.game.card.Card;
+import forge.game.player.Player;
+import forge.game.zone.Zone;
+import forge.game.zone.ZoneType;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.function.Predicate;
+
+/**
+ * sdcc-leakswap-1115: the hidden-card SWAP leak test of the live priority search (DIAGNOSTICS ONLY).
+ *
+ * <p>Off unless {@code -Dsdcc.leakSwap=<out.jsonl>} is set ({@code {pid}} in the path is replaced by the JVM's pid); off,
+ * nothing in this class runs and no game changes. On, at a sample of a search seat's SEARCHED priority decisions
+ * ({@code -Dsdcc.leakSwap.every}, default 3: about one in three, by a hash of the game uid and the decision index; at most
+ * {@code -Dsdcc.leakSwap.cap} decisions with a changed hidden card per game, default 10), after the real search has
+ * answered and without changing its answer, {@link RlSearch} searches the same decision twice more with the same world
+ * seeds: R on the live position as it is (a repeat control) and S on the live position with its hidden cards re-dealt by
+ * {@link #redeal} (and put back exactly by {@link Deal#restore}). One JSON line per decision.
+ *
+ * <p>The re-deal works IN PLACE on the live game's own card objects (no new cards, no events), so every structure keyed by
+ * the game or by card ids (InfoStates, the seat's knowledge, readers) stays valid: (1) the opponent's hidden hand cards and
+ * the unknown cards of their library are dealt again from their union (a seeded shuffle); (2) the seat's own library is
+ * shuffled in its unknown slots. A card stays where it is if the seat can see it (CardView.canBeShownTo), if InfoStates
+ * knows its position or its run, if the seat remembers it (RlKnowledge), or if it is face down.
+ */
+final class LeakSwap {
+    static final String OUT = System.getProperty("sdcc.leakSwap");
+    static final boolean ON = OUT != null && !OUT.isEmpty();
+    static final int EVERY = Math.max(1, Integer.getInteger("sdcc.leakSwap.every", 3));
+    static final int CAP = Integer.getInteger("sdcc.leakSwap.cap", 10);
+    static final long SALT = Long.getLong("sdcc.leakSwap.salt", 0x1eac5a9L);
+
+    private static final Map<Long, Integer> DONE = new HashMap<>();
+    private static Writer out;
+
+    private LeakSwap() {
+    }
+
+    static long mix(long a, long b) {
+        return RlSearch.splitmix(a ^ RlSearch.splitmix(b));
+    }
+
+    /** This decision is in the sample (and the game's cap is not reached). */
+    static synchronized boolean want(final long uid, final int decIdx) {
+        if (DONE.getOrDefault(uid, 0) >= CAP) {
+            return false;
+        }
+        return Long.remainderUnsigned(mix(mix(SALT, uid), decIdx), EVERY) == 0;
+    }
+
+    /** A logged decision with at least one hidden card changed (counts toward the game's cap). */
+    static synchronized void counted(final long uid) {
+        DONE.merge(uid, 1, Integer::sum);
+    }
+
+    static synchronized void write(final JsonObject row) {
+        try {
+            if (out == null) {
+                final String path = OUT.replace("{pid}", String.valueOf(ProcessHandle.current().pid()));
+                out = new FileWriter(path, StandardCharsets.UTF_8, true);
+            }
+            out.write(row.toString());
+            out.write('\n');
+            out.flush();
+        } catch (IOException e) {
+            System.err.println("[leakswap] write failed: " + e);
+        }
+    }
+
+    /** The zones a re-deal changed, their original card lists (for the exact restore), and what changed. */
+    static final class Deal {
+        final List<Zone> zones = new ArrayList<>();
+        final List<List<Card>> orig = new ArrayList<>();
+        int oppHandChanged, oppLibChanged, ownLibChanged;
+        int oppHandSize, oppHandFree, oppLibSize, oppLibFree, ownLibSize, ownLibFree;
+
+        int changed() {
+            return oppHandChanged + oppLibChanged + ownLibChanged;
+        }
+
+        void set(final Zone z, final List<Card> now) {
+            zones.add(z);
+            orig.add(new ArrayList<>(z.getCards()));
+            z.setCardsQuiet(now);
+        }
+
+        /** Put every zone back in its original order; true when each zone holds exactly its original list again. */
+        boolean restore() {
+            boolean ok = true;
+            for (int i = zones.size() - 1; i >= 0; i--) {
+                zones.get(i).setCardsQuiet(orig.get(i));
+            }
+            for (int i = 0; i < zones.size(); i++) {
+                final List<Card> now = new ArrayList<>(zones.get(i).getCards());
+                final List<Card> was = orig.get(i);
+                if (now.size() != was.size()) {
+                    ok = false;
+                    continue;
+                }
+                for (int k = 0; k < was.size(); k++) {
+                    if (now.get(k) != was.get(k)) {
+                        ok = false;
+                    }
+                }
+            }
+            return ok;
+        }
+
+        void into(final JsonObject row) {
+            row.addProperty("changed", changed());
+            row.addProperty("opp_hand_changed", oppHandChanged);
+            row.addProperty("opp_lib_changed", oppLibChanged);
+            row.addProperty("own_lib_changed", ownLibChanged);
+            row.addProperty("opp_hand", oppHandSize);
+            row.addProperty("opp_hand_free", oppHandFree);
+            row.addProperty("opp_lib", oppLibSize);
+            row.addProperty("opp_lib_free", oppLibFree);
+            row.addProperty("own_lib", ownLibSize);
+            row.addProperty("own_lib_free", ownLibFree);
+        }
+    }
+
+    private static boolean visible(final Card c, final Player me) {
+        return c.isFaceDown() || c.getView().canBeShownTo(me.getView());
+    }
+
+    private static Set<Integer> fixedIds(final InfoStates is, final Player me, final Player owner) {
+        final Set<Integer> out = new HashSet<>();
+        if (is == null) {
+            return out;
+        }
+        out.addAll(is.knownIndex(me, owner).keySet());
+        for (Set<Integer> run : is.runs(me, owner)) {
+            out.addAll(run);
+        }
+        return out;
+    }
+
+    /**
+     * Re-deal the hidden cards of {@code g} for the seat {@code me} with {@code seed} (see the class comment). The caller
+     * must {@link Deal#restore} the returned deal before the game goes on.
+     */
+    static Deal redeal(final Game g, final Player me, final RlKnowledge know, final Predicate<Card> remembered,
+            final long seed) {
+        final Deal d = new Deal();
+        final Random rng = new Random(seed);
+        final InfoStates is = InfoStates.find(g);
+        final int seat = know == null ? -1 : know.seatOf(me);
+        for (Player opp : g.getRegisteredPlayers()) {
+            if (opp == me) {
+                continue;
+            }
+            final Zone hz = opp.getZone(ZoneType.Hand);
+            final Zone lz = opp.getZone(ZoneType.Library);
+            final List<Card> hand = new ArrayList<>(hz.getCards());
+            final List<Card> lib = new ArrayList<>(lz.getCards());
+            final Set<Integer> fixed = fixedIds(is, me, opp);
+            final List<Integer> hFree = new ArrayList<>(), lFree = new ArrayList<>();
+            final List<Card> pool = new ArrayList<>();
+            for (int i = 0; i < hand.size(); i++) {
+                final Card c = hand.get(i);
+                if (!visible(c, me) && !remembered.test(c) && !(know != null && know.knows(seat, c))) {
+                    hFree.add(i);
+                    pool.add(c);
+                }
+            }
+            for (int i = 0; i < lib.size(); i++) {
+                final Card c = lib.get(i);
+                if (!visible(c, me) && !fixed.contains(c.getId()) && !(know != null && know.knows(seat, c))) {
+                    lFree.add(i);
+                    pool.add(c);
+                }
+            }
+            d.oppHandSize += hand.size();
+            d.oppHandFree += hFree.size();
+            d.oppLibSize += lib.size();
+            d.oppLibFree += lFree.size();
+            pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+            Collections.shuffle(pool, rng);
+            final List<Card> nh = new ArrayList<>(hand), nl = new ArrayList<>(lib);
+            int k = 0;
+            for (int i : hFree) {
+                nh.set(i, pool.get(k++));
+            }
+            for (int i : lFree) {
+                nl.set(i, pool.get(k++));
+            }
+            // changed hand cards: the new free hand cards whose names the old free hand did not hold (as multisets)
+            final Map<String, Integer> was = new HashMap<>();
+            for (int i : hFree) {
+                was.merge(hand.get(i).getName(), 1, Integer::sum);
+            }
+            for (int i : hFree) {
+                final String n = nh.get(i).getName();
+                final int left = was.getOrDefault(n, 0);
+                if (left > 0) {
+                    was.put(n, left - 1);
+                } else {
+                    d.oppHandChanged++;
+                }
+            }
+            for (int i : lFree) {
+                if (!nl.get(i).getName().equals(lib.get(i).getName())) {
+                    d.oppLibChanged++;
+                }
+            }
+            if (!hFree.isEmpty()) {
+                d.set(hz, nh);
+            }
+            if (!lFree.isEmpty()) {
+                d.set(lz, nl);
+            }
+        }
+        final Zone mz = me.getZone(ZoneType.Library);
+        final List<Card> lib = new ArrayList<>(mz.getCards());
+        final Set<Integer> fixed = fixedIds(is, me, me);
+        final List<Integer> free = new ArrayList<>();
+        final List<Card> pool = new ArrayList<>();
+        for (int i = 0; i < lib.size(); i++) {
+            final Card c = lib.get(i);
+            if (!visible(c, me) && !fixed.contains(c.getId())) {
+                free.add(i);
+                pool.add(c);
+            }
+        }
+        d.ownLibSize = lib.size();
+        d.ownLibFree = free.size();
+        Collections.shuffle(pool, rng);
+        final List<Card> nl = new ArrayList<>(lib);
+        for (int k = 0; k < free.size(); k++) {
+            nl.set(free.get(k), pool.get(k));
+            if (!pool.get(k).getName().equals(lib.get(free.get(k)).getName())) {
+                d.ownLibChanged++;
+            }
+        }
+        if (!free.isEmpty()) {
+            d.set(mz, nl);
+        }
+        return d;
+    }
+}
