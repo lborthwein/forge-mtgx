@@ -2235,6 +2235,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final LeakSwap.Deal d = LeakSwap.redeal(g, me, liveKnow, c -> remembersHandCard(g, me, c),
                     LeakSwap.mix(LeakSwap.mix(LeakSwap.SALT ^ 0x53a9L, uid), frame.decIdx));
             boolean restored = false;
+            boolean sDiffers = false;
             try {
                 d.into(row);
                 final byte[] o1 = obs == null ? null : obs.get();
@@ -2246,12 +2247,35 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     st[0] = null;
                     final LookaheadSearch.GivenResult rs = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);
                     row.add("S", leakArm(rs, order, st[0]));
+                    sDiffers = !leakSame(real, rs);
                 } else {
                     row.addProperty("skip", "nothing_changed");
                 }
             } finally {
                 restored = d.restore();
                 row.addProperty("restored", restored);
+            }
+            if (sDiffers && restored) {
+                // S differs from the real search: the same deal split into its parts (opponent only, own library only)
+                final long seed = LeakSwap.mix(LeakSwap.mix(LeakSwap.SALT ^ 0x53a9L, uid), frame.decIdx);
+                for (int part = 0; part < 2; part++) {
+                    final LeakSwap.Deal dp = LeakSwap.redeal(g, me, liveKnow, c -> remembersHandCard(g, me, c), seed,
+                            part == 0, part == 1);
+                    final String key = part == 0 ? "S_opp" : "S_own";
+                    try {
+                        if (dp.changed() > 0 && (obs == null || java.util.Arrays.equals(o0, obs.get()))) {
+                            st[0] = null;
+                            final LookaheadSearch.GivenResult rp = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);
+                            final JsonObject a = leakArm(rp, order, st[0]);
+                            a.addProperty("changed", dp.changed());
+                            row.add(key, a);
+                        }
+                    } finally {
+                        if (!dp.restore()) {
+                            row.addProperty("restored", false);
+                        }
+                    }
+                }
             }
             if (obs != null) {
                 row.addProperty("obs_restored", java.util.Arrays.equals(o0, obs.get()));
@@ -2310,6 +2334,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, null);
         }
         return ls.decideGiven(g, me, given, cfg.breadth);
+    }
+
+    /** sdcc-leakswap-1115: the same chosen candidate, searched entries and ev (within 1e-9) as the real search. */
+    private static boolean leakSame(final LookaheadSearch.GivenResult a, final LookaheadSearch.GivenResult b) {
+        if (b == null || a.chosen != b.chosen || !java.util.Arrays.equals(a.givenIndex, b.givenIndex) || a.ev.length != b.ev.length) {
+            return false;
+        }
+        for (int j = 0; j < a.ev.length; j++) {
+            final double x = a.ev[j], y = b.ev[j];
+            if (Double.isNaN(x) != Double.isNaN(y) || !Double.isNaN(x) && Math.abs(x - y) > 1e-9) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** sdcc-leakswap-1115: one arm's answer: the chosen menu index (-1 - k = plan k), the searched entries, ev, values. */

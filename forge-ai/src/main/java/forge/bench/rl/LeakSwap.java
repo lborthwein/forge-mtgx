@@ -158,6 +158,15 @@ final class LeakSwap {
      */
     static Deal redeal(final Game g, final Player me, final RlKnowledge know, final Predicate<Card> remembered,
             final long seed) {
+        return redeal(g, me, know, remembered, seed, true, true);
+    }
+
+    /**
+     * As above; {@code opp} / {@code own}: which part is applied (the random stream is the same either way, so the
+     * opponent-only and own-only deals are exactly the parts of the full deal with the same seed).
+     */
+    static Deal redeal(final Game g, final Player me, final RlKnowledge know, final Predicate<Card> remembered,
+            final long seed, final boolean opp0, final boolean own) {
         final Deal d = new Deal();
         final Random rng = new Random(seed);
         final InfoStates is = InfoStates.find(g);
@@ -220,6 +229,11 @@ final class LeakSwap {
                     d.oppLibChanged++;
                 }
             }
+            if (!opp0) {
+                d.oppHandChanged = 0;
+                d.oppLibChanged = 0;
+                continue;
+            }
             if (!hFree.isEmpty()) {
                 d.set(hz, nh);
             }
@@ -249,7 +263,9 @@ final class LeakSwap {
                 d.ownLibChanged++;
             }
         }
-        if (!free.isEmpty()) {
+        if (!own) {
+            d.ownLibChanged = 0;
+        } else if (!free.isEmpty()) {
             d.set(mz, nl);
         }
         return d;
