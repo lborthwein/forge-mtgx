@@ -208,17 +208,19 @@ public final class HumanManaAffordability {
      * afford-reflected-1114 (owner report 2026-11-15T01-17-17: an untapped Chrome Mox with nothing imprinted, and every
      * spell in hand glowing). A reflected mana ability ({@code ManaReflected}) produces "1" by its script, which the
      * proof could not read, so one such source made every proof give up. Here the one shape whose colours can be read
-     * without side effects: {@code ReflectProperty$ Is} over {@code Valid$ Defined.<cards>} (Chrome Mox's imprinted
-     * card), the colours those cards are now, as {@code ManaReflectedEffect} reads them at resolution
-     * ({@link CardUtil#getReflectableManaColors}). 0 when there is no colour to reflect: the effect then adds "0", so
-     * the source makes no mana. Null for every other reflected ability (Reflecting Pool's "Produce", whose reading
-     * sets other abilities' activating players) and for any that cannot be read: the caller keeps its old answer.
+     * without side effects and cannot change while a cost is paid: {@code ReflectProperty$ Is} over
+     * {@code Valid$ Defined.Imprinted} (Chrome Mox), the colours of the imprinted cards now, as
+     * {@code ManaReflectedEffect} reads them at resolution ({@link CardUtil#getReflectableManaColors}). 0 when there is
+     * no colour to reflect: the effect then adds "0", so the source makes no mana. Null for every other reflected
+     * ability and for any that cannot be read: the caller keeps its old answer. Review S1 (Astra, #240): another
+     * {@code Defined.} set may grow during the payment (Corrupted Grafstone's graveyard, once a Blood Pet is sacrificed
+     * for mana), and Reflecting Pool's "Produce" reading sets other abilities' activating players.
      */
     public static Integer reflectedColours(final Player player, final SpellAbility source) {
         if (source.getApi() != ApiType.ManaReflected || source.getManaPart() == null
                 || source.getManaPart().isComboMana()
                 || !"Is".equals(source.getParam("ReflectProperty"))
-                || !source.getParamOrDefault("Valid", "").startsWith("Defined.")) return null;
+                || !"Defined.Imprinted".equals(source.getParam("Valid"))) return null;
         try {
             int colours = 0;
             for (String name : CardUtil.getReflectableManaColors(source)) {
@@ -246,9 +248,23 @@ public final class HumanManaAffordability {
      * X and no Phyrexian pip, with no static in play that may lower a price, and whose card makes, with each of its
      * {T} mana abilities, no more mana than that cost has pips. A card with a mana ability the proof cannot read, or
      * one that does not tap, is refused.</p>
+     *
+     * <p>Review S1 (Astra, #240): an untapped permanent can also make mana through ANOTHER source whose cost taps it
+     * ({@code CostTapType}: Urza, Lord High Artificer taps the untapped Basalt Monolith for {U}; Grand Architect taps
+     * the untapped Horseshoe Crab for {C}{C}, more than its {U} untap costs). So any mana ability of the player's
+     * that taps other permanents refuses the bound. The caller also refuses it for a spell with improvise (an untapped
+     * artifact pays {1}); convoke never reaches it.</p>
      */
     public static Integer untapWidening(final Player player) {
         if (costStaticInPlay(player)) return null;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            if (card.isPhasedOut()) continue;
+            for (SpellAbility source : card.getManaAbilities()) {
+                if (source.getPayCosts() != null && activatableWhereItIs(card, source)
+                        && source.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostTapType)) return null;
+            }
+        }
         int widen = 0;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isPhasedOut()) continue;
@@ -1102,7 +1118,11 @@ public final class HumanManaAffordability {
             // afford-reflected-1114: every untap usable now costs at least what it gives back, so the mana counted now
             // bounds the payment; each counted mana (not life, convoke, improvise or delve) may also stand in for one of
             // the colours an untap brings back.
-            final Integer widen = (hooks & HOOK_CONVERT) != 0 ? null : untapWidening(player);
+            // Improvise pays {1} per untapped artifact; harmonize's reduction (a ReduceCost static on the card itself,
+            // in the graveyard where costStaticInPlay does not look) grows with a creature an untap brings back.
+            final Integer widen = (hooks & HOOK_CONVERT) != 0
+                    || spell && (host.hasKeyword(Keyword.IMPROVISE) || ability.isHarmonize()) ? null
+                    : untapWidening(player);
             if (widen != null) {
                 final List<Token> wideBase = new ArrayList<>();
                 for (Token t : base) {

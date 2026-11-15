@@ -203,4 +203,89 @@ public class HumanManaAffordabilityReflectedUntapTest extends AITest {
         final Integer widen = HumanManaAffordability.untapWidening(me);
         assertEquals(widen == null ? null : widen & ManaAtom.ALL_MANA_TYPES, Integer.valueOf(ManaAtom.COLORLESS));
     }
+
+    /**
+     * The boundary: Basalt Monolith's "{3}: Untap" gives back exactly {C}{C}{C}, which is admitted. With three Mountains
+     * the counted mana is three, and Ulamog ({11}) is proved unpayable.
+     */
+    @Test
+    public void basaltCostsExactlyWhatItGivesBack() {
+        board();
+        mine("Basalt Monolith", true);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        final Card ulamog = hand("Ulamog, the Infinite Gyre");
+        settle();
+
+        final Integer widen = HumanManaAffordability.untapWidening(me);
+        assertEquals(widen == null ? null : widen & ManaAtom.ALL_MANA_TYPES, Integer.valueOf(ManaAtom.COLORLESS));
+        noGlow(ulamog);
+    }
+
+    /** A self-untap that gives back more than it costs (Basalt Monolith given a "{T}: Add five {C}") is refused. */
+    @Test
+    public void selfUntapThatGivesBackMoreIsRefused() {
+        board();
+        final Card basalt = mine("Basalt Monolith", true);
+        final SpellAbility five = forge.game.ability.AbilityFactory.getAbility(
+                "AB$ Mana | Cost$ T | Produced$ C | Amount$ 5 | SpellDescription$ Add five colorless.", basalt);
+        basalt.addSpellAbility(five);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        final Card ulamog = hand("Ulamog, the Infinite Gyre");
+        settle();
+
+        assertNull(HumanManaAffordability.untapWidening(me), "an untap for {3} that gives back five is not admitted");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(ulamog)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
+    // ------------------------------------------------------------------ review counterexamples (Astra, #240)
+
+    /** Review S1: Urza can tap the untapped Basalt Monolith for {U}. Three Mountains pay its untap: Mystical Tutor is payable. */
+    @Test
+    public void review_urzaCanTapTheUntappedMonolith() {
+        board();
+        mine("Basalt Monolith", true);
+        mine("Urza, Lord High Artificer", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        final Card tutor = hand("Mystical Tutor");
+        settle();
+
+        assertNull(HumanManaAffordability.untapWidening(me), "an artifact-tapping mana ability refuses the bound");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(tutor)), Assessment.PROVEN_UNAFFORDABLE);
+        assertNotEquals(HumanManaAffordability.proof(me, spell(tutor)), Proof.UNAFFORDABLE);
+    }
+
+    /** Review S1: Grand Architect taps the untapped Horseshoe Crab for {C}{C}, more than its {U} untap: six for Wurmcoil Engine. */
+    @Test
+    public void review_architectMakesTheCrabsUntapGainMana() {
+        board();
+        mine("Horseshoe Crab", false);
+        mine("Grand Architect", false);
+        mine("Island", false);
+        final Card wurm = hand("Wurmcoil Engine");
+        settle();
+
+        assertNull(HumanManaAffordability.untapWidening(me), "a creature-tapping mana ability refuses the bound");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(wurm)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
+    /** Review S1: Corrupted Grafstone reads the graveyard, which grows when Blood Pet is sacrificed for {B}: Hymn is payable. */
+    @Test
+    public void review_grafstoneReadsAGraveyardThatCanGrow() {
+        board();
+        final Card stone = mine("Corrupted Grafstone", false);
+        mine("Blood Pet", false);
+        final Card hymn = hand("Hymn to Tourach");
+        settle();
+
+        final SpellAbility tap = stone.getManaAbilities().iterator().next();
+        tap.setActivatingPlayer(me);
+        assertNull(HumanManaAffordability.reflectedColours(me, tap), "only an imprint is read as stable");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(hymn)), Assessment.PROVEN_UNAFFORDABLE);
+    }
 }
