@@ -386,6 +386,13 @@ public final class ChoiceApply {
      */
     public static List<List<Integer>> pileChoices(final Game live, final Player liveMe, final ForcedWinSolver.Config cfg,
             final int nodes, final long ms, final int top, final long seed) {
+        return pileChoices(live, liveMe, cfg, nodes, ms, top, seed, null);
+    }
+
+    /** As above; sdcc-scorerleak-1115: {@code onCopy} (null = none, as before) edits the copy before the planner reads it. */
+    public static List<List<Integer>> pileChoices(final Game live, final Player liveMe, final ForcedWinSolver.Config cfg,
+            final int nodes, final long ms, final int top, final long seed,
+            final java.util.function.BiConsumer<Game, Player> onCopy) {
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
@@ -404,6 +411,9 @@ public final class ChoiceApply {
                 final GameCopier copier = copier(live, 1, true, null);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
+                if (onCopy != null) {
+                    onCopy.accept(g, me);
+                }
             }
             final forge.game.spellability.SpellAbilityStackInstance si = g.getStack().peek();
             final Card host = si.getSourceCard();

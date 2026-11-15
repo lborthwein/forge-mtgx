@@ -32,12 +32,19 @@ public class ScorerRedealSpecTest {
     }
 
     @Test
-    public void anyOtherValueReadsAsOff() {
-        // as every boolean scorer key (reachDiscards ...): the jar reads anything but true as off; the play host's
-        // validator (lborthwein/mtgx#1896) refuses such a value before it reaches the JVM
-        for (String v : new String[] {"1", "yes", "on"}) {
+    public void theJarReadsBooleansStrictly() {
+        // the play host passes true|false only (lborthwein/mtgx#1896); the jar also takes 1|0, on|off, yes|no
+        for (String v : new String[] {"true", "1", "on", "yes"}) {
+            Assert.assertTrue(scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOpp=" + v).redealOpp, v);
+            Assert.assertTrue(scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOwnOrder=" + v).redealOwnOrder, v);
+        }
+        for (String v : new String[] {"false", "0", "off", "no"}) {
             Assert.assertFalse(scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOpp=" + v).redealOpp, v);
             Assert.assertFalse(scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOwnOrder=" + v).redealOwnOrder, v);
+        }
+        for (String v : new String[] {"2", "maybe", "TRUE", "On", "0.5", "-1"}) {
+            Assert.assertThrows(IllegalArgumentException.class, () -> scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOpp=" + v));
+            Assert.assertThrows(IllegalArgumentException.class, () -> scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOwnOrder=" + v));
         }
     }
 }
