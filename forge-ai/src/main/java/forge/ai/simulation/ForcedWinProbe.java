@@ -152,10 +152,16 @@ public final class ForcedWinProbe {
      * sdcc-scorerleak-1115 (the seat's choiceScorer.redealOpp; empty = off, and then nothing changes): per live game and
      * seat, the belief re-draw ({@link LookaheadSearch#opponentRedraw}) that {@link #scrub} deals the other players' hidden
      * cards with, instead of the deal from their real cards: the sandbox then holds belief cards (new objects), never
-     * the opponent's real hand, as the search's worlds do.
+     * the opponent's real hand, as the search's worlds do. Review S1: keys AND values are weak (the re-draw reaches its
+     * game through its search), so an ended game leaves the map; the registering search keeps its re-draw alive.
      */
-    private static final Map<Game, Map<Integer, ForcedWinSolver.Redraw>> REDRAWS =
+    private static final Map<Game, Map<Integer, java.lang.ref.WeakReference<ForcedWinSolver.Redraw>>> REDRAWS =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** sdcc-scorerleak-1115 (tests): the live games with a registered re-draw (stale ones expunged). */
+    static int redrawGames() {
+        return REDRAWS.size();
+    }
 
     /** sdcc-scorerleak-1115: sandboxes of {@code live} made for {@code seat} draw the opponents' hidden cards with {@code r}. */
     public static void redrawFor(final Game live, final Player seat, final ForcedWinSolver.Redraw r) {
@@ -163,7 +169,12 @@ public final class ForcedWinProbe {
             return;
         }
         synchronized (REDRAWS) {
-            REDRAWS.computeIfAbsent(live, k -> new java.util.concurrent.ConcurrentHashMap<>()).putIfAbsent(seat.getId(), r);
+            final Map<Integer, java.lang.ref.WeakReference<ForcedWinSolver.Redraw>> m =
+                    REDRAWS.computeIfAbsent(live, k -> new java.util.concurrent.ConcurrentHashMap<>());
+            final java.lang.ref.WeakReference<ForcedWinSolver.Redraw> old = m.get(seat.getId());
+            if (old == null || old.get() == null) {
+                m.put(seat.getId(), new java.lang.ref.WeakReference<>(r));
+            }
         }
     }
 
@@ -172,8 +183,9 @@ public final class ForcedWinProbe {
         if (REDRAWS.isEmpty() || source == null || sourceMe == null) {
             return null;
         }
-        final Map<Integer, ForcedWinSolver.Redraw> m = REDRAWS.get(source);
-        return m == null ? null : m.get(sourceMe.getId());
+        final Map<Integer, java.lang.ref.WeakReference<ForcedWinSolver.Redraw>> m = REDRAWS.get(source);
+        final java.lang.ref.WeakReference<ForcedWinSolver.Redraw> w = m == null ? null : m.get(sourceMe.getId());
+        return w == null ? null : w.get();
     }
 
     /** labeller-v2 (c): set by a planScry reader around its learning (false = v1). */

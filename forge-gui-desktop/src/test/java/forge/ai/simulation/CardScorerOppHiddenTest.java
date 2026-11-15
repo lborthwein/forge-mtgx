@@ -467,7 +467,7 @@ public class CardScorerOppHiddenTest extends AITest {
             Game g = new GameCopier(live, true).makeCopy();
             ForcedWinProbe.scrub(live, me, g, g.getPlayer(me.getId()), 7L);
             Assert.assertTrue(calls.isEmpty());
-            ForcedWinProbe.redrawFor(live, me, stub);
+            ForcedWinProbe.redrawFor(live, me, stub); // the test holds stub (as the seat's search holds its re-draw)
             // the other seat's sandboxes are untouched by this seat's key
             g = new GameCopier(live, true).makeCopy();
             ForcedWinProbe.scrub(live, opp, g, g.getPlayer(opp.getId()), 7L);
@@ -481,5 +481,37 @@ public class CardScorerOppHiddenTest extends AITest {
         } finally {
             ForcedWinProbe.HIDE.set(prev);
         }
+    }
+
+    /**
+     * Review S1: a registered re-draw that reaches its game (as LookaheadSearch.opponentRedraw does, through the search)
+     * must not keep the game alive: once the game and its search are dropped, the entry leaves the registry.
+     */
+    @Test
+    public void anEndedGameLeavesTheRedrawRegistry() throws Exception {
+        final int before = ForcedWinProbe.redrawGames();
+        register();
+        Assert.assertEquals(ForcedWinProbe.redrawGames(), before + 1);
+        for (int i = 0; i < 50 && ForcedWinProbe.redrawGames() > before; i++) {
+            System.gc();
+            Thread.sleep(20);
+            final byte[][] pressure = new byte[64][];
+            for (int j = 0; j < pressure.length; j++) {
+                pressure[j] = new byte[1 << 16];
+            }
+        }
+        Assert.assertEquals(ForcedWinProbe.redrawGames(), before, "the ended game's entry was collected");
+    }
+
+    /** A game and a re-draw holding it strongly, registered, then both dropped (the frame ends). */
+    private static void register() {
+        final Game live = ForcedWinSolverTest.game("Default", "Default", frame("Giant Growth"));
+        final Game[] holds = {live};
+        final ForcedWinSolver.Redraw r = (src, srcMe, g, gMe, rng) -> {
+            if (holds[0] == null) {
+                throw new AssertionError();
+            }
+        };
+        ForcedWinProbe.redrawFor(live, live.getPlayers().get(0), r);
     }
 }

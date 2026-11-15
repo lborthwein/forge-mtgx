@@ -722,6 +722,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (reach != null && ReachCfg.parse(reach).verifyOn() && "off".equals(belief)) {
                 throw new IllegalArgumentException("search.reach.verify needs a belief (search.belief must not be off)");
             }
+            // sdcc-scorerleak-1115 (review S3): redealOpp deals the opponents' hidden cards from the belief; without one
+            // (belief off, or no cube) it would fall back to a deal from their real cards, so it is refused
+            if (choiceScorer != null && ChoiceScorer.Config.parse(choiceScorer).redealOpp && ("off".equals(belief) || beliefCube == null)) {
+                throw new IllegalArgumentException("search.choiceScorer.redealOpp needs a belief (search.belief must not be off, beliefCube set)");
+            }
             if (!"forge".equals(opponent) && !"policy".equals(opponent)) {
                 throw new IllegalArgumentException("search.opponent must be forge or policy, not " + opponent);
             }
@@ -2985,6 +2990,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     private ChoiceScorer scorer;
 
+    /** sdcc-scorerleak-1115: the probes' belief re-draw, held here for the game's life (the registry's reference is weak). */
+    private forge.ai.simulation.ForcedWinSolver.Redraw probeRedraw;
+
     /** sdcc-scorerleak-1115: the choiceScorer's redealOpp, read once (null = not yet). */
     private Boolean redealOpp;
 
@@ -2997,7 +3005,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             redealOpp = cfg.choiceScorer != null && ChoiceScorer.Config.parse(cfg.choiceScorer).redealOpp;
         }
         if (redealOpp) {
-            forge.ai.simulation.ForcedWinProbe.redrawFor(g, me, ls.opponentRedraw());
+            if (probeRedraw == null) {
+                probeRedraw = ls.opponentRedraw();
+            }
+            // review S1: the registry holds the re-draw weakly; this search (one per game) keeps it alive
+            forge.ai.simulation.ForcedWinProbe.redrawFor(g, me, probeRedraw);
         }
     }
 
