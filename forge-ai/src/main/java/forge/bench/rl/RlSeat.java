@@ -1112,7 +1112,16 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             // S1: the look-ahead over the policy's own priority decision (the policy's choice is its default)
             @SuppressWarnings("unchecked")
             final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
+            if (LeakSwap.ON && search instanceof RlSearch) {
+                // sdcc-leakswap-1115 (diagnostics; off unless -Dsdcc.leakSwap is set): the seat's own observation, rebuilt
+                final RlCandidates.Menu lm = m;
+                final int ls = seat;
+                ((RlSearch) search).leakObs = () -> leakFrame(ls, g, player, lm);
+            }
             final int alt = search.decide(g, player, m, frame, d.steps[0], menuObjs);
+            if (LeakSwap.ON && search instanceof RlSearch) {
+                ((RlSearch) search).leakObs = null;
+            }
             if (alt == PrioritySearch.VOID) {
                 endGame("cpu_cap");
                 return null;
@@ -1426,6 +1435,22 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     public void note(final Game g, final Player player, final String key) {
         if (g == game) {
             note(key);
+        }
+    }
+
+    /**
+     * sdcc-leakswap-1115 (diagnostics): the seat's observation of the live game now, as the encoded frame of the decision
+     * in progress without the privileged block; a scratch random stream and the id counters put back, as the RECORD path.
+     */
+    private byte[] leakFrame(final int seat, final Game g, final Player player, final RlCandidates.Menu m) {
+        final java.util.Random live = forge.util.MyRandom.getThreadRandom();
+        final int[] snap = idValues();
+        forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
+        try {
+            return RlWire.encodeDecide(frame(seat, g, m, feat.observe(g, player, m.mullK, false, m)));
+        } finally {
+            forge.util.MyRandom.setThreadRandom(live);
+            restoreIds(snap);
         }
     }
 

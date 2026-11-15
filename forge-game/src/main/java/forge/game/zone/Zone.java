@@ -176,6 +176,19 @@ public class Zone implements java.io.Serializable, Iterable<Card> {
         game.fireEvent(new GameEventZone(zoneType, getPlayer(), EventValueChangeType.ComplexUpdate, null));
     }
 
+    /**
+     * sdcc-leakswap-1115 (diagnostics only; called by nothing unless -Dsdcc.leakSwap is set): as {@link #setCards} but
+     * fires no game event, so a temporary re-deal of hidden cards and its exact restore are invisible to every listener.
+     */
+    public final void setCardsQuiet(final Iterable<Card> cards) {
+        cardList.clear();
+        for (Card c : cards) {
+            c.setZone(this);
+            cardList.add(c);
+        }
+        onChanged();
+    }
+
     public final void removeAllCards(boolean forcedWithoutEvents) {
         if (forcedWithoutEvents) {
             cardList.clear();

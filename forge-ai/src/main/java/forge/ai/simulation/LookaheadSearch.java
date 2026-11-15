@@ -2902,6 +2902,36 @@ public final class LookaheadSearch {
     private volatile java.util.function.Predicate<Card> trueKnown = null;
 
     /** S-b: the next searched decision's world-0 seed (its recordings play in the same world 0 as its valuation). */
+    /**
+     * sdcc-leakswap-1115 (diagnostics only; nothing calls it unless -Dsdcc.leakSwap is set): the per-decision state a given
+     * search reads and advances (the decision index that seeds its worlds, the departure limits, the replay force, the
+     * last candidates / belief, the kept worlds), so a decision can be searched again with the same world seeds and the
+     * state put back afterwards. Opaque; give it to {@link #leakRewind}.
+     */
+    public Object leakMark() {
+        return new Object[] {decisionIndex, departuresTurn, departuresThisTurn, new TreeMap<>(departureCounts), forcePlayed,
+                decisionForce, lastCandidates, lastBelief, decisionBelief, tutorIndex, kept, keptTurn};
+    }
+
+    /** sdcc-leakswap-1115: put back the state of a {@link #leakMark}. */
+    @SuppressWarnings("unchecked")
+    public void leakRewind(Object mark) {
+        final Object[] a = (Object[]) mark;
+        decisionIndex = (Integer) a[0];
+        departuresTurn = (Integer) a[1];
+        departuresThisTurn = (Integer) a[2];
+        departureCounts.clear();
+        departureCounts.putAll((Map<String, Integer>) a[3]);
+        forcePlayed = (String) a[4];
+        decisionForce = (String) a[5];
+        lastCandidates = (List<Cand>) a[6];
+        lastBelief = (BeliefSampler.Dist) a[7];
+        decisionBelief = (BeliefSampler.Dist) a[8];
+        tutorIndex = (Integer) a[9];
+        kept = (Rollout[]) a[10];
+        keptTurn = (Integer) a[11];
+    }
+
     public long nextWorld0Seed() {
         return mix(mix(cfg.seed, 0x5eedL + decisionIndex), 1000);
     }

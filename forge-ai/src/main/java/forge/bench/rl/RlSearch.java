@@ -1808,6 +1808,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final LookaheadSearch.GivenResult r;
         PlanSearch.Stage stage = null;
+        // sdcc-leakswap-1115 (diagnostics; off unless -Dsdcc.leakSwap is set): the search state before this decision
+        final Object leakPre = LeakSwap.ON && cfg.choices <= 0 && LeakSwap.want(uid, frame.decIdx) ? ls.leakMark() : null;
         if (sb != null && sb.planPoint(g, menuObjs)) {
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
             stage = sb.propose(g, me, m, menuObjs, t0, bt0);
@@ -1877,6 +1879,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             r = ls.decideGiven(g, me, given, cfg.breadth);
         }
         ck.ended(DecisionClock.Phase.GIVEN);
+        if (leakPre != null && r.givenIndex.length > 0) {
+            leakSwap(g, me, m, frame, sc, menuObjs, given, order, stage, sb, r, leakPre); // sdcc-leakswap-1115 (diagnostics)
+        }
         tookForce(r);
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
@@ -2150,6 +2155,161 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         tap(r.givenIndex.length > 0 ? "searched" : String.valueOf(r.outcome), stage, r, order.size(), answer);
         return answer;
+    }
+
+    /**
+     * sdcc-leakswap-1115 (diagnostics; null unless -Dsdcc.leakSwap is set): the seat's own observation of the decision in
+     * progress, rebuilt from the live game as encoded frame bytes (no privileged block), set by the seat before each
+     * decide. The swap test asserts it is the same before and after the re-deal.
+     */
+    java.util.function.Supplier<byte[]> leakObs;
+
+    /**
+     * sdcc-leakswap-1115 (diagnostics): the decision just searched ({@code real}, not changed) searched twice more with
+     * the same world seeds, R on the live position as it is and S with its hidden cards re-dealt ({@link LeakSwap}); one
+     * JSON line. The look-ahead's state is put back as the real search left it.
+     */
+    private void leakSwap(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final RlSearchClient.Scores sc, final List<SpellAbility> menuObjs, final List<SpellAbility> given,
+            final List<Integer> order, final PlanSearch.Stage stage, final PlanSearch sb,
+            final LookaheadSearch.GivenResult real, final Object pre) {
+        final Object post = ls.leakMark();
+        final boolean f0 = lastForced, f1 = lastForcedMiss;
+        final JsonObject row = new JsonObject();
+        row.addProperty("game_uid", Long.toUnsignedString(uid));
+        row.addProperty("dec_idx", frame.decIdx);
+        row.addProperty("seat", frame.seat);
+        row.addProperty("turn", g.getPhaseHandler().getTurn());
+        row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        row.addProperty("stack", !g.getStack().isEmpty());
+        row.addProperty("plan_point", stage != null);
+        row.addProperty("n_given", order.size());
+        row.add("real", leakArm(real, order, null));
+        final java.util.function.Supplier<byte[]> obs = leakObs;
+        final long wall0 = System.nanoTime();
+        try {
+            final byte[] o0 = obs == null ? null : obs.get();
+            row.addProperty("obs_check", o0 != null);
+            final PlanSearch.Stage[] st = new PlanSearch.Stage[1];
+            final LookaheadSearch.GivenResult rr = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);
+            row.add("R", leakArm(rr, order, st[0]));
+            final LeakSwap.Deal d = LeakSwap.redeal(g, me, liveKnow, c -> remembersHandCard(g, me, c),
+                    LeakSwap.mix(LeakSwap.mix(LeakSwap.SALT ^ 0x53a9L, uid), frame.decIdx));
+            boolean restored = false;
+            try {
+                d.into(row);
+                final byte[] o1 = obs == null ? null : obs.get();
+                final boolean same = o0 == null || java.util.Arrays.equals(o0, o1);
+                row.addProperty("obs_same", same);
+                if (!same) {
+                    row.addProperty("skip", "obs_changed");
+                } else if (d.changed() > 0) {
+                    st[0] = null;
+                    final LookaheadSearch.GivenResult rs = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);
+                    row.add("S", leakArm(rs, order, st[0]));
+                } else {
+                    row.addProperty("skip", "nothing_changed");
+                }
+            } finally {
+                restored = d.restore();
+                row.addProperty("restored", restored);
+            }
+            if (obs != null) {
+                row.addProperty("obs_restored", java.util.Arrays.equals(o0, obs.get()));
+            }
+            if (row.has("S")) {
+                LeakSwap.counted(uid);
+            }
+        } catch (RuntimeException e) {
+            row.addProperty("error", String.valueOf(e));
+            System.err.println("[leakswap] failed at decision " + frame.decIdx + ": " + e);
+            e.printStackTrace();
+        } finally {
+            ls.leakRewind(post);
+            lastForced = f0;
+            lastForcedMiss = f1;
+        }
+        row.addProperty("leak_ms", Math.round((System.nanoTime() - wall0) / 1e5) / 10.0);
+        LeakSwap.write(row);
+    }
+
+    /** sdcc-leakswap-1115: the priority search of the decision again, from the state {@code pre}, on the live game as it is. */
+    private LookaheadSearch.GivenResult leakRepeat(final Game g, final Player me, final RlCandidates.Menu m,
+            final RlSearchClient.Scores sc, final List<SpellAbility> menuObjs, final List<SpellAbility> given,
+            final PlanSearch.Stage stage, final PlanSearch sb, final Object pre, final PlanSearch.Stage[] stOut) {
+        ls.leakRewind(pre);
+        final long t0 = System.nanoTime();
+        final long bt0 = budgetStart(t0);
+        if (cfg.budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, cfg.budgetMs * 1_000_000L);
+        }
+        PlanSearch.Stage st = null;
+        if (stage != null) {
+            sb.leakDryRun = true;
+            try {
+                st = sb.propose(g, me, m, menuObjs, t0, bt0);
+            } finally {
+                sb.leakDryRun = false;
+            }
+            stOut[0] = st;
+            if (st.hook) {
+                return null; // a proven line where the real decision had none (reported as such)
+            }
+        }
+        armForce(mark());
+        if (cfg.anytime && "value".equals(cfg.leaf)) {
+            ls.setRootP((1 + sc.valueObs) / 2);
+        }
+        if (sb != null) {
+            final int kt = st != null ? st.knownTop : sb.knownTop(g);
+            if (st != null && st.horizonTurn > 0) {
+                ls.setPlanHorizonTurn(st.horizonTurn);
+            }
+            final long lt0 = st != null ? PlanSearch.lookStart(bt0, budgetStart(System.nanoTime()),
+                    forge.ai.WallClock.budgetMs(cfg.budgetMs), sb.lookFloorMs()) : bt0;
+            return st != null ? ls.decideGivenPlans(g, me, given, st.duel ? 1 : sb.breadthAt(st, cfg.breadth), st.plans, st.labels, kt, lt0, sb.threat, null)
+                    : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, null);
+        }
+        return ls.decideGiven(g, me, given, cfg.breadth);
+    }
+
+    /** sdcc-leakswap-1115: one arm's answer: the chosen menu index (-1 - k = plan k), the searched entries, ev, values. */
+    private static JsonObject leakArm(final LookaheadSearch.GivenResult r, final List<Integer> order, final PlanSearch.Stage st) {
+        final JsonObject a = new JsonObject();
+        if (st != null) {
+            a.addProperty("plans", st.plans.size());
+            if (st.hook) {
+                a.addProperty("proven_line", true);
+            }
+        }
+        if (r == null) {
+            a.addProperty("chosen", -1000);
+            return a;
+        }
+        a.addProperty("chosen", r.chosen <= 0 ? 0 : r.chosen < order.size() ? order.get(r.chosen) : -1 - (r.chosen - order.size()));
+        a.addProperty("outcome", r.outcome);
+        final JsonArray ix = new JsonArray();
+        final JsonArray ev = new JsonArray();
+        final JsonArray vw = new JsonArray();
+        for (int j = 0; j < r.givenIndex.length; j++) {
+            final int gi = r.givenIndex[j];
+            ix.add(gi < order.size() ? order.get(gi) : -1 - (gi - order.size()));
+            ev.add(Double.isNaN(r.ev[j]) ? null : r.ev[j]);
+        }
+        for (int j = 0; j < r.values.length; j++) {
+            final JsonArray w = new JsonArray();
+            for (double x : r.values[j]) {
+                w.add(Double.isInfinite(x) || Double.isNaN(x) ? null : (Number) x);
+            }
+            vw.add(w);
+        }
+        a.add("entry", ix);
+        a.add("ev", ev);
+        a.add("values", vw);
+        a.addProperty("failed", r.failed);
+        a.addProperty("leaf_fallback", r.leafFallback);
+        a.addProperty("ms", Math.round(r.ms * 10) / 10.0);
+        return a;
     }
 
     /**
