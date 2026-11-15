@@ -2196,8 +2196,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final PlanSearch.Stage[] st = new PlanSearch.Stage[1];
             final LookaheadSearch.GivenResult rr = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);
             row.add("R", leakArm(rr, order, st[0]));
-            final LeakSwap.Deal d = LeakSwap.redeal(g, me, liveKnow, c -> remembersHandCard(g, me, c),
-                    LeakSwap.mix(LeakSwap.mix(LeakSwap.SALT ^ 0x53a9L, uid), frame.decIdx));
+            final long seed = LeakSwap.mix(LeakSwap.mix(LeakSwap.SALT ^ 0x53a9L, uid), frame.decIdx);
+            // T (touch control): the zones the deal rewrites, rewritten with their own cards in their own order
+            LookaheadSearch.GivenResult rt = null;
+            final LeakSwap.Deal dt = LeakSwap.redeal(g, me, liveKnow, c -> remembersHandCard(g, me, c), seed, true, true, true);
+            try {
+                if (dt.changed() == 0 && (obs == null || java.util.Arrays.equals(o0, obs.get()))) {
+                    st[0] = null;
+                    rt = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);
+                    row.add("T", leakArm(rt, order, st[0]));
+                }
+            } finally {
+                if (!dt.restore()) {
+                    row.addProperty("restored", false);
+                }
+            }
+            final LeakSwap.Deal d = LeakSwap.redeal(g, me, liveKnow, c -> remembersHandCard(g, me, c), seed);
             boolean restored = false;
             boolean sDiffers = false;
             try {
@@ -2214,17 +2228,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     st[0] = null;
                     final LookaheadSearch.GivenResult rs = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);
                     row.add("S", leakArm(rs, order, st[0]));
-                    sDiffers = !leakSame(real, rs);
+                    sDiffers = !leakSame(real, rs) || rt == null || !leakSame(rt, rs);
                 } else {
                     row.addProperty("skip", "nothing_changed");
                 }
             } finally {
-                restored = d.restore();
+                restored = d.restore() && !(row.has("restored") && !row.get("restored").getAsBoolean());
                 row.addProperty("restored", restored);
             }
-            if (sDiffers && restored) {
-                // S differs from the real search: the same deal split into its parts (opponent only, own library only)
-                final long seed = LeakSwap.mix(LeakSwap.mix(LeakSwap.SALT ^ 0x53a9L, uid), frame.decIdx);
+            if (sDiffers && restored && row.get("restored").getAsBoolean()) {
+                // S differs from the real search or from T: the same deal split into its parts (opponent only, own library only)
                 for (int part = 0; part < 2; part++) {
                     final LeakSwap.Deal dp = LeakSwap.redeal(g, me, liveKnow, c -> remembersHandCard(g, me, c), seed,
                             part == 0, part == 1);
