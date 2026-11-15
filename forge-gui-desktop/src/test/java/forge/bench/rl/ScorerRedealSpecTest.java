@@ -32,9 +32,12 @@ public class ScorerRedealSpecTest {
     }
 
     @Test
-    public void aBadValueIsRefused() {
+    public void anyOtherValueReadsAsOff() {
+        // as every boolean scorer key (reachDiscards ...): the jar reads anything but true as off; the play host's
+        // validator (lborthwein/mtgx#1896) refuses such a value before it reaches the JVM
         for (String v : new String[] {"1", "yes", "on"}) {
-            Assert.assertThrows(RuntimeException.class, () -> scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOpp=" + v));
+            Assert.assertFalse(scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOpp=" + v).redealOpp, v);
+            Assert.assertFalse(scorer(OwnerMisplaysSpecTest.SHIP + ",choiceScorer.redealOwnOrder=" + v).redealOwnOrder, v);
         }
     }
 }
