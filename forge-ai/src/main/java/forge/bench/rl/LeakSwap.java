@@ -37,7 +37,8 @@ import java.util.function.Predicate;
  * the game or by card ids (InfoStates, the seat's knowledge, readers) stays valid: (1) the opponent's hidden hand cards and
  * the unknown cards of their library are dealt again from their union (a seeded shuffle); (2) the seat's own library is
  * shuffled in its unknown slots. A card stays where it is if the seat can see it (CardView.canBeShownTo), if InfoStates
- * knows its position or its run, if the seat remembers it (RlKnowledge), or if it is face down.
+ * knows its position or its run, if the seat knows or remembers it (RlKnowledge, either zone, own library included: the
+ * featurizer shows such a library card with its position), or if it is face down.
  */
 final class LeakSwap {
     static final String OUT = System.getProperty("sdcc.leakSwap");
@@ -313,7 +314,7 @@ final class LeakSwap {
         final List<Card> pool = new ArrayList<>();
         for (int i = 0; i < lib.size(); i++) {
             final Card c = lib.get(i);
-            if (!visible(c, me) && !fixed.contains(c.getId())) {
+            if (!visible(c, me) && !fixed.contains(c.getId()) && !(know != null && know.knows(seat, c))) {
                 free.add(i);
                 pool.add(c);
             }
