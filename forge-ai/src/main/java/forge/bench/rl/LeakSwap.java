@@ -160,10 +160,20 @@ final class LeakSwap {
             return oppHandChanged + oppLibChanged + ownLibChanged;
         }
 
+        /** InfoStates of the game (null = none): told of every library rewrite ({@link InfoStates#leakResnap}). */
+        InfoStates is;
+
         void set(final Zone z, final List<Card> now) {
             zones.add(z);
             orig.add(new ArrayList<>(z.getCards()));
             z.setCardsQuiet(now);
+            resnap(z);
+        }
+
+        private void resnap(final Zone z) {
+            if (is != null && z.getZoneType() == ZoneType.Library && z.getPlayer() != null) {
+                is.leakResnap(z.getPlayer());
+            }
         }
 
         /** Put every zone back in its original order; true when each zone holds exactly its original list again. */
@@ -171,6 +181,7 @@ final class LeakSwap {
             boolean ok = true;
             for (int i = zones.size() - 1; i >= 0; i--) {
                 zones.get(i).setCardsQuiet(orig.get(i));
+                resnap(zones.get(i));
             }
             for (int i = 0; i < zones.size(); i++) {
                 final List<Card> now = new ArrayList<>(zones.get(i).getCards());
@@ -246,6 +257,7 @@ final class LeakSwap {
         final Deal d = new Deal();
         final Random rng = new Random(seed);
         final InfoStates is = InfoStates.find(g);
+        d.is = is;
         final int seat = know == null ? -1 : know.seatOf(me);
         for (Player opp : g.getRegisteredPlayers()) {
             if (opp == me) {

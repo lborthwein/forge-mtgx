@@ -239,6 +239,18 @@ public final class InfoStates implements LibraryInfoListener {
         return out;
     }
 
+    /**
+     * sdcc-leakswap-1115 (diagnostics only; nothing calls it unless -Dsdcc.leakSwap is set): the swap test re-deals the
+     * UNKNOWN cards of {@code owner}'s library in place (every card whose position is known stays at its index) and puts
+     * them back afterwards, with no game event. Record the new order as explained, so the next read does not take it for
+     * an unexplained change and forget the library ({@link #checkExplained}).
+     */
+    public synchronized void leakResnap(final Player owner) {
+        if (owner != null && owner.getGame() == game) {
+            snap.put(owner.getId(), ids(owner));
+        }
+    }
+
     private void forgetLib(final int owner) {
         for (int o : seats) {
             final View v = view(o, owner);

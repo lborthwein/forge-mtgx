@@ -2226,6 +2226,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         row.addProperty("plan_point", stage != null);
         row.addProperty("n_given", order.size());
         row.add("real", leakArm(real, order, null));
+        final forge.ai.simulation.InfoStates lis = forge.ai.simulation.InfoStates.find(g);
+        if (lis != null) {
+            row.addProperty("is_silent0", lis.silent); // InfoStates' unexplained library changes before the arms
+        }
         final java.util.function.Supplier<byte[]> obs = leakObs;
         final long wall0 = System.nanoTime();
         try {
@@ -2310,6 +2314,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ls.leakRewind(post);
             lastForced = f0;
             lastForcedMiss = f1;
+        }
+        if (lis != null) {
+            row.addProperty("is_silent1", lis.silent); // and after them (equal: no arm was taken for an unexplained change)
         }
         row.addProperty("leak_ms", Math.round((System.nanoTime() - wall0) / 1e5) / 10.0);
         LeakSwap.write(row);
