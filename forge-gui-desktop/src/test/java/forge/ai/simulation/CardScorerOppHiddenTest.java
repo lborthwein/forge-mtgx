@@ -59,7 +59,7 @@ public class CardScorerOppHiddenTest extends AITest {
         final StringBuilder sb = new StringBuilder("<pad>\t0\n<unk>\t1\n");
         int i = 2;
         for (String n : new String[] {"Demonic Tutor", "Smallpox", "Mountain", "Plains", "Island", "Swamp", "Forest",
-            "Lightning Bolt", "Counterspell", "Dark Ritual", "Ponder", "Grizzly Bears", "Balduvian Bears", "Giant Growth"}) {
+            "Lightning Bolt", "Counterspell", "Dark Ritual", "Ponder", "Grizzly Bears", "Balduvian Bears", "Giant Growth", "Brainstorm", "Shock"}) {
             sb.append(n).append('\t').append(i++).append('\n');
         }
         return CardIndex.of(sb.toString().getBytes(StandardCharsets.UTF_8));
@@ -80,6 +80,11 @@ public class CardScorerOppHiddenTest extends AITest {
      * {@code redealOpp} = the key.
      */
     private static ChoiceScorer scorer(final boolean redealOpp) {
+        return scorer(redealOpp, false);
+    }
+
+    /** {@code redealOwnOrder} = the own-order key (sdcc-scorerleak-1115, second part). */
+    private static ChoiceScorer scorer(final boolean redealOpp, final boolean redealOwnOrder) {
         final JsonObject o = JsonParser.parseString("{\"budgetMs\":60000,\"families\":\"CARDS\",\"gfActive\":3,"
                 + "\"gfAskNodes\":60000,\"gfExtra\":2,\"gfGamma\":0.8,\"gfHorizon\":5,\"gfLambda\":0.6,\"gfLands\":true,"
                 + "\"gfMs\":60000,\"gfNodes\":1500,\"gfSamples\":0,\"margin\":0.02,\"reachAlpha\":0.85,\"reachNameNodes\":1000,"
@@ -88,8 +93,13 @@ public class CardScorerOppHiddenTest extends AITest {
         if (redealOpp) {
             o.addProperty("redealOpp", true);
         }
+        if (redealOwnOrder) {
+            o.addProperty("redealOwnOrder", true);
+        }
         final ChoiceScorer.Config cfg = ChoiceScorer.Config.parse(o);
         Assert.assertEquals(cfg.redealOpp, redealOpp);
+        Assert.assertEquals(cfg.redealOwnOrder, redealOwnOrder);
+        Assert.assertEquals(cfg.toJson().has("redealOwnOrder"), redealOwnOrder, "the key prints only when on");
         Assert.assertEquals(cfg.toJson().has("redealOpp"), redealOpp, "the key prints only when on");
         cfg.solverCfg = ForcedWinSolver.Config.fromProps(SOLVER::get);
         return new ChoiceScorer(cfg, index(), 2, 77L);
@@ -296,5 +306,70 @@ public class CardScorerOppHiddenTest extends AITest {
             Assert.assertTrue(names(me, ZoneType.Hand).equals("Giant Growth"), "our own cards are not dealt");
         }
         Assert.assertEquals(hands.get(1), hands.get(0), "the same deal from both hidden worlds");
+    }
+
+    // ------------------------------------------------------------------ 4. our own library's unknown order (redealOwnOrder)
+
+    /**
+     * Brainstorm resolving, three cards drawn, the put-back menu open: the replay draws again from our library, so the
+     * guard asks for redealOwn's re-deals (4 in the live string). World C: the same game with our unknown library in
+     * reverse order (after the draws: the hand is the same).
+     */
+    private static String putBack(final boolean redealOwnOrder, final boolean worldC) {
+        final Game g = CardScorerHiddenReadTest.cast("Brainstorm;Mountain;Plains",
+                "Lightning Bolt;Shock;Giant Growth;Counterspell;Dark Ritual;Ponder;Swamp;Forest;Island;Plains;Mountain;Island;Swamp;Forest",
+                "Brainstorm");
+        final Player me = g.getPlayers().get(0);
+        me.drawCards(3);
+        g.getStack().setResolving(true);
+        if (worldC) {
+            final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+            Collections.reverse(lib);
+            me.getZone(ZoneType.Library).setCards(lib);
+        }
+        final String lib0 = String.valueOf(me.getCardsIn(ZoneType.Library).get(0).getId());
+        final RlKnowledge know = new RlKnowledge(g);
+        know.v2 = true;
+        know.attach();
+        final RlCandidates.Menu m = forge.bench.rl.TestMenus.singleCards(me.getCardsIn(ZoneType.Hand));
+        final String out = score(scorer(true, redealOwnOrder), g, me, m, new short[] {0}, know, null);
+        Assert.assertEquals(String.valueOf(me.getCardsIn(ZoneType.Library).get(0).getId()), lib0, "the live game is untouched");
+        System.out.println("OPPHIDDEN putback redealOwnOrder=" + redealOwnOrder + " world=" + (worldC ? "C" : "A") + " " + out);
+        return out;
+    }
+
+    @Test
+    public void anOwnLibraryReplayIsTheSameInEveryOrderWithTheKey() {
+        final String a = putBack(true, false), c = putBack(true, true);
+        Assert.assertEquals(c, a, "a swap of our unknown library order never changes the scorer's output");
+    }
+
+    @Test
+    public void withoutTheOwnKeyTheTwoOrdersAreReported() {
+        // the old behaviour (diagnostic print): redealOwn's re-deals permute the real order
+        putBack(false, false);
+        putBack(false, true);
+    }
+
+    @Test
+    public void theOwnDealDependsOnlyOnWhichCardsAreUnknown() {
+        final List<String> libs = new ArrayList<>();
+        for (boolean worldC : new boolean[] {false, true}) {
+            final Game g = ForcedWinSolverTest.game("Default", "Default", frame("Giant Growth"));
+            final Player me = g.getPlayers().get(0);
+            if (worldC) {
+                final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+                Collections.reverse(lib);
+                me.getZone(ZoneType.Library).setCards(lib);
+            }
+            final RlKnowledge know = know(g);
+            ChoiceScorer.redealOwnOrder(g, me, know, 99L);
+            final StringBuilder ids = new StringBuilder();
+            for (Card c : me.getCardsIn(ZoneType.Library)) {
+                ids.append(c.getId()).append(' ');
+            }
+            libs.add(ids.toString());
+        }
+        Assert.assertEquals(libs.get(1), libs.get(0), "the same order from both real orders");
     }
 }

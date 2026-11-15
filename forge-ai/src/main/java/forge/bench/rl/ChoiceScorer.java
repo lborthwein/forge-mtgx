@@ -182,6 +182,14 @@ public final class ChoiceScorer {
          * belief as the look-ahead's default worlds, {@code LookaheadSearch.resample}).
          */
         public boolean redealOpp = false;
+        /**
+         * sdcc-scorerleak-1115 (false = off, the default, and then nothing changes): every scorer copy re-deals the order
+         * of the seat's OWN library cards whose place it does not know (pooled in id order, dealt back with one seeded
+         * deal per ask into the same places; cards whose place it knows stay), before the answer is replayed and before
+         * {@link #redealOwn}'s re-deals or the guard's own-order probe. The replay then never draws from the real order,
+         * and redealOwn's samples become samples of a dealt order instead of permutations of the real one.
+         */
+        public boolean redealOwnOrder = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
                 "settleSteps", "margin", "noDecline", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig",
@@ -192,7 +200,7 @@ public final class ChoiceScorer {
                 // discard-guard-1113, off by default
                 "departScored", "departFloor",
                 // sdcc-scorerleak-1115, off by default
-                "redealOpp"));
+                "redealOpp", "redealOwnOrder"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -278,6 +286,7 @@ public final class ChoiceScorer {
                 throw new IllegalArgumentException("choiceScorer: redealOwn must be 0..64");
             }
             if (o.has("redealOpp")) c.redealOpp = o.get("redealOpp").getAsBoolean();
+            if (o.has("redealOwnOrder")) c.redealOwnOrder = o.get("redealOwnOrder").getAsBoolean();
             if (o.has("departScored")) c.departScored = o.get("departScored").getAsInt();
             if (o.has("departFloor")) c.departFloor = o.get("departFloor").getAsDouble();
             if (c.departScored < 0 || c.departScored > 2 || !(c.departFloor >= 0 && c.departFloor <= 1)) {
@@ -370,6 +379,9 @@ public final class ChoiceScorer {
             if (redealOpp) {
                 o.addProperty("redealOpp", true); // sdcc-scorerleak-1115: only when on
             }
+            if (redealOwnOrder) {
+                o.addProperty("redealOwnOrder", true); // sdcc-scorerleak-1115: only when on
+            }
             if (departScored > 0) {
                 o.addProperty("departScored", departScored); // discard-guard-1113: only when on
             }
@@ -448,6 +460,10 @@ public final class ChoiceScorer {
     private long oppSeed = -1;
     /** sdcc-scorerleak-1115 (diagnostics, {@link #forceRedealOpp}): 0 = the config decides, 1 = re-deal on, -1 = off. */
     private int oppForce = 0;
+    /** sdcc-scorerleak-1115: while >= 0, every copy's own unknown library order is re-dealt with this seed ({@link #redealOwnOrder}). */
+    private long ownSeed = -1;
+    /** sdcc-scorerleak-1115 (diagnostics, {@link #forceRedealOwnOrder}): 0 = the config decides, 1 = on, -1 = off. */
+    private int ownForce = 0;
     /** sdcc-scorerleak-1115 (diagnostics): the re-deal's seed salt, so a shadow pass can deal a second world. */
     private long oppSalt = 0;
     private Object screenReader;
@@ -518,6 +534,9 @@ public final class ChoiceScorer {
                 }
                 if (oppSeed >= 0) {
                     redealOppHidden(copy, me, k, oppSeed); // sdcc-scorerleak-1115: before any probe swap
+                }
+                if (ownSeed >= 0) {
+                    redealOwnOrder(copy, me, k, ownSeed); // sdcc-scorerleak-1115: before redealOwn and the own probe
                 }
                 if (cfg.probeOpp || guardSwap) {
                     swapOpponentHidden(copy, me, k);
@@ -1236,6 +1255,39 @@ public final class ChoiceScorer {
         }
     }
 
+    /**
+     * sdcc-scorerleak-1115 ({@link Config#redealOwnOrder}): our own library cards whose place the seat does not know,
+     * pooled in id order (so the deal never depends on their real order) and dealt back with {@code seed} into their own
+     * places; the cards whose place it knows stay. No zone-change events.
+     */
+    public static void redealOwnOrder(final Game g, final Player me, final RlKnowledge k, final long seed) {
+        final int seat = k.seatOf(me);
+        final List<Card> lib = new ArrayList<>(new forge.game.card.CardCollection(me.getCardsIn(ZoneType.Library)));
+        final List<Integer> at = new ArrayList<>();
+        final List<Card> pool = new ArrayList<>();
+        for (int i = 0; i < lib.size(); i++) {
+            if (seat < 0 || !k.knows(seat, lib.get(i))) {
+                at.add(i);
+                pool.add(lib.get(i));
+            }
+        }
+        if (pool.size() < 2) {
+            return;
+        }
+        pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+        java.util.Collections.shuffle(pool, new java.util.Random(seed));
+        final List<Card> out = new ArrayList<>(lib);
+        for (int j = 0; j < at.size(); j++) {
+            out.set(at.get(j), pool.get(j));
+        }
+        me.getZone(ZoneType.Library).setCards(out);
+    }
+
+    /** sdcc-scorerleak-1115 (diagnostics only): 1 = re-deal our own unknown library order in every copy, -1 = never, 0 = the config. */
+    public void forceRedealOwnOrder(final int force) {
+        this.ownForce = force;
+    }
+
     /** sdcc-scorerleak-1115 (diagnostics only): 1 = re-deal the opponents in every copy, -1 = never, 0 = the config. */
     public void forceRedealOpp(final int force, final long salt) {
         this.oppForce = force;
@@ -1266,6 +1318,8 @@ public final class ChoiceScorer {
         // sdcc-scorerleak-1115: one opposing deal for the whole ask (off: -1, nothing changes)
         oppSeed = (oppForce > 0 || oppForce == 0 && cfg.redealOpp)
                 ? forge.ai.simulation.LookaheadSearch.mix(seed ^ oppSalt, 0x0bbde41L) & Long.MAX_VALUE : -1;
+        ownSeed = (ownForce > 0 || ownForce == 0 && cfg.redealOwnOrder)
+                ? forge.ai.simulation.LookaheadSearch.mix(seed ^ oppSalt, 0x0bbde42L) & Long.MAX_VALUE : -1;
         if (cfg.relax <= 0) {
             screenReader = null; // one reader per ask: its probes are of this position's copies
         } // choice-search-1109 pass 3: with relax, one reader per game (the solver's readerPerGame; affordances by card)
