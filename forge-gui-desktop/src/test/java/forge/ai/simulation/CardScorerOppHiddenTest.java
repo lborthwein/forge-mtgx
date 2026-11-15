@@ -437,4 +437,49 @@ public class CardScorerOppHiddenTest extends AITest {
         Assert.assertEquals(b, a, "every scorer copy holds the same opposing hand whichever cards are really there");
         Assert.assertEquals(pb, pa);
     }
+
+    // ------------------------------------------------------------------ 6. the probes' sandboxes (ForcedWinProbe.scrub)
+
+    @Test
+    public void aProbeSandboxOfTheLiveGameTakesTheSeatsBeliefRedrawOnlyWhenRegistered() {
+        final Game live = ForcedWinSolverTest.game("Default", "Default", frame("Giant Growth"));
+        final Player me = live.getPlayers().get(0), opp = live.getPlayers().get(1);
+        final List<String> calls = new ArrayList<>();
+        // a stand-in for the belief re-draw: the opponent's hand becomes as many fresh Grizzly Bears (new card objects)
+        final ForcedWinSolver.Redraw stub = (src, srcMe, g, gMe, rng) -> {
+            calls.add(src == live ? "live" : "other");
+            for (Player o : gMe.getOpponents()) {
+                final List<Card> fresh = new ArrayList<>();
+                for (int i = 0; i < o.getCardsIn(ZoneType.Hand).size(); i++) {
+                    fresh.add(forge.game.card.CardFactory.getCard(forge.model.FModel.getMagicDb().getCommonCards().getCard("Grizzly Bears"), o, g));
+                }
+                o.getZone(ZoneType.Hand).setCards(fresh);
+            }
+        };
+        final List<Integer> real = new ArrayList<>();
+        for (Card c : opp.getCardsIn(ZoneType.Hand)) {
+            real.add(c.getId());
+        }
+        final boolean prev = ForcedWinProbe.HIDE.get();
+        ForcedWinProbe.HIDE.set(true);
+        try {
+            // before registration: the deal of their unknown cards (as before), no re-draw
+            Game g = new GameCopier(live, true).makeCopy();
+            ForcedWinProbe.scrub(live, me, g, g.getPlayer(me.getId()), 7L);
+            Assert.assertTrue(calls.isEmpty());
+            ForcedWinProbe.redrawFor(live, me, stub);
+            // the other seat's sandboxes are untouched by this seat's key
+            g = new GameCopier(live, true).makeCopy();
+            ForcedWinProbe.scrub(live, opp, g, g.getPlayer(opp.getId()), 7L);
+            Assert.assertTrue(calls.isEmpty(), "only the registering seat");
+            g = new GameCopier(live, true).makeCopy();
+            ForcedWinProbe.scrub(live, me, g, g.getPlayer(me.getId()), 7L);
+            Assert.assertEquals(calls, java.util.Collections.singletonList("live"));
+            for (Card c : g.getPlayer(opp.getId()).getCardsIn(ZoneType.Hand)) {
+                Assert.assertFalse(real.contains(c.getId()), "the sandbox holds none of the opponent's real hand cards");
+            }
+        } finally {
+            ForcedWinProbe.HIDE.set(prev);
+        }
+    }
 }

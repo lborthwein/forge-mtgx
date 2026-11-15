@@ -118,6 +118,11 @@ public final class ForcedWinProbe {
         }
         final Random rng = new Random(ForcedWinSolver.mix(seed, 0x4C45414B31L));
         ForcedWinSolver.shuffleUnknownOwnLibrary(me, 0, null, rng, true);
+        final ForcedWinSolver.Redraw rd = redrawOf(source, sourceMe);
+        if (rd != null) {
+            rd.apply(source, sourceMe, g, me, rng); // sdcc-scorerleak-1115: the opponents' hidden cards from the seat's belief
+            return;
+        }
         final forge.game.player.PlayerView view = sourceMe.getView();
         for (Player o : g.getPlayers()) {
             if (o == me) {
@@ -141,6 +146,34 @@ public final class ForcedWinProbe {
             o.getZone(ZoneType.Hand).setCards(newHand);
             o.getZone(ZoneType.Library).setCards(new ArrayList<>(pool.subList(need, pool.size())));
         }
+    }
+
+    /**
+     * sdcc-scorerleak-1115 (the seat's choiceScorer.redealOpp; empty = off, and then nothing changes): per live game and
+     * seat, the belief re-draw ({@link LookaheadSearch#opponentRedraw}) that {@link #scrub} deals the other players' hidden
+     * cards with, instead of the deal from their real cards: the sandbox then holds belief cards (new objects), never
+     * the opponent's real hand, as the search's worlds do.
+     */
+    private static final Map<Game, Map<Integer, ForcedWinSolver.Redraw>> REDRAWS =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** sdcc-scorerleak-1115: sandboxes of {@code live} made for {@code seat} draw the opponents' hidden cards with {@code r}. */
+    public static void redrawFor(final Game live, final Player seat, final ForcedWinSolver.Redraw r) {
+        if (live == null || seat == null || r == null) {
+            return;
+        }
+        synchronized (REDRAWS) {
+            REDRAWS.computeIfAbsent(live, k -> new java.util.concurrent.ConcurrentHashMap<>()).putIfAbsent(seat.getId(), r);
+        }
+    }
+
+    /** sdcc-scorerleak-1115: the re-draw registered for {@code source} and its seat, or null (off). */
+    static ForcedWinSolver.Redraw redrawOf(final Game source, final Player sourceMe) {
+        if (REDRAWS.isEmpty() || source == null || sourceMe == null) {
+            return null;
+        }
+        final Map<Integer, ForcedWinSolver.Redraw> m = REDRAWS.get(source);
+        return m == null ? null : m.get(sourceMe.getId());
     }
 
     /** labeller-v2 (c): set by a planScry reader around its learning (false = v1). */
