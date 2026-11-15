@@ -266,6 +266,18 @@ public final class RlLiveSeat {
             return Integer.parseInt(v);
         }
 
+        /**
+         * sdcc-copycast-1114 (copyside review 11-15, item 4): a copy-side key's on/off value, read strictly: 1, true, on,
+         * yes = on; 0, false, off, no = off; any other value refuses the spec (it never turns a key on by accident).
+         */
+        static boolean copyFlag(final String k, final String v) {
+            switch (v) {
+                case "1": case "true": case "on": case "yes": return true;
+                case "0": case "false": case "off": case "no": return false;
+                default: throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want 1|0, true|false, on|off or yes|no)");
+            }
+        }
+
         public static Spec parse(final String raw) {
             final Spec s = new Spec();
             s.raw = raw;
@@ -334,10 +346,10 @@ public final class RlLiveSeat {
                     case "log": s.log = !"0".equals(v); break;
                     case "obs": c.obs = Integer.parseInt(v); break;
                     case "copyFidelity": c.copyFidelity = Integer.parseInt(v); break;
-                    case "copyCast": c.copyCast = !"0".equals(v) && !"false".equals(v); break; // sdcc-copycast-1114
-                    case "copyDungeon": c.copyDungeon = !"0".equals(v) && !"false".equals(v); break; // sdcc-copycast-1114
-                    case "copyStaleRefs": c.copyStaleRefs = !"0".equals(v) && !"false".equals(v); break; // sdcc-copycast-1114
-                    case "copyTriggers": c.copyTriggers = !"0".equals(v) && !"false".equals(v); break; // sdcc-copycast-1114
+                    case "copyCast": c.copyCast = copyFlag(k, v); break; // sdcc-copycast-1114
+                    case "copyDungeon": c.copyDungeon = copyFlag(k, v); break; // sdcc-copycast-1114
+                    case "copyStaleRefs": c.copyStaleRefs = copyFlag(k, v); break; // sdcc-copycast-1114
+                    case "copyTriggers": c.copyTriggers = copyFlag(k, v); break; // sdcc-copycast-1114
                     // block-search-1019: the look-ahead over declare-blockers asks (absent = off, S-c / S-b unchanged)
                     case "blocks": c.blocks = blockKey(k, v, 0, 1); break;
                     case "blocks.samples": c.blockSamples = blockKey(k, v, 0, 64); break;

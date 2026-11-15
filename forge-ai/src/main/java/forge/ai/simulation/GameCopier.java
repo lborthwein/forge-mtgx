@@ -399,8 +399,11 @@ public class GameCopier {
         if (t == null || inner == null || host == null || g.findById(host.getId()) == null) {
             return "trigger-host";
         }
-        // a host in the command zone (a dungeon's room, an effect such as the monarch) is not rebuilt in the copy
-        if (host.isInZone(ZoneType.Command)) {
+        // a host in the command zone (a dungeon's room, an effect such as the monarch) is not rebuilt in the copy;
+        // checked on the wrapped host and on the game's current object of that id (copyside review 11-15, item 3: the
+        // wrapped host can be a last-known copy of a card that has since moved to the command zone)
+        final Card current = g.findById(host.getId());
+        if (host.isInZone(ZoneType.Command) || current.isInZone(ZoneType.Command)) {
             return "trigger-host";
         }
         if (inner.isCopied() || t.isStatic() || LookaheadSearch.triggerIndex(host, t) < 0
@@ -496,6 +499,42 @@ public class GameCopier {
      * Forge builds a trigger's ability (TriggerHandler.runSingleTriggerInternal) from the copied host's trigger at the
      * same position. Throws when it cannot be rebuilt.
      */
+    /**
+     * copyTriggers (copyside review 11-15, item 2): the copied host's trigger that is the live trigger {@code lt}, matched by
+     * its definition, not by its position in the list: the same mode, the same parameters (Execute among them) and the same
+     * intrinsic flag. Trigger ids are not kept by a copy, so the definition is the identity used. When several of the copy's
+     * triggers share that definition (they would build the same ability), the k-th of them is taken, k being the live
+     * trigger's rank among the live host's triggers with that definition. Null when the copy has no such trigger (a
+     * trigger granted by a static the copy does not hold yet, or a changed host): the copy then fails, never binding a
+     * different trigger of the same name.
+     */
+    static Trigger sameTrigger(Card liveHost, Trigger lt, Card copyHost) {
+        int rank = 0;
+        for (Trigger x : liveHost.getTriggers()) {
+            if (x == lt) {
+                break;
+            }
+            if (sameDefinition(x, lt)) {
+                rank++;
+            }
+        }
+        for (Trigger x : copyHost.getTriggers()) {
+            if (sameDefinition(x, lt) && rank-- == 0) {
+                return x;
+            }
+        }
+        return null;
+    }
+
+    private static boolean sameDefinition(Trigger a, Trigger b) {
+        return a.getMode() == b.getMode() && a.isIntrinsic() == b.isIntrinsic() && a.getMapParams().equals(b.getMapParams());
+    }
+
+    /*
+     * Known limit (copyside review 11-15, item 5; copy-only): the rebuilt trigger's ability does not carry the live one's
+     * last-known lists, remembered objects or StoredTransform. Effects that read them evaluate differently in the copy than
+     * in the live game; the live game itself is never touched.
+     */
     private SpellAbility rebuildStackTrigger(forge.game.trigger.WrappedAbility w, Game newGame) {
         final SpellAbility live = w.getWrappedAbility();
         final Trigger lt = w.getTrigger();
@@ -504,15 +543,8 @@ public class GameCopier {
         if (host == null || idx < 0) {
             throw new IllegalStateException("stack copy: trigger host " + w.getHostCard() + " missing");
         }
-        Trigger t = null;
-        int i = 0;
-        for (Trigger x : host.getTriggers()) {
-            if (i++ == idx) {
-                t = x;
-                break;
-            }
-        }
-        if (t == null || t.getMode() != lt.getMode() || !java.util.Objects.equals(t.getParam("Execute"), lt.getParam("Execute"))) {
+        final Trigger t = sameTrigger(w.getHostCard(), lt, host);
+        if (t == null) {
             throw new IllegalStateException("stack copy: trigger " + idx + " of " + host + " does not match");
         }
         final Player activator = (Player) find(live.getActivatingPlayer());
