@@ -1672,6 +1672,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
+        armRedraw(g, me); // sdcc-scorerleak-1115 (off: nothing)
         final forge.game.WorkClock.Span ws = workBegin();
         lastReason = RlSeat.IMIT_SEARCH;
         try {
@@ -2979,6 +2980,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     private ChoiceScorer scorer;
 
+    /** sdcc-scorerleak-1115: the choiceScorer's redealOpp, read once (null = not yet). */
+    private Boolean redealOpp;
+
+    /**
+     * sdcc-scorerleak-1115 (choiceScorer.redealOpp; off: nothing): every sandbox the seat's probes copy from this live game
+     * draws the opponents' hidden cards from the seat's belief ({@link forge.ai.simulation.ForcedWinProbe#redrawFor}).
+     */
+    private void armRedraw(final Game g, final Player me) {
+        if (redealOpp == null) {
+            redealOpp = cfg.choiceScorer != null && ChoiceScorer.Config.parse(cfg.choiceScorer).redealOpp;
+        }
+        if (redealOpp) {
+            forge.ai.simulation.ForcedWinProbe.redrawFor(g, me, ls.opponentRedraw());
+        }
+    }
+
     private ChoiceScorer scorer() {
         if (scorer == null) {
             scorer = new ChoiceScorer(ChoiceScorer.Config.parse(cfg.choiceScorer), index, obsVersion, uid);
@@ -2986,6 +3003,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             scorer.setCopyStaleRefs(cfg.copyStaleRefs); // sdcc-copycast-1114
             scorer.setCopyTriggers(cfg.copyTriggers); // sdcc-copycast-1114
             final ChoiceScorer.Config sc = scorer.config();
+            if (sc.redealOpp) {
+                scorer.setRedraw(ls.opponentRedraw()); // sdcc-scorerleak-1115: belief cards in the scorer's copies
+            }
             if (sc.screenNodes > 0 || sc.pile) {
                 sc.solverCfg = PlanSearch.Spec.parse(cfg.plans).solverConfig();
             }
@@ -3052,6 +3072,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
+        armRedraw(g, me); // sdcc-scorerleak-1115 (off: nothing)
         final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
         try {
             return decideChoice0(g, me, m, frame, greedy, objs);
@@ -3300,6 +3321,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
+        armRedraw(g, me); // sdcc-scorerleak-1115 (off: nothing)
         if (cfg.blocks <= 0) {
             return null;
         }
@@ -3654,6 +3676,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (forge.ai.simulation.LeakTrace.ON) {
             forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // sdcc-leak-1111 (diagnostics; off: nothing)
         }
+        armRedraw(g, me); // sdcc-scorerleak-1115 (off: nothing)
         final LiveMacro lm = liveMacro;
         if (cfg.labelSink == null || lm == null) {
             return;

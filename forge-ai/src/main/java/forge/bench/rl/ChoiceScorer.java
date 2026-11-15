@@ -478,6 +478,16 @@ public final class ChoiceScorer {
     private boolean guardSwapOwn = false;
     /** owner-misplays-1113: while >= 0, every copy's unknown own library is re-dealt with this seed ({@link #redealOwnHidden}). */
     private long redealSeed = -1;
+    /** sdcc-scorerleak-1115: the seat's belief re-draw for {@link Config#redealOpp} (null = the deal of the unknown cards). */
+    private forge.ai.simulation.ForcedWinSolver.Redraw redraw;
+    /** sdcc-scorerleak-1115: the live game and seat of the ask in progress (the re-draw reads what the seat sees there). */
+    private Game liveGame;
+    private Player liveSeat;
+
+    public void setRedraw(final forge.ai.simulation.ForcedWinSolver.Redraw r) {
+        this.redraw = r;
+    }
+
     /** sdcc-scorerleak-1115 (tests only): sees every scorer copy as its replay starts from it; null (always, outside tests) = nothing. */
     public static volatile java.util.function.BiConsumer<Game, Player> COPY_HOOK = null;
     /**
@@ -568,7 +578,13 @@ public final class ChoiceScorer {
                     k.setSearchedTopSeats(seatMask);
                 }
                 if (oppSeed >= 0) {
-                    redealOppHidden(copy, me, k, oppSeed); // sdcc-scorerleak-1115: before any probe swap
+                    // sdcc-scorerleak-1115: before any probe swap; with the seat's belief re-draw the opponents' hidden cards
+                    // are belief cards (as in the search's worlds), else a deal of their unknown cards
+                    if (redraw != null && liveGame != null) {
+                        redraw.apply(liveGame, liveSeat, copy, me, new java.util.Random(oppSeed));
+                    } else {
+                        redealOppHidden(copy, me, k, oppSeed);
+                    }
                 }
                 if (ownSeed >= 0) {
                     redealOwnOrder(copy, me, k, ownSeed); // sdcc-scorerleak-1115: before redealOwn and the own probe
@@ -1363,6 +1379,8 @@ public final class ChoiceScorer {
         final Scored s = new Scored();
         final long t0 = System.nanoTime();
         redealSeed = -1;
+        liveGame = g; // sdcc-scorerleak-1115
+        liveSeat = me;
         // sdcc-scorerleak-1115: one opposing deal for the whole ask (off: -1, nothing changes)
         oppSeed = (oppForce > 0 || oppForce == 0 && cfg.redealOpp)
                 ? forge.ai.simulation.LookaheadSearch.mix(seed ^ oppSalt, 0x0bbde41L) & Long.MAX_VALUE : -1;
