@@ -178,6 +178,11 @@ public final class ForcedWinProbe {
         }
     }
 
+    /** sdcc-scorerleak-1115 (tests): a re-draw is registered for this live game and seat. */
+    public static boolean hasRedraw(final Game live, final Player seat) {
+        return redrawOf(live, seat) != null;
+    }
+
     /** sdcc-scorerleak-1115: the re-draw registered for {@code source} and its seat, or null (off). */
     static ForcedWinSolver.Redraw redrawOf(final Game source, final Player sourceMe) {
         if (REDRAWS.isEmpty() || source == null || sourceMe == null) {

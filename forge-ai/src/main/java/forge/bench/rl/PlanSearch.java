@@ -676,6 +676,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     /** work-units-1107: {@code body} as one decision of the seat on its work clock (workUnits off: the body alone). */
     private <T> T worked(final java.util.function.Supplier<T> body) {
+        // sdcc-scorerleak-1115 (review S3): every hook entry (priority, discard, attack, look, triggers, pick, order, confirm,
+        // binary, costs, keep, choices) arms its seat before its body probes anything (off: nothing)
+        rs.armHook(me.getGame(), me);
         final forge.game.WorkClock.Span ws = rs.workBegin();
         try {
             return body.get();
@@ -686,7 +689,6 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     @Override
     public List<SpellAbility> priority(final PlayerControllerBridge c) {
-        rs.armHook(me.getGame(), me); // sdcc-scorerleak-1115: before the defence / follower probe anything (off: nothing)
         return worked(() -> priority0(c));
     }
 
@@ -965,7 +967,6 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** kill-line-1106: plans.lineKeep. */
     @Override
     public CardCollection lineKeep(final CardCollection ordinary, final CardCollection valid) {
-        rs.armHook(me.getGame(), me); // sdcc-scorerleak-1115 (off: nothing)
         return worked(() -> driver.lineKeep(ordinary, valid)); // work-units-1107
     }
 
