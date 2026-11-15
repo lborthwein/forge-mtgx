@@ -255,13 +255,15 @@ public final class HumanManaAffordability {
      * that taps other permanents refuses the bound. The caller also refuses it for a spell with improvise (an untapped
      * artifact pays {1}); convoke never reaches it.</p>
      *
-     * <p>Re-review S1 (Astra, #240): an untap or an activation can set off a trigger that adds to the payment (Mesmeric
-     * Orb mills a card for delve each time Basalt Monolith untaps; a trigger on activating an ability may copy the untap,
-     * so one payment untaps twice). So any trigger in play on untapping or on activating, casting or copying, and any
-     * untap replacement that puts something in the untap's place, refuses the bound.</p>
+     * <p>Re-reviews S1 (Astra, #240): the argument holds only if nothing reacts to the events of an untap cycle, and
+     * each repetition repeats them: Mesmeric Orb mills a card for delve on each untap; Magda makes a Treasure each time
+     * the re-untapped card is tapped again; a trigger on activating may copy the untap, so one payment untaps twice.
+     * A cycle's events are exactly: activating the untap, paying its mana, tapping for mana (the re-tap and the sources
+     * that pay), the untap, and its resolution. So any trigger in the game on one of those ({@link #CYCLE_REACTIONS}),
+     * and any tap or untap replacement that puts something in its place, refuses the bound.</p>
      */
     public static Integer untapWidening(final Player player) {
-        if (costStaticInPlay(player) || untapOrActivationReaction(player)) return null;
+        if (costStaticInPlay(player) || cycleReaction(player)) return null;
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             if (card.isPhasedOut()) continue;
@@ -291,28 +293,33 @@ public final class HumanManaAffordability {
         return widen;
     }
 
-    /** Trigger modes that an untap ability's activation or resolution can set off ({@link #untapWidening}). */
-    private static final Set<TriggerType> UNTAP_REACTIONS = Set.of(TriggerType.Untaps, TriggerType.UntapAll,
-            TriggerType.AbilityCast, TriggerType.SpellAbilityCast, TriggerType.SpellAbilityCopy);
+    /**
+     * Trigger modes the events of an untap cycle can set off ({@link #untapWidening}): activating (cast, copy, resolve),
+     * paying mana (expend), tapping and making mana, untapping.
+     */
+    private static final Set<TriggerType> CYCLE_REACTIONS = Set.of(
+            TriggerType.AbilityCast, TriggerType.SpellAbilityCast, TriggerType.SpellAbilityCopy, TriggerType.AbilityResolves,
+            TriggerType.ManaExpend, TriggerType.Taps, TriggerType.TapAll, TriggerType.TapsForMana, TriggerType.ManaAdded,
+            TriggerType.Untaps, TriggerType.UntapAll);
 
     /**
-     * Is there, anywhere in the game, a trigger that an untap ability's activation or its untapping can set off
-     * ({@link #UNTAP_REACTIONS}, in a zone where it works, as {@link #activeHooks} reads triggers), or an untap
-     * replacement that puts something in the untap's place ({@code ReplaceWith})? A replacement that only stops an untap
-     * (Grim Monolith's "doesn't untap during your untap step") can only take mana away.
+     * Is there, anywhere in the game, a trigger on an event of an untap cycle ({@link #CYCLE_REACTIONS}: on a card, in a
+     * zone where it works, as {@link #activeHooks} reads triggers; or delayed), or a tap or untap replacement that puts
+     * something in the event's place ({@code ReplaceWith})? A replacement that only stops an untap (Grim Monolith's
+     * "doesn't untap during your untap step") can only take mana away.
      */
-    static boolean untapOrActivationReaction(final Player player) {
+    static boolean cycleReaction(final Player player) {
         final forge.game.trigger.TriggerHandler handler = player.getGame().getTriggerHandler();
-        if (handler.getDelayedTriggersView().stream().anyMatch(t -> UNTAP_REACTIONS.contains(t.getMode()))
+        if (handler.getDelayedTriggersView().stream().anyMatch(t -> CYCLE_REACTIONS.contains(t.getMode()))
                 || handler.getPlayerDefinedDelayedTriggersView().values().stream()
-                    .anyMatch(t -> UNTAP_REACTIONS.contains(t.getMode()))) return true;
+                    .anyMatch(t -> CYCLE_REACTIONS.contains(t.getMode()))) return true;
         for (Card card : player.getGame().getCardsInGame()) {
             for (Trigger t : card.getTriggers()) {
-                if (!UNTAP_REACTIONS.contains(t.getMode())) continue;
+                if (!CYCLE_REACTIONS.contains(t.getMode())) continue;
                 if (t.getSpawningAbility() != null || t.zonesCheck(player.getGame().getZoneOf(card))) return true;
             }
             for (ReplacementEffect r : card.getReplacementEffects()) {
-                if (r.getMode() == ReplacementType.Untap && r.hasParam("ReplaceWith")
+                if ((r.getMode() == ReplacementType.Untap || r.getMode() == ReplacementType.Tap) && r.hasParam("ReplaceWith")
                         && r.zonesCheck(player.getGame().getZoneOf(card))) return true;
             }
         }

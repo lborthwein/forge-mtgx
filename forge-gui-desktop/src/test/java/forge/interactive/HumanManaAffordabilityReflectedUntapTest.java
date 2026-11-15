@@ -305,6 +305,26 @@ public class HumanManaAffordabilityReflectedUntapTest extends AITest {
         assertNotEquals(HumanManaAffordability.assessPayable(me, spell(ulamog)), Assessment.PROVEN_UNAFFORDABLE);
     }
 
+    /**
+     * Re-review 2 S1: Magda, Brazen Outlaw makes a Treasure whenever a Dwarf you control becomes tapped. With the re-untapped
+     * Basalt Monolith a Dwarf (Ensoul Artifact + Maskwood Nexus), each cycle's re-tap adds a Treasure. Any trigger on
+     * tapping refuses the bound.
+     */
+    @Test
+    public void review3_tapTriggerRefusesTheBound() {
+        board();
+        mine("Basalt Monolith", true);
+        mine("Magda, Brazen Outlaw", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        final Card wurm = hand("Wurmcoil Engine");
+        settle();
+
+        assertNull(HumanManaAffordability.untapWidening(me), "a trigger on tapping refuses the bound");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(wurm)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
     /** Review S1: Corrupted Grafstone reads the graveyard, which grows when Blood Pet is sacrificed for {B}: Hymn is payable. */
     @Test
     public void review_grafstoneReadsAGraveyardThatCanGrow() {
