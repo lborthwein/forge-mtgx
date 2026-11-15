@@ -224,7 +224,7 @@ final class LeakSwap {
      */
     static Deal redeal(final Game g, final Player me, final RlKnowledge know, final Predicate<Card> remembered,
             final long seed) {
-        return redeal(g, me, know, remembered, seed, true, true);
+        return redeal(g, me, know, remembered, seed, true, true, false);
     }
 
     /**
@@ -233,6 +233,16 @@ final class LeakSwap {
      */
     static Deal redeal(final Game g, final Player me, final RlKnowledge know, final Predicate<Card> remembered,
             final long seed, final boolean opp0, final boolean own) {
+        return redeal(g, me, know, remembered, seed, opp0, own, false);
+    }
+
+    /**
+     * As above; {@code touch}: the TOUCH control: every zone the full deal would rewrite is rewritten quietly with its
+     * own cards in their own order (nothing hidden changes), so S against T isolates the hidden cards from the act of
+     * rewriting the zones.
+     */
+    static Deal redeal(final Game g, final Player me, final RlKnowledge know, final Predicate<Card> remembered,
+            final long seed, final boolean opp0, final boolean own, final boolean touch) {
         final Deal d = new Deal();
         final Random rng = new Random(seed);
         final InfoStates is = InfoStates.find(g);
@@ -266,8 +276,10 @@ final class LeakSwap {
             d.oppHandFree += hFree.size();
             d.oppLibSize += lib.size();
             d.oppLibFree += lFree.size();
-            pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
-            Collections.shuffle(pool, rng);
+            if (!touch) {
+                pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+                Collections.shuffle(pool, rng);
+            }
             final List<Card> nh = new ArrayList<>(hand), nl = new ArrayList<>(lib);
             int k = 0;
             for (int i : hFree) {
@@ -321,7 +333,9 @@ final class LeakSwap {
         }
         d.ownLibSize = lib.size();
         d.ownLibFree = free.size();
-        Collections.shuffle(pool, rng);
+        if (!touch) {
+            Collections.shuffle(pool, rng);
+        }
         final List<Card> nl = new ArrayList<>(lib);
         for (int k = 0; k < free.size(); k++) {
             nl.set(free.get(k), pool.get(k));
