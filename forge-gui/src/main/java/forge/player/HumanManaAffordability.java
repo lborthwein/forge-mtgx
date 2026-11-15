@@ -5,6 +5,7 @@ import forge.card.mana.ManaCost;
 import forge.card.mana.ManaCostShard;
 import forge.game.card.Card;
 import forge.game.card.CardPlayOption;
+import forge.game.card.CardUtil;
 import forge.game.cost.CostPartMana;
 import forge.game.cost.CostTap;
 import forge.game.cost.CostPayLife;
@@ -188,6 +189,8 @@ public final class HumanManaAffordability {
 
     /** The colours a mana ability can make, as a mask; every colour when the proof cannot read them. */
     private static int producibleColours(final Player player, final SpellAbility source) {
+        final Integer reflected = reflectedColours(player, source);
+        if (reflected != null) return reflected;
         if (source.getManaPart() == null) return ManaAtom.ALL_MANA_TYPES;
         final String produced = source.getManaPart().getOrigProduced();
         if (produced == null || "Any".equals(produced)) return ManaAtom.ALL_MANA_TYPES;
@@ -199,6 +202,110 @@ public final class HumanManaAffordability {
             colours |= colour | player.getManaPool().getPossibleColorUses(colour);
         }
         return colours;
+    }
+
+    /**
+     * afford-reflected-1114 (owner report 2026-11-15T01-17-17: an untapped Chrome Mox with nothing imprinted, and every
+     * spell in hand glowing). A reflected mana ability ({@code ManaReflected}) produces "1" by its script, which the
+     * proof could not read, so one such source made every proof give up. Here the one shape whose colours can be read
+     * without side effects: {@code ReflectProperty$ Is} over {@code Valid$ Defined.<cards>} (Chrome Mox's imprinted
+     * card), the colours those cards are now, as {@code ManaReflectedEffect} reads them at resolution
+     * ({@link CardUtil#getReflectableManaColors}). 0 when there is no colour to reflect: the effect then adds "0", so
+     * the source makes no mana. Null for every other reflected ability (Reflecting Pool's "Produce", whose reading
+     * sets other abilities' activating players) and for any that cannot be read: the caller keeps its old answer.
+     */
+    public static Integer reflectedColours(final Player player, final SpellAbility source) {
+        if (source.getApi() != ApiType.ManaReflected || source.getManaPart() == null
+                || source.getManaPart().isComboMana()
+                || !"Is".equals(source.getParam("ReflectProperty"))
+                || !source.getParamOrDefault("Valid", "").startsWith("Defined.")) return null;
+        try {
+            int colours = 0;
+            for (String name : CardUtil.getReflectableManaColors(source)) {
+                final byte colour = ManaAtom.fromName(name);
+                if (colour == 0) return null;
+                colours |= colour | player.getManaPool().getPossibleColorUses(colour);
+            }
+            return colours;
+        } catch (RuntimeException unreadable) {
+            return null;
+        }
+    }
+
+    /**
+     * afford-reflected-1114 (owner report 2026-11-15T01-17-17: Grim Monolith tapped with its "{4}: Untap" usable, and
+     * Kiki-Jiki, {2}{R}{R}{R}, and Ulamog, {11}, glowing with two red sources and four mana in all). An untap ability
+     * made the amount of mana unknown ({@link #UNENUMERATED_UNTAP}), so only the colour proof was left. But an untap
+     * that costs at least the mana it gives back cannot add mana: it turns c mana into at most c of the untapped
+     * permanent's colours. So any payment that uses such untaps is also a payment from the sources counted now, each
+     * of which may stand in for one mana of those colours. This returns the colours to widen every counted mana by,
+     * or null when some untap usable now is not of that kind (the old answer stands).
+     *
+     * <p>Admitted: an Untap ability of a permanent on the battlefield that untaps only its own card (no target, no
+     * Defined other than Self, no choice of permanents, no radiance, no sub-ability), whose whole cost is mana with no
+     * X and no Phyrexian pip, with no static in play that may lower a price, and whose card makes, with each of its
+     * {T} mana abilities, no more mana than that cost has pips. A card with a mana ability the proof cannot read, or
+     * one that does not tap, is refused.</p>
+     */
+    public static Integer untapWidening(final Player player) {
+        if (costStaticInPlay(player)) return null;
+        int widen = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isPhasedOut()) continue;
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                if (sa.isSpell() || sa.isManaAbility() || !untaps(sa) || !activatableWhereItIs(card, sa)
+                        || !activatableNow(card, sa, player)) continue;
+                if (sa.getApi() != ApiType.Untap || sa.getSubAbility() != null || sa.usesTargeting()
+                        || sa.hasParam("UntapUpTo") || sa.hasParam("UntapExactly") || sa.hasParam("UntapType")
+                        || sa.hasParam("Radiance") || !"Self".equals(sa.getParamOrDefault("Defined", "Self"))) return null;
+                final forge.game.cost.Cost pay = sa.getPayCosts();
+                if (pay == null || pay.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana))) return null;
+                final List<ManaCostShard> own = ownManaCost(pay);
+                if (own == null || own.isEmpty()) return null;
+                final Integer output = tapOutput(player, card);
+                if (output == null || (output >>> 8) > own.size()) return null;
+                widen |= output & 0xFF;
+            }
+        }
+        return widen;
+    }
+
+    /**
+     * What one untap of {@code card} gives back ({@link #untapWidening}): the most mana any one of its {T} mana abilities
+     * makes, shifted left 8 bits, OR'd with the colours they can make. Null when one of its mana abilities is not a
+     * plain {T} ability the proof can read.
+     */
+    private static Integer tapOutput(final Player player, final Card card) {
+        int most = 0, colours = 0;
+        for (SpellAbility source : card.getManaAbilities()) {
+            final forge.game.cost.Cost pay = source.getPayCosts();
+            if (pay == null || !pay.hasTapCost() || source.getManaPart() == null || source.hasParam("Each")
+                    || source.getSubAbility() != null
+                    || pay.getCostParts().stream().anyMatch(p -> !(p instanceof CostTap) && !(p instanceof CostPartMana))) {
+                return null;
+            }
+            final String amountText = source.getParamOrDefault("Amount", "1");
+            if (!amountText.matches("[0-9]{1,3}")) return null;
+            final int amount = Integer.parseInt(amountText);
+            final Integer reflected = reflectedColours(player, source);
+            if (reflected != null) {
+                if (reflected != 0) most = Math.max(most, amount);
+                colours |= reflected;
+                continue;
+            }
+            final String produced = source.getManaPart().getOrigProduced();
+            final boolean choice = "Any".equals(produced) || produced.startsWith("Combo ");
+            final String simple = "Any".equals(produced) ? "W U B R G"
+                    : produced.startsWith("Combo ") ? produced.substring(6) : produced;
+            if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return null;
+            final String[] symbols = simple.split(" ");
+            most = Math.max(most, amount * (choice ? 1 : symbols.length));
+            for (String symbol : symbols) {
+                final byte colour = ManaAtom.fromName(symbol);
+                colours |= colour | player.getManaPool().getPossibleColorUses(colour);
+            }
+        }
+        return (most << 8) | colours;
     }
 
     /**
@@ -890,22 +997,32 @@ public final class HumanManaAffordability {
                 final String amountText = source.getParamOrDefault("Amount", "1");
                 final String produced = source.getManaPart().getOrigProduced();
                 if (!amountText.matches("[0-9]{1,3}")) return unknown("source-amount", card);
-                final boolean choice = "Any".equals(produced) || produced.startsWith("Combo ");
-                final String simple = "Any".equals(produced) ? "W U B R G"
+                // afford-reflected-1114: a reflected source (Chrome Mox) counts with the colours it reflects now, one
+                // mana per activation and amount; with none to reflect it makes no mana at all.
+                final Integer reflected = reflectedColours(player, source);
+                if (reflected != null && reflected == 0) continue;
+                final boolean choice = reflected != null || "Any".equals(produced) || produced.startsWith("Combo ");
+                final String simple = reflected != null ? null : "Any".equals(produced) ? "W U B R G"
                         : produced.startsWith("Combo ") ? produced.substring(6) : produced;
-                if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return unknown("source-produced", card);
+                if (simple != null && !simple.matches("[WUBRGC]( [WUBRGC])*")) return unknown("source-produced", card);
                 final List<ManaCostShard> own = ownManaCost(pay);
                 if (own == null) return unknown("source-own-cost", card);
                 // A costed ability is modelled as used once ({@link Unit}); one activated per tapped permanent is not.
                 if (activations > 1 && !own.isEmpty()) return unknown("source-cost:TapType+mana", card);
                 if (activations == 0) continue;
-                final String[] symbols = simple.split(" ");
                 int colors = 0;
-                for (String symbol : symbols) {
-                    byte color = ManaAtom.fromName(symbol);
-                    colors |= color | player.getManaPool().getPossibleColorUses(color);
+                int per = 1;
+                if (reflected != null) {
+                    colors = reflected;
+                } else {
+                    final String[] symbols = simple.split(" ");
+                    if (!choice) per = symbols.length;
+                    for (String symbol : symbols) {
+                        byte color = ManaAtom.fromName(symbol);
+                        colors |= color | player.getManaPool().getPossibleColorUses(color);
+                    }
                 }
-                alts.add(new Alt(activations * Integer.parseInt(amountText) * (choice ? 1 : symbols.length), colors, own));
+                alts.add(new Alt(activations * Integer.parseInt(amountText) * per, colors, own));
                 allTap &= tap;
             }
             if (alts.isEmpty()) continue;
@@ -982,6 +1099,23 @@ public final class HumanManaAffordability {
             // Review S1-1: a production hook set aside for want of an untapped source acts again once the untap brings
             // a tapped one back: unknown. S1-2: an untap can untap a creature that then convokes its colour: unknown.
             if ((hooks & HOOK_PRODUCTION) != 0 || spell && host.hasKeyword(Keyword.CONVOKE)) return Assessment.UNKNOWN;
+            // afford-reflected-1114: every untap usable now costs at least what it gives back, so the mana counted now
+            // bounds the payment; each counted mana (not life, convoke, improvise or delve) may also stand in for one of
+            // the colours an untap brings back.
+            final Integer widen = (hooks & HOOK_CONVERT) != 0 ? null : untapWidening(player);
+            if (widen != null) {
+                final List<Token> wideBase = new ArrayList<>();
+                for (Token t : base) {
+                    wideBase.add(t.spellOnly() || t.colors() == LIFE_PAYMENT ? t : new Token(t.colors() | widen, t.rank(), false));
+                }
+                final List<Unit> wideUnits = new ArrayList<>();
+                for (Unit u : units) {
+                    final List<Alt> wideAlts = new ArrayList<>();
+                    for (Alt a : u.alts()) wideAlts.add(new Alt(a.amount(), a.colors() | widen, a.cost()));
+                    wideUnits.add(new Unit(u.freeAmount(), u.freeColors() | widen, wideAlts));
+                }
+                if (!payableWith(shards, wideBase, wideUnits, cap)) return Assessment.PROVEN_UNAFFORDABLE;
+            }
             // Improvise and delve pay with colourless.
             int extra = 0;
             for (Token t : base) {
