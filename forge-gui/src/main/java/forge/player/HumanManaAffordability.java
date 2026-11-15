@@ -5,6 +5,7 @@ import forge.card.mana.ManaCost;
 import forge.card.mana.ManaCostShard;
 import forge.game.card.Card;
 import forge.game.card.CardPlayOption;
+import forge.game.card.CardUtil;
 import forge.game.cost.CostPartMana;
 import forge.game.cost.CostTap;
 import forge.game.cost.CostPayLife;
@@ -188,6 +189,8 @@ public final class HumanManaAffordability {
 
     /** The colours a mana ability can make, as a mask; every colour when the proof cannot read them. */
     private static int producibleColours(final Player player, final SpellAbility source) {
+        final Integer reflected = reflectedColours(player, source);
+        if (reflected != null) return reflected;
         if (source.getManaPart() == null) return ManaAtom.ALL_MANA_TYPES;
         final String produced = source.getManaPart().getOrigProduced();
         if (produced == null || "Any".equals(produced)) return ManaAtom.ALL_MANA_TYPES;
@@ -199,6 +202,202 @@ public final class HumanManaAffordability {
             colours |= colour | player.getManaPool().getPossibleColorUses(colour);
         }
         return colours;
+    }
+
+    /**
+     * afford-reflected-1114 (owner report 2026-11-15T01-17-17: an untapped Chrome Mox with nothing imprinted, and every
+     * spell in hand glowing). A reflected mana ability ({@code ManaReflected}) produces "1" by its script, which the
+     * proof could not read, so one such source made every proof give up. Here the one shape whose colours can be read
+     * without side effects and cannot change while a cost is paid: {@code ReflectProperty$ Is} over
+     * {@code Valid$ Defined.Imprinted} (Chrome Mox), the colours of the imprinted cards now, as
+     * {@code ManaReflectedEffect} reads them at resolution ({@link CardUtil#getReflectableManaColors}). 0 when there is
+     * no colour to reflect: the effect then adds "0", so the source makes no mana. Null for every other reflected
+     * ability and for any that cannot be read: the caller keeps its old answer. Review S1 (Astra, #240): another
+     * {@code Defined.} set may grow during the payment (Corrupted Grafstone's graveyard, once a Blood Pet is sacrificed
+     * for mana), and Reflecting Pool's "Produce" reading sets other abilities' activating players.
+     */
+    public static Integer reflectedColours(final Player player, final SpellAbility source) {
+        if (source.getApi() != ApiType.ManaReflected || source.getManaPart() == null
+                || source.getManaPart().isComboMana()
+                || !"Is".equals(source.getParam("ReflectProperty"))
+                || !"Defined.Imprinted".equals(source.getParam("Valid"))) return null;
+        try {
+            int colours = 0;
+            for (String name : CardUtil.getReflectableManaColors(source)) {
+                final byte colour = ManaAtom.fromName(name);
+                if (colour == 0) return null;
+                colours |= colour | player.getManaPool().getPossibleColorUses(colour);
+            }
+            return colours;
+        } catch (RuntimeException unreadable) {
+            return null;
+        }
+    }
+
+    /**
+     * afford-reflected-1114 (owner report 2026-11-15T01-17-17: Grim Monolith tapped with its "{4}: Untap" usable, and
+     * Kiki-Jiki, {2}{R}{R}{R}, and Ulamog, {11}, glowing with two red sources and four mana in all). An untap ability
+     * made the amount of mana unknown ({@link #UNENUMERATED_UNTAP}), so only the colour proof was left. But an untap
+     * that costs at least the mana it gives back cannot add mana: it turns c mana into at most c of the untapped
+     * permanent's colours. So any payment that uses such untaps is also a payment from the sources counted now, each
+     * of which may stand in for one mana of those colours. This returns the colours to widen every counted mana by,
+     * or null when some untap usable now is not of that kind (the old answer stands).
+     *
+     * <p>Admitted: an Untap ability of a permanent on the battlefield that untaps only its own card (no target, no
+     * Defined other than Self, no choice of permanents, no radiance, no sub-ability), whose whole cost is mana with no
+     * X and no Phyrexian pip, with no static in play that may lower a price, and whose card makes, with each of its
+     * {T} mana abilities, no more mana than that cost has pips. A card with a mana ability the proof cannot read, or
+     * one that does not tap, is refused.</p>
+     *
+     * <p>Review S1 (Astra, #240): an untapped permanent can also make mana through ANOTHER source whose cost taps it
+     * ({@code CostTapType}: Urza, Lord High Artificer taps the untapped Basalt Monolith for {U}; Grand Architect taps
+     * the untapped Horseshoe Crab for {C}{C}, more than its {U} untap costs). So any mana ability of the player's
+     * that taps other permanents refuses the bound. The caller also refuses it for a spell with improvise (an untapped
+     * artifact pays {1}); convoke never reaches it.</p>
+     *
+     * <p>Re-reviews S1 (Astra, #240): the argument holds only if nothing reacts to the events of an untap cycle, and
+     * each repetition repeats them: Mesmeric Orb mills a card for delve on each untap; Magda makes a Treasure each time
+     * the re-untapped card is tapped again; a trigger on activating may copy the untap, so one payment untaps twice.
+     * A cycle's events are exactly: activating the untap, paying its mana, tapping for mana (the re-tap and the sources
+     * that pay), the untap, and its resolution. So any trigger in the game on one of those ({@link #CYCLE_REACTIONS}),
+     * and any tap or untap replacement that puts something in its place, refuses the bound.</p>
+     */
+    public static Integer untapWidening(final Player player) {
+        if (costStaticInPlay(player) || cycleReaction(player)) return null;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            if (card.isPhasedOut()) continue;
+            for (SpellAbility source : card.getManaAbilities()) {
+                if (source.getPayCosts() != null && activatableWhereItIs(card, source)
+                        && source.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostTapType)) return null;
+            }
+        }
+        int widen = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isPhasedOut()) continue;
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                if (sa.isSpell() || sa.isManaAbility() || !untaps(sa) || !activatableWhereItIs(card, sa)
+                        || !activatableNow(card, sa, player)) continue;
+                if (sa.getApi() != ApiType.Untap || sa.getSubAbility() != null || sa.usesTargeting()
+                        || sa.hasParam("UntapUpTo") || sa.hasParam("UntapExactly") || sa.hasParam("UntapType")
+                        || sa.hasParam("Radiance") || !"Self".equals(sa.getParamOrDefault("Defined", "Self"))) return null;
+                final forge.game.cost.Cost pay = sa.getPayCosts();
+                if (pay == null || pay.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana))) return null;
+                final List<ManaCostShard> own = ownManaCost(pay);
+                if (own == null || own.isEmpty()) return null;
+                final Integer output = tapOutput(player, card);
+                if (output == null || (output >>> 8) > own.size()) return null;
+                widen |= output & 0xFF;
+            }
+        }
+        return widen;
+    }
+
+    /**
+     * Trigger modes the events of an untap cycle can set off ({@link #untapWidening}): activating (cast, copy, resolve),
+     * paying mana (expend), tapping and making mana, untapping.
+     */
+    private static final Set<TriggerType> CYCLE_REACTIONS = Set.of(
+            TriggerType.AbilityCast, TriggerType.SpellAbilityCast, TriggerType.SpellAbilityCopy, TriggerType.AbilityResolves,
+            TriggerType.ManaExpend, TriggerType.Taps, TriggerType.TapAll, TriggerType.TapsForMana, TriggerType.ManaAdded,
+            TriggerType.Untaps, TriggerType.UntapAll);
+
+    /**
+     * Is there, anywhere in the game, a trigger on an event of an untap cycle ({@link #CYCLE_REACTIONS}: on a card, in a
+     * zone where it works, as {@link #activeHooks} reads triggers; or delayed), or a tap or untap replacement that puts
+     * something in the event's place ({@code ReplaceWith})? A replacement that only stops an untap (Grim Monolith's
+     * "doesn't untap during your untap step") can only take mana away.
+     */
+    static boolean cycleReaction(final Player player) {
+        // Re-review 3 S1 (Astra, #240): a reaction can also ride on mana, registered only when the mana is spent
+        // (Sunken Palace's "when you spend this mana ... copy that ability" copies the untap). So mana in the pool with
+        // a rider, or any mana ability of the player's that makes such mana, refuses the bound.
+        for (var mana : player.getManaPool()) {
+            if (manaRider(mana.getManaAbility())) return true;
+        }
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            for (SpellAbility source : card.getManaAbilities()) {
+                if (manaRider(source.getManaPart())) return true;
+            }
+            // Nor can anything of the player's copy the untap without a trigger: an activated ability or a spell that
+            // copies an ability (Lithoform Engine's "{2}, {T}: Copy target activated ability" untaps Basalt Monolith a
+            // second time, six mana out for five in). And a spell that untaps (Turnabout), which the untap scan skips
+            // as a spell, is an untap the bound does not admit. A charm counts by any of its modes.
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                    if (s.getApi() == ApiType.CopySpellAbility || sa.isSpell() && untaps(s)) return true;
+                    if (s.getApi() == ApiType.Charm) {
+                        for (String mode : s.getParamOrDefault("Choices", "").split(",")) {
+                            final String text = card.getSVar(mode.trim());
+                            if (text.contains("CopySpellAbility") || sa.isSpell() && text.matches("(?s).*\\b(Untap|UntapAll|TapOrUntap|TapOrUntapAll)\\b.*")) return true;
+                        }
+                    }
+                }
+            }
+        }
+        final forge.game.trigger.TriggerHandler handler = player.getGame().getTriggerHandler();
+        if (handler.getDelayedTriggersView().stream().anyMatch(t -> CYCLE_REACTIONS.contains(t.getMode()))
+                || handler.getPlayerDefinedDelayedTriggersView().values().stream()
+                    .anyMatch(t -> CYCLE_REACTIONS.contains(t.getMode()))) return true;
+        for (Card card : player.getGame().getCardsInGame()) {
+            for (Trigger t : card.getTriggers()) {
+                if (!CYCLE_REACTIONS.contains(t.getMode())) continue;
+                if (t.getSpawningAbility() != null || t.zonesCheck(player.getGame().getZoneOf(card))) return true;
+            }
+            for (ReplacementEffect r : card.getReplacementEffects()) {
+                if ((r.getMode() == ReplacementType.Untap || r.getMode() == ReplacementType.Tap) && r.hasParam("ReplaceWith")
+                        && r.zonesCheck(player.getGame().getZoneOf(card))) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Does mana made by this part carry a rider: a trigger when spent, keywords or counters for what it pays? */
+    private static boolean manaRider(final forge.game.spellability.AbilityManaPart part) {
+        if (part == null) return false;
+        if (part.getTriggersWhenSpent() || part.getKeywords() != null) return true;
+        final SpellAbility source = part.getSourceSA();
+        return source != null && (source.hasParam("TriggersWhenSpent") || source.hasParam("AddsKeywords")
+                || source.hasParam("AddsCounters"));
+    }
+
+    /**
+     * What one untap of {@code card} gives back ({@link #untapWidening}): the most mana any one of its {T} mana abilities
+     * makes, shifted left 8 bits, OR'd with the colours they can make. Null when one of its mana abilities is not a
+     * plain {T} ability the proof can read.
+     */
+    private static Integer tapOutput(final Player player, final Card card) {
+        int most = 0, colours = 0;
+        for (SpellAbility source : card.getManaAbilities()) {
+            final forge.game.cost.Cost pay = source.getPayCosts();
+            if (pay == null || !pay.hasTapCost() || source.getManaPart() == null || source.hasParam("Each")
+                    || source.getSubAbility() != null
+                    || pay.getCostParts().stream().anyMatch(p -> !(p instanceof CostTap) && !(p instanceof CostPartMana))) {
+                return null;
+            }
+            final String amountText = source.getParamOrDefault("Amount", "1");
+            if (!amountText.matches("[0-9]{1,3}")) return null;
+            final int amount = Integer.parseInt(amountText);
+            final Integer reflected = reflectedColours(player, source);
+            if (reflected != null) {
+                if (reflected != 0) most = Math.max(most, amount);
+                colours |= reflected;
+                continue;
+            }
+            final String produced = source.getManaPart().getOrigProduced();
+            final boolean choice = "Any".equals(produced) || produced.startsWith("Combo ");
+            final String simple = "Any".equals(produced) ? "W U B R G"
+                    : produced.startsWith("Combo ") ? produced.substring(6) : produced;
+            if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return null;
+            final String[] symbols = simple.split(" ");
+            most = Math.max(most, amount * (choice ? 1 : symbols.length));
+            for (String symbol : symbols) {
+                final byte colour = ManaAtom.fromName(symbol);
+                colours |= colour | player.getManaPool().getPossibleColorUses(colour);
+            }
+        }
+        return (most << 8) | colours;
     }
 
     /**
@@ -890,22 +1089,32 @@ public final class HumanManaAffordability {
                 final String amountText = source.getParamOrDefault("Amount", "1");
                 final String produced = source.getManaPart().getOrigProduced();
                 if (!amountText.matches("[0-9]{1,3}")) return unknown("source-amount", card);
-                final boolean choice = "Any".equals(produced) || produced.startsWith("Combo ");
-                final String simple = "Any".equals(produced) ? "W U B R G"
+                // afford-reflected-1114: a reflected source (Chrome Mox) counts with the colours it reflects now, one
+                // mana per activation and amount; with none to reflect it makes no mana at all.
+                final Integer reflected = reflectedColours(player, source);
+                if (reflected != null && reflected == 0) continue;
+                final boolean choice = reflected != null || "Any".equals(produced) || produced.startsWith("Combo ");
+                final String simple = reflected != null ? null : "Any".equals(produced) ? "W U B R G"
                         : produced.startsWith("Combo ") ? produced.substring(6) : produced;
-                if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return unknown("source-produced", card);
+                if (simple != null && !simple.matches("[WUBRGC]( [WUBRGC])*")) return unknown("source-produced", card);
                 final List<ManaCostShard> own = ownManaCost(pay);
                 if (own == null) return unknown("source-own-cost", card);
                 // A costed ability is modelled as used once ({@link Unit}); one activated per tapped permanent is not.
                 if (activations > 1 && !own.isEmpty()) return unknown("source-cost:TapType+mana", card);
                 if (activations == 0) continue;
-                final String[] symbols = simple.split(" ");
                 int colors = 0;
-                for (String symbol : symbols) {
-                    byte color = ManaAtom.fromName(symbol);
-                    colors |= color | player.getManaPool().getPossibleColorUses(color);
+                int per = 1;
+                if (reflected != null) {
+                    colors = reflected;
+                } else {
+                    final String[] symbols = simple.split(" ");
+                    if (!choice) per = symbols.length;
+                    for (String symbol : symbols) {
+                        byte color = ManaAtom.fromName(symbol);
+                        colors |= color | player.getManaPool().getPossibleColorUses(color);
+                    }
                 }
-                alts.add(new Alt(activations * Integer.parseInt(amountText) * (choice ? 1 : symbols.length), colors, own));
+                alts.add(new Alt(activations * Integer.parseInt(amountText) * per, colors, own));
                 allTap &= tap;
             }
             if (alts.isEmpty()) continue;
@@ -982,6 +1191,27 @@ public final class HumanManaAffordability {
             // Review S1-1: a production hook set aside for want of an untapped source acts again once the untap brings
             // a tapped one back: unknown. S1-2: an untap can untap a creature that then convokes its colour: unknown.
             if ((hooks & HOOK_PRODUCTION) != 0 || spell && host.hasKeyword(Keyword.CONVOKE)) return Assessment.UNKNOWN;
+            // afford-reflected-1114: every untap usable now costs at least what it gives back, so the mana counted now
+            // bounds the payment; each counted mana (not life, convoke, improvise or delve) may also stand in for one of
+            // the colours an untap brings back.
+            // Improvise pays {1} per untapped artifact; harmonize's reduction (a ReduceCost static on the card itself,
+            // in the graveyard where costStaticInPlay does not look) grows with a creature an untap brings back.
+            final Integer widen = (hooks & HOOK_CONVERT) != 0
+                    || spell && (host.hasKeyword(Keyword.IMPROVISE) || ability.isHarmonize()) ? null
+                    : untapWidening(player);
+            if (widen != null) {
+                final List<Token> wideBase = new ArrayList<>();
+                for (Token t : base) {
+                    wideBase.add(t.spellOnly() || t.colors() == LIFE_PAYMENT ? t : new Token(t.colors() | widen, t.rank(), false));
+                }
+                final List<Unit> wideUnits = new ArrayList<>();
+                for (Unit u : units) {
+                    final List<Alt> wideAlts = new ArrayList<>();
+                    for (Alt a : u.alts()) wideAlts.add(new Alt(a.amount(), a.colors() | widen, a.cost()));
+                    wideUnits.add(new Unit(u.freeAmount(), u.freeColors() | widen, wideAlts));
+                }
+                if (!payableWith(shards, wideBase, wideUnits, cap)) return Assessment.PROVEN_UNAFFORDABLE;
+            }
             // Improvise and delve pay with colourless.
             int extra = 0;
             for (Token t : base) {
