@@ -254,9 +254,14 @@ public final class HumanManaAffordability {
      * the untapped Horseshoe Crab for {C}{C}, more than its {U} untap costs). So any mana ability of the player's
      * that taps other permanents refuses the bound. The caller also refuses it for a spell with improvise (an untapped
      * artifact pays {1}); convoke never reaches it.</p>
+     *
+     * <p>Re-review S1 (Astra, #240): an untap or an activation can set off a trigger that adds to the payment (Mesmeric
+     * Orb mills a card for delve each time Basalt Monolith untaps; a trigger on activating an ability may copy the untap,
+     * so one payment untaps twice). So any trigger in play on untapping or on activating, casting or copying, and any
+     * untap replacement that puts something in the untap's place, refuses the bound.</p>
      */
     public static Integer untapWidening(final Player player) {
-        if (costStaticInPlay(player)) return null;
+        if (costStaticInPlay(player) || untapOrActivationReaction(player)) return null;
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             if (card.isPhasedOut()) continue;
@@ -284,6 +289,34 @@ public final class HumanManaAffordability {
             }
         }
         return widen;
+    }
+
+    /** Trigger modes that an untap ability's activation or resolution can set off ({@link #untapWidening}). */
+    private static final Set<TriggerType> UNTAP_REACTIONS = Set.of(TriggerType.Untaps, TriggerType.UntapAll,
+            TriggerType.AbilityCast, TriggerType.SpellAbilityCast, TriggerType.SpellAbilityCopy);
+
+    /**
+     * Is there, anywhere in the game, a trigger that an untap ability's activation or its untapping can set off
+     * ({@link #UNTAP_REACTIONS}, in a zone where it works, as {@link #activeHooks} reads triggers), or an untap
+     * replacement that puts something in the untap's place ({@code ReplaceWith})? A replacement that only stops an untap
+     * (Grim Monolith's "doesn't untap during your untap step") can only take mana away.
+     */
+    static boolean untapOrActivationReaction(final Player player) {
+        final forge.game.trigger.TriggerHandler handler = player.getGame().getTriggerHandler();
+        if (handler.getDelayedTriggersView().stream().anyMatch(t -> UNTAP_REACTIONS.contains(t.getMode()))
+                || handler.getPlayerDefinedDelayedTriggersView().values().stream()
+                    .anyMatch(t -> UNTAP_REACTIONS.contains(t.getMode()))) return true;
+        for (Card card : player.getGame().getCardsInGame()) {
+            for (Trigger t : card.getTriggers()) {
+                if (!UNTAP_REACTIONS.contains(t.getMode())) continue;
+                if (t.getSpawningAbility() != null || t.zonesCheck(player.getGame().getZoneOf(card))) return true;
+            }
+            for (ReplacementEffect r : card.getReplacementEffects()) {
+                if (r.getMode() == ReplacementType.Untap && r.hasParam("ReplaceWith")
+                        && r.zonesCheck(player.getGame().getZoneOf(card))) return true;
+            }
+        }
+        return false;
     }
 
     /**

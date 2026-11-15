@@ -274,6 +274,37 @@ public class HumanManaAffordabilityReflectedUntapTest extends AITest {
         assertNotEquals(HumanManaAffordability.assessPayable(me, spell(wurm)), Assessment.PROVEN_UNAFFORDABLE);
     }
 
+    /**
+     * Re-review S1: Mesmeric Orb mills a card each time Basalt Monolith untaps. Tap it for {C}{C}{C}, pay its untap, and
+     * the milled card pays one more by delve: Murderous Cut is payable from four mana.
+     */
+    @Test
+    public void review2_orbMillsAnExtraDelvePayment() {
+        board();
+        mine("Basalt Monolith", false);
+        mine("Mesmeric Orb", false);
+        mine("Swamp", false);
+        addCardToZone("Grizzly Bears", game.getPlayers().get(0), ZoneType.Battlefield);
+        addCardToZone("Mountain", me, ZoneType.Library);
+        final Card cut = hand("Murderous Cut");
+        settle();
+
+        assertNull(HumanManaAffordability.untapWidening(me), "an untap trigger refuses the bound");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(cut)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
+    /** Re-review S1: a trigger on activating an ability (Rings of Brighthearth copies it) refuses the bound. */
+    @Test
+    public void review2_activationTriggerRefusesTheBound() {
+        ownerBoard(true);
+        mine("Rings of Brighthearth", false);
+        final Card ulamog = hand("Ulamog, the Infinite Gyre");
+        settle();
+
+        assertNull(HumanManaAffordability.untapWidening(me), "a trigger on activating refuses the bound");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(ulamog)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
     /** Review S1: Corrupted Grafstone reads the graveyard, which grows when Blood Pet is sacrificed for {B}: Hymn is payable. */
     @Test
     public void review_grafstoneReadsAGraveyardThatCanGrow() {
