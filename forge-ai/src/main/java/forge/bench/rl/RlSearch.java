@@ -3201,8 +3201,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /**
      * sdcc-scorerleak-1115 (diagnostics only): the same card ask scored again after the live answer is fixed, as
-     * {@code plain2} (copies as the live pass: the run-to-run noise) and {@code opp1} / {@code opp2} (every copy's unknown
-     * opposing hand and library re-dealt, two deals), one {@code [scorer-ab]} line on stderr. The live answer, the
+     * {@code plain2} (copies as the live pass: the run-to-run noise), {@code opp1} / {@code opp2} (every copy's unknown
+     * opposing hand and library re-dealt, two deals), {@code own1} (our own unknown library order re-dealt) and
+     * {@code all1} (both), one {@code [scorer-ab]} line on stderr. The live answer, the
      * scorer's per-ask state and the game are unchanged (the passes work on copies; the service only answers values).
      */
     private void scorerOppAB(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy,
@@ -3218,14 +3219,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         row.addProperty("src", src);
         row.addProperty("redealOppCfg", sc.config().redealOpp);
         row.add("live", abPass(live, liveAlt));
-        final String[] names = {"plain2", "opp1", "opp2"};
-        final int[] force = {-1, 1, 1};
-        final long[] salt = {0L, 0x5ca1ab1e01L, 0x5ca1ab1e02L};
+        final String[] names = {"plain2", "opp1", "opp2", "own1", "all1"};
+        final int[] force = {-1, 1, 1, -1, 1};
+        final int[] forceOwn = {-1, -1, -1, 1, 1};
+        final long[] salt = {0L, 0x5ca1ab1e01L, 0x5ca1ab1e02L, 0x5ca1ab1e01L, 0x5ca1ab1e01L};
         final long t0 = System.nanoTime();
         try {
             for (int i = 0; i < names.length; i++) {
                 sc.restoreAskState(st0);
                 sc.forceRedealOpp(force[i], salt[i]);
+                sc.forceRedealOwnOrder(forceOwn[i]);
                 final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed, sc.mechAsk(m) ? askSa(objs) : null);
                 final List<byte[]> ps = sc.payloads(s);
                 double[] v = null;
@@ -3242,6 +3245,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("error", String.valueOf(e));
         } finally {
             sc.forceRedealOpp(0, 0L);
+            sc.forceRedealOwnOrder(0);
             sc.restoreAskState(after);
         }
         row.addProperty("ab_ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
