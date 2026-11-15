@@ -2202,6 +2202,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * decide. The swap test asserts it is the same before and after the re-deal.
      */
     java.util.function.Supplier<byte[]> leakObs;
+    /** sdcc-leakswap-1115 (diagnostics): the same observation as the featurizer's Obs (for the field diff). */
+    java.util.function.Supplier<Object> leakObsRaw;
 
     /**
      * sdcc-leakswap-1115 (diagnostics): the decision just searched ({@code real}, not changed) searched twice more with
@@ -2228,6 +2230,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final long wall0 = System.nanoTime();
         try {
             final byte[] o0 = obs == null ? null : obs.get();
+            final Object raw0 = leakObsRaw == null ? null : leakObsRaw.get();
             row.addProperty("obs_check", o0 != null);
             final PlanSearch.Stage[] st = new PlanSearch.Stage[1];
             final LookaheadSearch.GivenResult rr = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);
@@ -2243,6 +2246,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("obs_same", same);
                 if (!same) {
                     row.addProperty("skip", "obs_changed");
+                    if (raw0 != null) {
+                        row.add("obs_diff", LeakSwap.obsDiff(raw0, leakObsRaw.get()));
+                    }
                 } else if (d.changed() > 0) {
                     st[0] = null;
                     final LookaheadSearch.GivenResult rs = leakRepeat(g, me, m, sc, menuObjs, given, stage, sb, pre, st);

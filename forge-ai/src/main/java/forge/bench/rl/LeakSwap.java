@@ -83,6 +83,71 @@ final class LeakSwap {
         }
     }
 
+    /**
+     * The fields of two featurizer observations that differ (reflection over the Obs class: arrays element-wise, scalars
+     * by value), as "field[i]: a -> b" for the first differing elements (diagnostics: where a re-deal shows in the frame).
+     */
+    static com.google.gson.JsonArray obsDiff(final Object a, final Object b) {
+        final com.google.gson.JsonArray out = new com.google.gson.JsonArray();
+        if (a == null || b == null || a.getClass() != b.getClass()) {
+            out.add("class");
+            return out;
+        }
+        for (java.lang.reflect.Field f : a.getClass().getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                continue;
+            }
+            try {
+                f.setAccessible(true);
+                final Object x = f.get(a), y = f.get(b);
+                if (x == null || y == null) {
+                    if (x != y) {
+                        out.add(f.getName() + ": null");
+                    }
+                    continue;
+                }
+                if (x.getClass().isArray()) {
+                    final int nx = java.lang.reflect.Array.getLength(x), ny = java.lang.reflect.Array.getLength(y);
+                    int shown = 0, diffs = 0;
+                    for (int i = 0; i < Math.max(nx, ny); i++) {
+                        final Object u = i < nx ? java.lang.reflect.Array.get(x, i) : null;
+                        final Object v = i < ny ? java.lang.reflect.Array.get(y, i) : null;
+                        final boolean eq = u == null ? v == null : u.getClass().isArray()
+                                ? java.util.Objects.deepEquals(u, v) : u.equals(v);
+                        if (!eq) {
+                            diffs++;
+                            if (shown++ < 6) {
+                                out.add(f.getName() + "[" + i + "]: " + str(u) + " -> " + str(v));
+                            }
+                        }
+                    }
+                    if (diffs > 0 || nx != ny) {
+                        out.add(f.getName() + ": " + diffs + " diffs, len " + nx + " -> " + ny);
+                    }
+                } else if (!x.equals(y) && (x instanceof Number || x instanceof Boolean || x instanceof String)) {
+                    out.add(f.getName() + ": " + x + " -> " + y);
+                }
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                out.add(f.getName() + ": " + e);
+            }
+        }
+        return out;
+    }
+
+    private static String str(final Object o) {
+        if (o == null) {
+            return "null";
+        }
+        if (o.getClass().isArray()) {
+            final StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < Math.min(12, java.lang.reflect.Array.getLength(o)); i++) {
+                sb.append(i > 0 ? "," : "").append(java.lang.reflect.Array.get(o, i));
+            }
+            return sb.append("]").toString();
+        }
+        return String.valueOf(o);
+    }
+
     /** The zones a re-deal changed, their original card lists (for the exact restore), and what changed. */
     static final class Deal {
         final List<Zone> zones = new ArrayList<>();

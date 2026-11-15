@@ -1117,10 +1117,12 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 final RlCandidates.Menu lm = m;
                 final int ls = seat;
                 ((RlSearch) search).leakObs = () -> leakFrame(ls, g, player, lm);
+                ((RlSearch) search).leakObsRaw = () -> leakObsRaw(g, player, lm);
             }
             final int alt = search.decide(g, player, m, frame, d.steps[0], menuObjs);
             if (LeakSwap.ON && search instanceof RlSearch) {
                 ((RlSearch) search).leakObs = null;
+                ((RlSearch) search).leakObsRaw = null;
             }
             if (alt == PrioritySearch.VOID) {
                 endGame("cpu_cap");
@@ -1442,6 +1444,18 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
      * sdcc-leakswap-1115 (diagnostics): the seat's observation of the live game now, as the encoded frame of the decision
      * in progress without the privileged block; a scratch random stream and the id counters put back, as the RECORD path.
      */
+    private Object leakObsRaw(final Game g, final Player player, final RlCandidates.Menu m) {
+        final java.util.Random live = forge.util.MyRandom.getThreadRandom();
+        final int[] snap = idValues();
+        forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
+        try {
+            return feat.observe(g, player, m.mullK, false, m);
+        } finally {
+            forge.util.MyRandom.setThreadRandom(live);
+            restoreIds(snap);
+        }
+    }
+
     private byte[] leakFrame(final int seat, final Game g, final Player player, final RlCandidates.Menu m) {
         final java.util.Random live = forge.util.MyRandom.getThreadRandom();
         final int[] snap = idValues();
