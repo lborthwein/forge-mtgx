@@ -3000,6 +3000,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * sdcc-scorerleak-1115 (choiceScorer.redealOpp; off: nothing): every sandbox the seat's probes copy from this live game
      * draws the opponents' hidden cards from the seat's belief ({@link forge.ai.simulation.ForcedWinProbe#redrawFor}).
      */
+    /**
+     * sdcc-scorerleak-1115 (residual land-probe reads): the seat's plan hook (the defence with a spell on the stack, the line
+     * follower) runs at the bridge BEFORE this search's decide, i.e. before {@link #armRedraw} and before LeakTrace is armed
+     * for this seat. LeakTrace then still watched the opponent (the seat that cast the spell) and counted this seat's own
+     * hand in its probes as the opponent's real hand. Called first by the hook: LeakTrace follows the seat whose search runs
+     * (diagnostics; off: nothing) and the seat's belief re-draw is registered before any of its probes.
+     */
+    void armHook(final Game g, final Player me) {
+        if (forge.ai.simulation.LeakTrace.ON) {
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // diagnostics; off: nothing
+        }
+        armRedraw(g, me);
+    }
+
     private void armRedraw(final Game g, final Player me) {
         if (redealOpp == null) {
             redealOpp = cfg.choiceScorer != null && ChoiceScorer.Config.parse(cfg.choiceScorer).redealOpp;

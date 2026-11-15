@@ -686,6 +686,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     @Override
     public List<SpellAbility> priority(final PlayerControllerBridge c) {
+        rs.armHook(me.getGame(), me); // sdcc-scorerleak-1115: before the defence / follower probe anything (off: nothing)
         return worked(() -> priority0(c));
     }
 
@@ -964,6 +965,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** kill-line-1106: plans.lineKeep. */
     @Override
     public CardCollection lineKeep(final CardCollection ordinary, final CardCollection valid) {
+        rs.armHook(me.getGame(), me); // sdcc-scorerleak-1115 (off: nothing)
         return worked(() -> driver.lineKeep(ordinary, valid)); // work-units-1107
     }
 

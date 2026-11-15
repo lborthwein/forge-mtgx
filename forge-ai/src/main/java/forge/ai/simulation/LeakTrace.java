@@ -78,6 +78,20 @@ public final class LeakTrace {
         a.oppKnown = oppKnown;
     }
 
+    /** sdcc-scorerleak-1115 (tests): {opp reads, real-hand reads} summed over the tags whose text contains {@code part}. */
+    static long[] oppCounts(final String part) {
+        long reads = 0, real = 0;
+        for (Map.Entry<String, long[]> e : COUNTS.entrySet()) {
+            if (e.getKey().contains(part)) {
+                synchronized (e.getValue()) {
+                    reads += e.getValue()[OPP];
+                    real += e.getValue()[OPP_REAL];
+                }
+            }
+        }
+        return new long[] {reads, real};
+    }
+
     private static String tag() {
         final StringBuilder sb = new StringBuilder();
         int n = 0;
