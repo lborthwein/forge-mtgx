@@ -309,6 +309,33 @@ public final class HumanManaAffordability {
      * "doesn't untap during your untap step") can only take mana away.
      */
     static boolean cycleReaction(final Player player) {
+        // Re-review 3 S1 (Astra, #240): a reaction can also ride on mana, registered only when the mana is spent
+        // (Sunken Palace's "when you spend this mana ... copy that ability" copies the untap). So mana in the pool with
+        // a rider, or any mana ability of the player's that makes such mana, refuses the bound.
+        for (var mana : player.getManaPool()) {
+            if (manaRider(mana.getManaAbility())) return true;
+        }
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            for (SpellAbility source : card.getManaAbilities()) {
+                if (manaRider(source.getManaPart())) return true;
+            }
+            // Nor can anything of the player's copy the untap without a trigger: an activated ability or a spell that
+            // copies an ability (Lithoform Engine's "{2}, {T}: Copy target activated ability" untaps Basalt Monolith a
+            // second time, six mana out for five in). And a spell that untaps (Turnabout), which the untap scan skips
+            // as a spell, is an untap the bound does not admit. A charm counts by any of its modes.
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                    if (s.getApi() == ApiType.CopySpellAbility || sa.isSpell() && untaps(s)) return true;
+                    if (s.getApi() == ApiType.Charm) {
+                        for (String mode : s.getParamOrDefault("Choices", "").split(",")) {
+                            final String text = card.getSVar(mode.trim());
+                            if (text.contains("CopySpellAbility") || sa.isSpell() && text.matches("(?s).*\\b(Untap|UntapAll|TapOrUntap|TapOrUntapAll)\\b.*")) return true;
+                        }
+                    }
+                }
+            }
+        }
         final forge.game.trigger.TriggerHandler handler = player.getGame().getTriggerHandler();
         if (handler.getDelayedTriggersView().stream().anyMatch(t -> CYCLE_REACTIONS.contains(t.getMode()))
                 || handler.getPlayerDefinedDelayedTriggersView().values().stream()
@@ -324,6 +351,15 @@ public final class HumanManaAffordability {
             }
         }
         return false;
+    }
+
+    /** Does mana made by this part carry a rider: a trigger when spent, keywords or counters for what it pays? */
+    private static boolean manaRider(final forge.game.spellability.AbilityManaPart part) {
+        if (part == null) return false;
+        if (part.getTriggersWhenSpent() || part.getKeywords() != null) return true;
+        final SpellAbility source = part.getSourceSA();
+        return source != null && (source.hasParam("TriggersWhenSpent") || source.hasParam("AddsKeywords")
+                || source.hasParam("AddsCounters"));
     }
 
     /**

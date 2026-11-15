@@ -325,6 +325,60 @@ public class HumanManaAffordabilityReflectedUntapTest extends AITest {
         assertNotEquals(HumanManaAffordability.assessPayable(me, spell(wurm)), Assessment.PROVEN_UNAFFORDABLE);
     }
 
+    /**
+     * Re-review 3 S1: Sunken Palace's second ability makes {U} that copies the ability it pays for. Floating, it can copy
+     * Basalt Monolith's untap (tap for {C}{C}{C} between the copy and the original). The rider refuses the bound, from
+     * the pool (Palace shuffled away into the library, where no scan of sources looks) and from a mana ability on the battlefield.
+     */
+    @Test
+    public void review4_manaWithASpendRiderRefusesTheBound() {
+        board();
+        mine("Basalt Monolith", true);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        final Card palace = mine("Sunken Palace", true);
+        final Card wurm = hand("Wurmcoil Engine");
+        settle();
+        assertNull(HumanManaAffordability.untapWidening(me), "a mana ability with a spend rider refuses the bound");
+
+        SpellAbility rider = null;
+        for (SpellAbility sa : palace.getManaAbilities()) {
+            if (sa.hasParam("TriggersWhenSpent")) rider = sa;
+        }
+        assertTrue(rider != null, "Sunken Palace's rider ability");
+        me.getManaPool().addMana(new forge.game.mana.Mana((byte) ManaAtom.BLUE, palace, rider.getManaPart(), me));
+        game.getAction().moveToLibrary(palace, null);
+        settle();
+        assertNull(HumanManaAffordability.untapWidening(me), "floating mana with a spend rider refuses the bound");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(wurm)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
+    /** Lithoform Engine copies the untap for {2} with no trigger: Basalt Monolith untaps twice, six out for five in. */
+    @Test
+    public void copyAbilityRefusesTheBound() {
+        board();
+        mine("Basalt Monolith", true);
+        mine("Lithoform Engine", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        final Card wurm = hand("Wurmcoil Engine");
+        settle();
+
+        assertNull(HumanManaAffordability.untapWidening(me), "an ability that copies abilities refuses the bound");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(wurm)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
+    /** Turnabout in hand untaps every artifact: a spell that untaps is an untap the bound does not admit. */
+    @Test
+    public void untapSpellInHandRefusesTheBound() {
+        ownerBoard(true);
+        hand("Turnabout");
+        settle();
+
+        assertNull(HumanManaAffordability.untapWidening(me), "a spell that untaps refuses the bound");
+    }
+
     /** Review S1: Corrupted Grafstone reads the graveyard, which grows when Blood Pet is sacrificed for {B}: Hymn is payable. */
     @Test
     public void review_grafstoneReadsAGraveyardThatCanGrow() {
