@@ -172,6 +172,16 @@ public final class ChoiceScorer {
          * this floor (a position with nothing to choose between: differences there are noise). {@code held=floor}.
          */
         public double departFloor = 0.0;
+        /**
+         * sdcc-scorerleak-1115 (false = off, the default, and then nothing changes): every copy the scorer makes (its
+         * options, the hidden guard's probes, the re-deals) re-deals what the seat cannot see of each opponent before the
+         * answer is replayed: the opponent's hand cards the seat does not know and their library cards it does not know
+         * are pooled and dealt back into the same places (hand size and known cards stay), one seeded deal per ask, so
+         * every option of the ask is replayed in the same world. The opponent's Forge AI then answers inside the replayed
+         * resolution from a sampled hand, never from its real one (the deal's pool is their deck remainder, the same
+         * belief as the look-ahead's default worlds, {@code LookaheadSearch.resample}).
+         */
+        public boolean redealOpp = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
                 "settleSteps", "margin", "noDecline", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig",
@@ -180,7 +190,9 @@ public final class ChoiceScorer {
                 // owner-misplays-1113, off by default
                 "redealOwn", "discardTail",
                 // discard-guard-1113, off by default
-                "departScored", "departFloor"));
+                "departScored", "departFloor",
+                // sdcc-scorerleak-1115, off by default
+                "redealOpp"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -265,6 +277,7 @@ public final class ChoiceScorer {
             if (c.redealOwn < 0 || c.redealOwn > 64) {
                 throw new IllegalArgumentException("choiceScorer: redealOwn must be 0..64");
             }
+            if (o.has("redealOpp")) c.redealOpp = o.get("redealOpp").getAsBoolean();
             if (o.has("departScored")) c.departScored = o.get("departScored").getAsInt();
             if (o.has("departFloor")) c.departFloor = o.get("departFloor").getAsDouble();
             if (c.departScored < 0 || c.departScored > 2 || !(c.departFloor >= 0 && c.departFloor <= 1)) {
@@ -354,6 +367,9 @@ public final class ChoiceScorer {
             if (redealOwn > 0) {
                 o.addProperty("redealOwn", redealOwn); // owner-misplays-1113: only when on
             }
+            if (redealOpp) {
+                o.addProperty("redealOpp", true); // sdcc-scorerleak-1115: only when on
+            }
             if (departScored > 0) {
                 o.addProperty("departScored", departScored); // discard-guard-1113: only when on
             }
@@ -428,6 +444,12 @@ public final class ChoiceScorer {
     private boolean guardSwapOwn = false;
     /** owner-misplays-1113: while >= 0, every copy's unknown own library is re-dealt with this seed ({@link #redealOwnHidden}). */
     private long redealSeed = -1;
+    /** sdcc-scorerleak-1115: while >= 0, every copy's unknown opposing cards are re-dealt with this seed ({@link #redealOppHidden}). */
+    private long oppSeed = -1;
+    /** sdcc-scorerleak-1115 (diagnostics, {@link #forceRedealOpp}): 0 = the config decides, 1 = re-deal on, -1 = off. */
+    private int oppForce = 0;
+    /** sdcc-scorerleak-1115 (diagnostics): the re-deal's seed salt, so a shadow pass can deal a second world. */
+    private long oppSalt = 0;
     private Object screenReader;
     private int pileSeen = 0;
     /** The chosen pile of the resolution in progress (top first), and the picks already given; null when none. */
@@ -493,6 +515,9 @@ public final class ChoiceScorer {
                 final RlKnowledge k = live.forkFor(copy);
                 if (seatMask != 0) {
                     k.setSearchedTopSeats(seatMask);
+                }
+                if (oppSeed >= 0) {
+                    redealOppHidden(copy, me, k, oppSeed); // sdcc-scorerleak-1115: before any probe swap
                 }
                 if (cfg.probeOpp || guardSwap) {
                     swapOpponentHidden(copy, me, k);
@@ -1167,6 +1192,66 @@ public final class ChoiceScorer {
         me.getZone(ZoneType.Library).setCards(out);
     }
 
+    /**
+     * sdcc-scorerleak-1115 ({@link Config#redealOpp}): each opponent's hand cards the seat does not know and their
+     * library cards it does not know, pooled (in id order, so the deal depends on the seed only) and dealt back with
+     * {@code seed} into the same places: hand size, library size and every card the seat knows stay where they are. No
+     * zone-change events (the zones' lists are set), so no trigger and no knowledge update sees the deal.
+     */
+    public static void redealOppHidden(final Game g, final Player me, final RlKnowledge k, final long seed) {
+        final int seat = k.seatOf(me);
+        for (Player o : me.getOpponents()) {
+            final List<Card> hand = new ArrayList<>(new forge.game.card.CardCollection(o.getCardsIn(ZoneType.Hand)));
+            final List<Card> lib = new ArrayList<>(new forge.game.card.CardCollection(o.getCardsIn(ZoneType.Library)));
+            final List<Card> pool = new ArrayList<>();
+            final List<Integer> handAt = new ArrayList<>(), libAt = new ArrayList<>();
+            for (int i = 0; i < hand.size(); i++) {
+                if (seat < 0 || !k.knows(seat, hand.get(i))) {
+                    handAt.add(i);
+                    pool.add(hand.get(i));
+                }
+            }
+            for (int i = 0; i < lib.size(); i++) {
+                if (seat < 0 || !k.knows(seat, lib.get(i))) {
+                    libAt.add(i);
+                    pool.add(lib.get(i));
+                }
+            }
+            if (pool.size() < 2) {
+                continue;
+            }
+            pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+            java.util.Collections.shuffle(pool, new java.util.Random(seed ^ (0x9E3779B97F4A7C15L * (o.getId() + 1))));
+            int at = 0;
+            final List<Card> nh = new ArrayList<>(hand);
+            for (int i : handAt) {
+                nh.set(i, pool.get(at++));
+            }
+            final List<Card> nl = new ArrayList<>(lib);
+            for (int i : libAt) {
+                nl.set(i, pool.get(at++));
+            }
+            o.getZone(ZoneType.Hand).setCards(nh);
+            o.getZone(ZoneType.Library).setCards(nl);
+        }
+    }
+
+    /** sdcc-scorerleak-1115 (diagnostics only): 1 = re-deal the opponents in every copy, -1 = never, 0 = the config. */
+    public void forceRedealOpp(final int force, final long salt) {
+        this.oppForce = force;
+        this.oppSalt = salt;
+    }
+
+    /** sdcc-scorerleak-1115 (diagnostics only): the per-ask state a second pass over the same ask must start from. */
+    public int[] askState() {
+        return new int[] {seqSeen, pileSeen};
+    }
+
+    public void restoreAskState(final int[] st) {
+        seqSeen = st[0];
+        pileSeen = st[1];
+    }
+
     /** sdcc-leak-1111: the own-library guard is on with the solver's hideOwnLibrary (and not hiddenOrderLegacy). */
     private boolean ownGuard() {
         return cfg.solverCfg != null && cfg.solverCfg.hideHidden();
@@ -1178,6 +1263,9 @@ public final class ChoiceScorer {
         final Scored s = new Scored();
         final long t0 = System.nanoTime();
         redealSeed = -1;
+        // sdcc-scorerleak-1115: one opposing deal for the whole ask (off: -1, nothing changes)
+        oppSeed = (oppForce > 0 || oppForce == 0 && cfg.redealOpp)
+                ? forge.ai.simulation.LookaheadSearch.mix(seed ^ oppSalt, 0x0bbde41L) & Long.MAX_VALUE : -1;
         if (cfg.relax <= 0) {
             screenReader = null; // one reader per ask: its probes are of this position's copies
         } // choice-search-1109 pass 3: with relax, one reader per game (the solver's readerPerGame; affordances by card)

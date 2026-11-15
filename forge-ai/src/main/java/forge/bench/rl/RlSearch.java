@@ -3138,6 +3138,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final String src = ChoiceScorer.srcOf(g);
         sc.setCostPart(costPartOf(objs)); // choice-search-1109 (COST_CARDS)
         sc.setAskPlayer(askPlayer(objs)); // integrate-1110 (reachDiscards: whose discard)
+        final int[] abState = SCORER_OPP_AB ? sc.askState() : null; // sdcc-scorerleak-1115 (diagnostics; off: null)
         // choice-search-1109: the asking ability (lineOnly only); integrate-1110: also for a reachDiscards ask (off:
         // mechAsk is lineOnly itself)
         final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed, sc.mechAsk(m) ? askSa(objs) : null);
@@ -3184,7 +3185,84 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 addRow(row);
             }
         }
+        if (abState != null) {
+            scorerOppAB(g, me, m, greedy, objs, seed, src, frame, s, alt, abState); // sdcc-scorerleak-1115 (diagnostics)
+        }
         return alt;
+    }
+
+    /** sdcc-scorerleak-1115 (diagnostics only, {@code -Dsdcc.scorerOppAB}; absent: nothing runs). */
+    static final boolean SCORER_OPP_AB = System.getProperty("sdcc.scorerOppAB") != null;
+
+    /**
+     * sdcc-scorerleak-1115 (diagnostics only): the same card ask scored again after the live answer is fixed, as
+     * {@code plain2} (copies as the live pass: the run-to-run noise) and {@code opp1} / {@code opp2} (every copy's unknown
+     * opposing hand and library re-dealt, two deals), one {@code [scorer-ab]} line on stderr. The live answer, the
+     * scorer's per-ask state and the game are unchanged (the passes work on copies; the service only answers values).
+     */
+    private void scorerOppAB(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy,
+            final Object objs, final long seed, final String src, final RlWire.Decide frame, final ChoiceScorer.Scored live,
+            final short[] liveAlt, final int[] st0) {
+        final ChoiceScorer sc = scorer();
+        final int[] after = sc.askState();
+        final JsonObject row = new JsonObject();
+        row.addProperty("game_uid", Long.toUnsignedString(uid));
+        row.addProperty("dec_idx", frame.decIdx);
+        row.addProperty("turn", g.getPhaseHandler().getTurn());
+        row.addProperty("family", RlSchema.familyName(m.family));
+        row.addProperty("src", src);
+        row.addProperty("redealOppCfg", sc.config().redealOpp);
+        row.add("live", abPass(live, liveAlt));
+        final String[] names = {"plain2", "opp1", "opp2"};
+        final int[] force = {-1, 1, 1};
+        final long[] salt = {0L, 0x5ca1ab1e01L, 0x5ca1ab1e02L};
+        final long t0 = System.nanoTime();
+        try {
+            for (int i = 0; i < names.length; i++) {
+                sc.restoreAskState(st0);
+                sc.forceRedealOpp(force[i], salt[i]);
+                final ChoiceScorer.Scored s = sc.enumerate(g, me, m, greedy, liveKnow, seed, sc.mechAsk(m) ? askSa(objs) : null);
+                final List<byte[]> ps = sc.payloads(s);
+                double[] v = null;
+                if (s.unsupported == null) {
+                    v = ps.isEmpty() ? new double[0] : leafValues(new ArrayList<Object>(ps));
+                }
+                short[] alt = v == null ? null : sc.choose(s, v, greedy);
+                if (sc.config().shadow) {
+                    alt = null;
+                }
+                row.add(names[i], abPass(s, alt));
+            }
+        } catch (RuntimeException e) {
+            row.addProperty("error", String.valueOf(e));
+        } finally {
+            sc.forceRedealOpp(0, 0L);
+            sc.restoreAskState(after);
+        }
+        row.addProperty("ab_ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
+        System.err.println("[scorer-ab] " + row);
+    }
+
+    private static JsonObject abPass(final ChoiceScorer.Scored s, final short[] alt) {
+        final JsonObject p = new JsonObject();
+        if (s.unsupported != null) p.addProperty("unsupported", s.unsupported);
+        if (s.held != null) p.addProperty("held", s.held);
+        p.addProperty("pick", alt == null ? "policy" : java.util.Arrays.toString(alt));
+        if (s.chosen != null) p.addProperty("chosen", s.chosen.label);
+        final JsonObject vals = new JsonObject();
+        for (ChoiceScorer.Option o : s.options) {
+            String k = String.valueOf(o.label);
+            while (vals.has(k)) {
+                k = k + "'";
+            }
+            if (o.fail != null) {
+                vals.addProperty(k, "fail:" + o.fail);
+            } else {
+                vals.addProperty(k, Double.isNaN(o.value) ? null : Math.round(o.value * 1e5) / 1e5);
+            }
+        }
+        p.add("v", vals);
+        return p;
     }
 
 
