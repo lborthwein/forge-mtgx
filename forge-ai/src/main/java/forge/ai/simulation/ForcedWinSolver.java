@@ -5006,6 +5006,8 @@ public final class ForcedWinSolver {
         public boolean gfCut;
         /** SETUP: the best line itself (opaque outside this package; {@link #screenSeq} only). */
         Line bestLine;
+        /** reach-verify-1114 (only while {@link #keepLines} is set): the screen's first lines, best first. */
+        List<Line> topLines;
         /**
          * choice-search-1109 (set only when a choice scorer's {@code check} ran on this position; NaN / null otherwise): the
          * honest win check's p_win over its belief worlds, its label, worlds run, gate and time.
@@ -5218,6 +5220,337 @@ public final class ForcedWinSolver {
             out.nanos = forge.game.WorkClock.nanoTime() - t0;
         }
         return out;
+    }
+
+    // ------------------------------------------------------------------ reach-verify-1114 (nothing here runs unless asked)
+
+    /** reach-verify-1114: keep this many of each screen's lines ({@link Screen#topLines}; 0 = off, the default). */
+    int keepLines;
+    /** reach-verify-1114: the play-outs put these card ids on top of our library, in order (null = off, the default). */
+    List<Integer> arrangeTop;
+    /** reach-verify-1114: the opponent passes at our response points (false = as before). */
+    boolean passiveOpp;
+    /** reach-verify-1114: the line's follower does not replan (false = as before). */
+    boolean noReplan;
+
+    /** reach-verify-1114: check worlds. SAMPLED = the position as it stands; UNOPPOSED = world 0 (hidden hand removed). */
+    public static final int VERIFY_SAMPLED = 1, VERIFY_UNOPPOSED = 2;
+    /** reach-verify-1114: no engine check of one line runs past this much (work-clock time when one is installed). */
+    static final long VERIFY_WALL_NS = 5_000_000_000L;
+
+    /** reach-verify-1114: one reach screen that found a line, and its engine checks. */
+    public static final class Claim {
+        /** The next card's name (null = the no-new-card screen), its copies below the known top, its share of the reach. */
+        public String group;
+        public int count;
+        public double weight;
+        /** The screen's lines, and its best line's turn (0 = this turn), steps and text. */
+        public int lines, winTurn, steps;
+        public String line;
+        /** The best line uses a loop step (a step whose targets the follower chooses). */
+        public boolean loop;
+        /** Per world: "won" or why not (null = not run), lines run, the winning line's turn (-1 = none), time. */
+        public String sampled, unopposed;
+        public int sampledRun, unopposedRun, sampledTurn = -1, unopposedTurn = -1;
+        public long sampledNanos, unopposedNanos;
+        /** A screen the reach itself did not run: the direct line failed its check, so the per-card screens ran for the verified reach only. */
+        public boolean fallback;
+    }
+
+    /** reach-verify-1114: {@link #reachVerified}'s result. */
+    public static final class VerifiedReach {
+        /** The reach exactly as {@link #reach} computes it (the claim). */
+        public Reach reach;
+        /** The reach counting only the screens whose line the key's world confirmed (NaN = not computed). */
+        public double pv = Double.NaN, pdv = Double.NaN;
+        public final List<Claim> claims = new ArrayList<>();
+        public long checkNanos;
+        public int checks;
+    }
+
+    /**
+     * reach-verify-1114: {@link #reach}, its claim unchanged, and each screen that found a line checked in the engine: up
+     * to {@code maxLines} of its lines (best first) are played by {@link #playout} in a copy of {@code g} with the screen's
+     * next card moved into its library slot (after the known top), until one wins. {@code modes}: VERIFY_SAMPLED (the
+     * position as it stands, i.e. the world the play-out sampled; the opponent keeps its cards and passes at our response
+     * points) and / or VERIFY_UNOPPOSED (world 0: its hidden hand removed). {@code keyMode} is the world whose verdicts
+     * give the verified reach. {@code full}: a direct line that fails its check is followed by the per-card screens, for
+     * the verified reach only. {@code free}: the checks run off the work clock and outside any Forge AI work budget (a
+     * measurement that leaves the decision as it was). The checks never replan and never learn models.
+     */
+    public VerifiedReach reachVerified(final Game g, final List<Integer> knownTop, final ReachOpts o, final int modes,
+            final int keyMode, final int maxLines, final boolean full, final boolean free, final long seed) {
+        final VerifiedReach vr = new VerifiedReach();
+        final int prevKeep = keepLines;
+        keepLines = Math.max(1, maxLines);
+        try {
+            vr.reach = reachVerified0(g, knownTop, o, modes, keyMode, maxLines, full, free, seed, vr);
+        } finally {
+            keepLines = prevKeep;
+        }
+        return vr;
+    }
+
+    private Reach reachVerified0(final Game g, final List<Integer> knownTop, final ReachOpts o, final int modes,
+            final int keyMode, final int maxLines, final boolean full, final boolean free, final long seed,
+            final VerifiedReach vr) {
+        final Reach out = new Reach();
+        final long t0 = forge.game.WorkClock.nanoTime();
+        final int nameNodes = o.nameNodes < 0 ? o.nodes : o.nameNodes;
+        double pv = 0, pdv = 0;
+        boolean directFailed = false;
+        try {
+            final List<Integer> known = knownTop == null ? new ArrayList<>() : new ArrayList<>(knownTop);
+            final Screen s0 = screenAt(g, knownTop, null, o.nodes, o.ms, o.window, false);
+            out.screens++;
+            out.nodes += s0.nodes;
+            if (s0.failed) {
+                out.failed = true;
+                return out;
+            }
+            if (s0.lines > 0) {
+                out.p = 1.0;
+                out.pd = Math.pow(o.gamma, Math.max(0, s0.bestTurn));
+                out.direct = true;
+                final List<Integer> top0 = knownPrefix(knownTop);
+                final Claim c0 = check(g, s0, null, 0, 1.0, top0, modes, keyMode, maxLines, free, seed, vr);
+                final int t = keyMode == VERIFY_SAMPLED ? c0.sampledTurn : c0.unopposedTurn;
+                if (t >= 0) {
+                    vr.pv = 1.0;
+                    vr.pdv = Math.pow(o.gamma, t);
+                    return out;
+                }
+                if (!full) {
+                    vr.pv = 0.0;
+                    vr.pdv = 0.0;
+                    return out;
+                }
+                directFailed = true; // the claim stays the direct line; the verified reach goes on to the per-card screens
+            }
+            if (!directFailed) {
+                out.s0Capped = s0.exhausted;
+                if (o.skipCapped && s0.exhausted) {
+                    out.p = 0.0;
+                    out.pd = 0.0;
+                    out.skipped = true;
+                    vr.pv = 0.0;
+                    vr.pdv = 0.0;
+                    return out;
+                }
+            }
+            final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+            int k = knownTop == null ? 0 : knownTop.size();
+            if (k > lib.size()) {
+                k = 0;
+            }
+            for (int i = 0; i < k; i++) {
+                if (lib.get(i).getId() != knownTop.get(i)) {
+                    k = 0; // not a prefix: the reader ignores it too
+                    break;
+                }
+            }
+            final java.util.LinkedHashMap<String, List<Card>> byName = new java.util.LinkedHashMap<>();
+            final List<Card> unknownCards = new ArrayList<>(lib.subList(k, lib.size()));
+            if (cfg.hideHidden()) {
+                unknownCards.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+            }
+            for (Card c : unknownCards) {
+                byName.computeIfAbsent(c.getName(), x -> new ArrayList<>()).add(c);
+            }
+            final int unknown = lib.size() - k;
+            if (!directFailed) {
+                out.unknown = unknown;
+            }
+            if (unknown <= 0) {
+                if (!directFailed) {
+                    out.p = 0.0;
+                    out.pd = 0.0;
+                }
+                vr.pv = 0.0;
+                vr.pdv = 0.0;
+                return out;
+            }
+            List<List<Card>> groups = new ArrayList<>(byName.values());
+            if (o.sig) {
+                groups = sigGroups(g, groups, lib.subList(0, k));
+            }
+            groups.sort((a, b) -> Integer.compare(b.size(), a.size()));
+            double p = 0, pd = 0;
+            final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
+            for (int i = 0; i < groups.size() && i < o.maxNames; i++) {
+                if (Thread.currentThread().isInterrupted()) {
+                    break; // reach-verify-1114: the world was cancelled; its value is discarded
+                }
+                final List<Card> grp = groups.get(i);
+                final Screen s = screenAt(g, top, grp.get(0), nameNodes, o.ms, o.window, o.nameOnePass);
+                if (!directFailed) {
+                    out.screens++;
+                    out.names++;
+                    out.groups++;
+                    out.nodes += s.nodes;
+                    if (s.exhausted) {
+                        out.nameCapped++;
+                    }
+                }
+                if (!s.failed && s.lines > 0) {
+                    final double w = grp.size() / (double) unknown;
+                    p += w;
+                    pd += w * Math.pow(o.gamma, Math.max(0, s.bestTurn));
+                    final List<Integer> tops = new ArrayList<>(top);
+                    tops.add(grp.get(0).getId());
+                    final Claim c = check(g, s, grp.get(0).getName(), grp.size(), w, tops, modes, keyMode, maxLines, free,
+                            mix(seed, 0xC1A1L + i), vr);
+                    c.fallback = directFailed;
+                    final int t = keyMode == VERIFY_SAMPLED ? c.sampledTurn : c.unopposedTurn;
+                    if (t >= 0) {
+                        pv += w;
+                        pdv += w * Math.pow(o.gamma, t);
+                    }
+                }
+            }
+            if (!directFailed) {
+                out.p = Math.min(1.0, p);
+                out.pd = Math.min(1.0, pd);
+            }
+            vr.pv = Math.min(1.0, pv);
+            vr.pdv = Math.min(1.0, pdv);
+        } catch (RuntimeException | StackOverflowError e) {
+            out.failed = true;
+        } finally {
+            out.nanos = forge.game.WorkClock.nanoTime() - t0;
+        }
+        return out;
+    }
+
+    /** The known top as the reader takes it (a prefix of our library's real order), else empty. */
+    private List<Integer> knownPrefix(final List<Integer> knownTop) {
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        if (knownTop == null || knownTop.size() > lib.size()) {
+            return new ArrayList<>();
+        }
+        for (int i = 0; i < knownTop.size(); i++) {
+            if (lib.get(i).getId() != knownTop.get(i)) {
+                return new ArrayList<>();
+            }
+        }
+        return new ArrayList<>(knownTop);
+    }
+
+    /** One screen's claim, checked in each asked world. */
+    private Claim check(final Game g, final Screen s, final String group, final int count, final double weight,
+            final List<Integer> tops, final int modes, final int keyMode, final int maxLines, final boolean free,
+            final long seed, final VerifiedReach vr) {
+        final Claim c = new Claim();
+        c.group = group;
+        c.count = count;
+        c.weight = weight;
+        c.lines = s.lines;
+        c.winTurn = s.bestTurn;
+        c.steps = s.bestSteps;
+        c.line = s.best == null ? null : s.best.length() > 600 ? s.best.substring(0, 600) + "..." : s.best;
+        final List<Line> ls = s.topLines == null ? List.of() : s.topLines;
+        if (!ls.isEmpty()) {
+            c.loop = "loop".equals(ls.get(0).how); // planLoops: an engine step with no targets ("loop with ...")
+        }
+        for (int mode : new int[] {VERIFY_SAMPLED, VERIFY_UNOPPOSED}) {
+            if ((modes & mode) == 0 && mode != keyMode) {
+                continue;
+            }
+            final long t0 = System.nanoTime();
+            String first = null;
+            int run = 0, turn = -1;
+            for (int i = 0; i < ls.size() && i < Math.max(1, maxLines); i++) {
+                if (Thread.currentThread().isInterrupted()) {
+                    if (first == null) {
+                        first = "cancelled"; // reach-verify-1114: the world was cancelled: no more checks
+                    }
+                    break;
+                }
+                run++;
+                vr.checks++;
+                // only the key's own world runs on the pilot's clock; a second world asked for the log is always free
+                final Outcome u = checkLine(g, ls.get(i), tops, mode, mix(seed, 31L * mode + i), free || mode != keyMode);
+                if (u.won) {
+                    turn = ls.get(i).winTurn;
+                    first = "won";
+                    break;
+                }
+                if (first == null) {
+                    final String why = String.valueOf(u.why);
+                    first = why.length() > 400 ? why.substring(0, 400) + "..." : why;
+                }
+            }
+            final long dt = System.nanoTime() - t0;
+            vr.checkNanos += dt;
+            if (mode == VERIFY_SAMPLED) {
+                c.sampled = first == null ? "no-line" : first;
+                c.sampledRun = run;
+                c.sampledTurn = turn;
+                c.sampledNanos = dt;
+            } else {
+                c.unopposed = first == null ? "no-line" : first;
+                c.unopposedRun = run;
+                c.unopposedTurn = turn;
+                c.unopposedNanos = dt;
+            }
+        }
+        vr.claims.add(c);
+        return c;
+    }
+
+    /** One line played in a copy of {@code g}: the claimed top in place, never a replan; never throws. */
+    private Outcome checkLine(final Game g, final Line line, final List<Integer> tops, final int mode, final long seed,
+            final boolean free) {
+        final List<Integer> a0 = arrangeTop;
+        final boolean p0 = passiveOpp, r0 = noReplan;
+        final forge.game.WorkClock.Clock clock = free ? forge.game.WorkClock.install(null) : null;
+        final forge.ai.AiWork.Budget work = free ? forge.ai.AiWork.current() : null;
+        if (free) {
+            forge.ai.AiWork.restore(null);
+        }
+        arrangeTop = tops;
+        passiveOpp = mode == VERIFY_SAMPLED;
+        noReplan = true;
+        final boolean vc0 = forge.ai.VerifyCancel.set(true); // reach-verify-1114: a cancelled world stops the check
+        try {
+            return playout(g, line, seed, mode == VERIFY_SAMPLED ? -1 : 0, -1,
+                    forge.game.WorkClock.nanoTime() + VERIFY_WALL_NS);
+        } catch (RuntimeException | StackOverflowError e) {
+            final Outcome o = new Outcome();
+            o.why = "error:" + e;
+            return o;
+        } finally {
+            forge.ai.VerifyCancel.set(vc0);
+            arrangeTop = a0;
+            passiveOpp = p0;
+            noReplan = r0;
+            if (free) {
+                forge.ai.AiWork.restore(work);
+                forge.game.WorkClock.install(clock);
+            }
+        }
+    }
+
+    /** reach-verify-1114: the cards of {@code ids} first in {@code p}'s library, in that order (the rest keep theirs). */
+    static void arrangeTopIn(final Player p, final List<Integer> ids) {
+        final List<Card> lib = new ArrayList<>(p.getCardsIn(ZoneType.Library));
+        final List<Card> head = new ArrayList<>();
+        for (int id : ids) {
+            Card found = null;
+            for (Card c : lib) {
+                if (c.getId() == id) {
+                    found = c;
+                    break;
+                }
+            }
+            if (found == null) {
+                throw new IllegalStateException("arrange: card " + id + " is not in the copy's library");
+            }
+            head.add(found);
+            lib.remove(found);
+        }
+        head.addAll(lib);
+        p.getZone(ZoneType.Library).setCards(head);
     }
 
     /** solver-distill-cc-1109 (GOLDFISH): {@link #goldfish}'s knobs. */
@@ -5815,6 +6148,12 @@ public final class ForcedWinSolver {
                     s.bestSteps = l.steps.size();
                     s.best = String.valueOf(l);
                 }
+            }
+            if (keepLines > 0 && !r.lines.isEmpty()) {
+                // reach-verify-1114: the screen's lines, best first (the order above: earliest turn, then fewest steps)
+                final List<Line> ls = new ArrayList<>(r.lines);
+                ls.sort(java.util.Comparator.comparingInt((Line l) -> l.winTurn).thenComparingInt(l -> l.steps.size()));
+                s.topLines = new ArrayList<>(ls.subList(0, Math.min(keepLines, ls.size())));
             }
         } catch (RuntimeException | StackOverflowError e) {
             s.failed = true;
@@ -6526,6 +6865,9 @@ public final class ForcedWinSolver {
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
+                if (arrangeTop != null) {
+                    arrangeTopIn(cm, arrangeTop); // reach-verify-1114: the claimed next card in its slot (null = off)
+                }
                 if (world >= 0) {
                     // search-bones-1015 (d): world -1 = the position as it stands (exact)
                     if (redraw != null) {
@@ -6571,7 +6913,7 @@ public final class ForcedWinSolver {
             lineAi.uncapped = cfg.lineUncapped; // unified-search-1106
             final BridgeRoot rest = bridgeRest; // sdcc-bridge-1111 (null except in prefixCopy)
             lineAi.stopWhenDone = rest != null;
-            if (cfg.verifyReplan && line.winTurn > 0 && rest == null) {
+            if (cfg.verifyReplan && line.winTurn > 0 && rest == null && !noReplan) {
                 lineAi.startTurn = g.getPhaseHandler().getTurn();
                 lineAi.replanner = old -> replanIn(g, cm, old); // kill-line-1106
             }
@@ -6580,7 +6922,7 @@ public final class ForcedWinSolver {
             for (Player o : g.getPlayers()) {
                 if (o != cm) {
                     adv = new AdversaryAi(g, o, o.getController().getLobbyPlayer(), cm, counterAt);
-                    adv.passive = cfg.testPassiveOpp;
+                    adv.passive = cfg.testPassiveOpp || passiveOpp; // reach-verify-1114: passiveOpp false = as before
                     adv.hw = hw;
                     if (script != null) {
                         adv.driver = new OppMin.Driver(script, o, cm, -1); // labeller-v2 (d), the shared MIN
@@ -6612,6 +6954,9 @@ public final class ForcedWinSolver {
             meter.playouts++;
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps && !lineAi.rested) {
                 ForcedWinEngine.checkWall(wall, "play-out step");
+                if (noReplan && forge.ai.VerifyCancel.cancelled()) {
+                    throw new ForcedWinEngine.OutOfBudget("cancelled: play-out step"); // reach-verify-1114
+                }
                 ph.mainLoopStep();
                 steps++;
                 meter.playoutSteps++;
@@ -6673,6 +7018,11 @@ public final class ForcedWinSolver {
             }
         } catch (ForcedWinEngine.OutOfBudget | forge.ai.AiWork.Exhausted ex) {
             libCut = true; // review #161 S2-2
+            if (ex.getMessage() != null && ex.getMessage().startsWith("cancelled")) {
+                out.won = false; // reach-verify-1114: the check's look-ahead world was cancelled: not a win, not a wall cut
+                out.why = "cancelled";
+                return out;
+            }
             if (forge.ai.AiWork.spent()) {
                 // rollout-budget-1101: the decision's Forge AI work cap is spent: not a win, and not dropped as at the wall
                 out.won = false;

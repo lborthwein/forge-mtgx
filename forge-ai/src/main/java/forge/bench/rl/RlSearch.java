@@ -717,6 +717,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (!"deck".equals(belief) && (beliefDeckModel != null || beliefDeckSha256 != null)) {
                 throw new IllegalArgumentException("search.beliefDeck is for belief=deck only");
             }
+            // reach-verify-1114: the checks play lines in the leaf's own world, which is the true position unless a belief
+            // re-draws the opponent's hidden cards: reach.verify is refused without one (the true hand is never used)
+            if (reach != null && ReachCfg.parse(reach).verifyOn() && "off".equals(belief)) {
+                throw new IllegalArgumentException("search.reach.verify needs a belief (search.belief must not be off)");
+            }
             if (!"forge".equals(opponent) && !"policy".equals(opponent)) {
                 throw new IllegalArgumentException("search.opponent must be forge or policy, not " + opponent);
             }
@@ -4191,7 +4196,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("alpha", "oppBeta", "nodes",
                 "ms", "maxNames", "nameNodes", "nameOnePass", "skipCapped", "sig", "gate", "oppDirect", "gamma", "depart",
                 "sinkSamples", "leafGf", "leafGfs", "leafGfsW", "leafGfFree", "gateEnder", "leafGfNodes", "leafGfMaxNodes",
-                "gateWindow"));
+                "gateWindow", "verify", "verifyLines", "verifyFull"));
 
         /** gate-loop-window-1113: a true|false or 1|0 key (Gson reads the number 1 as false: refused rather than guessed). */
         static boolean flag01(final String k, final com.google.gson.JsonElement e) {
@@ -4205,6 +4210,29 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
             }
             throw new IllegalArgumentException("reach: " + k + " wants true|false or 1|0, not " + e);
+        }
+
+        /**
+         * reach-verify-1114 ("off" = the default, and nothing changes): a leaf's reach counts only the planner screens
+         * whose line the engine confirms. Each screen that found a line has up to {@link #verifyLines} of its lines played
+         * by the solver's line play-out in a copy of the leaf, the screen's next card moved into its library slot:
+         * "sampled" = the leaf as it stands (the world the play-out sampled; the opponent keeps its cards and passes at our
+         * response points), "unopposed" = the solver's world 0 (the opponent's hidden hand removed). {@link #verifyFull}: a
+         * direct line that fails is followed by the per-card screens. The checks run on the pilot's clock.
+         */
+        public String verify = "off";
+        public int verifyLines = 3;
+        public boolean verifyFull = true;
+
+        /** reach-verify-1114: the key is on. */
+        public boolean verifyOn() {
+            return !"off".equals(verify);
+        }
+
+        /** reach-verify-1114: the world whose verdicts count. */
+        public int verifyMode() {
+            return "unopposed".equals(verify) ? forge.ai.simulation.ForcedWinSolver.VERIFY_UNOPPOSED
+                    : forge.ai.simulation.ForcedWinSolver.VERIFY_SAMPLED;
         }
 
         public forge.ai.simulation.ForcedWinSolver.ReachOpts opts() {
@@ -4251,6 +4279,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("leafGfMaxNodes")) c.leafGfMaxNodes = o.get("leafGfMaxNodes").getAsLong();
             if (o.has("gateWindow") && !o.get("gateWindow").isJsonNull()) {
                 c.gateWindow = flag01("gateWindow", o.get("gateWindow")); // gate-loop-window-1113 (null = absent)
+            }
+            if (o.has("verify")) c.verify = o.get("verify").getAsString();
+            if (o.has("verifyLines")) c.verifyLines = o.get("verifyLines").getAsInt();
+            if (o.has("verifyFull")) c.verifyFull = o.get("verifyFull").getAsBoolean();
+            if (!java.util.Arrays.asList("off", "sampled", "unopposed").contains(c.verify)) {
+                throw new IllegalArgumentException("reach.verify is off, sampled or unopposed, not " + c.verify);
             }
             return c;
         }
@@ -4519,9 +4553,29 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         // {R_me, R_opp, then cost (report only): planner nodes, s0 capped, skipped, per-card screens, per-card capped; then
         // the value sink's leaf row (labels only, never read to decide): goldfish, its turn, 1 = this leaf is a sink row}
         // [10], [11]: the sink row's sampled goldfish and its share of orders with a line (labels only; reach.sinkSamples)
-        final double[] out = {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0, Double.NaN, Double.NaN};
+        // reach-verify-1114 (reach.verify on only): [12] claimed own reach, [13] verified own, [14] claimed opponent's,
+        // [15] verified opponent's, [16] unused (-1), [17] check nanos
+        final boolean ver = rc.verifyOn();
+        final double[] out = ver
+                ? new double[] {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0, Double.NaN, Double.NaN,
+                        Double.NaN, Double.NaN, Double.NaN, Double.NaN, -1, 0}
+                : new double[] {Double.NaN, Double.NaN, 0, 0, 0, 0, 0, Double.NaN, -1, 0, Double.NaN, Double.NaN};
         if (rc.gate && !reachOn) {
             out[0] = 0.0; // the root showed no potential: no screens for the seat at this decision's leaves
+            if (ver) {
+                out[12] = 0.0;
+                out[13] = 0.0;
+            }
+        } else if (ver) {
+            final forge.ai.simulation.ForcedWinSolver.VerifiedReach vr = reachChecked(k, g, me, rc, rc.opts());
+            final forge.ai.simulation.ForcedWinSolver.Reach r = vr.reach;
+            final double claimed = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
+            final double verified = r.failed ? Double.NaN : Double.isNaN(vr.pv) ? claimed : rc.gamma < 1.0 ? vr.pdv : vr.pv;
+            out[0] = verified;
+            out[12] = claimed;
+            out[13] = verified;
+            out[17] += vr.checkNanos;
+            addCost(out, r);
         } else {
             final forge.ai.simulation.ForcedWinSolver.Reach r = reachFull(k, g, me);
             out[0] = r.failed ? Double.NaN : rc.gamma < 1.0 ? r.pd : r.p;
@@ -4535,7 +4589,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 leafTeacher(rc, k, g, me, out);
             }
         }
-        if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
+        if (rc.oppBeta > 0 && me.getOpponents().size() == 1 && ver) {
+            // reach-verify-1114: the opponent's reach, claimed and checked (oppDirect: its no-new-card screen only)
+            final Player opp = me.getOpponents().get(0);
+            final forge.ai.simulation.ForcedWinSolver.ReachOpts oo = rc.opts();
+            if (rc.oppDirect) {
+                oo.maxNames = 0;
+            }
+            final forge.ai.simulation.ForcedWinSolver.VerifiedReach vo = reachChecked(k, g, opp, rc, oo);
+            final forge.ai.simulation.ForcedWinSolver.Reach ro = vo.reach;
+            final double claimed = ro.failed ? Double.NaN : ro.p;
+            final double verified = ro.failed ? Double.NaN : Double.isNaN(vo.pv) ? claimed : vo.pv;
+            out[1] = verified;
+            out[14] = claimed;
+            out[15] = verified;
+            out[17] += vo.checkNanos;
+            addCost(out, ro);
+        } else if (rc.oppBeta > 0 && me.getOpponents().size() == 1) {
             final forge.ai.simulation.ForcedWinSolver.Reach ro = reachOpp(k, g, me.getOpponents().get(0), rc);
             out[1] = ro.failed ? Double.NaN : ro.p;
             addCost(out, ro);
@@ -4566,6 +4636,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         return out;
+    }
+
+    // ---- reach-verify-1114: the engine check of leaf reach (the reach.verify key; off = the default)
+
+    /**
+     * reach-verify-1114 (reach.verify on only): the reach of {@code p} at {@code g} with its screens' lines checked in the
+     * key's world. The checks run on the pilot's clock.
+     */
+    private forge.ai.simulation.ForcedWinSolver.VerifiedReach reachChecked(final RlKnowledge k, final Game g, final Player p,
+            final ReachCfg rc, final forge.ai.simulation.ForcedWinSolver.ReachOpts o) {
+        final Object reader = reachReaders.computeIfAbsent(p.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());
+        final int key = rc.verifyMode();
+        final long seed = splitmix(uid ^ 0xF9C4EC4L ^ p.getId());
+        return forge.ai.simulation.ForcedWinSolver.withReader(p, reachSolverCfg, reader).reachVerified(g, knownTopOf(k, p), o,
+                key, key, rc.verifyLines, rc.verifyFull, false, seed);
     }
 
     /** {@link ReachCfg#leafGf}, {@link ReachCfg#leafGfs}: the teacher's potential at this leaf joins its reach. */

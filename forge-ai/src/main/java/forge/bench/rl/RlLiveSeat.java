@@ -401,6 +401,10 @@ public final class RlLiveSeat {
             if (s.loopGuard < 0) {
                 throw new IllegalArgumentException("policySearch: loopGuard >= 0 (0 = off)");
             }
+            if (c.reach != null && RlSearch.ReachCfg.parse(c.reach).verifyOn() && !"uniform".equals(c.belief)) {
+                // reach-verify-1114: the checks play lines in the leaf's own world, so they need the honest belief
+                throw new IllegalArgumentException("policySearch: reach.verify needs the honest belief (belief=uniform)");
+            }
             if (c.plans != null && c.plans.has("defend") && c.plans.get("defend").getAsBoolean() && !"uniform".equals(c.belief)) {
                 // strong-opp-1020 (review S3-3): the defense reads the honest belief, or it would fall back to their real deck
                 throw new IllegalArgumentException("policySearch: plans.defend needs the honest belief (belief=uniform)");
