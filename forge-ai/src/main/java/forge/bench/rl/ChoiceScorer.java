@@ -202,6 +202,28 @@ public final class ChoiceScorer {
                 // sdcc-scorerleak-1115, off by default
                 "redealOpp", "redealOwnOrder"));
 
+        /**
+         * sdcc-scorerleak-1115: a strict boolean (the live string types true|false as a boolean, a whole number as a
+         * number, a word as a string): true / 1 / on / yes are on, false / 0 / off / no are off, anything else refuses.
+         */
+        static boolean strictBool(final JsonObject o, final String k) {
+            final com.google.gson.JsonElement e = o.get(k);
+            if (e != null && e.isJsonPrimitive()) {
+                final com.google.gson.JsonPrimitive p = e.getAsJsonPrimitive();
+                if (p.isBoolean()) {
+                    return p.getAsBoolean();
+                }
+                final String v = p.getAsString();
+                if (v.equals("1") || v.equals("true") || v.equals("on") || v.equals("yes")) {
+                    return true;
+                }
+                if (v.equals("0") || v.equals("false") || v.equals("off") || v.equals("no")) {
+                    return false;
+                }
+            }
+            throw new IllegalArgumentException("choiceScorer: " + k + " must be true|false (1|0, on|off, yes|no): " + e);
+        }
+
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
                 if (!KEYS.contains(k)) {
@@ -285,8 +307,8 @@ public final class ChoiceScorer {
             if (c.redealOwn < 0 || c.redealOwn > 64) {
                 throw new IllegalArgumentException("choiceScorer: redealOwn must be 0..64");
             }
-            if (o.has("redealOpp")) c.redealOpp = o.get("redealOpp").getAsBoolean();
-            if (o.has("redealOwnOrder")) c.redealOwnOrder = o.get("redealOwnOrder").getAsBoolean();
+            if (o.has("redealOpp")) c.redealOpp = strictBool(o, "redealOpp");
+            if (o.has("redealOwnOrder")) c.redealOwnOrder = strictBool(o, "redealOwnOrder");
             if (o.has("departScored")) c.departScored = o.get("departScored").getAsInt();
             if (o.has("departFloor")) c.departFloor = o.get("departFloor").getAsDouble();
             if (c.departScored < 0 || c.departScored > 2 || !(c.departFloor >= 0 && c.departFloor <= 1)) {
@@ -456,6 +478,19 @@ public final class ChoiceScorer {
     private boolean guardSwapOwn = false;
     /** owner-misplays-1113: while >= 0, every copy's unknown own library is re-dealt with this seed ({@link #redealOwnHidden}). */
     private long redealSeed = -1;
+    /** sdcc-scorerleak-1115 (tests only): sees every scorer copy as its replay starts from it; null (always, outside tests) = nothing. */
+    public static volatile java.util.function.BiConsumer<Game, Player> COPY_HOOK = null;
+    /**
+     * sdcc-scorerleak-1115 (diagnostics, printed at exit with -Dforge.ai.leakTrace): opposing deals made, and deals that left
+     * the hand's card set as it was: every hand card known to the seat, a pool too small to deal, or the same cards by chance.
+     */
+    static final java.util.concurrent.atomic.AtomicLongArray DEALS = new java.util.concurrent.atomic.AtomicLongArray(4);
+    static {
+        if (forge.ai.simulation.LeakTrace.ON) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> System.err.println("[scorer-redeal] oppDeals=" + DEALS.get(0)
+                    + " sameHandAllKnown=" + DEALS.get(1) + " sameHandSmallPool=" + DEALS.get(2) + " sameHandChance=" + DEALS.get(3))));
+        }
+    }
     /** sdcc-scorerleak-1115: while >= 0, every copy's unknown opposing cards are re-dealt with this seed ({@link #redealOppHidden}). */
     private long oppSeed = -1;
     /** sdcc-scorerleak-1115 (diagnostics, {@link #forceRedealOpp}): 0 = the config decides, 1 = re-deal on, -1 = off. */
@@ -546,6 +581,10 @@ public final class ChoiceScorer {
                 }
                 if (redealSeed >= 0) {
                     redealOwnHidden(copy, me, k, redealSeed); // owner-misplays-1113
+                }
+                final java.util.function.BiConsumer<Game, Player> hook = COPY_HOOK;
+                if (hook != null) {
+                    hook.accept(copy, me); // sdcc-scorerleak-1115 (tests only; null otherwise)
                 }
                 k.attach();
                 final RlFeaturizer f = new RlFeaturizer(index);
@@ -1236,7 +1275,13 @@ public final class ChoiceScorer {
                     pool.add(lib.get(i));
                 }
             }
+            if (forge.ai.simulation.LeakTrace.ON && !hand.isEmpty()) {
+                DEALS.incrementAndGet(0);
+            }
             if (pool.size() < 2) {
+                if (forge.ai.simulation.LeakTrace.ON && !hand.isEmpty()) {
+                    DEALS.incrementAndGet(handAt.isEmpty() ? 1 : 2);
+                }
                 continue;
             }
             pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
@@ -1249,6 +1294,9 @@ public final class ChoiceScorer {
             final List<Card> nl = new ArrayList<>(lib);
             for (int i : libAt) {
                 nl.set(i, pool.get(at++));
+            }
+            if (forge.ai.simulation.LeakTrace.ON && !hand.isEmpty() && new java.util.HashSet<>(nh).equals(new java.util.HashSet<>(hand))) {
+                DEALS.incrementAndGet(handAt.isEmpty() ? 1 : 3);
             }
             o.getZone(ZoneType.Hand).setCards(nh);
             o.getZone(ZoneType.Library).setCards(nl);
@@ -1672,7 +1720,9 @@ public final class ChoiceScorer {
             return;
         }
         pileSeen = key;
-        final List<List<Integer>> ps = ChoiceApply.pileChoices(g, me, cfg.solverCfg, cfg.pileNodes, cfg.pileMs, cfg.pileTop, seed);
+        // sdcc-scorerleak-1115: with a re-deal key the planner's pile copy is dealt as every other scorer copy (off: as before)
+        final List<List<Integer>> ps = ChoiceApply.pileChoices(g, me, cfg.solverCfg, cfg.pileNodes, cfg.pileMs, cfg.pileTop, seed,
+                oppSeed >= 0 || ownSeed >= 0 ? fr::onCopy : null);
         s.menuOptions = ps.size();
         if (ps.isEmpty()) {
             s.unsupported = "noPile";

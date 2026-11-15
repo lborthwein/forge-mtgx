@@ -372,4 +372,69 @@ public class CardScorerOppHiddenTest extends AITest {
         }
         Assert.assertEquals(libs.get(1), libs.get(0), "the same order from both real orders");
     }
+
+    // ------------------------------------------------------------------ 5. every scorer copy path (seqs included)
+
+    /**
+     * Every copy the scorer makes for the Brainstorm put-back (the guard's probes, then the sequence step's own probes,
+     * {@code ChoiceScorer.seqs}), as the opponent's hand ids each replay starts from, with the opponent's hidden cards in
+     * world A or world B; {@code paths} collects the scorer method each copy came from.
+     */
+    private static List<String> copiesOf(final boolean worldB, final List<String> paths) {
+        final Game g = CardScorerHiddenReadTest.cast("Brainstorm;Mountain;Plains",
+                "Lightning Bolt;Shock;Giant Growth;Counterspell;Dark Ritual;Ponder;Swamp;Forest;Island;Plains;Mountain;Island;Swamp;Forest",
+                "Brainstorm");
+        final Player me = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        me.drawCards(3);
+        g.getStack().setResolving(true);
+        if (worldB) {
+            // the opponent's two Forests and Grizzly Bears (all unknown) trade places with three of their library cards
+            final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            final List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
+            for (int i = 0; i < hand.size(); i++) {
+                final Card h = hand.get(i);
+                hand.set(i, lib.get(lib.size() - 1 - i));
+                lib.set(lib.size() - 1 - i, h);
+            }
+            opp.getZone(ZoneType.Hand).setCards(hand);
+            opp.getZone(ZoneType.Library).setCards(lib);
+        }
+        final RlKnowledge know = new RlKnowledge(g);
+        know.v2 = true;
+        know.attach();
+        final List<String> hands = new ArrayList<>();
+        ChoiceScorer.COPY_HOOK = (copy, seat) -> {
+            final List<Integer> ids = new ArrayList<>();
+            for (Card c : copy.getPlayer(opp.getId()).getCardsIn(ZoneType.Hand)) {
+                ids.add(c.getId());
+            }
+            Collections.sort(ids);
+            hands.add(ids.toString());
+            for (StackTraceElement f : Thread.currentThread().getStackTrace()) {
+                if (f.getClassName().equals(ChoiceScorer.class.getName()) && !f.getMethodName().startsWith("lambda")
+                        && !f.getMethodName().equals("frames") && !f.getMethodName().equals("access$")) {
+                    paths.add(f.getMethodName());
+                    break;
+                }
+            }
+        };
+        try {
+            score(scorer(true, true), g, me, forge.bench.rl.TestMenus.singleCards(me.getCardsIn(ZoneType.Hand)), new short[] {0},
+                    know, null);
+        } finally {
+            ChoiceScorer.COPY_HOOK = null;
+        }
+        System.out.println("OPPHIDDEN copies world=" + (worldB ? "B" : "A") + " paths=" + paths + " hands=" + hands);
+        return hands;
+    }
+
+    @Test
+    public void everyScorerCopyIncludingTheSequenceStepStartsFromTheSameDealInEveryHiddenWorld() {
+        final List<String> pa = new ArrayList<>(), pb = new ArrayList<>();
+        final List<String> a = copiesOf(false, pa), b = copiesOf(true, pb);
+        Assert.assertTrue(pa.contains("seqs"), "the sequence step made copies: " + pa);
+        Assert.assertTrue(a.size() >= 3, "copies: " + a);
+        Assert.assertEquals(b, a, "every scorer copy holds the same opposing hand whichever cards are really there");
+        Assert.assertEquals(pb, pa);
+    }
 }
