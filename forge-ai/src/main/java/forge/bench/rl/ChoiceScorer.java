@@ -1530,7 +1530,7 @@ public final class ChoiceScorer {
             return;
         }
         pileSeen = key;
-        final List<List<Integer>> ps = ChoiceApply.pileChoices(g, me, cfg.solverCfg, cfg.pileNodes, cfg.pileMs, cfg.pileTop, seed);
+        final List<List<Integer>> ps = ChoiceApply.pileChoices(g, me, cfg.solverCfg, cfg.pileNodes, cfg.pileMs, cfg.pileTop, seed, fr);
         s.menuOptions = ps.size();
         if (ps.isEmpty()) {
             s.unsupported = "noPile";
