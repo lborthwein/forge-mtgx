@@ -5237,6 +5237,29 @@ public final class ForcedWinSolver {
     public static final int VERIFY_SAMPLED = 1, VERIFY_UNOPPOSED = 2;
     /** reach-verify-1114: no engine check of one line runs past this much (work-clock time when one is installed). */
     static final long VERIFY_WALL_NS = 5_000_000_000L;
+    /**
+     * reach-verify-1115: the checks stop this far before the play-out's decision deadline (the leaf still has to be
+     * valued and the play-out to end); a claim not checked by then counts as unconfirmed.
+     */
+    static final long VERIFY_DEADLINE_MARGIN_NS = 250_000_000L;
+    /**
+     * reach-verify-1115: the decision budget of the play-out whose leaf is being checked (set by the look-ahead's leaf
+     * probe around its reach; null = none, e.g. a check outside a searched decision: only the 5 s wall applies).
+     */
+    public static final ThreadLocal<LookaheadSearch.Budget> VERIFY_BUDGET = new ThreadLocal<>();
+
+    /** reach-verify-1115: the latest time (work clock) a line check may run to: its own wall or the decision's, less the margin. */
+    static long verifyWall() {
+        final long w = forge.game.WorkClock.nanoTime() + VERIFY_WALL_NS;
+        final LookaheadSearch.Budget b = VERIFY_BUDGET.get();
+        return b == null ? w : Math.min(w, b.deadline - VERIFY_DEADLINE_MARGIN_NS);
+    }
+
+    /** reach-verify-1115: the decision is out of time for checks (stopped by the wall, or within the margin of its deadline). */
+    static boolean verifyOver() {
+        final LookaheadSearch.Budget b = VERIFY_BUDGET.get();
+        return b != null && (b.over() || forge.game.WorkClock.nanoTime() - (b.deadline - VERIFY_DEADLINE_MARGIN_NS) > 0);
+    }
 
     /** reach-verify-1114: one reach screen that found a line, and its engine checks. */
     public static final class Claim {
@@ -5378,8 +5401,8 @@ public final class ForcedWinSolver {
             double p = 0, pd = 0;
             final List<Integer> top = k == 0 ? new ArrayList<>() : new ArrayList<>(knownTop.subList(0, k));
             for (int i = 0; i < groups.size() && i < o.maxNames; i++) {
-                if (Thread.currentThread().isInterrupted()) {
-                    break; // reach-verify-1114: the world was cancelled; its value is discarded
+                if (verifyOver()) {
+                    break; // reach-verify-1115: out of time: the unscreened groups count as unconfirmed (a lower bound)
                 }
                 final List<Card> grp = groups.get(i);
                 final Screen s = screenAt(g, top, grp.get(0), nameNodes, o.ms, o.window, o.nameOnePass);
@@ -5460,9 +5483,9 @@ public final class ForcedWinSolver {
             String first = null;
             int run = 0, turn = -1;
             for (int i = 0; i < ls.size() && i < Math.max(1, maxLines); i++) {
-                if (Thread.currentThread().isInterrupted()) {
+                if (verifyOver()) {
                     if (first == null) {
-                        first = "cancelled"; // reach-verify-1114: the world was cancelled: no more checks
+                        first = "deadline"; // reach-verify-1115: out of time: the claim counts as unconfirmed
                     }
                     break;
                 }
@@ -5511,16 +5534,19 @@ public final class ForcedWinSolver {
         arrangeTop = tops;
         passiveOpp = mode == VERIFY_SAMPLED;
         noReplan = true;
-        final boolean vc0 = forge.ai.VerifyCancel.set(true); // reach-verify-1114: a cancelled world stops the check
         try {
-            return playout(g, line, seed, mode == VERIFY_SAMPLED ? -1 : 0, -1,
-                    forge.game.WorkClock.nanoTime() + VERIFY_WALL_NS);
+            final long wall = verifyWall(); // reach-verify-1115: never past the decision's deadline (less the margin)
+            if (wall - forge.game.WorkClock.nanoTime() <= 0) {
+                final Outcome o = new Outcome();
+                o.why = "deadline";
+                return o;
+            }
+            return playout(g, line, seed, mode == VERIFY_SAMPLED ? -1 : 0, -1, wall);
         } catch (RuntimeException | StackOverflowError e) {
             final Outcome o = new Outcome();
             o.why = "error:" + e;
             return o;
         } finally {
-            forge.ai.VerifyCancel.set(vc0);
             arrangeTop = a0;
             passiveOpp = p0;
             noReplan = r0;
@@ -6954,8 +6980,8 @@ public final class ForcedWinSolver {
             meter.playouts++;
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps && !lineAi.rested) {
                 ForcedWinEngine.checkWall(wall, "play-out step");
-                if (noReplan && forge.ai.VerifyCancel.cancelled()) {
-                    throw new ForcedWinEngine.OutOfBudget("cancelled: play-out step"); // reach-verify-1114
+                if (noReplan && verifyOver()) {
+                    throw new ForcedWinEngine.OutOfBudget("cancelled: play-out step"); // reach-verify-1115: the decision ran out
                 }
                 ph.mainLoopStep();
                 steps++;

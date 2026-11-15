@@ -46,6 +46,27 @@ public class ReachVerifySpecTest {
     }
 
     @Test
+    public void verifyFullIsStrictAndVerifyLinesIsBounded() {
+        // reach-verify-1115 (review S2): 1 reads as true and 0 as false (never a silent false), anything else is refused
+        Assert.assertTrue(RlSearch.ReachCfg.parse(JsonParser.parseString("{\"verifyFull\":1}").getAsJsonObject()).verifyFull);
+        Assert.assertFalse(RlSearch.ReachCfg.parse(JsonParser.parseString("{\"verifyFull\":0}").getAsJsonObject()).verifyFull);
+        Assert.assertFalse(RlSearch.ReachCfg.parse(JsonParser.parseString("{\"verifyFull\":false}").getAsJsonObject()).verifyFull);
+        for (String bad : new String[] {"\"yes\"", "\"true\"", "2", "0.5"}) {
+            Assert.assertThrows(IllegalArgumentException.class,
+                    () -> RlSearch.ReachCfg.parse(JsonParser.parseString("{\"verifyFull\":" + bad + "}").getAsJsonObject()));
+        }
+        Assert.assertTrue(RlSearch.ReachCfg.parse(RlLiveSeat.Spec.parse(SHIP + ",reach.verify=sampled,reach.verifyFull=1").search.reach)
+                .verifyFull);
+        Assert.assertFalse(RlSearch.ReachCfg.parse(RlLiveSeat.Spec.parse(SHIP + ",reach.verify=sampled,reach.verifyFull=0").search.reach)
+                .verifyFull);
+        Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(SHIP + ",reach.verifyFull=yes"));
+        for (String n : new String[] {"0", "9", "-1"}) {
+            Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(SHIP + ",reach.verifyLines=" + n));
+        }
+        Assert.assertEquals(RlSearch.ReachCfg.parse(RlLiveSeat.Spec.parse(SHIP + ",reach.verifyLines=8").search.reach).verifyLines, 8);
+    }
+
+    @Test
     public void benchSpecNeedsABelief() {
         final String base = "{\"server\":\"127.0.0.1:1\",\"worlds\":2,\"breadth\":2,\"horizon\":2,\"reach\":{\"verify\":\"sampled\"}";
         final IllegalArgumentException e = Assert.expectThrows(IllegalArgumentException.class,

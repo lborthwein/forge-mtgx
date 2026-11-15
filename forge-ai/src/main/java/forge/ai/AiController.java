@@ -1756,13 +1756,6 @@ public class AiController {
             AiWork.check("chooseSpellAbilityToPlay");
             return chosen;
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
-            if (e instanceof InterruptedException && VerifyCancel.active()) {
-                // reach-verify-1114: a cancelled engine check of a planner line: stop the eval thread and keep the
-                // interrupt, so the check's play-out stops at its next step (only the verify path sets the mark)
-                future.cancel(true);
-                Thread.currentThread().interrupt();
-                return null;
-            }
             if (AiWork.spent()) {
                 future.cancel(true);
                 try {

@@ -4282,7 +4282,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (o.has("verify")) c.verify = o.get("verify").getAsString();
             if (o.has("verifyLines")) c.verifyLines = o.get("verifyLines").getAsInt();
-            if (o.has("verifyFull")) c.verifyFull = o.get("verifyFull").getAsBoolean();
+            if (o.has("verifyFull")) c.verifyFull = flag01("verifyFull", o.get("verifyFull")); // reach-verify-1115: strict
+            if (c.verifyLines < 1 || c.verifyLines > 8) {
+                throw new IllegalArgumentException("reach.verifyLines is 1..8, not " + c.verifyLines);
+            }
             if (!java.util.Arrays.asList("off", "sampled", "unopposed").contains(c.verify)) {
                 throw new IllegalArgumentException("reach.verify is off, sampled or unopposed, not " + c.verify);
             }

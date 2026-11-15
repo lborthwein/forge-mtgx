@@ -1643,6 +1643,8 @@ public final class LookaheadSearch {
         Object payloadOpp;
         /** solver-distill-cc-1109: {@link SearchHooks#leafReach} at the leaf (null = off or failed). */
         double[] reach;
+        /** reach-verify-1115: the play-out's decision budget (null = none); reach.verify's engine checks stop at it. */
+        Budget budget;
 
         LeafProbe(SearchHooks hooks, Object ctx) {
             this.hooks = hooks;
@@ -1663,10 +1665,14 @@ public final class LookaheadSearch {
 
         /** solver-distill-cc-1109: the reach at the leaf, never a failure of the play-out. */
         void takeReach(Game g, Player me) {
+            final Budget prev = ForcedWinSolver.VERIFY_BUDGET.get();
+            ForcedWinSolver.VERIFY_BUDGET.set(budget); // reach-verify-1115: read only by reach.verify's checks
             try {
                 reach = hooks.leafReach(ctx, g, me);
             } catch (RuntimeException | StackOverflowError e) {
                 reach = null;
+            } finally {
+                ForcedWinSolver.VERIFY_BUDGET.set(prev);
             }
         }
 
@@ -6727,6 +6733,9 @@ public final class LookaheadSearch {
             final boolean recording = p.firstAction != null && p.firstAction.recorder != null;
             // bvw-step2-fork-1027: an OPR roll-out (noLeaf) plays to the end of the game or its cap, without a leaf
             final LeafProbe probe = hookLeaf && !recording && !p.noLeaf ? new LeafProbe(hooks, p.hookCtx) : null;
+            if (probe != null) {
+                probe.budget = p.budget; // reach-verify-1115
+            }
             if (probe != null && cfg.leafOpp && me.getOpponents().size() == 1) {
                 probe.opp = me.getOpponents().get(0); // S2T: the opponent's own frame at the leaf too
             }
