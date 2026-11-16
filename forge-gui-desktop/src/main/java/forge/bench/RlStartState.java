@@ -77,6 +77,8 @@ public final class RlStartState {
      * {"schema": "mtgx-rl-exact/1", "seat": 0 | 1, "state": "<Forge GameState text>", "stop": n >= 1}} installs that
      * exact position (as the route start installs its dealt one) and ends the game (a draw) after the named seat's
      * n-th priority decision, so the full pilot's decision rows at a recorded position can be read. Null = off.
+     * The property's value may also name a directory: a GAME without the key then takes {@code <dir>/<game seed>.json}
+     * (that object) when the file exists, so a harness run needs no GAME change ("true" = the GAME key only).
      */
     private final String exactText;
     private final int exactStop;
@@ -103,14 +105,32 @@ public final class RlStartState {
         return exactText != null;
     }
 
-    private static RlStartState exactOf(final JsonObject g) {
-        if (!Boolean.getBoolean("forge.bench.exactStart")) {
-            throw new IllegalArgumentException("exact_start needs -Dforge.bench.exactStart=true (research only)");
+    private static final String EXACT_PROP = System.getProperty("forge.bench.exactStart");
+
+    /** exact-start-1116: the seed file of the property's directory, or null (no directory, no file). */
+    private static JsonObject exactFile(final long seed) {
+        if (EXACT_PROP == null || "true".equals(EXACT_PROP)) {
+            return null;
+        }
+        final java.nio.file.Path f = java.nio.file.Paths.get(EXACT_PROP, Long.toString(seed) + ".json");
+        if (!java.nio.file.Files.isRegularFile(f)) {
+            return null;
+        }
+        try {
+            return com.google.gson.JsonParser.parseString(new String(java.nio.file.Files.readAllBytes(f),
+                    java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+        } catch (java.io.IOException ex) {
+            throw new IllegalArgumentException("exact_start file " + f + ": " + ex);
+        }
+    }
+
+    private static RlStartState exactOf(final JsonObject g, final JsonObject e) {
+        if (EXACT_PROP == null) {
+            throw new IllegalArgumentException("exact_start needs -Dforge.bench.exactStart (research only)");
         }
         if (g.has("start_state") && !g.get("start_state").isJsonNull()) {
             throw new IllegalArgumentException("exact_start and start_state together");
         }
-        final JsonObject e = g.getAsJsonObject("exact_start");
         if (!EXACT_SCHEMA.equals(e.get("schema").getAsString()) || e.keySet().size() != 4) {
             throw new IllegalArgumentException("exact_start: schema " + EXACT_SCHEMA + ", keys schema, seat, state, stop");
         }
@@ -229,7 +249,11 @@ public final class RlStartState {
     /** The GAME's start state, or null (off) when it has none. Throws IllegalArgumentException on a malformed spec. */
     public static RlStartState of(final JsonObject g, final long gameSeed) {
         if (g.has("exact_start") && !g.get("exact_start").isJsonNull()) {
-            return exactOf(g);
+            return exactOf(g, g.getAsJsonObject("exact_start"));
+        }
+        final JsonObject ef = exactFile(gameSeed);
+        if (ef != null) {
+            return exactOf(g, ef);
         }
         if (!g.has("start_state") || g.get("start_state").isJsonNull()) {
             return null;
