@@ -120,8 +120,8 @@ public final class RlReplaySearch implements PriorityDecisionListener {
                                 + p.salts.length + " salts");
                     }
                 }
-                if (p.K < 1 || p.K > 64) {
-                    throw new IllegalArgumentException("position " + p.posId + ": K must be 1..64, not " + p.K);
+                if (p.K < 0 || p.K > 64) {   // setup-gap-1115: K 0 = find the position (and export its state) without a search
+                    throw new IllegalArgumentException("position " + p.posId + ": K must be 0..64, not " + p.K);
                 }
             }
             return p;
