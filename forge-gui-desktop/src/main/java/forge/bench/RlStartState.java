@@ -131,15 +131,44 @@ public final class RlStartState {
         if (g.has("start_state") && !g.get("start_state").isJsonNull()) {
             throw new IllegalArgumentException("exact_start and start_state together");
         }
-        if (!EXACT_SCHEMA.equals(e.get("schema").getAsString()) || e.keySet().size() != 4) {
-            throw new IllegalArgumentException("exact_start: schema " + EXACT_SCHEMA + ", keys schema, seat, state, stop");
+        if (!EXACT_SCHEMA.equals(e.get("schema").getAsString()) || e.keySet().size() != 4 || !e.has("state")
+                || !e.has("stop") || !(e.has("seat") || e.has("deck"))) {
+            throw new IllegalArgumentException("exact_start: schema " + EXACT_SCHEMA + ", keys schema, seat | deck, state, stop");
         }
-        final int seat = e.get("seat").getAsInt();
+        // "deck": the seat is the one playing that deck file (basename); the state names that seat "human", and the
+        // text is flipped (human <-> ai) when it sits second, so one seed file serves both seat orders of a pair
+        final int seat;
+        String text = e.get("state").getAsString();
+        if (e.has("deck")) {
+            final JsonArray dj = g.getAsJsonArray("decks");
+            final String want = "/" + e.get("deck").getAsString();
+            final boolean d0 = dj.get(0).getAsString().endsWith(want), d1 = dj.get(1).getAsString().endsWith(want);
+            if (d0 == d1) {
+                throw new IllegalArgumentException("exact_start: deck " + want + " is not exactly one seat's");
+            }
+            seat = d0 ? 0 : 1;
+            if (seat == 1) {
+                final StringBuilder sb = new StringBuilder();
+                for (String l : text.split("\\R")) {
+                    if (l.startsWith("activeplayer=")) {
+                        l = "activeplayer=" + ("human".equals(l.substring(13).trim()) ? "ai" : "human");
+                    } else if (l.startsWith("human")) {
+                        l = "ai" + l.substring(5);
+                    } else if (l.startsWith("ai")) {
+                        l = "human" + l.substring(2);
+                    }
+                    sb.append(l).append('\n');
+                }
+                text = sb.toString();
+            }
+        } else {
+            seat = e.get("seat").getAsInt();
+        }
         final int stop = e.get("stop").getAsInt();
         if ((seat != 0 && seat != 1) || stop < 1) {
             throw new IllegalArgumentException("exact_start: seat 0 | 1, stop >= 1");
         }
-        return new RlStartState(e, e.get("state").getAsString(), seat, stop);
+        return new RlStartState(e, text, seat, stop);
     }
 
     private JsonObject installExact(final Game game) {
