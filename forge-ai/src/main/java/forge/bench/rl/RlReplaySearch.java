@@ -163,7 +163,7 @@ public final class RlReplaySearch implements PriorityDecisionListener {
             this.playFrom = playFrom;
         }
 
-        static final Set<String> KEYS = Set.of("positions", "spec", "server", "policySha", "out", "saltBase", "tol");
+        static final Set<String> KEYS = Set.of("positions", "spec", "server", "policySha", "out", "saltBase", "tol", "exportState");
 
         public static Spec parse(final JsonObject o, final boolean playFrom) {
             final String what = playFrom ? "playFrom" : "replaySearch";
