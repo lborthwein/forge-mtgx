@@ -241,7 +241,7 @@ public class RlItem2HooksTest {
             gen.search = forge.bench.rl.RlSearch.Config.parse(JsonParser.parseString(SPEC.substring(0, SPEC.length() - 1)
                     + ",\"server\":\"" + svc.address() + "\",\"decisionLog\":\"" + dlog + "\"}").getAsJsonObject());
             final List<JsonObject> tapes = new ArrayList<>();
-            final int n = Integer.getInteger("rl.i2hGames", 2);
+            final int n = Integer.getInteger("rl.i2hGames", 4);
             for (int i = 0; i < n; i++) {
                 final RlActorBench.Played p = RlActorBench.play(gen, "train", RlActorBenchTest.game(i, "rl:M", "rl:M", false),
                         new RlFeaturizer(RlActorBenchTest.index), RlActorBenchOpponentTest.endpoint("train"), null, "test");
@@ -260,10 +260,29 @@ public class RlItem2HooksTest {
             try (java.util.stream.Stream<Path> s = Files.list(tapeDir)) {
                 tapeFile = s.filter(f -> f.getFileName().toString().startsWith("tapes-")).findFirst().orElseThrow();
             }
+            // the hook-off forced replay first: the games it reproduces are the ones the hooks are tested on
+            final RlActorBench.Cfg bc = replayCfg();
+            bc.replayDir = tapeDir.toString();
+            bc.replayOut = d.resolve("base-replay.jsonl").toString();
+            RlActorBench.replay(bc, RlActorBenchTest.index, "test");
+            final Set<String> baseEqual = new HashSet<>();
+            for (String l : Files.readAllLines(java.nio.file.Paths.get(bc.replayOut), StandardCharsets.UTF_8)) {
+                final JsonObject r = JsonParser.parseString(l).getAsJsonObject();
+                System.err.println("[i2h-test] hook-off replay " + r.get("game_uid") + " equal " + r.get("equal")
+                        + (r.has("decision_log") && r.getAsJsonObject("decision_log").has("divergence")
+                        ? " " + r.getAsJsonObject("decision_log").get("divergence") : ""));
+                if (r.get("equal").getAsBoolean()) {
+                    baseEqual.add(forge.bench.rl.TrajectoryRef.canonicalUid(r.get("game_uid").getAsString()));
+                }
+            }
+            Assert.assertFalse(baseEqual.isEmpty(), "no source game replays forced");
             // positions: searched priority rows with >= 2 searched entries, the greedy answer from a not-overridden tape row
             final Map<String, JsonObject> byUid = new TreeMap<>();
             for (JsonObject t : tapes) {
-                byUid.put(forge.bench.rl.TrajectoryRef.canonicalUid(t.get("game_uid").getAsString()), t);
+                final String u = forge.bench.rl.TrajectoryRef.canonicalUid(t.get("game_uid").getAsString());
+                if (baseEqual.contains(u)) {
+                    byUid.put(u, t);
+                }
             }
             final List<JsonObject> rsPos = new ArrayList<>();
             final Map<String, Integer> perGame = new TreeMap<>();
@@ -274,6 +293,9 @@ public class RlItem2HooksTest {
                 }
                 final String uid = forge.bench.rl.TrajectoryRef.canonicalUid(r.get("game_uid").getAsString());
                 final JsonObject t = byUid.get(uid);
+                if (t == null) {
+                    continue;
+                }
                 final int dec = r.get("dec_idx").getAsInt();
                 boolean over = false;
                 for (JsonElement e : t.getAsJsonArray("overridden")) {
