@@ -72,8 +72,86 @@ public final class RlStartState {
     final int[] lands, hand, gy, life, oppLands, oppHand, oppBoard, oppGy, oppLife;
     final double active;
     private JsonObject started;
+    /**
+     * exact-start-1116 (research, offline; refused unless -Dforge.bench.exactStart=true): GAME {@code "exact_start":
+     * {"schema": "mtgx-rl-exact/1", "seat": 0 | 1, "state": "<Forge GameState text>", "stop": n >= 1}} installs that
+     * exact position (as the route start installs its dealt one) and ends the game (a draw) after the named seat's
+     * n-th priority decision, so the full pilot's decision rows at a recorded position can be read. Null = off.
+     */
+    private final String exactText;
+    private final int exactStop;
+    public static final String EXACT_SCHEMA = "mtgx-rl-exact/1";
+
+    private RlStartState(final JsonObject spec, final String text, final int seat, final int stop) {
+        this.spec = spec.deepCopy();
+        this.seed = 0;
+        this.seat = seat;
+        this.route = "exact";
+        this.missing = new int[0];
+        this.lands = this.hand = this.gy = this.life = this.oppLands = this.oppHand = this.oppBoard = this.oppGy
+                = this.oppLife = null;
+        this.active = 0;
+        this.exactText = text;
+        this.exactStop = stop;
+        started = new JsonObject();
+        started.addProperty("applied", false);
+        started.addProperty("reason", "not_reached");
+    }
+
+    /** exact-start-1116: an exact position start (allowed in eval mode, research only). */
+    public boolean exact() {
+        return exactText != null;
+    }
+
+    private static RlStartState exactOf(final JsonObject g) {
+        if (!Boolean.getBoolean("forge.bench.exactStart")) {
+            throw new IllegalArgumentException("exact_start needs -Dforge.bench.exactStart=true (research only)");
+        }
+        if (g.has("start_state") && !g.get("start_state").isJsonNull()) {
+            throw new IllegalArgumentException("exact_start and start_state together");
+        }
+        final JsonObject e = g.getAsJsonObject("exact_start");
+        if (!EXACT_SCHEMA.equals(e.get("schema").getAsString()) || e.keySet().size() != 4) {
+            throw new IllegalArgumentException("exact_start: schema " + EXACT_SCHEMA + ", keys schema, seat, state, stop");
+        }
+        final int seat = e.get("seat").getAsInt();
+        final int stop = e.get("stop").getAsInt();
+        if ((seat != 0 && seat != 1) || stop < 1) {
+            throw new IllegalArgumentException("exact_start: seat 0 | 1, stop >= 1");
+        }
+        return new RlStartState(e, e.get("state").getAsString(), seat, stop);
+    }
+
+    private JsonObject installExact(final Game game) {
+        final Now gs = new Now();
+        gs.parse(Arrays.asList(exactText.split("\\R")));
+        gs.now(game);
+        final Player me = game.getRegisteredPlayers().get(seat);
+        final int[] n = {0};
+        game.addPriorityDecisionListener(new forge.game.PriorityDecisionListener() {
+            @Override
+            public void beforeDecision(final Player p) {
+            }
+
+            @Override
+            public void afterDecision(final Player p, final List<forge.game.spellability.SpellAbility> chosen) {
+                if (p == me && ++n[0] >= exactStop && !game.isGameOver()) {
+                    game.setGameOver(forge.game.GameEndReason.Draw);
+                }
+            }
+        });
+        final JsonObject out = new JsonObject();
+        out.addProperty("applied", true);
+        out.addProperty("seat", seat);
+        out.addProperty("route", "exact");
+        out.addProperty("turn", game.getPhaseHandler().getTurn());
+        out.addProperty("stop", exactStop);
+        return out;
+    }
 
     private RlStartState(final JsonObject spec, final long seed) {
+        this.exactText = null;
+        this.exactStop = 0;
         this.spec = spec.deepCopy();
         this.seed = seed;
         for (String k : spec.keySet()) {
@@ -150,6 +228,9 @@ public final class RlStartState {
 
     /** The GAME's start state, or null (off) when it has none. Throws IllegalArgumentException on a malformed spec. */
     public static RlStartState of(final JsonObject g, final long gameSeed) {
+        if (g.has("exact_start") && !g.get("exact_start").isJsonNull()) {
+            return exactOf(g);
+        }
         if (!g.has("start_state") || g.get("start_state").isJsonNull()) {
             return null;
         }
@@ -271,6 +352,9 @@ public final class RlStartState {
      * {applied: false, reason: "missing", piece}.
      */
     JsonObject install(final Game game) {
+        if (exactText != null) {
+            return installExact(game);
+        }
         final Random r = new Random(RlSeeding.seatSeed(seed ^ SALT, 2));
         final List<Player> players = game.getRegisteredPlayers();
         final JsonObject out = new JsonObject();

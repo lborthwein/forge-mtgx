@@ -87,6 +87,9 @@ import forge.game.spellability.SpellAbility;
  * look-ahead to that seat (RlSeat checks it); the summary then echoes {@code seat}. -1 (the default) = every RL seat.
  */
 public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.SearchHooks, LookaheadSearch.ChoiceExpander {
+    /** exact-start-1116 (research, default off): every look-ahead row names its menu ({@code menu}, {@code def_act}). */
+    static final boolean MENU_NOTE = Boolean.getBoolean("sdcc.menuNote");
+
 
     /**
      * svcmemo-1114: the memo's counters on a searched decision's log row, only with the key on (off: the row is
@@ -2225,9 +2228,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("fw_ms", Math.round(sd.lastMs * 10) / 10.0);
             }
             row.addProperty("outcome", r.outcome);
-            if (r.stackNote != null) {
-                // measurement only (-Dsdcc.stackNote=true): the stack, the policy's answer and the menu by name
-                row.add("stack_note", r.stackNote);
+            if (r.stackNote != null || MENU_NOTE) {
+                // measurement only (-Dsdcc.stackNote=true): the stack, the policy's answer and the menu by name;
+                // exact-start-1116: -Dsdcc.menuNote=true writes the menu by name on every row (research, default off)
+                if (r.stackNote != null) {
+                    row.add("stack_note", r.stackNote);
+                }
                 row.addProperty("def_act", actLabel(given.isEmpty() ? null : given.get(0)));
                 final JsonArray menu = new JsonArray();
                 for (SpellAbility x : given) {

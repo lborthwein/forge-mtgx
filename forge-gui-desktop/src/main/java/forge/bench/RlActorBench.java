@@ -991,7 +991,7 @@ public final class RlActorBench {
             out.guardError = "start_state: " + e.getMessage();
             return out;
         }
-        if (startState != null && ("eval".equals(mode) || seeding != null)) {
+        if (startState != null && !startState.exact() && ("eval".equals(mode) || seeding != null)) {
             out.guardError = "start_state is a TRAIN curriculum: not allowed in eval mode or with seeding";
             return out;
         }
