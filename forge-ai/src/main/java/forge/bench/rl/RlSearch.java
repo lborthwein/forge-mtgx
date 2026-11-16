@@ -1446,6 +1446,56 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return obsVersion;
     }
 
+    // ---- sdcc-item2-hooks-1115 (offline replay hooks RlReplaySearch / RlPlayFrom; nothing below is called otherwise)
+
+    /**
+     * sdcc-item2-hooks-1115: the seat's plan search ({@code plans}) for player {@code p} of {@code g}, as {@link #attach}
+     * builds it, WITHOUT installing it on the seat's controller (a forced replay's controller is the AI tape's, and the
+     * replay must not change); and the game's InfoStates, as {@link #attach}. Refused for forcedWin and chooseACard,
+     * which only exist as installed hooks.
+     */
+    void attachShadow(final Game g, final Player p, final RlSeat seat) {
+        if (cfg.forcedWin != null || cfg.cac != null) {
+            throw new IllegalArgumentException("replay search: forcedWin / chooseACard specs are not supported");
+        }
+        attachInfoStates(cfg, g);
+        attachInfoState(g, cfg);
+        if (cfg.plans != null) {
+            final PlanSearch ps1 = new PlanSearch(PlanSearch.Spec.parse(cfg.plans), this, p, seat, null);
+            ps1.provenOnly = cfg.provenOnly;
+            ps1.lineGo = cfg.provenOnly ? cfg.lineGo : 0.0;
+            ps1.planEvery = cfg.provenOnly && cfg.planEvery;
+            planSearches.put(p.getId(), ps1);
+        }
+    }
+
+    /** sdcc-item2-hooks-1115: this search's per-decision rows so far (needs {@link #rowsWanted}), removed from it. */
+    List<JsonObject> takeRows() {
+        final List<JsonObject> out = new ArrayList<>(rows);
+        rows.clear();
+        return out;
+    }
+
+    /** sdcc-item2-hooks-1115: the policy's SCORE of a DECIDE payload (prior and v(o)) on this search's connection. */
+    public RlSearchClient.Scores policyScore(final byte[] payload) throws IOException {
+        try {
+            return client().score(payload);
+        } catch (IOException | RuntimeException e) {
+            drop();
+            throw e;
+        }
+    }
+
+    /** sdcc-item2-hooks-1115: the policy's DECISION for a DECIDE payload (greedy unless {@code sample}). */
+    public RlWire.Decision policyDecide(final byte[] payload, final boolean sample) throws IOException {
+        try {
+            return client().decide(payload, sample);
+        } catch (IOException | RuntimeException e) {
+            drop();
+            throw e;
+        }
+    }
+
     /** Close every connection and the look-ahead's pool (call at game end). */
     public void close() {
         ls.shutdown();

@@ -286,6 +286,13 @@ public final class RlActorBench {
         int decisionLogAttempt = 0;
         /** house p4 (explicit draw): report explicit game draws as draws even when surviving players have win bits. Off preserves receipts. */
         boolean honorDrawReason = false;
+        /**
+         * sdcc-item2-hooks-1115 (null = off, the default, and then nothing changes; replay mode only): REPLAY-SEARCH
+         * ({@link forge.bench.rl.RlReplaySearch}) and PLAY-FROM-POSITION ({@link forge.bench.rl.RlPlayFrom}), offline hooks.
+         */
+        forge.bench.rl.RlReplaySearch.Spec replaySearch = null, playFrom = null;
+        /** sdcc-item2-hooks-1115: playFrom's jobs (a replay line's third element is its job index). */
+        List<forge.bench.rl.RlPlayFrom.Job> playFromJobs = null;
     }
 
     static void parseReference(final Cfg c, final JsonObject o, final String where) {
@@ -531,6 +538,28 @@ public final class RlActorBench {
         }
         if (o.has("watchdog")) {
             c.watchdog = ReplayStallWatchdog.Thresholds.parse(o.get("watchdog")); // lki-fix-port-1027
+        }
+        for (String hk : new String[] {"replaySearch", "playFrom"}) {
+            // sdcc-item2-hooks-1115: the offline hooks, replay mode only, alone (no label, bank, scan, dump or search)
+            if (!o.has(hk) || o.get(hk).isJsonNull()) {
+                continue;
+            }
+            if (!"replay".equals(c.mode)) {
+                throw new IllegalArgumentException("refused: " + hk + " is a replay mode key, not " + c.mode);
+            }
+            if (c.labelSpec != null || c.exileScanOut != null || c.frameDumpOut != null || o.has("bank")
+                    || o.has("search") || o.has("replaySearch") && o.has("playFrom")) {
+                throw new IllegalArgumentException("refused: " + hk + " runs alone (no label, exileScan, frameDump, bank,"
+                        + " search or the other hook)");
+            }
+            final forge.bench.rl.RlReplaySearch.Spec hs = forge.bench.rl.RlReplaySearch.Spec.parse(
+                    o.getAsJsonObject(hk), "playFrom".equals(hk));
+            if ("playFrom".equals(hk)) {
+                c.playFrom = hs;
+                c.playFromJobs = forge.bench.rl.RlPlayFrom.jobs(hs);
+            } else {
+                c.replaySearch = hs;
+            }
         }
         if (o.has("decisionLog") && !o.get("decisionLog").isJsonNull()) {
             // bvw-decision-log-1027: checked once, at JVM start (exit 2 on a bad value)
@@ -1135,9 +1164,11 @@ public final class RlActorBench {
             feat.setKnowledge(know);
             seat.seenNames = know::opponentSeen; // NAME candidates (ICR B4-families-coordination)
             out.knowledge = know;
-            if (cfg.search != null && !"replay".equals(mode) && !"record".equals(mode)) {
+            // sdcc-item2-hooks-1115: a play-from-position continuation's own search config (null = cfg.search, as before)
+            final RlSearch.Config gameSearch = PLAY_FROM_SEARCH.get() != null ? PLAY_FROM_SEARCH.get() : cfg.search;
+            if (gameSearch != null && !"replay".equals(mode) && !"record".equals(mode)) {
                 // S1: the look-ahead over the RL seats' own priority decisions (one per game; world seeds from the GAME seed)
-                search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
+                search = new RlSearch(gameSearch, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
                 search.searchSeat = searchSeat;     // r3-distill-1010: -1 unless the GAME names one
                 seat.searchSeat = searchSeat;
                 seat.search = search;
@@ -2006,6 +2037,18 @@ public final class RlActorBench {
      */
     static int replay(final Cfg cfg, final CardIndex index, final String jarSha) throws IOException {
         expandReplayDir(cfg);
+        if (cfg.replaySearch != null || cfg.playFrom != null) {
+            // sdcc-item2-hooks-1115: the lines are the positions' games (play-from: one line per job); the hooks' sinks
+            hookLines(cfg);
+            if (cfg.replaySearch != null) {
+                replaySearchSink = new forge.bench.rl.RlReplaySearch.Sink(Paths.get(cfg.replaySearch.out));
+                System.err.println("[replay-search] " + cfg.replaySearch.positions.size() + " positions in "
+                        + cfg.replayLines.size() + " games -> " + cfg.replaySearch.out);
+            } else {
+                playFromSink = new forge.bench.rl.RlReplaySearch.Sink(Paths.get(cfg.playFrom.out));
+                System.err.println("[play-from] " + cfg.playFromJobs.size() + " continuations -> " + cfg.playFrom.out);
+            }
+        }
         forge.bench.rl.RlReplayLabeller.FATAL.set(null); // review #9: a fatal search error stops this replay only
         if (cfg.labelSpec != null) {
             // bvw-plr-1023: the label directory and its per-JVM files
@@ -2269,6 +2312,61 @@ public final class RlActorBench {
 
     static forge.bench.rl.RlAssemblyBank.Sink bankSink;
 
+    /**
+     * sdcc-item2-hooks-1115: the replay lines of the hooks' positions (each needs its {@code tape}; its {@code line}, or
+     * the line whose game_uid is the position's): replay-search, one line per game; play-from, one line per job
+     * ({@code [file, line, job]}). Explicit replay lines are refused.
+     */
+    static void hookLines(final Cfg cfg) throws IOException {
+        if (!cfg.replayLines.isEmpty()) {
+            throw new IllegalArgumentException("refused: replaySearch / playFrom take their games from the positions, "
+                    + "not replay.lines / replay.dir");
+        }
+        final forge.bench.rl.RlReplaySearch.Spec hs = cfg.replaySearch != null ? cfg.replaySearch : cfg.playFrom;
+        final Map<String, Integer> fileIdx = new HashMap<>();
+        final Map<String, List<JsonObject>> lines = new HashMap<>();
+        final Map<String, int[]> lineOf = new java.util.LinkedHashMap<>();
+        for (forge.bench.rl.RlReplaySearch.Pos q : hs.positions) {
+            if (q.tape == null) {
+                throw new IllegalArgumentException("position " + q.posId + ": no tape");
+            }
+            if (!lines.containsKey(q.tape)) {
+                lines.put(q.tape, RlTape.read(Paths.get(q.tape)));
+                fileIdx.put(q.tape, cfg.replayTapes.size());
+                cfg.replayTapes.add(q.tape);
+            }
+            int li = q.line;
+            final List<JsonObject> tl = lines.get(q.tape);
+            if (li < 0) {
+                for (int i = 0; i < tl.size(); i++) {
+                    if (forge.bench.rl.TrajectoryRef.canonicalUid(tl.get(i).get("game_uid").getAsString()).equals(q.gameUid)) {
+                        li = i;
+                        break;
+                    }
+                }
+            }
+            if (li < 0 || li >= tl.size() || !forge.bench.rl.TrajectoryRef.canonicalUid(
+                    tl.get(li).get("game_uid").getAsString()).equals(q.gameUid)) {
+                throw new IllegalArgumentException("position " + q.posId + ": game " + q.gameUid + " is not in " + q.tape
+                        + (q.line >= 0 ? " line " + q.line : ""));
+            }
+            lineOf.put(q.posId, new int[] {fileIdx.get(q.tape), li});
+        }
+        if (cfg.playFrom != null) {
+            for (int j = 0; j < cfg.playFromJobs.size(); j++) {
+                final int[] fl = lineOf.get(cfg.playFromJobs.get(j).pos.posId);
+                cfg.replayLines.add(new int[] {fl[0], fl[1], j});
+            }
+        } else {
+            final java.util.Set<String> seen = new java.util.HashSet<>();
+            for (int[] fl : lineOf.values()) {
+                if (seen.add(fl[0] + ":" + fl[1])) {
+                    cfg.replayLines.add(fl);
+                }
+            }
+        }
+    }
+
     static JsonObject replayOne(final Cfg cfg, final Map<String, List<JsonObject>> cache, final int[] fl,
             final RlFeaturizer feat, final String jarSha) {
         final String f = cfg.replayTapes.get(fl[0]);
@@ -2336,7 +2434,7 @@ public final class RlActorBench {
                 }
                 final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
                 final forge.bench.rl.RlAssemblyBank[] banks = new forge.bench.rl.RlAssemblyBank[1];
-                final JsonObject bankJob = fl.length > 2 ? cfg.bankJobs.get(fl[2]) : null;
+                final JsonObject bankJob = fl.length > 2 && cfg.playFrom == null ? cfg.bankJobs.get(fl[2]) : null;
                 if (bankJob != null) {
                     row.add("bank_job", bankJob.get("job_id"));
                 }
@@ -2344,7 +2442,26 @@ public final class RlActorBench {
                 final forge.bench.rl.RlExileScan[] scans = new forge.bench.rl.RlExileScan[1];
                 final forge.bench.rl.RlFrameDump[] dumps = new forge.bench.rl.RlFrameDump[1];
                 final forge.bench.rl.RlFrameStates[] states = new forge.bench.rl.RlFrameStates[1];
-                final GameHook hook0 = cfg.bankSpec != null ? (game, seat, know) -> {
+                // sdcc-item2-hooks-1115 (null unless replaySearch / playFrom): the offline hooks of this game
+                final forge.bench.rl.RlReplaySearch[] rss = new forge.bench.rl.RlReplaySearch[1];
+                final forge.bench.rl.RlPlayFrom[] pfs = new forge.bench.rl.RlPlayFrom[1];
+                final forge.bench.rl.RlPlayFrom.Job pfJob = cfg.playFrom != null && fl.length > 2
+                        ? cfg.playFromJobs.get(fl[2]) : null;
+                final forge.bench.rl.RlPlayFrom.SwitchEndpoint pfEp = pfJob == null ? null
+                        : new forge.bench.rl.RlPlayFrom.SwitchEndpoint(tapeEndpoint(t, RlWire.parseUid(
+                                t.get("game_uid").getAsString()), false));
+                if (pfJob != null) {
+                    row.addProperty("play_from", pfJob.key());
+                }
+                final GameHook hook0 = cfg.replaySearch != null ? (game, seat, know) -> {
+                    rss[0] = new forge.bench.rl.RlReplaySearch(cfg.replaySearch, t, game, seat, know, feat.index(), tobs,
+                            jarSha);
+                    game.addPriorityDecisionListener(rss[0]);
+                } : pfJob != null ? (game, seat, know) -> {
+                    pfs[0] = new forge.bench.rl.RlPlayFrom(cfg.playFrom, pfJob, t, game, seat, know, feat.index(), tobs,
+                            pfEp);
+                    game.addPriorityDecisionListener(pfs[0]);
+                } : cfg.bankSpec != null ? (game, seat, know) -> {
                     banks[0] = new forge.bench.rl.RlAssemblyBank(cfg.bankSpec, bankSink, bankJob, t, game, know,
                             feat.index(), tobs);
                     banks[0].attach();
@@ -2400,8 +2517,20 @@ public final class RlActorBench {
                             trajectoryRef.provenance()) : null, rowsHere);
                     game.addPriorityDecisionListener(checks[0]);
                 };
-                final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
-                        t.get("game_uid").getAsString()), cfg.bankSpec != null), null, jarSha, hook, dl);
+                final Played p;
+                if (pfJob != null) {
+                    // sdcc-item2-hooks-1115: the continuation's live search (both seats), seeded by its j
+                    PLAY_FROM_SEARCH.set(forge.bench.rl.RlReplaySearch.config(cfg.playFrom,
+                            forge.bench.rl.RlPlayFrom.searchSalt(cfg.playFrom, pfJob.j), tobs));
+                    try {
+                        p = play(cfg, tmode, g, feat, pfEp, null, jarSha, hook, dl);
+                    } finally {
+                        PLAY_FROM_SEARCH.remove();
+                    }
+                } else {
+                    p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
+                            t.get("game_uid").getAsString()), cfg.bankSpec != null), null, jarSha, hook, dl);
+                }
                 final forge.bench.rl.RlReplayLabeller lab = labs[0];
                 if (p.guardError != null) {
                     row.addProperty("error", "deck_guard: " + p.guardError);
@@ -2477,6 +2606,37 @@ public final class RlActorBench {
                         eq &= se;
                     }
                     row.addProperty("equal", eq);
+                    if (cfg.replaySearch != null) {
+                        // sdcc-item2-hooks-1115: the game's rows only when its replay digest is the tape's
+                        if (rss[0] == null) {
+                            row.addProperty("error", "replay search: never attached");
+                            row.addProperty("equal", false);
+                        } else {
+                            try {
+                                rss[0].finish(replaySearchSink, eq, row);
+                            } catch (IOException e) {
+                                row.addProperty("error", "replay search sink: " + e);
+                                row.addProperty("equal", false);
+                            }
+                        }
+                    }
+                    if (pfJob != null) {
+                        // sdcc-item2-hooks-1115: a continuation is not the tape's game; it is "equal" when it forked
+                        final JsonObject pr = pfs[0] == null ? null : pfs[0].finish(p.tape != null ? p.tape : p.end);
+                        if (pr == null) {
+                            row.addProperty("error", "play-from: never attached");
+                            row.addProperty("equal", false);
+                        } else {
+                            row.add("play_from_result", pr);
+                            row.addProperty("equal", pr.get("void").isJsonNull());
+                            try {
+                                playFromSink.append(playFromSink.file("results"), List.of(pr));
+                            } catch (IOException e) {
+                                row.addProperty("error", "play-from sink: " + e);
+                                row.addProperty("equal", false);
+                            }
+                        }
+                    }
                     if (banks[0] != null) {
                         final JsonObject br = banks[0].finish(eq);
                         for (String k : br.keySet()) {
@@ -2770,6 +2930,13 @@ public final class RlActorBench {
 
     /** bvw-plr-1023: the replay's label sink (one per JVM), or null. */
     static forge.bench.rl.RlReplayLabeller.Sink labelSink = null;
+    /** sdcc-item2-hooks-1115: the offline hooks' sinks (null = off). */
+    static forge.bench.rl.RlReplaySearch.Sink replaySearchSink = null, playFromSink = null;
+    /**
+     * sdcc-item2-hooks-1115: set by a play-from-position replay around its game only (null otherwise, and then {@link
+     * #play} uses cfg.search as before): the continuation's search config (its seedSalt is the continuation's).
+     */
+    static final ThreadLocal<RlSearch.Config> PLAY_FROM_SEARCH = new ThreadLocal<>();
     /** bvw-step1-build-1024: the exile scan's per-JVM files (exileScan replays only). */
     static forge.bench.rl.RlExileScan.Sink scanSink = null;
     /** outcome-arm-1104: the frame-dump replay's sink (null = off). */

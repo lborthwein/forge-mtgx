@@ -1429,6 +1429,17 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
     }
 
+    /**
+     * sdcc-item2-hooks-1115 (offline replay hooks only; nothing else calls it): the DECIDE frame {@link #frame} builds for
+     * {@code m} and {@code o}, numbered {@code decIdx}; the seat's own counters are not touched.
+     */
+    public RlWire.Decide frameAt(final int seat, final Game g, final RlCandidates.Menu m, final RlFeaturizer.Obs o,
+            final int decIdx) {
+        final RlWire.Decide f = frame(seat, g, m, o);
+        f.decIdx = decIdx;
+        return f;
+    }
+
     private RlWire.Decide frame(final int seat, final Game g, final RlCandidates.Menu m, final RlFeaturizer.Obs o) {
         final RlWire.Decide f = o.version == 2 ? RlWire.Decide.v2() : new RlWire.Decide();
         f.gameUid = uid;
