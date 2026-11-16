@@ -150,6 +150,13 @@ public final class RlReplaySearch implements PriorityDecisionListener {
         public String out;
         public long saltBase = 0x17E3A2B5EEDL;
         public double tol = 1e-4;
+        /**
+         * setup-gap-1115 (offline only, default off): at every found position also write the replayed game's full
+         * Forge state ({@link forge.game.GameState}, puzzle text) into the position's status row as {@code state_full}.
+         * Full information, both seats: the offline analysis reduces it to the seat's own view before any solver reads it;
+         * nothing here reaches a search, a decision or a label.
+         */
+        public boolean exportState = false;
         public final boolean playFrom;
 
         Spec(final boolean playFrom) {
@@ -193,6 +200,9 @@ public final class RlReplaySearch implements PriorityDecisionListener {
             s.out = o.get("out").getAsString();
             if (o.has("saltBase")) {
                 s.saltBase = o.get("saltBase").getAsLong();
+            }
+            if (o.has("exportState")) {
+                s.exportState = o.get("exportState").getAsBoolean();
             }
             if (o.has("tol")) {
                 s.tol = o.get("tol").getAsDouble();
@@ -506,6 +516,16 @@ public final class RlReplaySearch implements PriorityDecisionListener {
         st.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
         st.addProperty("C", pr.m.C());
         st.addProperty("priority_ordinal", priorityDecisions - 1);
+        if (spec.exportState) {
+            try {
+                final forge.game.GameState gs = new forge.game.GameState();
+                gs.initFromGame(g);
+                st.addProperty("state_full", gs.toString());
+                st.addProperty("state_seat", seat);
+            } catch (RuntimeException e) {
+                st.addProperty("state_error", String.valueOf(e));
+            }
+        }
         final Integer greedy = q.greedy != null ? q.greedy : tapeGreedy(q.decIdx);
         if (greedy == null || greedy < 0 || greedy >= pr.m.C() || pr.m.validate(new short[] {(short) (int) greedy}) != null) {
             st.addProperty("reason", greedy == null ? "no_greedy" : "bad_greedy " + greedy);
