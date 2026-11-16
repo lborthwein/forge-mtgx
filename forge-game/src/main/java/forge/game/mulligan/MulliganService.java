@@ -14,10 +14,18 @@ public class MulliganService {
     Player firstPlayer;
     Game game;
     List<AbstractMulligan> mulligans = Lists.newArrayList();
+    /** When set, only this player mulligans (an opening-hand puzzle's browser seat); null = every player, as always. */
+    Player only;
 
     public MulliganService(Player player) {
         firstPlayer = player;
         game = firstPlayer.getGame();
+    }
+
+    /** The mulligan of one player only, {@code first} named as the game's first player (who is on the play). */
+    public MulliganService(Player first, Player only) {
+        this(first);
+        this.only = only;
     }
 
     public void perform() {
@@ -37,6 +45,9 @@ public class MulliganService {
         boolean firstMullFree = game.getPlayers().size() > 2 || game.getRules().hasAppliedVariant(GameType.Brawl);
 
         for (Player player : whoCanMulligan) {
+            if (only != null && player != only) {
+                continue;
+            }
             MulliganDefs.MulliganRule rule = StaticData.instance().getMulliganRule();
             AbstractMulligan mulligan;
             switch (rule) {
