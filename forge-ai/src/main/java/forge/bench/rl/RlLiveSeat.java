@@ -362,6 +362,7 @@ public final class RlLiveSeat {
                     case "prioGf": c.prioGf = Integer.parseInt(v); break;
                     case "prioGfMargin": c.prioGfMargin = Double.parseDouble(v); break;
                     case "prioGfTurns": c.prioGfTurns = Integer.parseInt(v); break;
+                    case "prioGfHold": c.prioGfHold = flagKey(k, v); break;
                     default:
                         if (k.startsWith("choiceScorer.")) {
                             c.choiceScorer = objKey(c.choiceScorer, k, k.substring("choiceScorer.".length()), v);

@@ -393,6 +393,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int prioGf = 0;
         public double prioGfMargin = 0.01;
         public int prioGfTurns = 4;
+        /** sdcc-c1-priogf-1117 (false = off): {@link LookaheadSearch.Config#prioGfHold}; needs prioGf > 0. */
+        public boolean prioGfHold = false;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -470,7 +472,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "copyStaleRefs", "copyTriggers", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery", "imit", "prioGf", "prioGfMargin", "prioGfTurns"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit", "prioGf", "prioGfMargin", "prioGfTurns", "prioGfHold"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -507,6 +509,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("prioGf")) c.prioGf = o.get("prioGf").getAsInt(); // sdcc-c1-priogf-1117
             if (o.has("prioGfMargin")) c.prioGfMargin = o.get("prioGfMargin").getAsDouble();
             if (o.has("prioGfTurns")) c.prioGfTurns = o.get("prioGfTurns").getAsInt();
+            if (o.has("prioGfHold")) c.prioGfHold = o.get("prioGfHold").getAsBoolean();
             if (o.has("explore") && !o.get("explore").isJsonNull()) {
                 c.explore = o.getAsJsonObject("explore");
                 for (String k : c.explore.keySet()) {
@@ -770,6 +773,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (prioGf < 0 || prioGfTurns < 0 || !(prioGfMargin >= 0)) {
                 throw new IllegalArgumentException("search: prioGf >= 0, prioGfMargin >= 0, prioGfTurns >= 0");
             }
+            if (prioGfHold && prioGf <= 0) {
+                throw new IllegalArgumentException("search.prioGfHold needs prioGf > 0");
+            }
             if (prioGf > 0 && (choiceScorer == null || plans == null)) {
                 throw new IllegalArgumentException("search.prioGf needs choiceScorer (its gf* knobs) and plans (the solver config)");
             }
@@ -878,6 +884,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("prioGf", prioGf);
                 o.addProperty("prioGfMargin", prioGfMargin);
                 o.addProperty("prioGfTurns", prioGfTurns);
+                if (prioGfHold) {
+                    o.addProperty("prioGfHold", true); // only when on
+                }
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -1279,6 +1288,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.prioGf = cfg.prioGf; // sdcc-c1-priogf-1117 (0 = off)
         lc.prioGfMargin = cfg.prioGfMargin;
         lc.prioGfTurns = cfg.prioGfTurns;
+        lc.prioGfHold = cfg.prioGfHold;
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);

@@ -109,4 +109,55 @@ public class PrioGfConfigTest {
         Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, new double[] {0.0, 0.8, 0.8}, 2), -1);
         Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, new double[] {0.0, 0.8, 0.8}, 0), 2);
     }
+
+    @Test
+    public void holdOffByDefaultAndKeptWhenOn() {
+        final RlSearch.Config off = parse("{\"server\":\"h:1\",\"playout\":\"policy\",\"plans\":{},\"choiceScorer\":{},"
+                + "\"prioGf\":3}");
+        Assert.assertFalse(off.prioGfHold);
+        Assert.assertFalse(off.toJson().has("prioGfHold"));
+        Assert.assertFalse(new LookaheadSearch.Config().prioGfHold);
+        final RlSearch.Config on = parse("{\"server\":\"h:1\",\"playout\":\"policy\",\"plans\":{},\"choiceScorer\":{},"
+                + "\"prioGf\":3,\"prioGfHold\":true}");
+        Assert.assertTrue(on.prioGfHold);
+        final com.google.gson.JsonObject back = on.toJson();
+        Assert.assertTrue(back.get("prioGfHold").getAsBoolean());
+        back.addProperty("server", "h:1");
+        Assert.assertTrue(RlSearch.Config.parse(back).prioGfHold);
+        final String base = "server=h:1,cardIndex=x,policySha=" + "a".repeat(64);
+        Assert.assertFalse(RlLiveSeat.Spec.parse(base).search.prioGfHold);
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class)
+    public void holdWithoutPrioGfIsRefused() {
+        parse("{\"server\":\"h:1\",\"prioGfHold\":true}");
+    }
+
+    @Test
+    public void holdTieRule() {
+        // the default (0) casts a card, pass (1) holds; both reach the same line; 2 is outside
+        final double[] ev = {0.50, 0.495, 0.40};
+        final boolean[] in = {true, true, false};
+        final double[] gf = {0.8, 0.8, NAN};
+        // off: a tie with the default changes nothing
+        Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, gf, 0), -1);
+        Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, gf, 0, null), -1);
+        // on: the default alone plus pass; pass spends no card and ties: pass is played
+        Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, gf, 0, new boolean[] {false, true, false}), 1);
+        // both hold: the existing order (current pick) keeps the default
+        Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, gf, 0, new boolean[] {true, true, false}), -1);
+        // the default holds, a departure (current 1) spends: back to the default
+        Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, gf, 1, new boolean[] {true, false, false}), 0);
+        // a strictly better line still wins over a holding candidate
+        Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, new double[] {0.8, 0.64, NAN}, 0,
+                new boolean[] {false, true, false}), -1);
+        // no line anywhere: nothing changes even with a holding candidate
+        Assert.assertEquals(LookaheadSearch.prioGfSelect(ev, in, new double[] {0.0, 0.0, NAN}, 0,
+                new boolean[] {false, true, false}), -1);
+        // among several holders tied on score, the existing order: current, then larger ev
+        final double[] ev4 = {0.50, 0.49, 0.495, 0.30};
+        final boolean[] in4 = {true, true, true, false};
+        Assert.assertEquals(LookaheadSearch.prioGfSelect(ev4, in4, new double[] {0.8, 0.8, 0.8, NAN}, 0,
+                new boolean[] {false, true, true, false}), 2);
+    }
 }
