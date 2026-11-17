@@ -122,7 +122,9 @@ public final class RlLiveSeat {
                 "protectUntilNext", "drawGrowth",
                 // sdcc-costtax-1117 (absent = off): spells cost what the engine's cost adjustment says
                 // (ForcedWinSolver.Config.costTax)
-                "costTax"));
+                "costTax",
+                // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
+                "grantSacMana"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -154,7 +156,9 @@ public final class RlLiveSeat {
                 "protectUntilNext", "drawGrowth",
                 // sdcc-costtax-1117 (absent = off): spells cost what the engine's cost adjustment says
                 // (ForcedWinSolver.Config.costTax)
-                "costTax"));
+                "costTax",
+                // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
+                "grantSacMana"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as

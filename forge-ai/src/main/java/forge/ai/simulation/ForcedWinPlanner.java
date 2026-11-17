@@ -508,6 +508,12 @@ public final class ForcedWinPlanner {
          */
         boolean costTax;
         /**
+         * sdcc-sacmana-1117 (solverCfg grantSacMana; false = off, the default, and nothing changes): an observed
+         * {@link EffKind#GRANT_SAC_MANA} lets our lands (or permanents) be sacrificed this turn for one mana of its colours,
+         * after their own mana, as the last sources of a payment.
+         */
+        boolean grantSacMana;
+        /**
          * sdcc-protect-1117 (solverCfg drawGrowth; false = off, the default, and nothing changes): an ability observed
          * drawing more on each activation ({@link Abil#drawGrowth}) draws its observed count plus the growth times the
          * activations of that permanent earlier in the line.
@@ -625,10 +631,13 @@ public final class ForcedWinPlanner {
         boolean fresh;
         /** sdcc-protect-1117 (drawGrowth): activations of its growing draw ability so far in the line (kept across turns). */
         int uses;
+        /** sdcc-sacmana-1117 (grantSacMana): colours it can make this turn by sacrificing itself (a granted ability; 0 = none). */
+        int sacMana;
 
         Perm copy() {
             final Perm p = new Perm();
             p.uses = uses;
+            p.sacMana = sacMana;
             p.card = card;
             p.tapped = tapped;
             p.activated = activated;
@@ -1264,6 +1273,9 @@ public final class ForcedWinPlanner {
             if (!p.tapped && a.sourceColors != 0 && !a.sourceSick) {
                 need -= Math.max(1, a.sourceAmount);
             }
+            if (lim.grantSacMana && p.sacMana != 0) {
+                need--; // sdcc-sacmana-1117
+            }
         }
         return need <= 0;
     }
@@ -1872,6 +1884,7 @@ public final class ForcedWinPlanner {
             p.tapped = false;
             p.activated = false;
             p.fresh = false;
+            p.sacMana = 0; // sdcc-sacmana-1117: the granted ability ends with the turn
         }
         final List<Eff> draw = List.of(new Eff(EffKind.DRAW, 1, 0));
         resolve(s, draw, 0, 0, null, out);
@@ -2103,6 +2116,17 @@ public final class ForcedWinPlanner {
                     }
                     resolve(n, effs, ei + 1, 0, ab, out);
                 }
+                return;
+            }
+            case GRANT_SAC_MANA: {
+                if (lim.grantSacMana) {
+                    for (Perm p : s.bf) {
+                        if (e.n == 2 || cards.get(p.card).land) {
+                            p.sacMana |= e.colors; // sdcc-sacmana-1117: until the pass
+                        }
+                    }
+                }
+                resolve(s, effs, ei + 1, 0, ab, out);
                 return;
             }
             case TUTOR_BF: {
@@ -2950,7 +2974,7 @@ public final class ForcedWinPlanner {
         if (p == null) {
             return false;
         }
-        final int col = Integer.numberOfTrailingZeros(cards.get(p.card).sourceColors & mask);
+        final int col = Integer.numberOfTrailingZeros((lastSac ? p.sacMana : cards.get(p.card).sourceColors) & mask);
         tapSource(s, p, col);
         s.pool[col]--;
         return true;
@@ -2981,7 +3005,8 @@ public final class ForcedWinPlanner {
             return false;
         }
         final ACard a = cards.get(p.card);
-        final int col = (a.sourceColors & (1 << ForcedWinModel.C)) != 0 ? ForcedWinModel.C
+        final int col = lastSac ? Integer.numberOfTrailingZeros(p.sacMana) // sdcc-sacmana-1117
+                : (a.sourceColors & (1 << ForcedWinModel.C)) != 0 ? ForcedWinModel.C
                 : Integer.numberOfTrailingZeros(a.sourceColors);
         tapSource(s, p, col);
         s.pool[col]--;
@@ -3043,11 +3068,33 @@ public final class ForcedWinPlanner {
                 best = p;
             }
         }
+        lastSac = false;
+        if (best == null && lim.grantSacMana) {
+            // sdcc-sacmana-1117: no source left that taps: a permanent sacrificed for its granted mana, tapped ones first
+            for (Perm p : s.bf) {
+                if (p != self && (p.sacMana & mask) != 0 && (best == null || p.tapped && !best.tapped)) {
+                    best = p;
+                }
+            }
+            lastSac = best != null;
+        }
         return best;
     }
 
+    /** sdcc-sacmana-1117: the last {@link #source} answer is a sacrifice for granted mana (read right after the call). */
+    private boolean lastSac;
+
     private void tapSource(S s, Perm p, int col) {
         final ACard a = cards.get(p.card);
+        if (lastSac) {
+            // sdcc-sacmana-1117: the granted "sacrifice this: add one mana", floated like any source of the line
+            lastSac = false;
+            s.steps.add(new Step(AbilKind.FLOAT, a, null, col));
+            s.pool[col] += 1;
+            s.bf.remove(p);
+            s.gyPool.add(p.card);
+            return;
+        }
         // solver-gaps-1015: the line floats exactly the sources the model paid with, in the colour it used, before the
         // step (Forge AI's own payment chose other sources, or would not use a sacrifice source like Black Lotus)
         s.steps.add(new Step(AbilKind.FLOAT, a, null, col));

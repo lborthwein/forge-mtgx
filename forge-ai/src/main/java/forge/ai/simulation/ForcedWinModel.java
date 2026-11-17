@@ -81,7 +81,13 @@ public final class ForcedWinModel {
          * offered the search in the sandbox (its filter, as observed; null = any land); {@link Eff#colors} = 1 when the
          * land entered tapped there (the ability's own instruction), 0 otherwise.
          */
-        TUTOR_BF
+        TUTOR_BF,
+        /**
+         * sdcc-sacmana-1117 (observed only by a grantSacMana reader): until end of turn our permanents gain "sacrifice
+         * this: add one mana" ({@link Eff#colors}: its colours; {@link Eff#n} = 1: every permanent that gained it was a
+         * land, 2: other permanents too).
+         */
+        GRANT_SAC_MANA
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
@@ -1088,7 +1094,7 @@ public final class ForcedWinModel {
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
             // sdcc-fetchthin-1117: and a fetchThin reader ("ft|"), whose probes map a land searched onto the battlefield
             final String key = (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
-                    + (probeSettle ? "settle|" : "") + (fetchThin ? "ft|" : "") + (protectPass ? "pp|" : "") + (drawGrowth ? "dg|" : "")
+                    + (probeSettle ? "settle|" : "") + (fetchThin ? "ft|" : "") + (protectPass ? "pp|" : "") + (drawGrowth ? "dg|" : "") + (grantSacMana ? "gs|" : "")
                     + c.getName();
             final boolean prevHide = ForcedWinProbe.HIDE.get();
             ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
@@ -1117,6 +1123,8 @@ public final class ForcedWinModel {
                 ForcedWinProbe.FETCH_THIN.set(fetchThin);
                 ForcedWinProbe.PROTECT_PASS.set(protectPass);
                 ForcedWinProbe.DRAW_GROWTH.set(drawGrowth);
+                final boolean prevGs = ForcedWinProbe.GRANT_SAC.get();
+                ForcedWinProbe.GRANT_SAC.set(grantSacMana);
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
@@ -1133,6 +1141,7 @@ public final class ForcedWinModel {
                     ForcedWinProbe.FETCH_THIN.set(prevFt);
                     ForcedWinProbe.PROTECT_PASS.set(prevPp);
                     ForcedWinProbe.DRAW_GROWTH.set(prevDg);
+                    ForcedWinProbe.GRANT_SAC.set(prevGs);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     synchronized (templates) {
@@ -1192,6 +1201,8 @@ public final class ForcedWinModel {
 
         /** sdcc-protect-1117 (solver keys protectUntilNext / drawGrowth; false = off): see {@link ForcedWinProbe#PROTECT_PASS}. */
         boolean protectPass, drawGrowth;
+        /** sdcc-sacmana-1117 (solver key grantSacMana; false = off): see {@link ForcedWinProbe#GRANT_SAC}. */
+        boolean grantSacMana;
 
         /**
          * sdcc-tutorcast-1110 (solver key sourceLeaves; false = off, and then nothing changes): the probes also note
