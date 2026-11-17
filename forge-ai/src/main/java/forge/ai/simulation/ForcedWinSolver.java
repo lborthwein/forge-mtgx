@@ -2654,6 +2654,9 @@ public final class ForcedWinSolver {
         // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
         lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
+        // sdcc-sacmana-1117 / sdcc-piletc-1117: the late keys join only the last pass (below), when every other found none
+        lim.grantSacMana = false;
+        lim.pileTutorCast = false;
         // labeller-v2 (c), (e) (off = v1)
         lim.planScry = cfg.planScry;
         lim.planDiscard = cfg.planDiscard;
@@ -2698,6 +2701,23 @@ public final class ForcedWinSolver {
                 paySearchFound++;
                 payOnly = true;
             }
+        }
+        if (res.lines.isEmpty() && cfg.forced && (cfg.grantSacMana || cfg.pileTutorCast)) {
+            // sdcc-sacmana-1117 / sdcc-piletc-1117: only where every pass without them found no line, plan again with the
+            // granted sacrifice mana and the pile search-and-cast (the found lines elsewhere stay exactly as without them)
+            final int before = res.nodes;
+            lim.grantSacMana = cfg.grantSacMana;
+            lim.pileTutorCast = cfg.pileTutorCast;
+            lim.payPolicies = cfg.paySearch ? (cfg.payKeepUse ? ForcedWinPlanner.PAY_POLICIES_KEEP_USE : ForcedWinPlanner.PAY_POLICIES) : 1;
+            lim.horizon = 1;
+            res = planCapped(pos, lim);
+            if (res.lines.isEmpty() && cfg.horizon >= 2) {
+                final int first = res.nodes;
+                lim.horizon = cfg.horizon;
+                res = planCapped(pos, lim);
+                res.nodes += first;
+            }
+            res.nodes += before;
         }
         plannerNanos += forge.game.WorkClock.nanoTime() - t0;
         lastPlannerNodes = res.nodes;

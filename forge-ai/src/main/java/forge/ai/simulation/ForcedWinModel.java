@@ -612,8 +612,7 @@ public final class ForcedWinModel {
                 return true;
             }
             for (Abil a : fromHand) {
-                // sdcc-sacmana-1117: granted sacrifice-for-mana is mana too (only a grantSacMana reader observes it)
-                if (a.has(EffKind.MANA) || a.has(EffKind.GRANT_SAC_MANA)) {
+                if (a.has(EffKind.MANA)) {
                     return true;
                 }
             }
