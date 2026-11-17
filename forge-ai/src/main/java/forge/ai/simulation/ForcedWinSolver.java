@@ -7149,6 +7149,28 @@ public final class ForcedWinSolver {
         if (!hide) {
             final int need = hand.size() - keep.size();
             newHand.addAll(pool.subList(0, need));
+            if (Boolean.getBoolean("sdcc.dealLog")) {
+                // sdcc-dealcheck-1117 (diagnostics only, prints): overlap of the dealt hidden hand with the copy's own hidden
+                // hand, and of a fresh uniform deal (its own Random) from the same union, for the canonical-order check
+                final Set<Integer> real = new HashSet<>();
+                for (Card c : hand) {
+                    if (!keep.contains(c)) {
+                        real.add(c.getId());
+                    }
+                }
+                int ov = 0;
+                for (Card c : pool.subList(0, need)) {
+                    ov += real.contains(c.getId()) ? 1 : 0;
+                }
+                final List<Card> fresh = new ArrayList<>(pool);
+                Collections.shuffle(fresh, new Random(System.nanoTime()));
+                int fov = 0;
+                for (Card c : fresh.subList(0, need)) {
+                    fov += real.contains(c.getId()) ? 1 : 0;
+                }
+                System.out.println("[deal] need=" + need + " union=" + pool.size() + " overlap=" + ov + " fresh=" + fov
+                        + " canonical=" + canonical);
+            }
             pool.subList(0, need).clear();
         } else {
             // solver-gaps-1015: the hidden hand leaves the game (exile), not into their library: their library keeps its
