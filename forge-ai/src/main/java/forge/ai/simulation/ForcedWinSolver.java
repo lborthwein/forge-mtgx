@@ -331,6 +331,33 @@ public final class ForcedWinSolver {
          */
         public boolean tutorCast = false;
         /**
+         * sdcc-fetchthin-1117 (off by default, and then nothing changes): the width model knows an ability that searches
+         * our library for a land and puts it onto the battlefield (a fetch; {@link ForcedWinModel.EffKind#TUTOR_BF}):
+         * the land is ours in play and our library shrinks by one, so cracking a fetch after a pile thins the library
+         * for an empty-library or library-size win. A search may take a card the pile still holds (a lazy pile slot),
+         * a tutor too. Off, the probe dropped the land's move and a fetch read as "sacrifice it, shuffle".
+         */
+        public boolean fetchThin = false;
+        /**
+         * sdcc-paykeep-1117 (off by default, and then nothing changes): the planner's payment search (paySearch) also
+         * tries a payment order that taps last the sources with another use in play (a playable non-mana activated
+         * ability: a land that draws when the hand has a given size, a land that sacrifices itself for a card). Off,
+         * every order ranked sources by colours and sacrifice only, so a colourless land with a draw ability was always
+         * tapped first for generic mana and its draw was never in a line.
+         */
+        public boolean payKeepUse = false;
+        /**
+         * sdcc-protect-1117 (off by default, and then nothing changes): the probes note a spell or entering permanent of
+         * ours that gives our player protection from everything or from creatures (by keyword), and the planner then
+         * skips the opponent's creature damage at the next pass (until our next turn).
+         */
+        public boolean protectUntilNext = false;
+        /**
+         * sdcc-protect-1117 (off by default, and then nothing changes): an activated draw ability whose second activation
+         * draws more than its first (observed in one sandbox) draws that much more per earlier activation in the line.
+         */
+        public boolean drawGrowth = false;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -968,6 +995,10 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
+            c.fetchThin = "true".equals(get.apply("fetchThin")); // sdcc-fetchthin-1117
+            c.payKeepUse = "true".equals(get.apply("payKeepUse")); // sdcc-paykeep-1117
+            c.protectUntilNext = "true".equals(get.apply("protectUntilNext")); // sdcc-protect-1117
+            c.drawGrowth = "true".equals(get.apply("drawGrowth")); // sdcc-protect-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1054,6 +1085,9 @@ public final class ForcedWinSolver {
                 + (probeSettle ? " probeSettle" : "")
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (fetchThin ? " fetchThin" : "") // sdcc-fetchthin-1117
+                + (payKeepUse ? " payKeepUse" : "") // sdcc-paykeep-1117
+                + (protectUntilNext ? " protectUntilNext" : "") + (drawGrowth ? " drawGrowth" : "") // sdcc-protect-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -1545,6 +1579,15 @@ public final class ForcedWinSolver {
         }
         if (cfg.tutorCast) {
             this.reader.tutorCast = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
+        }
+        if (cfg.fetchThin) {
+            this.reader.fetchThin = true; // sdcc-fetchthin-1117: our own cards only (its own template keys)
+        }
+        if (cfg.protectUntilNext) {
+            this.reader.protectPass = true; // sdcc-protect-1117: our own cards only (its own template keys)
+        }
+        if (cfg.drawGrowth) {
+            this.reader.drawGrowth = true; // sdcc-protect-1117
         }
         if (cfg.sourceLeaves) {
             this.reader.sourceLeaves = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
@@ -2615,7 +2658,7 @@ public final class ForcedWinSolver {
             // solver-gaps-1015 payment search: only where the greedy payment found no line, search the payment orders
             // (this turn, then by our next turn), within the planner's own node and time caps
             final int before = res.nodes;
-            lim.payPolicies = ForcedWinPlanner.PAY_POLICIES;
+            lim.payPolicies = cfg.payKeepUse ? ForcedWinPlanner.PAY_POLICIES_KEEP_USE : ForcedWinPlanner.PAY_POLICIES;
             lim.horizon = 1;
             res = planCapped(pos, lim);
             if (res.lines.isEmpty() && cfg.horizon >= 2) {
@@ -4447,6 +4490,9 @@ public final class ForcedWinSolver {
         lim.depth = cfg.planDepth; // solver-distill-cc-1109 (18 = the default)
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
+        lim.fetchThin = cfg.fetchThin; // sdcc-fetchthin-1117
+        lim.protectUntilNext = cfg.protectUntilNext; // sdcc-protect-1117
+        lim.drawGrowth = cfg.drawGrowth; // sdcc-protect-1117
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
         return lim;
     }
