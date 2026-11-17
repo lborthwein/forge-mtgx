@@ -537,6 +537,11 @@ public final class ForcedWinPlanner {
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
     static final int PAY_POLICIES = 9;
+    /**
+     * sdcc-paykeep-1117 (solverCfg payKeepUse; off = {@link #PAY_POLICIES} orders, as before): one more order, 9, taps
+     * last the sources that have another use in play (a playable activated ability that is not a mana ability).
+     */
+    static final int PAY_POLICIES_KEEP_USE = PAY_POLICIES + 1;
 
     static final class Result {
         final List<Line> lines = new ArrayList<>();
@@ -2948,11 +2953,14 @@ public final class ForcedWinPlanner {
     /**
      * A source's rank in the payment order (lower is tapped first). 0: least flexible first, one-shot sources last (the
      * greedy order); 1: one-shot sources first; 2: most flexible first; 3..7: keep colour W/U/B/R/G (tap other sources
-     * first); 8: as 0 with Phyrexian pips paid in life.
+     * first); 8: as 0 with Phyrexian pips paid in life; 9 (payKeepUse only): as 0, with the sources that have another
+     * use in play ({@link #otherUse}) last.
      */
     private int sourceScore(ACard a) {
         final int flex = Integer.bitCount(a.sourceColors), sac = a.sourceSac ? 1 : 0;
         switch (payPolicy) {
+            case 9:
+                return (otherUse(a) ? 1000 : 0) + flex * 10 + sac * 100;
             case 1:
                 return (1 - sac) * 100 + flex * 10;
             case 2:
@@ -2962,6 +2970,19 @@ public final class ForcedWinPlanner {
             default:
                 return flex * 10 + sac * 100;
         }
+    }
+
+    /**
+     * sdcc-paykeep-1117: the source has a playable activated ability in play that is not a mana ability (a land that
+     * draws, a permanent that sacrifices itself for a card): tapping it for mana spends that use this turn.
+     */
+    private static boolean otherUse(ACard a) {
+        for (Abil ab : a.onBattlefield) {
+            if (!ab.unplayable && ab.kind != AbilKind.FLOAT && !ab.loyalty) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Perm source(S s, int mask, Perm self) {

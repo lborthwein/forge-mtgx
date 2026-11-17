@@ -113,7 +113,10 @@ public final class RlLiveSeat {
                 "engineModeChoice",
                 // sdcc-fetchthin-1117 (absent = off): a land searched onto the battlefield thins the library in the
                 // width model (ForcedWinSolver.Config.fetchThin)
-                "fetchThin"));
+                "fetchThin",
+                // sdcc-paykeep-1117 (absent = off): the payment search keeps sources with another use in play
+                // (ForcedWinSolver.Config.payKeepUse)
+                "payKeepUse"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -136,7 +139,10 @@ public final class RlLiveSeat {
                 "engineModeChoice",
                 // sdcc-fetchthin-1117 (absent = off): a land searched onto the battlefield thins the library in the
                 // width model (ForcedWinSolver.Config.fetchThin)
-                "fetchThin"));
+                "fetchThin",
+                // sdcc-paykeep-1117 (absent = off): the payment search keeps sources with another use in play
+                // (ForcedWinSolver.Config.payKeepUse)
+                "payKeepUse"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
