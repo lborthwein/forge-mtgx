@@ -190,8 +190,14 @@ public final class ChoiceScorer {
          * and redealOwn's samples become samples of a dealt order instead of permutations of the real one.
          */
         public boolean redealOwnOrder = false;
+        /**
+         * sdcc-wincon-1117 (empty = off, the default, and then nothing changes): a {@link WinconProfile} file. On a CARDS
+         * ask of the seat whose deck has an entry, when every scored option's goldfish and reach are 0, the option of the
+         * highest profile score is played among the seat's own cards it does not hold (see {@link #wincon}).
+         */
+        public String winconProfile = "";
 
-        static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds",
+        static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("families", "cap", "explore", "mullWorlds", "winconProfile",
                 "settleSteps", "margin", "noDecline", "budgetMs", "searchedTop", "fidelity", "shadow", "screenNodes", "screenMs", "guard", "pile", "pileTop", "pileNodes", "pileMs", "reachAlpha", "reachMaxNames", "gfHorizon", "gfSamples", "gfNodes", "gfExtra", "gfMs", "gfGamma", "gfActive", "gfLambda", "gfLands", "gfAskNodes", "seqs", "reachNameNodes", "reachOnePass", "reachSkipCapped", "reachSig",
                 // choice-search-1109 (lineOnly, relax), integrate-1110 (reachDiscards): ported by owner-misplays-1113, all off by default
                 "lineOnly", "check", "checkTop", "subsetCap", "relax", "relaxTop", "relaxMs", "relaxDraws", "reachDiscards",
@@ -309,6 +315,12 @@ public final class ChoiceScorer {
             }
             if (o.has("redealOpp")) c.redealOpp = strictBool(o, "redealOpp");
             if (o.has("redealOwnOrder")) c.redealOwnOrder = strictBool(o, "redealOwnOrder");
+            if (o.has("winconProfile")) {
+                c.winconProfile = o.get("winconProfile").getAsString();
+                if (!c.winconProfile.isEmpty()) {
+                    WinconProfile.load(c.winconProfile); // sdcc-wincon-1117: a bad file fails at parse
+                }
+            }
             if (o.has("departScored")) c.departScored = o.get("departScored").getAsInt();
             if (o.has("departFloor")) c.departFloor = o.get("departFloor").getAsDouble();
             if (c.departScored < 0 || c.departScored > 2 || !(c.departFloor >= 0 && c.departFloor <= 1)) {
@@ -332,6 +344,9 @@ public final class ChoiceScorer {
                 fs.add(RlSchema.familyName(f));
             }
             o.addProperty("families", String.join(",", fs));
+            if (!winconProfile.isEmpty()) {
+                o.addProperty("winconProfile", winconProfile); // sdcc-wincon-1117: only when on
+            }
             o.addProperty("cap", cap);
             o.addProperty("explore", explore);
             o.addProperty("mullWorlds", mullWorlds);
@@ -444,6 +459,9 @@ public final class ChoiceScorer {
         public List<Integer> pileIds;
         /** solver-distill-cc-1109: a whole-resolution answer ({@link Config#seqs}); pileIds holds its picks. */
         public boolean seq;
+        /** sdcc-wincon-1117 (only with a profile for the seat): the option's profile score and its eligibility. */
+        double wcScore;
+        boolean wcEligible;
     }
 
     /** One scored ask. */
@@ -468,6 +486,9 @@ public final class ChoiceScorer {
         public int redeal;
         /** discard-guard-1113: why a departure was held back ({@code unscored}, {@code floor}), null = none was. */
         public String held;
+        /** sdcc-wincon-1117: the seat's profile applies to this ask; and the pick when the rule chose ("name score (n scored)"). */
+        boolean wcActive;
+        public String wincon;
     }
 
     /** Frames at most for one opening-hand ask. */
@@ -1421,6 +1442,9 @@ public final class ChoiceScorer {
         } else {
             s.unsupported = "family";
         }
+        if (!cfg.winconProfile.isEmpty() && m.family == RlSchema.F_CARDS && !s.reachDiscards && s.unsupported == null) {
+            winconTag(me, m, s); // sdcc-wincon-1117 (off: never reached)
+        }
         for (Option o : s.options) {
             s.frames += o.frames.size();
             if (o.fail != null) {
@@ -1433,6 +1457,74 @@ public final class ChoiceScorer {
         }
         s.totalNanos = System.nanoTime() - t0;
         return s;
+    }
+
+    /**
+     * sdcc-wincon-1117: with a profile entry for the seat's deck, each single-card option's profile score (0 when the
+     * file does not name it) and eligibility: the card is the seat's own (it owns it), is not in its hand or on the
+     * battlefield (a card the choice would get: library, graveyard, exile), and the seat holds no card of that name in
+     * hand. Generic: the names are the file's data.
+     */
+    private void winconTag(final Player me, final RlCandidates.Menu m, final Scored s) {
+        final Map<String, Double> prof = WinconProfile.forSeat(cfg.winconProfile, me);
+        if (prof == null) {
+            return;
+        }
+        final Set<String> inHand = new java.util.HashSet<>();
+        for (Card c : me.getCardsIn(ZoneType.Hand)) {
+            inHand.add(c.getName());
+        }
+        for (Option o : s.options) {
+            if (o.steps == null || o.steps.length != 1 || o.steps[0] < 0 || o.steps[0] >= m.C()) {
+                continue;
+            }
+            final Card c = m.cands.get(o.steps[0]).host;
+            if (c == null) {
+                continue;
+            }
+            o.wcScore = prof.getOrDefault(c.getName(), 0.0);
+            o.wcEligible = c.getOwner() == me && !c.isInZone(ZoneType.Hand) && !c.isInZone(ZoneType.Battlefield)
+                    && !inHand.contains(c.getName());
+        }
+        s.wcActive = true;
+    }
+
+    /**
+     * sdcc-wincon-1117: the rule, after the options' values are set. Fires only when every scored option (a value) had
+     * its planner screen run and shows no line, goldfish 0 and reach 0; then {@link WinconProfile#select}. Null = no pick.
+     */
+    static Option wincon(final Scored s) {
+        final int n = s.options.size();
+        final double[] score = new double[n], v = new double[n];
+        final boolean[] el = new boolean[n];
+        boolean allZero = false;
+        int scored = 0;
+        for (int i = 0; i < n; i++) {
+            final Option o = s.options.get(i);
+            score[i] = o.wcScore;
+            el[i] = o.wcEligible && o.fail == null;
+            v[i] = o.value;
+            if (o.wcEligible && o.wcScore > 0) {
+                scored++;
+            }
+            if (Double.isNaN(o.value)) {
+                continue;
+            }
+            final forge.ai.simulation.ForcedWinSolver.Screen sc = o.screen;
+            final boolean zero = Double.isNaN(o.terminal) && sc != null && !sc.failed && sc.lines == 0
+                    && (Double.isNaN(sc.gf) || sc.gf == 0) && (Double.isNaN(sc.reach) || sc.reach == 0);
+            if (!zero) {
+                return null;
+            }
+            allZero = true;
+        }
+        final int pick = WinconProfile.select(score, el, v, allZero);
+        if (pick < 0) {
+            return null;
+        }
+        final Option o = s.options.get(pick);
+        s.wincon = o.label + " " + Math.round(o.wcScore * 1e4) / 1e4 + " (" + scored + " scored)";
+        return o;
     }
 
     private void cards(final Game g, final Player me, final RlCandidates.Menu m, final short[] greedy, final long seed,
@@ -2065,6 +2157,15 @@ public final class ChoiceScorer {
             }
         }
         s.chosen = best;
+        if (s.wcActive) {
+            // sdcc-wincon-1117 (only with winconProfile and the seat's deck in it): a fallback when the search and the
+            // goldfish see nothing for any option; the departure guard (choose) still applies
+            final Option w = wincon(s);
+            if (w != null) {
+                s.chosen = w;
+                return w.policy ? null : w.steps;
+            }
+        }
         if (cfg.lineOnly) {
             return chooseLine(s, own);
         }
@@ -2197,6 +2298,9 @@ public final class ChoiceScorer {
         r.addProperty("over_budget", s.overBudget);
         if (s.held != null) {
             r.addProperty("held", s.held); // discard-guard-1113
+        }
+        if (s.wincon != null) {
+            r.addProperty("wincon", s.wincon); // sdcc-wincon-1117: only when the rule chose
         }
         if (s.unsupported != null) {
             r.addProperty("unsupported", s.unsupported);
