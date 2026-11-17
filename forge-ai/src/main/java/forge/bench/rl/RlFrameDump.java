@@ -425,6 +425,31 @@ public final class RlFrameDump implements PriorityDecisionListener {
             prioFeat.setVersion(feat.version());
             prioFeat.reset();
         }
+        // off the game thread: a taped seat's controller answers a call there from its inner AI (AiTape.controllerHere is
+        // false), so the enumeration's own asks (optional costs, mana from pool, static ability choice) consume no record
+        final java.util.concurrent.Future<Object[]> fu = PRIO_EX.submit(() -> prioFrameIn(g, p, seat, turn));
+        try {
+            return fu.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("prio-decide interrupted", e);
+        } catch (java.util.concurrent.ExecutionException e) {
+            final Throwable c = e.getCause();
+            if (c instanceof RuntimeException) {
+                throw (RuntimeException) c;
+            }
+            throw new IllegalStateException("prio-decide", c);
+        }
+    }
+
+    /** prio-decide-1117: one daemon thread for the menu builds (each replay worker waits on its own build). */
+    private static final java.util.concurrent.ExecutorService PRIO_EX = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+        final Thread t = new Thread(r, "prio-decide");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private Object[] prioFrameIn(final Game g, final Player p, final int seat, final int turn) {
         return PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
             final List<SpellAbility> menu = prioMenu(g, p);
             if (menu == null) {
