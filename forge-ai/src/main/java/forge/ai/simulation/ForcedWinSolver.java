@@ -1760,6 +1760,7 @@ public final class ForcedWinSolver {
         public void on(forge.game.event.GameEventShuffle e) {
             if (e.player() != null && e.player().getId() == solver.me.getId()) {
                 solver.placed.clear();
+                solver.exactBottom.clear(); // sdcc-exact-known-1117 (empty unless an exact start named them)
             }
         }
 
@@ -1811,6 +1812,13 @@ public final class ForcedWinSolver {
             infoStates = InfoStates.find(live); // review #172 S2: find only (attached at bind, on the game thread)
         } else {
             live.subscribeToEvents(new LibraryWatch(this));
+            // sdcc-exact-known-1117: an exact start's named own-library cards, as if this watch had seen them placed (no
+            // entry = nothing; in infoState mode the start pinned them in InfoStates instead)
+            final ExactStartKnown.Entry ek = ExactStartKnown.get(live, me);
+            if (ek != null) {
+                placed.addAll(ek.top);
+                exactBottom.addAll(ek.bottom);
+            }
         }
         if (cfg.frameMemory) {
             // EVAL only (frames mined mid-pile): the seat built its library top before the frame began
@@ -1839,6 +1847,8 @@ public final class ForcedWinSolver {
      * them at their index ({@link #pinnedIn}).
      */
     final Set<Integer> pinned = new HashSet<>();
+    /** sdcc-exact-known-1117: an exact start's known bottom cards (pinned like {@link #pinned}; a shuffle forgets them). */
+    final Set<Integer> exactBottom = new HashSet<>();
 
     /** known-lib-1102: our seat knows the positions of these library cards (each stays at its index). */
     public void notePinned(Iterable<Card> cards) {
@@ -1854,12 +1864,12 @@ public final class ForcedWinSolver {
 
     /** known-lib-1102: the pinned ids in {@code p}'s library (a copy keeps the ids); empty when none are noted. */
     Set<Integer> pinnedIn(Player p) {
-        if (pinned.isEmpty() && isPinned.isEmpty()) {
+        if (pinned.isEmpty() && isPinned.isEmpty() && exactBottom.isEmpty()) {
             return Collections.emptySet();
         }
         final Set<Integer> out = new HashSet<>();
         for (Card c : p.getCardsIn(ZoneType.Library)) {
-            if (pinned.contains(c.getId()) || isPinned.contains(c.getId())) {
+            if (pinned.contains(c.getId()) || isPinned.contains(c.getId()) || exactBottom.contains(c.getId())) {
                 out.add(c.getId());
             }
         }

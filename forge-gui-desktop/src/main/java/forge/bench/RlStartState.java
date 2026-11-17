@@ -145,9 +145,15 @@ public final class RlStartState {
         if (g.has("start_state") && !g.get("start_state").isJsonNull()) {
             throw new IllegalArgumentException("exact_start and start_state together");
         }
-        if (!EXACT_SCHEMA.equals(e.get("schema").getAsString()) || e.keySet().size() != 4 || !e.has("state")
+        // sdcc-exact-known-1117: known_top / known_bottom are optional (absent = 0: nothing known, as before)
+        final int optional = (e.has("known_top") ? 1 : 0) + (e.has("known_bottom") ? 1 : 0);
+        if (!EXACT_SCHEMA.equals(e.get("schema").getAsString()) || e.keySet().size() != 4 + optional || !e.has("state")
                 || !e.has("stop") || !(e.has("seat") || e.has("deck"))) {
-            throw new IllegalArgumentException("exact_start: schema " + EXACT_SCHEMA + ", keys schema, seat | deck, state, stop");
+            throw new IllegalArgumentException("exact_start: schema " + EXACT_SCHEMA + ", keys schema, seat | deck, state, stop"
+                    + " (optional known_top, known_bottom)");
+        }
+        if (knownCount(e, "known_top") < 0 || knownCount(e, "known_bottom") < 0) {
+            throw new IllegalArgumentException("exact_start: known_top, known_bottom >= 0");
         }
         // "deck": the seat is the one playing that deck file (basename); the state names that seat "human", and the
         // text is flipped (human <-> ai) when it sits second, so one seed file serves both seat orders of a pair
@@ -189,11 +195,64 @@ public final class RlStartState {
         return new RlStartState(e, text, seat, stop);
     }
 
+    /** sdcc-exact-known-1117: an optional known_* count of the exact_start object (absent = 0). */
+    static int knownCount(final JsonObject e, final String k) {
+        return e.has(k) && !e.get(k).isJsonNull() ? e.get(k).getAsInt() : 0;
+    }
+
+    /** sdcc-exact-known-1117: the live seat knowledge an exact start's known cards are taught to (null = none). */
+    private forge.bench.rl.RlKnowledge knowledge;
+
+    /** sdcc-exact-known-1117: the game's seat-knowledge tracker (call before the hook runs; null = none). */
+    public void setKnowledge(final forge.bench.rl.RlKnowledge k) {
+        this.knowledge = k;
+    }
+
+    /**
+     * sdcc-exact-known-1117: the seat's own library cards it knows at the installed position: the top {@code top} and the
+     * bottom {@code bottom} cards of its library in the order the state writes them (index 0 = top). Refused when they
+     * overlap or exceed the library.
+     */
+    static List<List<Card>> knownCards(final Player me, final int top, final int bottom) {
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        if (top + bottom > lib.size()) {
+            throw new IllegalArgumentException("exact_start: known_top + known_bottom = " + (top + bottom)
+                    + " > the seat's library (" + lib.size() + ")");
+        }
+        return Arrays.asList(new ArrayList<>(lib.subList(0, top)), new ArrayList<>(lib.subList(lib.size() - bottom, lib.size())));
+    }
+
+    /**
+     * sdcc-exact-known-1117: teach the seat (only) its known own-library cards, into every structure live play fills when
+     * a seat places cards on its library: the seat-knowledge tracker (frames, the scorer's and search's copies, the review
+     * sidecar's knownLibrary), the game's InfoStates when one is attached (observer = the seat), and the live solver's
+     * pile memory ({@link forge.ai.simulation.ExactStartKnown}, read when it starts watching). Returns the cards.
+     */
+    static List<Card> teachKnown(final Game game, final Player me, final int top, final int bottom,
+            final forge.bench.rl.RlKnowledge know) {
+        final List<List<Card>> tb = knownCards(me, top, bottom);
+        final List<Card> all = new ArrayList<>(tb.get(0));
+        all.addAll(tb.get(1));
+        if (know != null) {
+            know.learnOwnLibrary(me, all);
+        }
+        forge.ai.simulation.ExactStartKnown.put(game, me, tb.get(0), tb.get(1));
+        final forge.ai.simulation.InfoStates is = forge.ai.simulation.InfoStates.find(game);
+        if (is != null) {
+            is.pin(me, me, all);
+        }
+        return all;
+    }
+
     private JsonObject installExact(final Game game) {
         final Now gs = new Now();
         gs.parse(Arrays.asList(exactText.split("\\R")));
         gs.now(game);
         final Player me = game.getRegisteredPlayers().get(seat);
+        final int kTop = knownCount(spec, "known_top"), kBottom = knownCount(spec, "known_bottom");
+        if (kTop > 0 || kBottom > 0) {
+            teachKnown(game, me, kTop, kBottom, knowledge); // sdcc-exact-known-1117 (absent: nothing runs)
+        }
         final int[] n = {0};
         game.addPriorityDecisionListener(new forge.game.PriorityDecisionListener() {
             @Override
@@ -213,6 +272,10 @@ public final class RlStartState {
         out.addProperty("route", "exact");
         out.addProperty("turn", game.getPhaseHandler().getTurn());
         out.addProperty("stop", exactStop);
+        if (kTop > 0 || kBottom > 0) {
+            out.addProperty("known_top", kTop); // sdcc-exact-known-1117: only when named
+            out.addProperty("known_bottom", kBottom);
+        }
         return out;
     }
 

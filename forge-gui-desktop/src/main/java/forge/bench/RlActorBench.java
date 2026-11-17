@@ -1230,6 +1230,9 @@ public final class RlActorBench {
                     }
                 });
             }
+            if (startState != null && startState.exact()) {
+                startState.setKnowledge(know); // sdcc-exact-known-1117: read only when the start names known cards
+            }
             match.startGame(game, startState != null ? startState.hook(game) : null);
         } catch (Throwable e) {
             crash = e.toString();
