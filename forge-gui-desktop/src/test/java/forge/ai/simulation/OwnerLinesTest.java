@@ -70,6 +70,13 @@ public class OwnerLinesTest extends forge.ai.AITest {
                         + (best == null ? " none" : " proven=" + best.proven(1) + " pUnopposed=" + best.pUnopposed + " pBelief=" + best.pBelief
                                 + " steps=" + best.steps + " winTurn=" + best.winTurn + " how=" + best.how + " | " + cut(best.text, 260))
                         + " cap=" + s.lastCap() + " || " + s.summary());
+                if ("true".equals(System.getProperty("owner.full"))) {
+                    // sdcc-fetchthin-1117 (opt-in): every proposed line in full (steps with picks), and the probe's timing
+                    for (ForcedWinSolver.Proposal p : props) {
+                        System.out.println("OWNERLINES " + id + " FULL proven=" + p.proven(1) + " pBelief=" + p.pBelief + " | "
+                                + String.valueOf(p.line).replaceAll("\\s+", " "));
+                    }
+                }
             } catch (RuntimeException | Error ex) {
                 System.out.println("OWNERLINES " + id + " PROPOSE failed: " + cut(ex, 200));
             }
