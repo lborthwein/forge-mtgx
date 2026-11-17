@@ -116,6 +116,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          */
         public long lookFloorMs = 0;
         /**
+         * value-run-1117 (0 = off, the default; nothing changes then): with plans.unified, the solver's one deadline at a plan
+         * point is the decision's start plus max(the search budget, this many ms) instead of the search budget alone, so an
+         * offline reference solverCfg (a larger planner and engine budget) runs to its own budget; the look-ahead then keeps
+         * plans.lookFloorMs after it. A teacher / research key for slow offline pilots; never a live setting.
+         */
+        public long solverHardMs = 0;
+        /**
          * kill-line-1106 (off by default): at a point with a non-proven solver line, the search scores only the default and
          * the best line, in the same worlds with the same departZ gate, and no plans are sampled. With a lower
          * solverCfg.budgetMs this reserves the rest of the decision for that comparison.
@@ -175,7 +182,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 "setupMs", "setupHorizon", "setupActive", "setupMargin", "setupMinWorlds", "setupMaxLoss", "setupBreadth", "setupFailShare",
                 "samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lookFloorMs", "lineFloorAlways", "lineDuel", "unified", "planX",
+                "defendCfg", "lineChoices", "replanOnEntry", "lineKeep", "lineFloor", "lookFloorMs", "solverHardMs", "lineFloorAlways", "lineDuel", "unified", "planX",
                 "lineHorizon", "exactActions"));
 
         public static Spec parse(final JsonObject o) {
@@ -205,6 +212,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("lineKeep")) s.lineKeep = o.get("lineKeep").getAsBoolean();
             if (o.has("lineFloor")) s.lineFloor = o.get("lineFloor").getAsDouble();
             if (o.has("lookFloorMs")) s.lookFloorMs = o.get("lookFloorMs").getAsLong();
+            if (o.has("solverHardMs")) s.solverHardMs = o.get("solverHardMs").getAsLong();
             if (o.has("lineFloorAlways")) s.lineFloorAlways = o.get("lineFloorAlways").getAsBoolean();
             if (o.has("lineDuel")) s.lineDuel = o.get("lineDuel").getAsBoolean();
             if (o.has("unified")) s.unified = o.get("unified").getAsBoolean();
@@ -224,6 +232,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("setupBreadth")) s.setupBreadth = o.get("setupBreadth").getAsInt();
             if (!"seat".equals(s.lineChoices) && !"forge".equals(s.lineChoices)) {
                 throw new IllegalArgumentException("plans.lineChoices must be seat or forge, not " + s.lineChoices);
+            }
+            if (s.solverHardMs < 0 || s.solverHardMs > 600_000) {
+                throw new IllegalArgumentException("plans.solverHardMs must be 0..600000, not " + s.solverHardMs);
             }
             if (s.lookFloorMs < 0 || s.lookFloorMs > 60_000) {
                 throw new IllegalArgumentException("plans.lookFloorMs must be 0..60000, not " + s.lookFloorMs);
@@ -1188,7 +1199,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             final long a = System.nanoTime();
             // unified-search-1106; wu-reads-1107: from b0, the decision's start on the budget clock (t0 when workUnits is
             // off), so with workUnits the one deadline is on the work clock like every deadline the solver compares it with
-            long hard = spec.unified ? b0 + forge.ai.WallClock.budgetMs(rs.budgetMs()) * 1_000_000L : 0L;
+            long hard = spec.unified ? b0 + forge.ai.WallClock.budgetMs(Math.max(rs.budgetMs(), spec.solverHardMs)) * 1_000_000L : 0L;
             final long wms = windowWorkMs();
             final boolean windowed = wms > 0 && anyWindow() && offWindow(g);
             if (windowed) {
