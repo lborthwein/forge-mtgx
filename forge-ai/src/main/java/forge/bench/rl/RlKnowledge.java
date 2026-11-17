@@ -583,6 +583,27 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         return known[s].size();
     }
 
+    /**
+     * sdcc-exact-known-1117 (called only by an exact start that names known own-library cards): seat {@code owner} knows
+     * these cards of its own library (the order it placed them in before the installed position), as its own look while
+     * arranging them would have taught it ({@link #onLook}); the other seat forgets them. Unlike a look, nothing is marked
+     * arranged (no resolution follows).
+     */
+    public void learnOwnLibrary(final Player owner, final List<Card> cards) {
+        final int s = seatOf(owner);
+        for (Card c : cards) {
+            if (c == null || c.getOwner() != owner || !c.isInZone(ZoneType.Library)) {
+                continue;
+            }
+            learn(s, c, "exact_start");
+            for (int t = 0; t < 2; t++) {
+                if (t != s) {
+                    forget(t, c.getId(), "exact_start: the other seat's own library");
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------------------------------------------ bridge hooks
 
     @Override
