@@ -129,6 +129,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean stack = false;
         /** Also search pass (second, after the default), as K8's candidate set does, whatever its prior. */
         public boolean includePass = false;
+        /**
+         * activate-miss-1116 (Fix B; 0 = off, the default, and then nothing changes): at our own main-phase priority with
+         * an empty stack, every distinct given candidate past the breadth-B cut is also searched, in the given order
+         * (default, then prior), up to this many in all. The main-phase mirror of
+         * {@link forge.ai.simulation.LookaheadSearch.Config#offTurnBreadth}, which never reaches the given path. Measured
+         * cut before search on the owner-dd exact-start read: 'act' entries 0.32, cast 0.18, land 0.10 at breadth 4.
+         * General: a count of candidates, no card, kind or effect is named. Written to JSON only when on.
+         */
+        public int mainBreadth = 0;
         /** host:port of tools/ml/rl/search_server.py. */
         public String server;
         public int readTimeoutMs = 120_000;
@@ -450,7 +459,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "departMedian", "stack", "server", "readTimeoutMs",
-                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
+                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "mainBreadth", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
@@ -517,6 +526,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
             if (o.has("includePass")) c.includePass = o.get("includePass").getAsBoolean();
+            if (o.has("mainBreadth")) c.mainBreadth = o.get("mainBreadth").getAsInt();
             if (o.has("server") && !o.get("server").isJsonNull()) c.server = o.get("server").getAsString();
             if (o.has("readTimeoutMs")) c.readTimeoutMs = o.get("readTimeoutMs").getAsInt();
             if (o.has("cpuCapMs")) c.cpuCapMs = o.get("cpuCapMs").getAsLong();
@@ -650,6 +660,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (worlds < 1 || breadth < 2 || horizon < 1) {
                 throw new IllegalArgumentException("search: worlds >= 1, breadth >= 2, horizon >= 1");
             }
+            if (mainBreadth != 0 && mainBreadth <= breadth) {
+                throw new IllegalArgumentException("search.mainBreadth: 0 (off) or more than breadth (" + breadth + ")");
+            }
             if (budgetMs < 0 || connectTimeoutMs < 1 || readTimeoutMs < 1) {
                 throw new IllegalArgumentException("search: budgetMs >= 0, connectTimeoutMs >= 1, readTimeoutMs >= 1");
             }
@@ -781,6 +794,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("departMedian", departMedian);
             o.addProperty("stack", stack);
             o.addProperty("includePass", includePass);
+            if (mainBreadth > 0) {
+                o.addProperty("mainBreadth", mainBreadth);
+            }
             o.addProperty("cpuCapMs", cpuCapMs);
             o.addProperty("seedSalt", seedSalt);
             if (policySha != null) {
@@ -1705,6 +1721,29 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return lastReason;
     }
 
+    /**
+     * activate-miss-1116 (Fix B): the breadth for the given candidates. {@code base} (the spec's breadth, or a plan
+     * stage's) unless {@code mainBreadth} is on and this is our own main phase with an empty stack; then every given
+     * entry up to {@code mainBreadth}, never fewer than {@code base}.
+     */
+    static int givenBreadth(final int base, final int mainBreadth, final boolean ownMainEmptyStack, final int entries) {
+        if (mainBreadth <= base || !ownMainEmptyStack) {
+            return base;
+        }
+        return Math.max(base, Math.min(mainBreadth, entries));
+    }
+
+    private int givenBreadth(final Game g, final Player me, final int base, final int entries) {
+        final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+        final boolean own = cfg.mainBreadth > 0 && g.getStack().isEmpty() && ph.isPlayerTurn(me) && ph.getPhase() != null
+                && ph.getPhase().isMain();
+        lastBreadth = givenBreadth(base, cfg.mainBreadth, own, entries);
+        return lastBreadth;
+    }
+
+    /** activate-miss-1116: the breadth the last given search used (logged only when mainBreadth is on). */
+    private int lastBreadth;
+
     private int decide0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
         clock = null;
@@ -1900,8 +1939,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 System.err.println("[plan-look-floor] turn=" + g.getPhaseHandler().getTurn() + " phase="
                         + g.getPhaseHandler().getPhase() + " addedMs=" + (lt0 - bt0) / 1_000_000L);
             }
-            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth), stage.plans, stage.labels, kt, lt0, sb.threat, ex)
-                    : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
+            r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : givenBreadth(g, me, sb.breadthAt(stage, cfg.breadth), given.size()), stage.plans, stage.labels, kt, lt0, sb.threat, ex)
+                    : ls.decideGivenPlans(g, me, given, givenBreadth(g, me, cfg.breadth, given.size()), null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
             probeAsks.clear();
@@ -1912,9 +1951,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             for (int i = 0; i < order.size(); i++) {
                 givenPrior[i] = by.get(order.get(i))[0];
             }
-            r = ls.decideGiven(g, me, given, cfg.breadth, this);
+            r = ls.decideGiven(g, me, given, givenBreadth(g, me, cfg.breadth, given.size()), this);
         } else {
-            r = ls.decideGiven(g, me, given, cfg.breadth);
+            r = ls.decideGiven(g, me, given, givenBreadth(g, me, cfg.breadth, given.size()));
         }
         ck.ended(DecisionClock.Phase.GIVEN);
         tookForce(r);
@@ -2063,6 +2102,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
             row.addProperty("C", c);
             row.addProperty("entries", by.size());
+            if (cfg.mainBreadth > 0) {
+                row.addProperty("breadth_used", lastBreadth); // activate-miss-1116: written only when the key is on
+            }
             row.addProperty("v_root", sc.valueObs);
             if (cfg.reach != null && reachCfg().gate) {
                 row.addProperty("reach_on", reachOn);
