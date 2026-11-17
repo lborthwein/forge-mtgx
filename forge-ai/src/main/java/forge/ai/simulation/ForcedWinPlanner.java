@@ -2702,6 +2702,24 @@ public final class ForcedWinPlanner {
         s.remaining.remove(Integer.valueOf(card));
     }
 
+    /** sdcc-sacmana-1117 (grantSacMana only): the card gives our permanents sacrifice-for-mana: a mana card for the classes. */
+    private boolean grantsSacMana(ACard a) {
+        if (!lim.grantSacMana) {
+            return false;
+        }
+        for (Abil ab : a.fromHand) {
+            if (ab.has(EffKind.GRANT_SAC_MANA)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int orderOf(ACard a) {
+        final int o = a.order();
+        return o > 2 && grantsSacMana(a) ? 2 : o;
+    }
+
     /** One card per distinct name, ordered by observed affordance (wins, draws, mana, lands, protection), plus one other. */
     private List<Integer> classes(List<Integer> from) {
         return classes(from, lim.classes);
@@ -2717,13 +2735,13 @@ public final class ForcedWinPlanner {
             if (!names.add(a.name)) {
                 continue;
             }
-            if (a.useful() && !(a.land && a.sourceColors == 0)) {
+            if ((a.useful() || grantsSacMana(a)) && !(a.land && a.sourceColors == 0)) {
                 useful.add(r);
             } else if (other < 0) {
                 other = r;
             }
         }
-        useful.sort(Comparator.comparingInt((Integer c) -> cards.get(c).order()).thenComparingInt(c -> cards.get(c).id));
+        useful.sort(Comparator.comparingInt((Integer c) -> orderOf(cards.get(c))).thenComparingInt(c -> cards.get(c).id));
         final List<Integer> out = new ArrayList<>(useful.subList(0, Math.min(useful.size(), cap)));
         if (other >= 0) {
             out.add(other);
