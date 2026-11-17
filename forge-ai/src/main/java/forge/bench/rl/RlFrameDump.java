@@ -19,6 +19,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import forge.bench.PlayerControllerBridge;
+import forge.bench.StateEncoder;
 import forge.game.Game;
 import forge.game.PriorityDecisionListener;
 import forge.game.player.Player;
@@ -156,6 +157,20 @@ public final class RlFrameDump implements PriorityDecisionListener {
     private final Map<String, Integer> byMethod = new TreeMap<>();
     /** dump-menus-1105: menus on; the knowledge tracker menus fork; their featurizer; records; counts. */
     private final boolean menus;
+
+    /**
+     * prio-decide-1117 (research, offline; off unless -Dforge.bench.frameDump.prioDecide=true): at each in-band priority
+     * decision of a taped seat, the seat's PRIORITY DECIDE frame with its full candidate menu (the menu as the review
+     * observer builds it: pass + the seat's legal spell abilities, RlCandidates "chooseSpellAbilityToPlay") is written as
+     * a {@code row_kind: "prio"} record after the decision, {@code choice_ord} = the played candidate (absent when the
+     * played action maps to no candidate). Trivial, unposable and capped menus write no record (counted). For checkpoint
+     * policy drift on the pilot's own decisions. Off: nothing here runs and every output is unchanged.
+     */
+    static final boolean PRIO_DECIDE = Boolean.getBoolean("forge.bench.frameDump.prioDecide");
+    private RlFeaturizer prioFeat;
+    /** The pending priority frame: {seat, ord, turn, tbe, phase, stack, stateSha, payload, C, menu, Menu}. */
+    private Object[] prioPending;
+    private int prioRows = 0, prioTrivial = 0, prioUnposed = 0, prioCapped = 0, prioUnplayed = 0;
     private final RlKnowledge knowledge;
     private final RlFeaturizer menuFeat;
     private final List<byte[]> menuRecords = new ArrayList<>();
@@ -239,6 +254,7 @@ public final class RlFrameDump implements PriorityDecisionListener {
     public void beforeDecision(final Player p) {
         final Game g = game;
         final int ord = decisions++;
+        prioPending = null;
         if (g == null || g.isGameOver()) {
             return;
         }
@@ -254,10 +270,144 @@ public final class RlFrameDump implements PriorityDecisionListener {
         final Object[] got = frame(g, p, seat, turn, ord);
         priorityRows++;
         row(seat, ord, turn, tbe, phase, stack, stateSha, (byte[]) got[0], (Integer) got[1], "priority", -1, null);
+        if (PRIO_DECIDE) {
+            prioPending = null;
+            final Object[] pf = prioFrame(g, p, seat, turn);
+            if (pf != null) {
+                prioPending = new Object[] {seat, ord, turn, tbe, phase, stack, stateSha, pf[0], pf[1], pf[2], pf[3]};
+            }
+        }
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public void afterDecision(final Player p, final List<SpellAbility> chosen) {
+        if (!PRIO_DECIDE || prioPending == null) {
+            return;
+        }
+        final Object[] q = prioPending;
+        prioPending = null;
+        final Game g = game;
+        if (g == null || g.getRegisteredPlayers().indexOf(p) != (Integer) q[0]) {
+            return;
+        }
+        final List<SpellAbility> menu = (List<SpellAbility>) q[9];
+        final RlCandidates.Menu m = (RlCandidates.Menu) q[10];
+        int entry = -1;
+        if (chosen == null || chosen.isEmpty()) {
+            entry = 0;
+        } else {
+            final SpellAbility c = chosen.get(0);
+            for (int pass = 0; pass < 2 && entry < 0; pass++) {
+                for (int i = 0; i < menu.size(); i++) {
+                    final SpellAbility s = menu.get(i);
+                    if (pass == 0 ? s == c : (s.getHostCard() != null && c.getHostCard() != null
+                            && s.getHostCard().getId() == c.getHostCard().getId()
+                            && java.util.Objects.equals(s.getDescription(), c.getDescription()))) {
+                        entry = i + 1;
+                        break;
+                    }
+                }
+            }
+        }
+        int cand = -1;
+        for (int i = 0; entry >= 0 && i < m.C(); i++) {
+            if (RlSearch.choiceOf(m, i) == entry) {
+                cand = i;
+                break;
+            }
+        }
+        if (cand < 0) {
+            prioUnplayed++;
+        }
+        prioRows++;
+        row((Integer) q[0], (Integer) q[1], (Integer) q[2], (Integer) q[3], (String) q[4], (Integer) q[5], (String) q[6],
+                (byte[]) q[7], (Integer) q[8], "prio", cand, "prioDecide");
+    }
+
+    /** prio-decide-1117: the seat's PRIORITY decide frame with its full menu, or null (trivial / unposable / capped). */
+    private Object[] prioFrame(final Game g, final Player p, final int seat, final int turn) {
+        if (prioFeat == null) {
+            prioFeat = new RlFeaturizer(feat.index());
+            prioFeat.setVersion(feat.version());
+            prioFeat.reset();
+        }
+        return PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+            final List<SpellAbility> menu = RlReviewObserver.legalSpellAbilities(g, p);
+            final JsonObject body = new JsonObject();
+            final JsonArray items = new JsonArray();
+            items.add(StateEncoder.encodeSpellAbility(null));
+            for (SpellAbility sa : menu) {
+                items.add(StateEncoder.encodeSpellAbility(sa));
+            }
+            body.add("menu", items);
+            final RlCandidates.Menu m = RlCandidates.build(g, p, "chooseSpellAbilityToPlay", "priority", body, menu);
+            if (m == null || m.unposable != null) {
+                prioUnposed++;
+                return null;
+            }
+            if (m.trivial || menu.isEmpty()) {
+                prioTrivial++;
+                return null;
+            }
+            if (m.C() > RlSchema.C_MAX || m.S() > RlSchema.S_MAX) {
+                prioCapped++;
+                return null;
+            }
+            // a fork of the seat's tracker: this observation settles nothing the frames see
+            prioFeat.setKnowledge(knowledge == null ? null : knowledge.forkFor(g));
+            final RlFeaturizer.Obs o = prioFeat.observe(g, p, m.mullK, false, m);
+            m.bind(o, prioFeat, p);
+            final RlWire.Decide f = o.version == 2 ? RlWire.Decide.v2() : new RlWire.Decide();
+            f.gameUid = uid;
+            f.decIdx = decisions - 1;
+            f.seat = seat;
+            f.family = m.family;
+            f.mode = m.mode;
+            f.flags = (o.truncated ? RlWire.F_TRUNC_TOKENS : 0) | (o.droppedRefs ? RlWire.F_DROPPED_REFS : 0);
+            f.minPick = m.minPick;
+            f.maxPick = m.maxPick;
+            f.turn = Math.min(0xffff, turn);
+            f.L = o.L;
+            f.D = o.D;
+            f.C = m.C();
+            f.S = m.S();
+            f.P = 0;
+            f.tokCard = o.tokCard;
+            f.tokZone = o.tokZone;
+            f.tokAttr = o.tokAttr;
+            f.deckCard = o.deckCard;
+            f.deckCnt = o.deckCnt;
+            System.arraycopy(o.scal, 0, f.scal, 0, RlSchema.N_SCAL);
+            System.arraycopy(o.ctx, 0, f.ctx, 0, f.nCtx());
+            f.candKind = m.kindA;
+            f.candTok = m.tok;
+            f.candCard = m.card;
+            f.candTgt = m.tgt;
+            f.candSlot = m.slot;
+            f.candNum = m.num;
+            f.candAbility = m.ability;
+            f.candFlags = m.flagsA;
+            f.slotTok = m.slotTok;
+            if (o.version == 2) {
+                f.R = o.R;
+                f.F = o.F;
+                f.Dr = o.Dr;
+                f.tokBits = o.tokBits;
+                f.relSrc = o.relSrc;
+                f.relDst = o.relDst;
+                f.relType = o.relType;
+                f.relArg = o.relArg;
+                f.relNum = o.relNum;
+                f.factTok = o.factTok;
+                f.factId = o.factId;
+                f.factArg = o.factArg;
+                f.factNum = o.factNum;
+                f.restCard = o.restCard;
+                f.restCnt = o.restCnt;
+            }
+            return new Object[] {RlWire.encodeDecide(f), f.C, menu, m};
+        }));
     }
 
     /** A forced choice ask of a taped seat (after its recorded answer, as the labeller's choice rows). */
@@ -389,6 +539,14 @@ public final class RlFrameDump implements PriorityDecisionListener {
         gr.addProperty("rows_void", digestEqual ? 0 : records.size());
         gr.addProperty("priority_rows", priorityRows);
         gr.addProperty("choice_rows", choiceRows);
+        if (PRIO_DECIDE) {
+            // prio-decide-1117 (absent when off: games rows unchanged)
+            gr.addProperty("prio_rows", prioRows);
+            gr.addProperty("prio_trivial", prioTrivial);
+            gr.addProperty("prio_unposed", prioUnposed);
+            gr.addProperty("prio_capped", prioCapped);
+            gr.addProperty("prio_unplayed", prioUnplayed);
+        }
         final JsonObject bm = new JsonObject();
         for (Map.Entry<String, Integer> e : byMethod.entrySet()) {
             bm.addProperty(e.getKey(), e.getValue());
