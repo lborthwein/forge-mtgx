@@ -65,6 +65,9 @@ public final class ForcedWinProbe {
         boolean won, lost, entered, played;
         /** sdcc-protect-1117 (a PROTECT_PASS run only): our player gained protection from everything or from creatures. */
         boolean gainedProtection;
+        /** sdcc-sacmana-1117 (a GRANT_SAC run only): permanents that gained a sacrifice-for-mana ability, its colours, all lands. */
+        int grantSac, grantSacColors;
+        boolean grantSacLands = true;
         String error;
         int lifeDelta, oppLifeDelta;
         final int[] produced = new int[6];
@@ -226,6 +229,11 @@ public final class ForcedWinProbe {
     static final ThreadLocal<Boolean> PROTECT_PASS = ThreadLocal.withInitial(() -> false);
     /** sdcc-protect-1117: set by a drawGrowth reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> DRAW_GROWTH = ThreadLocal.withInitial(() -> false);
+    /**
+     * sdcc-sacmana-1117: set by a grantSacMana reader around its learning (false = off). On, a run notes the permanents of
+     * ours that gained a "sacrifice this: add mana" ability while the probed thing resolved ({@link EffKind#GRANT_SAC_MANA}).
+     */
+    static final ThreadLocal<Boolean> GRANT_SAC = ThreadLocal.withInitial(() -> false);
     /** sdcc-tutorcast-1110: the most cards a search-and-cast spell is observed with (one sandbox each), and of those tried first. */
     static final int CAST_SWEEP = 48, CAST_DISCOVER = 4;
 
@@ -622,6 +630,7 @@ public final class ForcedWinProbe {
             o.handBefore = me.getCardsIn(ZoneType.Hand).size() - (card.isInZone(ZoneType.Hand) ? 1 : 0);
             o.gyBefore = me.getCardsIn(ZoneType.Graveyard).size();
             o.libBefore = me.getCardsIn(ZoneType.Library).size();
+            final Map<Integer, Integer> sacBefore = GRANT_SAC.get() ? sacMana(me) : null; // sdcc-sacmana-1117
             o.played = act.apply(g, me, card);
             if (!o.played) {
                 o.error = o.error == null ? "not played" : o.error;
@@ -658,6 +667,22 @@ public final class ForcedWinProbe {
             o.devotionAfter = dev;
             if (PROTECT_PASS.get()) {
                 o.gainedProtection = passProtection(me) > prot0; // sdcc-protect-1117
+            }
+            if (sacBefore != null) {
+                // sdcc-sacmana-1117: permanents (other than the probed card) with more sacrifice-for-mana abilities now
+                for (Map.Entry<Integer, Integer> e : sacMana(me).entrySet()) {
+                    if (e.getKey() == cardId) {
+                        continue;
+                    }
+                    final int sb = sacBefore.getOrDefault(e.getKey(), 0);
+                    final int sa2 = e.getValue();
+                    if ((sa2 >>> 8) > (sb >>> 8)) {
+                        o.grantSac++;
+                        o.grantSacColors |= sa2 & 0x3F;
+                        final Card gc = g.findById(e.getKey());
+                        o.grantSacLands &= gc != null && gc.isLand();
+                    }
+                }
             }
         } catch (RuntimeException | StackOverflowError e) {
             o.error = String.valueOf(e);
@@ -3004,6 +3029,39 @@ public final class ForcedWinProbe {
         return null;
     }
 
+    /**
+     * sdcc-sacmana-1117: per battlefield permanent of ours, (number of its mana abilities whose cost sacrifices it) << 8
+     * | the colours they make; permanents with none are left out.
+     */
+    static Map<Integer, Integer> sacMana(Player me) {
+        final Map<Integer, Integer> out = new java.util.HashMap<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            int n = 0, colors = 0;
+            for (SpellAbility m : c.getManaAbilities()) {
+                if (m.getManaPart() == null || m.getPayCosts() == null) {
+                    continue;
+                }
+                boolean self = false;
+                for (forge.game.cost.CostPart p : m.getPayCosts().getCostParts()) {
+                    self |= p instanceof forge.game.cost.CostSacrifice s && s.payCostFromSource();
+                }
+                if (!self) {
+                    continue;
+                }
+                n++;
+                for (int i = 0; i < 6; i++) {
+                    if (m.canProduce(ForcedWinModel.SHORT[i])) {
+                        colors |= 1 << i;
+                    }
+                }
+            }
+            if (n > 0) {
+                out.put(c.getId(), n << 8 | colors);
+            }
+        }
+        return out;
+    }
+
     /** sdcc-protect-1117: the moves of a card from our library to our hand in a run's trace. */
     static int libraryToHand(List<String> trace) {
         int n = 0;
@@ -3046,6 +3104,9 @@ public final class ForcedWinProbe {
         ab.effects.addAll(o.effects);
         ab.counter = sa.getApi() == forge.game.ability.ApiType.Counter;
         ab.protectsPass = o.gainedProtection; // sdcc-protect-1117 (false unless a PROTECT_PASS run saw it)
+        if (o.grantSac > 0 && o.grantSacColors != 0) {
+            ab.effects.add(new Eff(EffKind.GRANT_SAC_MANA, o.grantSacLands ? 1 : 2, o.grantSacColors)); // sdcc-sacmana-1117
+        }
         netReceipt(sa.getHostCard() == null ? "?" : sa.getHostCard().getName(), ab.kind + (variant == null ? "" : "@" + variant),
                 ab.effects, o); // sdcc-draws-1110 (a probeSettle run with receipts only)
         return ab;

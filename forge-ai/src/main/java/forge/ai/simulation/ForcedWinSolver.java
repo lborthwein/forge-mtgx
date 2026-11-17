@@ -365,6 +365,11 @@ public final class ForcedWinSolver {
          */
         public boolean costTax = false;
         /**
+         * sdcc-sacmana-1117 (off by default, and then nothing changes): a spell observed giving our permanents "sacrifice
+         * this: add mana" until end of turn lets the plan sacrifice them for that mana, after their own.
+         */
+        public boolean grantSacMana = false;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -1007,6 +1012,7 @@ public final class ForcedWinSolver {
             c.protectUntilNext = "true".equals(get.apply("protectUntilNext")); // sdcc-protect-1117
             c.drawGrowth = "true".equals(get.apply("drawGrowth")); // sdcc-protect-1117
             c.costTax = "true".equals(get.apply("costTax")); // sdcc-costtax-1117
+            c.grantSacMana = "true".equals(get.apply("grantSacMana")); // sdcc-sacmana-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1097,6 +1103,7 @@ public final class ForcedWinSolver {
                 + (payKeepUse ? " payKeepUse" : "") // sdcc-paykeep-1117
                 + (protectUntilNext ? " protectUntilNext" : "") + (drawGrowth ? " drawGrowth" : "") // sdcc-protect-1117
                 + (costTax ? " costTax" : "") // sdcc-costtax-1117
+                + (grantSacMana ? " grantSacMana" : "") // sdcc-sacmana-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -1597,6 +1604,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.drawGrowth) {
             this.reader.drawGrowth = true; // sdcc-protect-1117
+        }
+        if (cfg.grantSacMana) {
+            this.reader.grantSacMana = true; // sdcc-sacmana-1117
         }
         if (cfg.sourceLeaves) {
             this.reader.sourceLeaves = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
@@ -4503,6 +4513,7 @@ public final class ForcedWinSolver {
         lim.protectUntilNext = cfg.protectUntilNext; // sdcc-protect-1117
         lim.drawGrowth = cfg.drawGrowth; // sdcc-protect-1117
         lim.costTax = cfg.costTax; // sdcc-costtax-1117
+        lim.grantSacMana = cfg.grantSacMana; // sdcc-sacmana-1117
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
         return lim;
     }
