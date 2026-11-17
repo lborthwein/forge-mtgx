@@ -1428,6 +1428,8 @@ public final class LookaheadSearch {
 
     /** Diagnostics: one "[lookahead-explain]" JSON line per searched decision (candidates, choices, per-world values). */
     private static final boolean EXPLAIN = Boolean.getBoolean("lookahead.explain");
+    /** leaf-note-1117: -Dsdcc.leafNote=true writes each given decision's per-world value sources to stderr. */
+    static final boolean LEAF_NOTE = Boolean.getBoolean("sdcc.leafNote");
     /** EXPLAIN only: the current decision's candidates' choices as prepared in world 0. */
     private String[] explainChoices;
 
@@ -3366,6 +3368,41 @@ public final class LookaheadSearch {
             res.leafFallback = stats.leafFallbacks != fb;
         }
         final boolean overBudget = aborted > 0;
+        if (LEAF_NOTE) {
+            // leaf-note-1117 (diagnostics only, -Dsdcc.leafNote=true; no effect on any choice): per given candidate and
+            // world, where the value came from: a terminal play-out (pTerminal), the value head at the horizon leaf, a
+            // capped play-out, or a dedup / reuse of another candidate's play-out; with the turn and phase reached
+            final JsonObject x = new JsonObject();
+            x.addProperty("decision", index);
+            x.addProperty("turn", turn);
+            x.addProperty("phase", String.valueOf(ph.getPhase()));
+            x.addProperty("horizonTurns", cfg.horizonTurns);
+            final JsonArray ca = new JsonArray();
+            for (int c = 0; c < n; c++) {
+                final JsonObject co = new JsonObject();
+                co.addProperty("label", cands.get(c).label);
+                co.addProperty("ok", ok[c]);
+                final JsonArray ws = new JsonArray();
+                for (int w = 0; w < k; w++) {
+                    final Rollout r = outs[c][w];
+                    final JsonObject wo = new JsonObject();
+                    wo.addProperty("v", values[c][w]);
+                    if (r != null) {
+                        wo.addProperty("src", r.dedupFrom >= 0 ? "dedup" + r.dedupFrom : r.reused ? "reused"
+                                : !Double.isNaN(r.pTerminal) ? "terminal" : r.capped ? "capped-leaf" : "leaf");
+                        wo.addProperty("pT", Double.isNaN(r.pTerminal) ? null : r.pTerminal);
+                        wo.addProperty("steps", r.steps);
+                        wo.addProperty("endTurn", r.endTurn);
+                        wo.addProperty("endPhase", r.endPhase);
+                    }
+                    ws.add(wo);
+                }
+                co.add("worlds", ws);
+                ca.add(co);
+            }
+            x.add("candidates", ca);
+            System.err.println("[leaf-note] " + x);
+        }
         final double[] ev = new double[n];
         for (int c = 0; c < n; c++) {
             double s = 0;
@@ -6258,6 +6295,9 @@ public final class LookaheadSearch {
         long keysComputed, keyNanos;
         /** Dedup: the earlier candidate whose value this play-out took (-1 = played out), and the steps that saved. */
         int dedupFrom = -1;
+        /** leaf-note-1117 (diagnostics only): the play-out's last turn and phase (-1 / null when not played out). */
+        int endTurn = -1;
+        String endPhase;
         int dedupStepsSaved;
         /** Dedup verify: the earlier candidate this play-out would have taken its value from, and at which step. */
         int wouldDedupFrom = -1;
@@ -6888,6 +6928,8 @@ public final class LookaheadSearch {
                 r.fingerprint = src.fingerprint;
             } else {
                 r.capped = !g.isGameOver() && !watch.reached;
+                r.endTurn = g.getPhaseHandler().getTurn();
+                r.endPhase = String.valueOf(g.getPhaseHandler().getPhase());
                 if (p.noLeaf) {
                     // bvw-step2-fork-1027 (OPR): only the game's result counts; a roll-out at its cap is not scored
                     r.pTerminal = terminalP(g, me);
