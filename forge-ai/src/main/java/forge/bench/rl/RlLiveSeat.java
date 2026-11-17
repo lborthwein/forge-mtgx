@@ -358,6 +358,10 @@ public final class RlLiveSeat {
                     case "stack": c.stack = flagKey(k, v); break;
                     case "blockSampleSeed": c.blockSampleSeed = flagKey(k, v); break;
                     case "infoAttach": c.infoAttach = flagKey(k, v); break;
+                    // sdcc-c1-priogf-1117 (absent = off): the goldfish tie-break among near-equal main-phase candidates
+                    case "prioGf": c.prioGf = Integer.parseInt(v); break;
+                    case "prioGfMargin": c.prioGfMargin = Double.parseDouble(v); break;
+                    case "prioGfTurns": c.prioGfTurns = Integer.parseInt(v); break;
                     default:
                         if (k.startsWith("choiceScorer.")) {
                             c.choiceScorer = objKey(c.choiceScorer, k, k.substring("choiceScorer.".length()), v);
