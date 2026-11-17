@@ -978,7 +978,7 @@ public final class RlActorBench {
             out.guardError = "seeding: " + e.getMessage();
             return out;
         }
-        if (seeding != null && "eval".equals(mode)) {
+        if (seeding != null && !seeding.exactHand() && "eval".equals(mode)) {
             out.guardError = "seeding is a TRAIN curriculum: not allowed in eval mode";
             return out;
         }
