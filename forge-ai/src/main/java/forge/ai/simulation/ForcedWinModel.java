@@ -886,6 +886,11 @@ public final class ForcedWinModel {
         int pendingId = -1;
         /** sdcc-etb-1110 (landEntersProbe; null = off): this position's land entries, asked when a plan plays a land. */
         LandEntry landEntry;
+        /**
+         * sdcc-costtax-1117 (costTax; null = off): for our spells in hand, library and graveyard, "card id|cost text" ->
+         * the change of its generic mana under this position's cost adjustments (taxes positive, reductions negative).
+         */
+        java.util.Map<String, Integer> tax;
 
         String describe() {
             return "life=" + life + " opp=" + oppLife + " oppLib=" + oppLibrary + " landDrop=" + landDrop + " storm="

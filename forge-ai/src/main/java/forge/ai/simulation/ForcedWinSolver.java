@@ -358,6 +358,13 @@ public final class ForcedWinSolver {
          */
         public boolean drawGrowth = false;
         /**
+         * sdcc-costtax-1117 (off by default, and then nothing changes): each of our spells' cost in the plan changes by
+         * the generic mana the engine's own cost adjustment adds or removes in this position (an opponent's tax on
+         * noncreature spells, a cost reducer of ours). Off, the planner paid printed costs and every line the engine
+         * then taxed failed its verification.
+         */
+        public boolean costTax = false;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -999,6 +1006,7 @@ public final class ForcedWinSolver {
             c.payKeepUse = "true".equals(get.apply("payKeepUse")); // sdcc-paykeep-1117
             c.protectUntilNext = "true".equals(get.apply("protectUntilNext")); // sdcc-protect-1117
             c.drawGrowth = "true".equals(get.apply("drawGrowth")); // sdcc-protect-1117
+            c.costTax = "true".equals(get.apply("costTax")); // sdcc-costtax-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1088,6 +1096,7 @@ public final class ForcedWinSolver {
                 + (fetchThin ? " fetchThin" : "") // sdcc-fetchthin-1117
                 + (payKeepUse ? " payKeepUse" : "") // sdcc-paykeep-1117
                 + (protectUntilNext ? " protectUntilNext" : "") + (drawGrowth ? " drawGrowth" : "") // sdcc-protect-1117
+                + (costTax ? " costTax" : "") // sdcc-costtax-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -4493,6 +4502,7 @@ public final class ForcedWinSolver {
         lim.fetchThin = cfg.fetchThin; // sdcc-fetchthin-1117
         lim.protectUntilNext = cfg.protectUntilNext; // sdcc-protect-1117
         lim.drawGrowth = cfg.drawGrowth; // sdcc-protect-1117
+        lim.costTax = cfg.costTax; // sdcc-costtax-1117
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
         return lim;
     }
@@ -6260,6 +6270,9 @@ public final class ForcedWinSolver {
                 if (cfg.landEntersProbe && hp != null) {
                     hp.landEntry = reader.landEntry(g, pg); // sdcc-etb-1110 (its sandboxes copy the probe root, as the reader's)
                 }
+                if (cfg.costTax && hp != null) {
+                    hp.tax = spellTaxes(g, pg, hp); // sdcc-costtax-1117
+                }
                 return hp;
             }));
         }
@@ -6273,7 +6286,64 @@ public final class ForcedWinSolver {
         if (cfg.landEntersProbe && pos != null) {
             pos.landEntry = reader.landEntry(live, me); // sdcc-etb-1110: asked when a plan from this position plays a land
         }
+        if (cfg.costTax && pos != null) {
+            pos.tax = spellTaxes(live, me, pos); // sdcc-costtax-1117
+        }
         return pos;
+    }
+
+    /**
+     * sdcc-costtax-1117 (costTax): for each spell (and alternative cost) of our cards the position models, the change of
+     * its total mana under the engine's cost adjustment in this game state (test mode: nothing is paid or changed), keyed
+     * "card id|cost text" as {@link ForcedWinModel.Abil#costKey}. Only nonzero changes are kept; a card that fails is skipped.
+     */
+    static java.util.Map<String, Integer> spellTaxes(final Game g, final Player me, final Position pos) {
+        final java.util.Map<String, Integer> out = new java.util.HashMap<>();
+        final java.util.Set<Integer> ids = new java.util.HashSet<>();
+        for (List<ForcedWinModel.ACard> zone : List.of(pos.hand, pos.library, pos.graveyard)) {
+            for (ForcedWinModel.ACard a : zone) {
+                ids.add(a.id);
+            }
+        }
+        for (int id : ids) {
+            final Card c = g.findById(id);
+            if (c == null || c.getOwner() != me) {
+                continue;
+            }
+            try {
+                for (SpellAbility original : c.getSpellAbilities()) {
+                    if (!original.isSpell()) {
+                        continue;
+                    }
+                    final List<SpellAbility> all = new ArrayList<>();
+                    all.add(original.copy(me));
+                    try {
+                        all.addAll(forge.game.GameActionUtil.getAlternativeCosts(all.get(0), me, false));
+                    } catch (RuntimeException e) {
+                        // none
+                    }
+                    for (SpellAbility sa : all) {
+                        if (sa.getPayCosts() == null) {
+                            continue;
+                        }
+                        sa.setActivatingPlayer(me);
+                        final forge.card.mana.ManaCost base = sa.getPayCosts().getTotalMana();
+                        // raises (static RaiseCost) first, as casting applies them, then reductions on the mana
+                        final forge.game.cost.Cost raised = forge.game.cost.CostAdjustment.adjust(sa.getPayCosts(), sa, false);
+                        final forge.game.mana.ManaCostBeingPaid m = new forge.game.mana.ManaCostBeingPaid(
+                                raised == null ? base : raised.getTotalMana());
+                        forge.game.cost.CostAdjustment.adjust(m, sa, me, null, true, false);
+                        final int d = m.toManaCost().getCMC() - base.getCMC();
+                        if (d != 0) {
+                            out.put(id + "|" + sa.getPayCosts().toString(), d);
+                        }
+                    }
+                }
+            } catch (RuntimeException e) {
+                // the card's cost cannot be adjusted here: printed cost, as before
+            }
+        }
+        return out;
     }
 
     /** The width model's probes copy this root, so no probe starts on the opponent's real hidden cards. */

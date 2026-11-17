@@ -119,7 +119,10 @@ public final class RlLiveSeat {
                 "payKeepUse",
                 // sdcc-protect-1117 (absent = off): player protection spares the next pass's damage; growing draws
                 // (ForcedWinSolver.Config.protectUntilNext / drawGrowth)
-                "protectUntilNext", "drawGrowth"));
+                "protectUntilNext", "drawGrowth",
+                // sdcc-costtax-1117 (absent = off): spells cost what the engine's cost adjustment says
+                // (ForcedWinSolver.Config.costTax)
+                "costTax"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -148,7 +151,10 @@ public final class RlLiveSeat {
                 "payKeepUse",
                 // sdcc-protect-1117 (absent = off): player protection spares the next pass's damage; growing draws
                 // (ForcedWinSolver.Config.protectUntilNext / drawGrowth)
-                "protectUntilNext", "drawGrowth"));
+                "protectUntilNext", "drawGrowth",
+                // sdcc-costtax-1117 (absent = off): spells cost what the engine's cost adjustment says
+                // (ForcedWinSolver.Config.costTax)
+                "costTax"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
