@@ -585,6 +585,15 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             return false;
         }
 
+        /** sdcc-landsonly-1117: the spec's {@code landsOnlyTurns} (0 = off, the default, and then nothing changes). */
+        default int landsOnlyTurns() {
+            return 0;
+        }
+
+        /** sdcc-landsonly-1117: the note the next {@link #decide}'s rows carry (its lands-only cut). */
+        default void noteLandsOnly(final String note) {
+        }
+
         /**
          * sdcc-imit-1111: the kind of component that chose the last answer of {@link #decide}, {@link #decideBlocks} or
          * {@link #decideChoice} (an {@code RlSeat.IMIT_*} code; 0 = none: a rule or a fallback, never imitated).
@@ -657,6 +666,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
      */
     public PrioritySearch searchAlt;
     public int altSeat = -1;
+    /** sdcc-landsonly-1117: priority asks the lands-only cut ran on, and those where it removed a candidate. */
+    public int landsOnlyCuts = 0, landsOnlyCutDropped = 0;
 
     /** The look-ahead that runs for {@code seat}: the alt seat's own, else the seat's (null = none). */
     private PrioritySearch searchFor(final int seat) {
@@ -999,6 +1010,30 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
         if (playoutFirst != null && family == RlSchema.F_PRIORITY && roles[seat] == Role.RL) {
             return forcedFirst(g, player, seat, method, m, objs);
+        }
+        if (family == RlSchema.F_PRIORITY && roles[seat] == Role.RL && objs instanceof List) {
+            // sdcc-landsonly-1117 (diagnostic, off unless the seat's search spec sets landsOnlyTurns): the seat's own early
+            // turns offer only land plays, mana sources and pass, to the policy and the search alike
+            final PrioritySearch lo = searchFor(seat);
+            final int n = lo == null ? 0 : lo.landsOnlyTurns();
+            if (n > 0) {
+                lo.noteLandsOnly(null); // a note set at an ask the search never saw does not reach a later row
+            }
+            if (n > 0 && RlCandidates.landsOnlyApplies(n, g.getPhaseHandler().isPlayerTurn(player),
+                    g.getPhaseHandler().getTurn())) {
+                @SuppressWarnings("unchecked")
+                final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
+                final int[] kn = RlCandidates.landsOnlyCut(m,
+                        ch -> ch >= 1 && ch <= menuObjs.size() && RlCandidates.landOrManaSource(menuObjs.get(ch - 1)));
+                landsOnlyCuts++;
+                if (kn[0] < kn[1]) {
+                    landsOnlyCutDropped++;
+                }
+                if (m.unposable == null && !m.trivial) {
+                    lo.noteLandsOnly("kept " + kn[0] + " of " + kn[1]);
+                }
+                // m.trivial (pass alone): the trivial path below passes, unsearched
+            }
         }
         if (planCursor != null && family == RlSchema.F_PRIORITY && roles[seat] == Role.RL && objs instanceof List) {
             // search-bones-1015 (S-b play-outs): the plan's step, never sent

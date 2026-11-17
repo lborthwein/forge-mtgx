@@ -899,6 +899,75 @@ public final class RlCandidates {
         return m;
     }
 
+    // ---- sdcc-landsonly-1117 (diagnostic; used only when a search spec sets landsOnlyTurns)
+
+    /** The seat's own turn number: ceil(game turn / 2) (right on the play and on the draw; extra turns ignored). */
+    public static int ownTurn(final int gameTurn) {
+        return (gameTurn + 1) / 2;
+    }
+
+    /** True when the lands-only cut ({@code n} &gt; 0 own turns) applies at a priority ask of the seat. */
+    public static boolean landsOnlyApplies(final int n, final boolean seatIsActive, final int gameTurn) {
+        return n > 0 && seatIsActive && gameTurn > 0 && ownTurn(gameTurn) <= n;
+    }
+
+    /**
+     * A land or mana source (generic, by card type and ability API): a land play; a mana ability; an activated ability
+     * of a land on the battlefield; a spell whose card has a mana ability, or whose effect chain adds mana.
+     */
+    public static boolean landOrManaSource(final SpellAbility sa) {
+        if (sa == null) {
+            return false;
+        }
+        if (sa.isLandAbility() || sa.isManaAbility()) {
+            return true;
+        }
+        final Card host = sa.getHostCard();
+        if (sa.isSpell()) {
+            if (host != null && !host.getManaAbilities().isEmpty()) {
+                return true;
+            }
+            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                if (s.getApi() == forge.game.ability.ApiType.Mana) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return host != null && host.isLand() && host.isInZone(ZoneType.Battlefield);
+    }
+
+    /**
+     * Cut a PRIORITY menu in place to pass and the candidates whose bridge menu entry (1-based) {@code keep} accepts;
+     * answers keep their entries (the fragments are unchanged). Returns {non-pass candidates kept, non-pass before}.
+     */
+    public static int[] landsOnlyCut(final Menu m, final java.util.function.IntPredicate keep) {
+        int before = 0, kept = 0;
+        final List<Cand> out = new ArrayList<>(m.cands.size());
+        for (Cand c : m.cands) {
+            if (c.kind == RlSchema.K_PASS) {
+                out.add(c);
+                continue;
+            }
+            before++;
+            final JsonElement f = c.frag;
+            final int ch = f != null && f.isJsonObject() && f.getAsJsonObject().has("choice")
+                    ? f.getAsJsonObject().get("choice").getAsInt() : -1;
+            if (keep.test(ch)) {
+                out.add(c);
+                kept++;
+            }
+        }
+        if (kept < before) {
+            m.cands.clear();
+            m.cands.addAll(out);
+            m.trivial = false;
+            m.trivialSteps = null;
+            finish(m);
+        }
+        return new int[] {kept, before};
+    }
+
     private static void finish(final Menu m) {
         final int c = m.C();
         switch (m.mode) {

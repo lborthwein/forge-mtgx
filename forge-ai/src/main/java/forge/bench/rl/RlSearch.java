@@ -118,6 +118,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int maxSteps = 5000;
         public int leafExtraSteps = 400;
         public double departZ = 1.645;
+        /**
+         * sdcc-landsonly-1117 (diagnostic; 0 = off, the default, unrecorded, and then nothing changes): at a PRIORITY ask
+         * of the search seat while it is the active player and its own turn (ceil(game turn / 2)) is at most this, the
+         * menu is cut to land plays, mana sources and pass before the policy and the search see it
+         * ({@link RlCandidates#landsOnlyCut}).
+         */
+        public int landsOnlyTurns = 0;
         /** unified-search-1106 (off by default): {@link LookaheadSearch.Config#anytime}. */
         public boolean anytime = false;
         public double margin = 0.0;
@@ -461,7 +468,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "copyStaleRefs", "copyTriggers", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit", "landsOnlyTurns"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -490,6 +497,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("maxSteps")) c.maxSteps = o.get("maxSteps").getAsInt();
             if (o.has("leafExtraSteps")) c.leafExtraSteps = o.get("leafExtraSteps").getAsInt();
             if (o.has("departZ")) c.departZ = o.get("departZ").getAsDouble();
+            if (o.has("landsOnlyTurns")) c.landsOnlyTurns = o.get("landsOnlyTurns").getAsInt(); // sdcc-landsonly-1117
             if (o.has("anytime")) c.anytime = o.get("anytime").getAsBoolean();
             if (o.has("provenOnly")) c.provenOnly = o.get("provenOnly").getAsBoolean();
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
@@ -644,6 +652,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
 
         void check() {
+            if (landsOnlyTurns < 0 || landsOnlyTurns > 30) {
+                throw new IllegalArgumentException("search.landsOnlyTurns must be 0 (off) .. 30, not " + landsOnlyTurns);
+            }
             if (!"static".equals(leaf) && !"value".equals(leaf)) {
                 throw new IllegalArgumentException("search.leaf must be static or value, not " + leaf);
             }
@@ -771,6 +782,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("maxSteps", maxSteps);
             o.addProperty("leafExtraSteps", leafExtraSteps);
             o.addProperty("departZ", departZ);
+            if (landsOnlyTurns > 0) {
+                o.addProperty("landsOnlyTurns", landsOnlyTurns); // sdcc-landsonly-1117: only when on
+            }
             o.addProperty("margin", margin);
             o.addProperty("leaf", leaf);
             o.addProperty("playout", playout);
@@ -1712,21 +1726,46 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("work_span_ms", Math.round(sp.spanMs() * 10) / 10.0);
             row.addProperty("work_cpu_ms", Math.round((gameCpuMs() - workCpu0) * 10) / 10.0);
         }
+        if (landsOnlyNote != null) {
+            row.addProperty("landsOnly", landsOnlyNote); // sdcc-landsonly-1117 (off: never set)
+        }
         rows.add(row);
     }
 
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
-        if (!cfg.svcMemo) {
-            return decideM(g, me, m, frame, greedy, menuObjs);
-        }
-        memoBegin(); // svcmemo-1114: this decision's own memo, dropped when it ends
         try {
-            return decideM(g, me, m, frame, greedy, menuObjs);
+            if (!cfg.svcMemo) {
+                return decideM(g, me, m, frame, greedy, menuObjs);
+            }
+            memoBegin(); // svcmemo-1114: this decision's own memo, dropped when it ends
+            try {
+                return decideM(g, me, m, frame, greedy, menuObjs);
+            } finally {
+                memoEnd();
+            }
         } finally {
-            memoEnd();
+            landsOnlyNote = null; // sdcc-landsonly-1117: the note belongs to this decision's rows only
         }
+    }
+
+    /** sdcc-landsonly-1117: the note of the current priority decision's lands-only cut (null = no cut). */
+    private String landsOnlyNote;
+
+    @Override
+    public int landsOnlyTurns() {
+        return cfg.landsOnlyTurns;
+    }
+
+    @Override
+    public void noteLandsOnly(final String note) {
+        landsOnlyNote = note;
+    }
+
+    /** sdcc-landsonly-1117: the current decision's lands-only note (null = none), for the live seat's decision line. */
+    public String landsOnlyNote() {
+        return landsOnlyNote;
     }
 
     /** svcmemo-1114: the body of {@link #decide}, unchanged (the wrapper only opens and drops the decision's memo). */

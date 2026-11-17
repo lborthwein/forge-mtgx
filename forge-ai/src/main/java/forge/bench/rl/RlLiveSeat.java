@@ -312,6 +312,7 @@ public final class RlLiveSeat {
                     case "maxSteps": c.maxSteps = Integer.parseInt(v); break;
                     case "leafExtraSteps": c.leafExtraSteps = Integer.parseInt(v); break;
                     case "departZ": c.departZ = Double.parseDouble(v); break;
+                    case "landsOnlyTurns": c.landsOnlyTurns = Integer.parseInt(v); break; // sdcc-landsonly-1117 (absent = off)
                     case "anytime": c.anytime = Boolean.parseBoolean(v); break;
                     case "margin": c.margin = Double.parseDouble(v); break;
                     case "leaf": c.leaf = v; break;
@@ -844,6 +845,9 @@ public final class RlLiveSeat {
         d.addProperty("cpuMs", Math.round(r.cpuMs));
         d.addProperty("scoreMs", Math.round(scoreMs * 10) / 10.0);
         d.addProperty("capped", "capped".equals(r.outcome));
+        if (search.landsOnlyNote() != null) {
+            d.addProperty("landsOnly", search.landsOnlyNote()); // sdcc-landsonly-1117 (off: never set)
+        }
         if (r.wall) {
             // sc-wallguard-1009: only when the hard wall cut the wait, so the line is otherwise unchanged
             d.addProperty("wall", true);
