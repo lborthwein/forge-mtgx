@@ -502,6 +502,12 @@ public final class ForcedWinPlanner {
          */
         boolean protectUntilNext;
         /**
+         * sdcc-costtax-1117 (solverCfg costTax; false = off, the default, and nothing changes): a spell's generic mana
+         * changes by the position's cost adjustment for it ({@link ForcedWinModel.Position#tax}: an opponent's tax on
+         * noncreature spells, a cost reducer), as the engine computes it.
+         */
+        boolean costTax;
+        /**
          * sdcc-protect-1117 (solverCfg drawGrowth; false = off, the default, and nothing changes): an ability observed
          * drawing more on each activation ({@link Abil#drawGrowth}) draws its observed count plus the growth times the
          * activations of that permanent earlier in the line.
@@ -2864,7 +2870,9 @@ public final class ForcedWinPlanner {
                 }
             }
         }
-        for (int k = 0; k < ab.generic; k++) {
+        // sdcc-costtax-1117 (costTax; 0 when off): the generic mana this spell's cost changes by in this position
+        final int tax = lim.costTax && pos.tax != null ? pos.tax.getOrDefault(step.hostId + "|" + ab.costKey, 0) : 0;
+        for (int k = 0; k < ab.generic + tax; k++) {
             if (!payGeneric(s, self)) {
                 return false;
             }
