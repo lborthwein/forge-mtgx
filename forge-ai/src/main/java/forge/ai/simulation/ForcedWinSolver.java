@@ -331,6 +331,14 @@ public final class ForcedWinSolver {
          */
         public boolean tutorCast = false;
         /**
+         * sdcc-fetchthin-1117 (off by default, and then nothing changes): the width model knows an ability that searches
+         * our library for a land and puts it onto the battlefield (a fetch; {@link ForcedWinModel.EffKind#TUTOR_BF}):
+         * the land is ours in play and our library shrinks by one, so cracking a fetch after a pile thins the library
+         * for an empty-library or library-size win. A search may take a card the pile still holds (a lazy pile slot),
+         * a tutor too. Off, the probe dropped the land's move and a fetch read as "sacrifice it, shuffle".
+         */
+        public boolean fetchThin = false;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -968,6 +976,7 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
+            c.fetchThin = "true".equals(get.apply("fetchThin")); // sdcc-fetchthin-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1054,6 +1063,7 @@ public final class ForcedWinSolver {
                 + (probeSettle ? " probeSettle" : "")
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (fetchThin ? " fetchThin" : "") // sdcc-fetchthin-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -1545,6 +1555,9 @@ public final class ForcedWinSolver {
         }
         if (cfg.tutorCast) {
             this.reader.tutorCast = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
+        }
+        if (cfg.fetchThin) {
+            this.reader.fetchThin = true; // sdcc-fetchthin-1117: our own cards only (its own template keys)
         }
         if (cfg.sourceLeaves) {
             this.reader.sourceLeaves = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
@@ -4447,6 +4460,7 @@ public final class ForcedWinSolver {
         lim.depth = cfg.planDepth; // solver-distill-cc-1109 (18 = the default)
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
+        lim.fetchThin = cfg.fetchThin; // sdcc-fetchthin-1117
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
         return lim;
     }

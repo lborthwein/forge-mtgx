@@ -80,6 +80,12 @@ public final class ForcedWinProbe {
         boolean libraryEmptied;
         /** solver-gaps-1015: other cards moved in ways no effect kind expresses (onto the battlefield from a hand). */
         int unmapped;
+        /**
+         * sdcc-fetchthin-1117 (diagnostics; nothing decides on it): moves of a card out of our library that
+         * {@link #effectsFromTrace} gave no effect and did not count as unmapped. 0 with fetchThin on for every ability
+         * whose library moves the model knows; the regression check that no library move is dropped silently.
+         */
+        int silent;
         /** solver-gaps-1015: our hand (without the probed card) and graveyard sizes when it was played. */
         int handBefore, gyBefore;
         /** sdcc-draws-1110: the run was a {@link #PROBE_SETTLE} one; our library's size when it was played and after it. */
@@ -208,6 +214,12 @@ public final class ForcedWinProbe {
     static final ThreadLocal<Boolean> TUTOR_CAST = ThreadLocal.withInitial(() -> false);
     /** sdcc-tutorcast-1110: set by a sourceLeaves reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> SOURCE_LEAVES = ThreadLocal.withInitial(() -> false);
+    /**
+     * sdcc-fetchthin-1117: set by a fetchThin reader around its learning (false = off: every probe as before). On, a land
+     * that the probed ability moves from our library onto our battlefield is a {@link EffKind#TUTOR_BF} effect (off, the
+     * move was dropped with no effect and not counted as unmapped: a fetch read as "sacrifice it, shuffle").
+     */
+    static final ThreadLocal<Boolean> FETCH_THIN = ThreadLocal.withInitial(() -> false);
     /** sdcc-tutorcast-1110: the most cards a search-and-cast spell is observed with (one sandbox each), and of those tried first. */
     static final int CAST_SWEEP = 48, CAST_DISCOVER = 4;
 
@@ -449,6 +461,9 @@ public final class ForcedWinProbe {
             this(trace, me, null);
         }
 
+        /** sdcc-fetchthin-1117: {@link #FETCH_THIN} when the recorder was made (the probe's thread). */
+        final boolean fetchThin = FETCH_THIN.get();
+
         ZoneRec(List<String> trace, int me, Player seat) {
             this.trace = trace;
             this.me = me;
@@ -485,7 +500,10 @@ public final class ForcedWinProbe {
                     }
                 }
             }
-            trace.add("MOVE " + e.card().getId() + " " + f + " " + t + (land ? " L" : ""));
+            // sdcc-fetchthin-1117 (a fetchThin probe only): a land entering our battlefield tapped (the event follows the
+            // ability's own "tapped" instruction)
+            final boolean tappedIn = fetchThin && land && t.equals("Battlefield@me") && e.card().isTapped();
+            trace.add("MOVE " + e.card().getId() + " " + f + " " + t + (land ? " L" : "") + (tappedIn ? " T" : ""));
         }
     }
 
@@ -873,6 +891,7 @@ public final class ForcedWinProbe {
         int posId = -1, posIndex = -1, posSize = -1; // sdcc-draws-1110: the last LIBPOS line (a settle run only)
         // sdcc-tutorcast-1110 (a tutorCast probe only): the card a search of our library exiled, and what became of it
         final boolean tc = TUTOR_CAST.get();
+        final boolean fetchThin = FETCH_THIN.get(); // sdcc-fetchthin-1117
         int exilePick = -1, castAt = -1;
         java.util.Set<String> exileNames = null;
         final List<Eff> viaExile = new ArrayList<>();
@@ -1028,13 +1047,32 @@ public final class ForcedWinProbe {
                 exiled++;
                 continue;
             }
+            final boolean landMove = p.length > 4 && "L".equals(p[4]);
+            if (k == null && fetchThin && landMove && from.equals("Library@me") && to.equals("Battlefield@me")) {
+                // sdcc-fetchthin-1117: a land searched from our library onto our battlefield (a fetch): the library shrinks
+                // by one and the land is ours in play. The search's offered names are its filter, as for a tutor.
+                if (last != null) {
+                    out.add(new Eff(last, run, 0));
+                    last = null;
+                    run = 0;
+                }
+                java.util.Set<String> bfNames = null;
+                if (pendingAsk != null && pendingAsk.startsWith("ASK pick Battlefield [Library")) {
+                    final int ni = pendingAsk.indexOf(" names=");
+                    bfNames = ni < 0 ? null : new java.util.HashSet<>(java.util.Arrays.asList(pendingAsk.substring(ni + 7).split("\\|")));
+                }
+                pendingAsk = null;
+                out.add(new Eff(EffKind.TUTOR_BF, 1, p.length > 5 && "T".equals(p[5]) ? 1 : 0, 0, bfNames));
+                continue;
+            }
             pendingAsk = null;
             if (k == null) {
                 // solver-gaps-1015: a move the width model has no effect for (a creature put onto the battlefield from
                 // our hand or library, a token): the engine search must handle this card
-                final boolean landMove = p.length > 4 && "L".equals(p[4]);
                 if (!landMove && (to.startsWith("Battlefield") || from.startsWith("Hand@me") && !to.startsWith("Stack"))) {
                     o.unmapped++;
+                } else if (from.equals("Library@me")) {
+                    o.silent++; // sdcc-fetchthin-1117: a library move with no effect and not counted (diagnostics)
                 }
                 continue;
             }

@@ -74,7 +74,14 @@ public final class ForcedWinModel {
          * that way in the sandbox (one run per card name of ours); {@link Eff#n} = 1: a searched card that is not cast
          * goes to our hand (observed), 0: it does not (such a pick is not planned).
          */
-        TUTOR_CAST
+        TUTOR_CAST,
+        /**
+         * sdcc-fetchthin-1117 (observed only by a fetchThin reader): search our library for a land and put it onto the
+         * battlefield (the library shrinks by one; the land is ours in play). {@link Eff#names}: the card names the engine
+         * offered the search in the sandbox (its filter, as observed; null = any land); {@link Eff#colors} = 1 when the
+         * land entered tapped there (the ability's own instruction), 0 otherwise.
+         */
+        TUTOR_BF
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
@@ -1064,8 +1071,9 @@ public final class ForcedWinModel {
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
             // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
+            // sdcc-fetchthin-1117: and a fetchThin reader ("ft|"), whose probes map a land searched onto the battlefield
             final String key = (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
-                    + (probeSettle ? "settle|" : "") + c.getName();
+                    + (probeSettle ? "settle|" : "") + (fetchThin ? "ft|" : "") + c.getName();
             final boolean prevHide = ForcedWinProbe.HIDE.get();
             ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
             final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
@@ -1088,6 +1096,8 @@ public final class ForcedWinModel {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
                 final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
+                final boolean prevFt = ForcedWinProbe.FETCH_THIN.get();
+                ForcedWinProbe.FETCH_THIN.set(fetchThin);
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
@@ -1101,6 +1111,7 @@ public final class ForcedWinModel {
                     ForcedWinProbe.TUTOR_CAST.set(prevTc);
                     ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
+                    ForcedWinProbe.FETCH_THIN.set(prevFt);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     synchronized (templates) {
@@ -1150,6 +1161,13 @@ public final class ForcedWinModel {
          * as their payment, and a search that puts the card into our hand by way of exile (a TUTOR).
          */
         boolean tutorCast;
+
+        /**
+         * sdcc-fetchthin-1117 (solver key fetchThin; false = off, and then nothing changes): the probes map a land that an
+         * ability searches from our library onto the battlefield ({@link EffKind#TUTOR_BF}) instead of dropping the move,
+         * under their own template keys.
+         */
+        boolean fetchThin;
 
         /**
          * sdcc-tutorcast-1110 (solver key sourceLeaves; false = off, and then nothing changes): the probes also note
@@ -1510,7 +1528,8 @@ public final class ForcedWinModel {
             }
             for (ACard a : p.battlefield) {
                 for (Abil ab : a.onBattlefield) {
-                    chooses |= !ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                    chooses |= !ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                            || ab.has(EffKind.TUTOR_BF)); // sdcc-fetchthin-1117 (a fetchThin reader's templates only)
                 }
             }
             // sdcc-probeobj-1111 (a probeObjects reader only): an ability whose object is a card in our graveyard needs the
