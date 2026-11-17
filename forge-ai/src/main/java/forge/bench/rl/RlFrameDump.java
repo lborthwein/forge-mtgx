@@ -325,6 +325,99 @@ public final class RlFrameDump implements PriorityDecisionListener {
                 (byte[]) q[7], (Integer) q[8], "prio", cand, "prioDecide");
     }
 
+    /**
+     * prio-decide-1117: the seat's priority menu as the policy seat's bridge builds it (PlayerControllerBridge
+     * legalSpellAbilities: lands, then the spell abilities with their alternative and additional costs, optional costs
+     * declined while enumerating and offered as their own variants; timing, payable for the seat, enough targets, not an
+     * empty choice), WITHOUT asking the seat's controller anything: a taped seat's controller would take the
+     * enumeration's chooseOptionalCosts as a decision and the replay would diverge.
+     */
+    static List<SpellAbility> prioMenu(final Game game, final Player p) {
+        final List<SpellAbility> out = new ArrayList<>();
+        try {
+            final forge.game.card.CardCollection lands = forge.ai.ComputerUtilAbility.getAvailableLandsToPlay(game, p);
+            if (lands != null) {
+                for (forge.game.card.Card land : lands) {
+                    for (SpellAbility sa : land.getAllPossibleAbilities(p, true)) {
+                        if (sa.isLandAbility() && sa.canPlay()) {
+                            out.add(sa);
+                        }
+                    }
+                }
+            }
+            final forge.game.card.CardCollection cards = forge.ai.ComputerUtilAbility.getAvailableCards(game, p);
+            final List<SpellAbility> origin = forge.ai.ComputerUtilAbility.getSpellAbilities(cards, p);
+            // ComputerUtilAbility.getOriginalAndAltCostAbilities with the optional-cost ask declined (the bridge's
+            // buildingMenu answer: an empty list), so no controller is asked
+            final List<SpellAbility> withAdd = new ArrayList<>();
+            for (SpellAbility sa : origin) {
+                sa.setActivatingPlayer(p);
+                withAdd.addAll(forge.game.GameActionUtil.getAdditionalCostSpell(sa));
+            }
+            final List<SpellAbility> all = new ArrayList<>();
+            for (SpellAbility sa : withAdd) {
+                final List<SpellAbility> alts = forge.game.GameActionUtil.getAlternativeCosts(sa, p, false);
+                final List<SpellAbility> pri = new ArrayList<>(), other = new ArrayList<>();
+                for (SpellAbility altSa : alts) {
+                    if (sa.getPayCosts().isOnlyManaCost() && altSa.getPayCosts().isOnlyManaCost()
+                            && sa.getPayCosts().getTotalMana().compareTo(altSa.getPayCosts().getTotalMana()) == 1) {
+                        pri.add(altSa);
+                    } else {
+                        other.add(altSa);
+                    }
+                }
+                all.addAll(pri);
+                all.add(sa);
+                all.addAll(other);
+            }
+            for (SpellAbility sa : all) {
+                sa.setActivatingPlayer(p);
+            }
+            final List<SpellAbility> withVariants = new ArrayList<>(all);
+            for (SpellAbility sa : all) {
+                try {
+                    final List<forge.game.spellability.OptionalCostValue> opts =
+                            forge.game.GameActionUtil.getOptionalCostValues(sa);
+                    if (opts == null || opts.isEmpty()) {
+                        continue;
+                    }
+                    final SpellAbility kicked = forge.game.GameActionUtil.addOptionalCosts(sa, opts);
+                    if (kicked != null && kicked != sa) {
+                        kicked.setActivatingPlayer(p);
+                        withVariants.add(kicked);
+                    }
+                } catch (RuntimeException e) {
+                    // a variant that cannot be built is not offered (as the bridge)
+                }
+            }
+            for (SpellAbility sa : withVariants) {
+                if (sa.isManaAbility() || sa.isLandAbility()) {
+                    continue;
+                }
+                sa.setActivatingPlayer(p);
+                if (!sa.canPlay()
+                        || !forge.ai.ComputerUtilCost.withKeepPwUltimates(
+                                () -> forge.ai.ComputerUtilCost.canPayCost(sa, p, sa.isTrigger()))
+                        || !PlayerControllerBridge.hasEnoughTargets(sa)) {
+                    continue;
+                }
+                boolean empty;
+                try {
+                    empty = forge.ai.AiEmptyChoice.emptyForEveryX(sa, p, StateEncoder.maxAnnounceableX(sa));
+                } catch (RuntimeException unreadable) {
+                    empty = false;
+                }
+                if (!empty) {
+                    out.add(sa);
+                }
+            }
+        } catch (RuntimeException e) {
+            System.err.println("[prio-decide] menu failed, no record: " + e);
+            return null;
+        }
+        return out;
+    }
+
     /** prio-decide-1117: the seat's PRIORITY decide frame with its full menu, or null (trivial / unposable / capped). */
     private Object[] prioFrame(final Game g, final Player p, final int seat, final int turn) {
         if (prioFeat == null) {
@@ -333,7 +426,11 @@ public final class RlFrameDump implements PriorityDecisionListener {
             prioFeat.reset();
         }
         return PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
-            final List<SpellAbility> menu = RlReviewObserver.legalSpellAbilities(g, p);
+            final List<SpellAbility> menu = prioMenu(g, p);
+            if (menu == null) {
+                prioUnposed++;
+                return null;
+            }
             final JsonObject body = new JsonObject();
             final JsonArray items = new JsonArray();
             items.add(StateEncoder.encodeSpellAbility(null));
