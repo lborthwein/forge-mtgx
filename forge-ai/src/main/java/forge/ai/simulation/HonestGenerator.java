@@ -103,6 +103,8 @@ public final class HonestGenerator {
         defaults.put("tutorCast", false); // sdcc-tutorcast-1110: off = the recorded config unchanged
         defaults.put("fetchThin", false); // sdcc-fetchthin-1117: off = the recorded config unchanged
         defaults.put("payKeepUse", false); // sdcc-paykeep-1117: off = the recorded config unchanged
+        defaults.put("protectUntilNext", false); // sdcc-protect-1117: off = the recorded config unchanged
+        defaults.put("drawGrowth", false); // sdcc-protect-1117: off = the recorded config unchanged
         defaults.put("probeObjects", false); // sdcc-probeobj-1111: off = the recorded config unchanged
         defaults.put("engineModeChoice", false); // owner-misplays-1113: off = the recorded config unchanged
         for (java.util.Map.Entry<String, Object> e : defaults.entrySet()) {

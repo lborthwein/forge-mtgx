@@ -49,14 +49,18 @@ public class PlanDumpTest extends forge.ai.AITest {
         for (ForcedWinModel.ACard a : pos.library) {
             System.out.println("PLANDUMP lib " + a + " fromHand=" + a.fromHand + " onBf=" + a.onBattlefield + " src=" + a.sourceColors);
         }
+        for (String hz : System.getProperty("plandump.horizons", System.getProperty("plandump.horizon", "1")).split(",")) {
         final ForcedWinPlanner.Limits lim = s.limits();
         lim.nodes = Integer.getInteger("plandump.nodes", 200_000);
-        lim.horizon = Integer.getInteger("plandump.horizon", 1);
+        lim.horizon = Integer.parseInt(hz.trim());
+        lim.payPolicies = Integer.getInteger("plandump.pay", lim.payPolicies);
+        lim.ms = -1L;
         final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
-        System.out.println("PLANDUMP plan nodes=" + r.nodes + " exhausted=" + r.exhausted + " stoppedBy=" + r.stoppedBy
+        System.out.println("PLANDUMP plan horizon=" + lim.horizon + " nodes=" + r.nodes + " exhausted=" + r.exhausted + " stoppedBy=" + r.stoppedBy
                 + " depthStops=" + r.depthStops + " lines=" + r.lines.size() + " ms=" + r.nanos / 1_000_000);
-        for (ForcedWinPlanner.Line l : r.lines) {
-            System.out.println("PLANDUMP line " + l);
+        for (int li = 0; li < Math.min(5, r.lines.size()); li++) {
+            System.out.println("PLANDUMP line " + r.lines.get(li));
+        }
         }
         }
     }

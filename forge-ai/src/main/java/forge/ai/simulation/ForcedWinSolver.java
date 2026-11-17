@@ -347,6 +347,17 @@ public final class ForcedWinSolver {
          */
         public boolean payKeepUse = false;
         /**
+         * sdcc-protect-1117 (off by default, and then nothing changes): the probes note a spell or entering permanent of
+         * ours that gives our player protection from everything or from creatures (by keyword), and the planner then
+         * skips the opponent's creature damage at the next pass (until our next turn).
+         */
+        public boolean protectUntilNext = false;
+        /**
+         * sdcc-protect-1117 (off by default, and then nothing changes): an activated draw ability whose second activation
+         * draws more than its first (observed in one sandbox) draws that much more per earlier activation in the line.
+         */
+        public boolean drawGrowth = false;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -986,6 +997,8 @@ public final class ForcedWinSolver {
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
             c.fetchThin = "true".equals(get.apply("fetchThin")); // sdcc-fetchthin-1117
             c.payKeepUse = "true".equals(get.apply("payKeepUse")); // sdcc-paykeep-1117
+            c.protectUntilNext = "true".equals(get.apply("protectUntilNext")); // sdcc-protect-1117
+            c.drawGrowth = "true".equals(get.apply("drawGrowth")); // sdcc-protect-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1074,6 +1087,7 @@ public final class ForcedWinSolver {
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
                 + (fetchThin ? " fetchThin" : "") // sdcc-fetchthin-1117
                 + (payKeepUse ? " payKeepUse" : "") // sdcc-paykeep-1117
+                + (protectUntilNext ? " protectUntilNext" : "") + (drawGrowth ? " drawGrowth" : "") // sdcc-protect-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -1568,6 +1582,12 @@ public final class ForcedWinSolver {
         }
         if (cfg.fetchThin) {
             this.reader.fetchThin = true; // sdcc-fetchthin-1117: our own cards only (its own template keys)
+        }
+        if (cfg.protectUntilNext) {
+            this.reader.protectPass = true; // sdcc-protect-1117: our own cards only (its own template keys)
+        }
+        if (cfg.drawGrowth) {
+            this.reader.drawGrowth = true; // sdcc-protect-1117
         }
         if (cfg.sourceLeaves) {
             this.reader.sourceLeaves = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
@@ -4471,6 +4491,8 @@ public final class ForcedWinSolver {
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
         lim.fetchThin = cfg.fetchThin; // sdcc-fetchthin-1117
+        lim.protectUntilNext = cfg.protectUntilNext; // sdcc-protect-1117
+        lim.drawGrowth = cfg.drawGrowth; // sdcc-protect-1117
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
         return lim;
     }

@@ -356,6 +356,16 @@ public final class ForcedWinModel {
         String returnType;
         boolean tapSelf, sacSelf, discardHand;
         /**
+         * sdcc-protect-1117 (a protectUntilNext reader only; false otherwise): playing it gave our player a protection
+         * keyword against everything or against creatures (observed in the sandbox), lasting until our next turn.
+         */
+        boolean protectsPass;
+        /**
+         * sdcc-protect-1117 (a drawGrowth reader only; 0 otherwise): each earlier activation of this permanent's ability
+         * makes its draw this many cards larger (observed: two activations in one sandbox, the host untapped between).
+         */
+        int drawGrowth;
+        /**
          * sdcc-tutorcast-1110 (set only by a sourceLeaves reader; 0 otherwise, and then nothing changes): where the
          * engine left this activated ability's own source once it had resolved, when that is no longer the battlefield
          * and leaving was not its cost: {@link #SELF_TOP} the top of our library, {@link #SELF_HAND} our hand,
@@ -1073,7 +1083,8 @@ public final class ForcedWinModel {
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
             // sdcc-fetchthin-1117: and a fetchThin reader ("ft|"), whose probes map a land searched onto the battlefield
             final String key = (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
-                    + (probeSettle ? "settle|" : "") + (fetchThin ? "ft|" : "") + c.getName();
+                    + (probeSettle ? "settle|" : "") + (fetchThin ? "ft|" : "") + (protectPass ? "pp|" : "") + (drawGrowth ? "dg|" : "")
+                    + c.getName();
             final boolean prevHide = ForcedWinProbe.HIDE.get();
             ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
             final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
@@ -1097,7 +1108,10 @@ public final class ForcedWinModel {
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
                 final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
                 final boolean prevFt = ForcedWinProbe.FETCH_THIN.get();
+                final boolean prevPp = ForcedWinProbe.PROTECT_PASS.get(), prevDg = ForcedWinProbe.DRAW_GROWTH.get();
                 ForcedWinProbe.FETCH_THIN.set(fetchThin);
+                ForcedWinProbe.PROTECT_PASS.set(protectPass);
+                ForcedWinProbe.DRAW_GROWTH.set(drawGrowth);
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
@@ -1112,6 +1126,8 @@ public final class ForcedWinModel {
                     ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
                     ForcedWinProbe.FETCH_THIN.set(prevFt);
+                    ForcedWinProbe.PROTECT_PASS.set(prevPp);
+                    ForcedWinProbe.DRAW_GROWTH.set(prevDg);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     synchronized (templates) {
@@ -1168,6 +1184,9 @@ public final class ForcedWinModel {
          * under their own template keys.
          */
         boolean fetchThin;
+
+        /** sdcc-protect-1117 (solver keys protectUntilNext / drawGrowth; false = off): see {@link ForcedWinProbe#PROTECT_PASS}. */
+        boolean protectPass, drawGrowth;
 
         /**
          * sdcc-tutorcast-1110 (solver key sourceLeaves; false = off, and then nothing changes): the probes also note
