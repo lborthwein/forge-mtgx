@@ -488,6 +488,14 @@ public final class ForcedWinPlanner {
          */
         boolean tutorCast;
         /**
+         * sdcc-fetchthin-1117 (solverCfg fetchThin; false = off, the default, and then nothing changes): an observed
+         * {@link EffKind#TUTOR_BF} (a land searched from our library onto the battlefield) takes a matching land out of our
+         * library, known or still open to an unchosen pile slot, and puts it into play; a tutor may also take a card still
+         * open to an unchosen pile slot; and a shuffle keeps the contents of the pile slots still in the library (the
+         * unchosen ones get the least useful cards left, as {@link #record} gives them), with their order forgotten.
+         */
+        boolean fetchThin;
+        /**
          * sdcc-probeobj-1111 (solverCfg probeObjects; false = off, the default, and then nothing changes): an ability
          * with an observed object need ({@link ForcedWinModel.ObjNeed}) is a move when a permanent of ours in play has a
          * name a sandbox played it with and the width model can express what that run did. One branch per such
@@ -529,6 +537,11 @@ public final class ForcedWinPlanner {
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
     static final int PAY_POLICIES = 9;
+    /**
+     * sdcc-paykeep-1117 (solverCfg payKeepUse; off = {@link #PAY_POLICIES} orders, as before): one more order, 9, taps
+     * last the sources that have another use in play (a playable activated ability that is not a mana ability).
+     */
+    static final int PAY_POLICIES_KEEP_USE = PAY_POLICIES + 1;
 
     static final class Result {
         final List<Line> lines = new ArrayList<>();
@@ -1984,6 +1997,19 @@ public final class ForcedWinPlanner {
             }
             case TUTOR:
             case TUTOR_TOP: {
+                if (lim.fetchThin) {
+                    // sdcc-fetchthin-1117: a card still open to an unchosen pile slot of our library may be searched too
+                    for (int[] cand : lazySearch(s, e.names, false)) {
+                        final S n = s.copy();
+                        takeFromLibrary(n, cand);
+                        if (e.kind == EffKind.TUTOR_TOP) {
+                            n.lib.add(0, cand[0]);
+                        } else {
+                            n.hand.add(cand[0]);
+                        }
+                        resolve(n, effs, ei + 1, 0, ab, out);
+                    }
+                }
                 final List<Integer> pool = new ArrayList<>(s.libPool);
                 for (int e2 : s.lib) {
                     if (e2 >= 0) {
@@ -2036,6 +2062,36 @@ public final class ForcedWinPlanner {
                     for (int i = 0; i < size; i++) {
                         n.lib.add(UNKNOWN);
                     }
+                    resolve(n, effs, ei + 1, 0, ab, out);
+                }
+                return;
+            }
+            case TUTOR_BF: {
+                // sdcc-fetchthin-1117 (only a fetchThin reader observes it): a land of our library onto our battlefield
+                if (!lim.fetchThin) {
+                    resolve(s, effs, ei + 1, 0, ab, out);
+                    return;
+                }
+                final List<int[]> cands = knownSearch(s, e.names, true);
+                cands.addAll(lazySearch(s, e.names, true));
+                if (cands.isEmpty()) {
+                    resolve(s, effs, ei + 1, 0, ab, out); // the search finds nothing: the rest of the ability resolves
+                    return;
+                }
+                for (int[] cand : cands) {
+                    final S n = s.copy();
+                    takeFromLibrary(n, cand);
+                    final ACard la = cards.get(cand[0]);
+                    final Perm p = new Perm();
+                    p.card = cand[0];
+                    p.tapped = e.colors != 0 || la.entersTapped;
+                    if (!p.tapped) {
+                        n.life += Math.min(0, la.landLife); // as observed for its land drop (a shock land paid untapped)
+                        if (n.life <= 0) {
+                            continue;
+                        }
+                    }
+                    n.bf.add(p);
                     resolve(n, effs, ei + 1, 0, ab, out);
                 }
                 return;
@@ -2213,6 +2269,9 @@ public final class ForcedWinPlanner {
             case SHUFFLE: {
                 // POST-FREEZE 2: our library is shuffled; every entry becomes an unseen card (known cards go back to
                 // the library's contents; a lazy pile position is no longer ours to choose)
+                if (lim.fetchThin) {
+                    pinPileSlots(s); // sdcc-fetchthin-1117: the pile's cards still in the library stay its known contents
+                }
                 final int size = s.lib.size();
                 for (int e2 : s.lib) {
                     if (e2 >= 0) {
@@ -2417,6 +2476,129 @@ public final class ForcedWinPlanner {
             }
         }
         return out;
+    }
+
+    /** sdcc-fetchthin-1117: a library entry that is a pile slot (chosen or not), not a known card or an unseen one. */
+    private static boolean slotEntry(final int e) {
+        return e != UNKNOWN && e < 0;
+    }
+
+    /**
+     * sdcc-fetchthin-1117 (fetchThin): the known cards of our library a search may take ({@code lands}: lands only),
+     * filtered by the observed names (null = any), one per class. Each is {card, library index or -1 (from the
+     * contents, an unseen entry leaves), 0, 0}. A card the library holds as a chosen pile slot counts as known.
+     */
+    private List<int[]> knownSearch(final S s, final java.util.Set<String> names, final boolean lands) {
+        final List<Integer> pool = new ArrayList<>();
+        final Map<Integer, Integer> at = new HashMap<>();
+        boolean unseen = false;
+        for (int i = 0; i < s.lib.size(); i++) {
+            final int e = s.lib.get(i);
+            final int c = e >= 0 ? e : slotEntry(e) && LAZY - e < s.pile.length ? s.pile[LAZY - e] : -1;
+            unseen |= e == UNKNOWN;
+            if (c >= 0 && !at.containsKey(c)) {
+                at.put(c, i);
+                pool.add(c);
+            }
+        }
+        if (unseen) {
+            for (int c : s.libPool) {
+                if (!at.containsKey(c)) {
+                    at.put(c, -1);
+                    pool.add(c);
+                }
+            }
+        }
+        final List<Integer> eligible = new ArrayList<>();
+        for (int c : pool) {
+            final ACard a = cards.get(c);
+            if ((!lands || a.land) && (names == null || names.contains(a.name))) {
+                eligible.add(c);
+            }
+        }
+        final List<int[]> out = new ArrayList<>();
+        for (int c : classes(eligible)) {
+            out.add(new int[] {c, at.get(c), 0, 0});
+        }
+        return out;
+    }
+
+    /**
+     * sdcc-fetchthin-1117 (fetchThin): the cards still open to an unchosen pile slot of our library that a search may
+     * take, filtered as {@link #knownSearch}, one per class, each given the deepest such slot (the top ones stay open
+     * for the draws): {card, library index, the slot's library entry, 1}.
+     */
+    private List<int[]> lazySearch(final S s, final java.util.Set<String> names, final boolean lands) {
+        final List<int[]> out = new ArrayList<>();
+        if (s.pile == null || s.remaining == null) {
+            return out;
+        }
+        int at = -1;
+        for (int i = s.lib.size() - 1; i >= 0 && at < 0; i--) {
+            final int e = s.lib.get(i);
+            if (slotEntry(e) && LAZY - e < s.pile.length && s.pile[LAZY - e] < 0) {
+                at = i;
+            }
+        }
+        if (at < 0) {
+            return out;
+        }
+        final List<Integer> eligible = new ArrayList<>();
+        for (int c : s.remaining) {
+            final ACard a = cards.get(c);
+            if ((!lands || a.land) && (names == null || names.contains(a.name))) {
+                eligible.add(c);
+            }
+        }
+        for (int c : classes(eligible)) {
+            out.add(new int[] {c, at, s.lib.get(at), 1});
+        }
+        return out;
+    }
+
+    /** sdcc-fetchthin-1117: take a search candidate ({@link #knownSearch} / {@link #lazySearch}) out of our library. */
+    private void takeFromLibrary(final S n, final int[] cand) {
+        final int c = cand[0];
+        if (cand[3] == 1) {
+            assign(n, cand[2], c); // the unchosen pile slot is this card
+        }
+        if (cand[1] >= 0) {
+            n.lib.remove(cand[1]);
+        } else {
+            n.libPool.remove(Integer.valueOf(c));
+            n.lib.remove(Integer.valueOf(UNKNOWN));
+        }
+        n.steps.get(n.steps.size() - 1).picks.add(cards.get(c).id);
+    }
+
+    /**
+     * sdcc-fetchthin-1117 (fetchThin; before a shuffle): every pile slot still in our library becomes its card, an
+     * unchosen one the least useful card left for the pile (as {@link #record} fills it), and joins the library's
+     * contents with the other known cards; the shuffle then forgets the order only.
+     */
+    private void pinPileSlots(final S s) {
+        if (s.pile == null) {
+            return;
+        }
+        for (int i = 0; i < s.lib.size(); i++) {
+            final int e = s.lib.get(i);
+            if (!slotEntry(e) || LAZY - e >= s.pile.length) {
+                continue;
+            }
+            int c = s.pile[LAZY - e];
+            if (c < 0 && s.remaining != null && !s.remaining.isEmpty()) {
+                for (int r : s.remaining) {
+                    if (c < 0 || cards.get(r).order() > cards.get(c).order()
+                            || cards.get(r).order() == cards.get(c).order() && cards.get(r).id < cards.get(c).id) {
+                        c = r;
+                    }
+                }
+                assign(s, e, c);
+            }
+            if (c >= 0) {
+                s.lib.set(i, c);
+            }
+        }
     }
 
     private void assign(S s, int lazy, int card) {
@@ -2771,11 +2953,14 @@ public final class ForcedWinPlanner {
     /**
      * A source's rank in the payment order (lower is tapped first). 0: least flexible first, one-shot sources last (the
      * greedy order); 1: one-shot sources first; 2: most flexible first; 3..7: keep colour W/U/B/R/G (tap other sources
-     * first); 8: as 0 with Phyrexian pips paid in life.
+     * first); 8: as 0 with Phyrexian pips paid in life; 9 (payKeepUse only): as 0, with the sources that have another
+     * use in play ({@link #otherUse}) last.
      */
     private int sourceScore(ACard a) {
         final int flex = Integer.bitCount(a.sourceColors), sac = a.sourceSac ? 1 : 0;
         switch (payPolicy) {
+            case 9:
+                return (otherUse(a) ? 1000 : 0) + flex * 10 + sac * 100;
             case 1:
                 return (1 - sac) * 100 + flex * 10;
             case 2:
@@ -2785,6 +2970,19 @@ public final class ForcedWinPlanner {
             default:
                 return flex * 10 + sac * 100;
         }
+    }
+
+    /**
+     * sdcc-paykeep-1117: the source has a playable activated ability in play that is not a mana ability (a land that
+     * draws, a permanent that sacrifices itself for a card): tapping it for mana spends that use this turn.
+     */
+    private static boolean otherUse(ACard a) {
+        for (Abil ab : a.onBattlefield) {
+            if (!ab.unplayable && ab.kind != AbilKind.FLOAT && !ab.loyalty) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Perm source(S s, int mask, Perm self) {

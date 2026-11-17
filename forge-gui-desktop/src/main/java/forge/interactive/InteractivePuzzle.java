@@ -70,6 +70,16 @@ final class InteractivePuzzle {
     private InteractivePuzzle() {
     }
 
+    /**
+     * Lane mullstart-1116, the opening-hand start: {@code puzzle.mulligan: true} on a turn-1 position whose browser
+     * seat holds its dealt seven and nothing on the battlefield, graveyard or exile. After the install the seat's
+     * library is shuffled and Forge's own mulligan (the configured rule, London: keep or mulligan, the bottom cards,
+     * further mulligans) runs for the browser seat only, in the mulligan stage, through the seat's controller, so its
+     * answers are ordinary MULLIGAN decisions. The AI seat keeps the hand the position gives it. Without the field
+     * nothing changes.
+     */
+    static final String MULLIGAN = "mulligan";
+
     /** Lane lessons-forge-jar-1027 (J1): a lesson position's goal: no goal card, no turn limit. */
     static final String NO_GOAL = "none";
 
@@ -77,9 +87,13 @@ final class InteractivePuzzle {
      * The config's puzzle: Forge's [state] lines, its goal and its absolute turn limit (0 for {@link #NO_GOAL}), and a
      * lesson's {@code [script]} section text (lane lessons-forge-jar-1027, J2) or null.
      */
-    record Spec(String state, String goal, int turns, String script) {
+    record Spec(String state, String goal, int turns, String script, boolean mulligan) {
         Spec(final String state, final String goal, final int turns) {
-            this(state, goal, turns, null);
+            this(state, goal, turns, null, false);
+        }
+
+        Spec(final String state, final String goal, final int turns, final String script) {
+            this(state, goal, turns, script, false);
         }
 
         boolean hasGoal() {
@@ -121,7 +135,7 @@ final class InteractivePuzzle {
         }
         final JsonObject p = json.getAsJsonObject(FIELD);
         for (String key : p.keySet()) {
-            if (!Set.of("state", "goal", "turns", "script").contains(key)) {
+            if (!Set.of("state", "goal", "turns", "script", MULLIGAN).contains(key)) {
                 throw refuse("puzzle has an unknown field: " + key);
             }
         }
@@ -162,8 +176,19 @@ final class InteractivePuzzle {
             scriptText = script.getAsString();
             parseScript(scriptText); // its structure, refused here (phase and card names at the game start)
         }
-        final Spec spec = new Spec(state.getAsString(), goal.getAsString(), t, scriptText);
-        lines(spec, 0, false); // the structure, refused here before any Forge singleton is up
+        final JsonElement mull = p.get(MULLIGAN);
+        boolean mulligan = false;
+        if (mull != null && !mull.isJsonNull()) {
+            if (!mull.isJsonPrimitive() || !mull.getAsJsonPrimitive().isBoolean()) {
+                throw refuse("puzzle.mulligan must be true or false");
+            }
+            mulligan = mull.getAsBoolean();
+        }
+        final Spec spec = new Spec(state.getAsString(), goal.getAsString(), t, scriptText, mulligan);
+        final List<String> checked = lines(spec, 0, false); // the structure, refused here before any Forge singleton is up
+        if (mulligan) {
+            openingHandCheck(checked);
+        }
         return spec;
     }
 
@@ -435,18 +460,33 @@ final class InteractivePuzzle {
                 ? List.of("Name:mtgx puzzle", "Goal:" + (spec.goal().equals("win") ? "Win" : "Survive"), "Turns:" + spec.turns())
                 : List.of("Name:mtgx lesson", "Goal:None"));
         sections.put("state", lines);
-        return new Position(sections, humanSeat, spec.hasGoal());
+        return new Position(sections, humanSeat, spec.hasGoal(), spec.mulligan());
     }
 
     /** A Forge {@link Puzzle} whose goal effect goes to the configured browser seat (none for a lesson position, J1). */
     static final class Position extends Puzzle {
         private final int humanSeat;
         private final boolean goal;
+        private final boolean mulligan;
 
         Position(final Map<String, List<String>> sections, final int humanSeat, final boolean goal) {
+            this(sections, humanSeat, goal, false);
+        }
+
+        Position(final Map<String, List<String>> sections, final int humanSeat, final boolean goal,
+                final boolean mulligan) {
             super(sections);
             this.humanSeat = humanSeat;
             this.goal = goal;
+            this.mulligan = mulligan;
+        }
+
+        boolean mulligan() {
+            return mulligan;
+        }
+
+        int humanSeat() {
+            return humanSeat;
         }
 
         @Override
@@ -546,7 +586,68 @@ final class InteractivePuzzle {
             }
             System.err.println("[forge.interactive] puzzle position installed: turn " + game.getPhaseHandler().getTurn()
                     + ", " + game.getPhaseHandler().getPhase());
+            if (position.mulligan()) {
+                openingMulligan(game, position.humanSeat());
+            }
         };
+    }
+
+    /**
+     * Lane mullstart-1116: refuse a mulligan start that is not an opening hand: turn 1, and the browser seat ({@code
+     * p0} / {@code human} in the checked lines, humanSeat 0) has a hand of 1-7 cards, a library, and no card on the battlefield, in the graveyard or
+     * in exile.
+     */
+    static void openingHandCheck(final List<String> lines) throws InteractiveProtocol.ProtocolException {
+        int hand = 0;
+        int library = 0;
+        for (String line : lines) {
+            final int eq = line.indexOf('=');
+            if (eq < 1) {
+                continue;
+            }
+            String key = line.substring(0, eq).trim().toLowerCase(Locale.ROOT);
+            if (key.startsWith("human")) {
+                key = "p0" + key.substring(5);
+            }
+            final String value = line.substring(eq + 1).trim();
+            final int n = value.isEmpty() ? 0 : value.split(";").length;
+            if (key.equals("turn") && !value.equals("1")) {
+                throw refuse("a mulligan start is a turn-1 position");
+            }
+            if (key.equals("p0hand")) {
+                hand = n;
+            } else if (key.equals("p0library")) {
+                library = n;
+            } else if ((key.equals("p0battlefield") || key.equals("p0graveyard") || key.equals("p0exile")) && n > 0) {
+                throw refuse("a mulligan start has nothing of the seat's out of hand and library");
+            }
+        }
+        if (hand < 1 || hand > 7 || library < 1) {
+            throw refuse("a mulligan start needs the dealt hand (1-7 cards) and a library");
+        }
+    }
+
+    /**
+     * Lane mullstart-1116: the browser seat's opening mulligan after the install: its library shuffled, then Forge's
+     * own mulligan for that seat alone in the mulligan stage (draws there do not count as the turn's draws), the
+     * active player named as the one on the play. The game then goes on from the position's turn 1 and phase.
+     */
+    static void openingMulligan(final Game game, final int humanSeat) {
+        final Player seat = InteractiveMain.playerAtSeat(game, humanSeat);
+        final Player onThePlay = game.getPhaseHandler().getPlayerTurn();
+        final forge.game.GameStage was = game.getAge();
+        seat.shuffle(null);
+        game.setAge(forge.game.GameStage.Mulligan);
+        try {
+            new forge.game.mulligan.MulliganService(onThePlay != null ? onThePlay : seat, seat).perform();
+        } finally {
+            if (game.getAge() == forge.game.GameStage.Mulligan) {
+                game.setAge(was);
+            }
+        }
+        seat.resetNumDrawnThisTurn();
+        System.err.println("[forge.interactive] opening mulligan done: the seat keeps " + seat.getCardsIn(
+                forge.game.zone.ZoneType.Hand).size());
     }
 
     /**
