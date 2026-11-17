@@ -496,6 +496,18 @@ public final class ForcedWinPlanner {
          */
         boolean fetchThin;
         /**
+         * sdcc-protect-1117 (solverCfg protectUntilNext; false = off, the default, and nothing changes): a step whose
+         * ability was observed giving our player protection from everything or from creatures
+         * ({@link Abil#protectsPass}) spares us the opponent's creature damage at the next pass.
+         */
+        boolean protectUntilNext;
+        /**
+         * sdcc-protect-1117 (solverCfg drawGrowth; false = off, the default, and nothing changes): an ability observed
+         * drawing more on each activation ({@link Abil#drawGrowth}) draws its observed count plus the growth times the
+         * activations of that permanent earlier in the line.
+         */
+        boolean drawGrowth;
+        /**
          * sdcc-probeobj-1111 (solverCfg probeObjects; false = off, the default, and then nothing changes): an ability
          * with an observed object need ({@link ForcedWinModel.ObjNeed}) is a move when a permanent of ours in play has a
          * name a sandbox played it with and the width model can express what that run did. One branch per such
@@ -605,9 +617,12 @@ public final class ForcedWinPlanner {
         byte block = ForcedWinModel.Position.BLOCK_UNTAPPED;
         /** planLoops: it entered during this turn of the line (cleared at the pass). */
         boolean fresh;
+        /** sdcc-protect-1117 (drawGrowth): activations of its growing draw ability so far in the line (kept across turns). */
+        int uses;
 
         Perm copy() {
             final Perm p = new Perm();
+            p.uses = uses;
             p.card = card;
             p.tapped = tapped;
             p.activated = activated;
@@ -642,6 +657,8 @@ public final class ForcedWinPlanner {
         int pileStep = -1;
         int devotion;
         boolean emptyDrawWin;
+        /** sdcc-protect-1117 (protectUntilNext): our player is protected from the opponent's creatures at the next pass. */
+        boolean protectedPass;
         boolean canDraw;
         List<Step> steps = new ArrayList<>();
         /**
@@ -681,6 +698,7 @@ public final class ForcedWinPlanner {
             s.pileStep = pileStep;
             s.devotion = devotion;
             s.emptyDrawWin = emptyDrawWin;
+            s.protectedPass = protectedPass;
             s.canDraw = canDraw;
             s.steps = new ArrayList<>();
             for (Step st : steps) {
@@ -1608,6 +1626,9 @@ public final class ForcedWinPlanner {
         if (pre != null) {
             effs.addAll(pre);
         }
+        if (lim.protectUntilNext && ab.protectsPass) {
+            s.protectedPass = true; // sdcc-protect-1117
+        }
         if (ab.kind == AbilKind.SPELL && a.permanent) {
             final Perm p = new Perm();
             p.card = host;
@@ -1633,6 +1654,16 @@ public final class ForcedWinPlanner {
             effs.addAll(ab.effects);
         } else {
             effs.addAll(ab.effects);
+        }
+        if (lim.drawGrowth && ab.drawGrowth > 0 && self != null) {
+            // sdcc-protect-1117: the draw grows with this permanent's earlier activations in the line
+            for (int i = 0; i < effs.size(); i++) {
+                final Eff e = effs.get(i);
+                if (e.kind == EffKind.DRAW && self.uses > 0) {
+                    effs.set(i, new Eff(EffKind.DRAW, e.n + ab.drawGrowth * self.uses, e.colors));
+                }
+            }
+            self.uses++;
         }
         // an instant or sorcery goes to our graveyard after it resolves (not while it resolves: Doomsday's own pile)
         // sdcc-draws-1110: unless it was observed going to our library instead (a SELF_TO_LIBRARY effect, probeSettle only)
@@ -1797,7 +1828,9 @@ public final class ForcedWinPlanner {
      */
     private List<S> passTurn(S s) {
         final List<S> out = new ArrayList<>();
-        if (s.oppLib > 0 && !pos.oppPowers.isEmpty()) {
+        final boolean prot = lim.protectUntilNext && s.protectedPass; // sdcc-protect-1117
+        s.protectedPass = false; // it lasts until our next turn
+        if (s.oppLib > 0 && !pos.oppPowers.isEmpty() && !prot) {
             final int blockers = blockers(s);
             if (blockers != s.bf.stream().filter(p -> cards.get(p.card).creature).count()) {
                 blockerDiffs++; // blockers-1109: a pass where the old count (every creature) differs; logged once per plan

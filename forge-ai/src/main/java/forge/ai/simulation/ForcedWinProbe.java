@@ -63,6 +63,8 @@ public final class ForcedWinProbe {
         final List<String> trace = new ArrayList<>();
         final List<Eff> effects = new ArrayList<>();
         boolean won, lost, entered, played;
+        /** sdcc-protect-1117 (a PROTECT_PASS run only): our player gained protection from everything or from creatures. */
+        boolean gainedProtection;
         String error;
         int lifeDelta, oppLifeDelta;
         final int[] produced = new int[6];
@@ -220,6 +222,10 @@ public final class ForcedWinProbe {
      * move was dropped with no effect and not counted as unmapped: a fetch read as "sacrifice it, shuffle").
      */
     static final ThreadLocal<Boolean> FETCH_THIN = ThreadLocal.withInitial(() -> false);
+    /** sdcc-protect-1117: set by a protectUntilNext reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> PROTECT_PASS = ThreadLocal.withInitial(() -> false);
+    /** sdcc-protect-1117: set by a drawGrowth reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> DRAW_GROWTH = ThreadLocal.withInitial(() -> false);
     /** sdcc-tutorcast-1110: the most cards a search-and-cast spell is observed with (one sandbox each), and of those tried first. */
     static final int CAST_SWEEP = 48, CAST_DISCOVER = 4;
 
@@ -608,6 +614,7 @@ public final class ForcedWinProbe {
                 opp = p;
             }
             final int life0 = me.getLife(), opp0 = opp == null ? 0 : opp.getLife();
+            final int prot0 = PROTECT_PASS.get() ? passProtection(me) : 0; // sdcc-protect-1117
             o.lifeBefore = life0;
             o.stormBefore = g.getStack().getSpellsCastThisTurn().size();
             g.subscribeToEvents(new ZoneRec(o.trace, me.getId(), o.settle ? me : null));
@@ -649,6 +656,9 @@ public final class ForcedWinProbe {
                 dev += ForcedWinModel.bluePips(c);
             }
             o.devotionAfter = dev;
+            if (PROTECT_PASS.get()) {
+                o.gainedProtection = passProtection(me) > prot0; // sdcc-protect-1117
+            }
         } catch (RuntimeException | StackOverflowError e) {
             o.error = String.valueOf(e);
         } finally {
@@ -1326,6 +1336,7 @@ public final class ForcedWinProbe {
                     a2.desc = alt.getDescription();
                     a2.targetVariant = v;
                     a2.effects.addAll(ab.effects);
+                    a2.protectsPass = ab.protectsPass; // sdcc-protect-1117
                     a2.unplayable = ab.unplayable;
                     a2.cardTargets = ab.cardTargets;
                     a2.alt = tutorCast; // sdcc-tutorcast-1110: never the spell an effect casts for free
@@ -1448,6 +1459,30 @@ public final class ForcedWinProbe {
                                     run(live, me, id, onBattlefield, activate, runSeed, st), card.getName());
                     final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
                     objAttach(t, ab, objs, objRun);
+                    if (DRAW_GROWTH.get() && objRun == null && sacCost == null && !ab.unplayable && ab.tapSelf && !ab.sacSelf
+                            && ab.has(EffKind.DRAW)) {
+                        // sdcc-protect-1117: does a second activation draw more than the first? (a count that grows with
+                        // what the first left on its source); the host is untapped between the two, in one sandbox
+                        final Act twice = (g, m, c) -> {
+                            if (!activate.apply(g, m, c)) {
+                                return false;
+                            }
+                            resolveAll(g);
+                            final Card again = g.findById(c.getId());
+                            if (again == null || !again.isInPlay()) {
+                                return false;
+                            }
+                            again.setTapped(false);
+                            return activate.apply(g, m, again);
+                        };
+                        final Obs o2 = run(live, me, id, onBattlefield, twice, ForcedWinSolver.mix(runSeed, 0x475257L), st);
+                        if (o2.error == null && o2.played) {
+                            final int d1 = libraryToHand(o.trace), d2 = libraryToHand(o2.trace);
+                            if (d1 > 0 && d2 > 2 * d1) {
+                                ab.drawGrowth = d2 - 2 * d1;
+                            }
+                        }
+                    }
                     if (sacCost != null) {
                         t.unmodeled = true; // as before the key (its cost was outside the model)
                     }
@@ -2969,6 +3004,34 @@ public final class ForcedWinProbe {
         return null;
     }
 
+    /** sdcc-protect-1117: the moves of a card from our library to our hand in a run's trace. */
+    static int libraryToHand(List<String> trace) {
+        int n = 0;
+        for (String l : trace) {
+            if (l.startsWith("MOVE ") && l.contains(" Library@me Hand@me")) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * sdcc-protect-1117: how many protection keywords our player has that stop an opponent's creature from dealing it
+     * damage (protection from everything, or from creatures), by keyword kind and its text.
+     */
+    static int passProtection(Player me) {
+        int n = 0;
+        for (forge.game.keyword.KeywordInterface k : me.getKeywords()) {
+            if (k.getKeyword() == forge.game.keyword.Keyword.PROTECTION) {
+                final String t = k.getOriginal().toLowerCase(java.util.Locale.ROOT);
+                if (t.contains("everything") || t.contains("creature")) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
     private static Abil withEffects(Abil base, Obs o, int hostId, SpellAbility sa, String variant) {
         final Abil ab = base.copyCost();
         ab.targetVariant = variant;
@@ -2982,6 +3045,7 @@ public final class ForcedWinProbe {
         effectsFromTrace(o, hostId, ab, sa);
         ab.effects.addAll(o.effects);
         ab.counter = sa.getApi() == forge.game.ability.ApiType.Counter;
+        ab.protectsPass = o.gainedProtection; // sdcc-protect-1117 (false unless a PROTECT_PASS run saw it)
         netReceipt(sa.getHostCard() == null ? "?" : sa.getHostCard().getName(), ab.kind + (variant == null ? "" : "@" + variant),
                 ab.effects, o); // sdcc-draws-1110 (a probeSettle run with receipts only)
         return ab;
