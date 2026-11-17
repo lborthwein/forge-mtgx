@@ -2353,6 +2353,16 @@ public final class ForcedWinPlanner {
                 return;
             }
             case SHUFFLE: {
+                if (lim.pileTutorCast && ei + 1 < effs.size() && (effs.get(ei + 1).kind == EffKind.TUTOR
+                        || effs.get(ei + 1).kind == EffKind.TUTOR_CAST || effs.get(ei + 1).kind == EffKind.TUTOR_BF)) {
+                    // sdcc-piletc-1117: "shuffle, then search" finds the same cards as "search, then shuffle": the search
+                    // first, so it can still take a card the pile holds before the shuffle fixes the pile's contents
+                    final List<Eff> swapped = new ArrayList<>(effs);
+                    swapped.set(ei, effs.get(ei + 1));
+                    swapped.set(ei + 1, e);
+                    resolve(s, swapped, ei, 0, ab, out);
+                    return;
+                }
                 // POST-FREEZE 2: our library is shuffled; every entry becomes an unseen card (known cards go back to
                 // the library's contents; a lazy pile position is no longer ours to choose)
                 if (lim.fetchThin) {

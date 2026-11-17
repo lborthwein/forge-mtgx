@@ -37,7 +37,14 @@ public class PlanDumpTest extends forge.ai.AITest {
         final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", o.get("state").getAsString());
         final Player me = g.getPlayers().get(0);
         final ForcedWinSolver s = new ForcedWinSolver(me, SolverDriver.config(cfg));
-        final ForcedWinModel.Position pos = s.readPosition(g, s.knownTop(g));
+        java.util.List<Integer> known = s.knownTop(g);
+        if (Boolean.getBoolean("plandump.knownAll")) {
+            known = new java.util.ArrayList<>();
+            for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                known.add(c.getId());
+            }
+        }
+        final ForcedWinModel.Position pos = s.readPosition(g, known);
         System.out.println("PLANDUMP life=" + pos.life + " landDrop=" + pos.landDrop + " sorcery=" + pos.sorcerySpeed + " storm=" + pos.storm);
         for (ForcedWinModel.ACard a : pos.hand) {
             System.out.println("PLANDUMP hand " + a + " fromHand=" + a.fromHand + " onBf=" + a.onBattlefield);
@@ -67,6 +74,7 @@ public class PlanDumpTest extends forge.ai.AITest {
         lim.nodes = Integer.getInteger("plandump.nodes", 200_000);
         lim.horizon = Integer.parseInt(hz.trim());
         lim.payPolicies = Integer.getInteger("plandump.pay", lim.payPolicies);
+        lim.classes = Integer.getInteger("plandump.classes", lim.classes);
         lim.ms = -1L;
         final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
         System.out.println("PLANDUMP plan horizon=" + lim.horizon + " nodes=" + r.nodes + " exhausted=" + r.exhausted + " stoppedBy=" + r.stoppedBy
