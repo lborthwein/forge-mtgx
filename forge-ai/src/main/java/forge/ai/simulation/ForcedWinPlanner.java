@@ -514,6 +514,11 @@ public final class ForcedWinPlanner {
          */
         boolean grantSacMana;
         /**
+         * sdcc-piletc-1117 (solverCfg pileTutorCast; false = off, the default, and nothing changes): an observed
+         * {@link EffKind#TUTOR_CAST} may also take a card still open to an unchosen pile slot (cast for free).
+         */
+        boolean pileTutorCast;
+        /**
          * sdcc-protect-1117 (solverCfg drawGrowth; false = off, the default, and nothing changes): an ability observed
          * drawing more on each activation ({@link Abil#drawGrowth}) draws its observed count plus the growth times the
          * activations of that permanent earlier in the line.
@@ -2166,6 +2171,24 @@ public final class ForcedWinPlanner {
                 if (!lim.tutorCast || step == null) {
                     resolve(s, effs, ei + 1, 0, ab, out);
                     return;
+                }
+                if (lim.pileTutorCast) {
+                    // sdcc-piletc-1117: a card still open to an unchosen pile slot may be searched and cast for free too
+                    for (int[] cand : lazySearch(s, e.names, false)) {
+                        final ACard ca = cards.get(cand[0]);
+                        if (freeSpells(ca).isEmpty()) {
+                            continue;
+                        }
+                        final S n = s.copy();
+                        takeFromLibrary(n, cand);
+                        if (n.pendingFree < 0) {
+                            n.pendingFree = cand[0];
+                            n.steps.get(n.steps.size() - 1).castFree = ca.id;
+                        } else {
+                            n.hand.add(cand[0]);
+                        }
+                        resolve(n, effs, ei + 1, 0, ab, out);
+                    }
                 }
                 final List<Integer> pool = new ArrayList<>(s.libPool);
                 for (int e2 : s.lib) {

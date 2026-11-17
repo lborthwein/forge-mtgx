@@ -124,7 +124,9 @@ public final class RlLiveSeat {
                 // (ForcedWinSolver.Config.costTax)
                 "costTax",
                 // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
-                "grantSacMana"));
+                "grantSacMana",
+                // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
+                "pileTutorCast"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -158,7 +160,9 @@ public final class RlLiveSeat {
                 // (ForcedWinSolver.Config.costTax)
                 "costTax",
                 // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
-                "grantSacMana"));
+                "grantSacMana",
+                // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
+                "pileTutorCast"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as

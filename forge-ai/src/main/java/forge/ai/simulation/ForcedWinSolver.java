@@ -370,6 +370,11 @@ public final class ForcedWinSolver {
          */
         public boolean grantSacMana = false;
         /**
+         * sdcc-piletc-1117 (off by default, and then nothing changes): a search-and-cast (tutorCast) may take a card the
+         * pile still holds, as a tutor may under fetchThin.
+         */
+        public boolean pileTutorCast = false;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -1013,6 +1018,7 @@ public final class ForcedWinSolver {
             c.drawGrowth = "true".equals(get.apply("drawGrowth")); // sdcc-protect-1117
             c.costTax = "true".equals(get.apply("costTax")); // sdcc-costtax-1117
             c.grantSacMana = "true".equals(get.apply("grantSacMana")); // sdcc-sacmana-1117
+            c.pileTutorCast = "true".equals(get.apply("pileTutorCast")); // sdcc-piletc-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1104,6 +1110,7 @@ public final class ForcedWinSolver {
                 + (protectUntilNext ? " protectUntilNext" : "") + (drawGrowth ? " drawGrowth" : "") // sdcc-protect-1117
                 + (costTax ? " costTax" : "") // sdcc-costtax-1117
                 + (grantSacMana ? " grantSacMana" : "") // sdcc-sacmana-1117
+                + (pileTutorCast ? " pileTutorCast" : "") // sdcc-piletc-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -4514,6 +4521,7 @@ public final class ForcedWinSolver {
         lim.drawGrowth = cfg.drawGrowth; // sdcc-protect-1117
         lim.costTax = cfg.costTax; // sdcc-costtax-1117
         lim.grantSacMana = cfg.grantSacMana; // sdcc-sacmana-1117
+        lim.pileTutorCast = cfg.pileTutorCast; // sdcc-piletc-1117
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
         return lim;
     }
