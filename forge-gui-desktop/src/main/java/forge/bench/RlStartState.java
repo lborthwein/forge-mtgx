@@ -124,6 +124,20 @@ public final class RlStartState {
         }
     }
 
+    /**
+     * exact-flip-1117: the other seat's key for a player-valued state line (monarch=, initiative=) when the exact-start
+     * text is flipped: human <-> ai, p0 <-> p1; anything else (NONE) unchanged.
+     */
+    static String flipPlayerKey(final String v) {
+        switch (v.toLowerCase()) {
+            case "human": return "ai";
+            case "ai": return "human";
+            case "p0": return "p1";
+            case "p1": return "p0";
+            default: return v;
+        }
+    }
+
     private static RlStartState exactOf(final JsonObject g, final JsonObject e) {
         if (EXACT_PROP == null) {
             throw new IllegalArgumentException("exact_start needs -Dforge.bench.exactStart (research only)");
@@ -152,6 +166,10 @@ public final class RlStartState {
                 for (String l : text.split("\\R")) {
                     if (l.startsWith("activeplayer=")) {
                         l = "activeplayer=" + ("human".equals(l.substring(13).trim()) ? "ai" : "human");
+                    } else if (l.startsWith("monarch=") || l.startsWith("initiative=")) {
+                        // exact-flip-1117: a player-valued designation names the other player after the flip
+                        final int eq = l.indexOf('=');
+                        l = l.substring(0, eq + 1) + flipPlayerKey(l.substring(eq + 1).trim());
                     } else if (l.startsWith("human")) {
                         l = "ai" + l.substring(5);
                     } else if (l.startsWith("ai")) {
