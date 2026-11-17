@@ -49,6 +49,19 @@ public class PlanDumpTest extends forge.ai.AITest {
         for (ForcedWinModel.ACard a : pos.library) {
             System.out.println("PLANDUMP lib " + a + " fromHand=" + a.fromHand + " onBf=" + a.onBattlefield + " src=" + a.sourceColors);
         }
+        if (Integer.getInteger("plandump.gfSamples", -1) >= 0) {
+            final ForcedWinSolver.GoldfishOpts go = new ForcedWinSolver.GoldfishOpts();
+            go.samples = Integer.getInteger("plandump.gfSamples", 8);
+            go.extra = Integer.getInteger("plandump.gfExtra", 2);
+            go.horizon = Integer.getInteger("plandump.gfHorizon", 5);
+            go.active = Integer.getInteger("plandump.gfActive", 3);
+            go.nodes = Integer.getInteger("plandump.gfNodes", 15000);
+            go.maxNodes = Long.getLong("plandump.gfMax", 600000L);
+            go.ms = -1L;
+            final ForcedWinSolver.Goldfish gf = s.goldfish(g, s.knownTop(g), go);
+            System.out.println("PLANDUMP goldfish g=" + gf.g + " p=" + gf.p + " bestTurn=" + gf.bestTurn + " direct=" + gf.direct
+                    + " samples=" + gf.samples + " screens=" + gf.screens + " capped=" + gf.capped + " cut=" + gf.cut + " failed=" + gf.failed);
+        }
         for (String hz : System.getProperty("plandump.horizons", System.getProperty("plandump.horizon", "1")).split(",")) {
         final ForcedWinPlanner.Limits lim = s.limits();
         lim.nodes = Integer.getInteger("plandump.nodes", 200_000);
