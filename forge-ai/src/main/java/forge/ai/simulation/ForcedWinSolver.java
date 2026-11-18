@@ -375,6 +375,12 @@ public final class ForcedWinSolver {
          */
         public boolean pileTutorCast = false;
         /**
+         * sdcc-widen-1117 (0 = off, the default, and then nothing changes): the first (this-turn) planner pass runs narrow
+         * first: at most this many classes where a draw, pile slot or tutor branches, with a third of the node cap; the
+         * full-width pass follows with the nodes left only when the narrow one found no line.
+         */
+        public int planWiden = 0;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -1019,6 +1025,7 @@ public final class ForcedWinSolver {
             c.costTax = "true".equals(get.apply("costTax")); // sdcc-costtax-1117
             c.grantSacMana = "true".equals(get.apply("grantSacMana")); // sdcc-sacmana-1117
             c.pileTutorCast = "true".equals(get.apply("pileTutorCast")); // sdcc-piletc-1117
+            c.planWiden = intOr(get.apply("planWiden"), c.planWiden); // sdcc-widen-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1111,6 +1118,7 @@ public final class ForcedWinSolver {
                 + (costTax ? " costTax" : "") // sdcc-costtax-1117
                 + (grantSacMana ? " grantSacMana" : "") // sdcc-sacmana-1117
                 + (pileTutorCast ? " pileTutorCast" : "") // sdcc-piletc-1117
+                + (planWiden > 0 ? " planWiden=" + planWiden : "") // sdcc-widen-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -2668,7 +2676,26 @@ public final class ForcedWinSolver {
         // before it reaches one); lines that pass the turn only when this turn has none
         lim.horizon = 1;
         lim.bridge = cfg.planBridge; // sdcc-bridge-1111: the offense's own two searches only (no screen, no re-plan)
-        ForcedWinPlanner.Result res = cfg.forced ? planCapped(pos, lim) : new ForcedWinPlanner.Result();
+        ForcedWinPlanner.Result res;
+        if (cfg.forced && cfg.planWiden > 0) {
+            // sdcc-widen-1117 (planWiden): a narrow pass first (cfg.planWiden classes per branching draw / pile / tutor,
+            // a third of the nodes); only when it finds no line, the full-width pass with the nodes left
+            final int classes0 = lim.classes, nodes0 = lim.nodes;
+            lim.classes = Math.min(classes0, cfg.planWiden);
+            lim.nodes = Math.max(1, nodes0 / 3);
+            res = planCapped(pos, lim);
+            lim.classes = classes0;
+            lim.nodes = nodes0;
+            if (res.lines.isEmpty()) {
+                final int first = res.nodes;
+                lim.nodes = Math.max(1, nodes0 - first);
+                res = planCapped(pos, lim);
+                lim.nodes = nodes0;
+                res.nodes += first;
+            }
+        } else {
+            res = cfg.forced ? planCapped(pos, lim) : new ForcedWinPlanner.Result();
+        }
         // sdcc-bridge-1111 (planBridge; empty when off): this turn's setup lines, then those that pass the turn
         final List<ForcedWinPlanner.Setup> setups = new ArrayList<>(res.setups);
         if (res.lines.isEmpty() && cfg.horizon >= 2 && cfg.forced) {
