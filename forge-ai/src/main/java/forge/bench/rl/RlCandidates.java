@@ -741,6 +741,50 @@ public final class RlCandidates {
             return placed == wanted && validate(out) == null ? out : null;
         }
 
+        /**
+         * attack-holdback-1118 (an ATTACK menu): {@code steps} with slot {@code s}'s attacker held back (its "none"
+         * candidate), or null when the menu has no such candidate.
+         */
+        short[] attackWithout(final short[] steps, final int s) {
+            if (family != RlSchema.F_ATTACK || steps == null || s < 0 || s >= S() || steps.length != S()) {
+                return null;
+            }
+            final int i = noneOf(s);
+            if (i < 0) {
+                return null;
+            }
+            final short[] out = steps.clone();
+            out[s] = (short) i;
+            return out;
+        }
+
+        /** attack-holdback-1118 (an ATTACK menu): the slots that attack in {@code steps}, as their attacker cards. */
+        java.util.Map<Integer, Card> attackingSlots(final short[] steps) {
+            final java.util.Map<Integer, Card> out = new java.util.TreeMap<>();
+            for (int s = 0; s < steps.length && s < S(); s++) {
+                final Cand x = cands.get(steps[s]);
+                if (x.kind == RlSchema.K_DEFENDER) {
+                    out.put(s, slotCards.get(s));
+                }
+            }
+            return out;
+        }
+
+        /**
+         * attack-holdback-1118 (an ATTACK menu): the declaration of valid steps, attacker card id -> its defender's key
+         * ({@code player:<id>} or {@code card:<id>}).
+         */
+        java.util.Map<Integer, String> attackMap(final short[] steps) {
+            final java.util.Map<Integer, String> m = new java.util.TreeMap<>();
+            for (int s = 0; s < steps.length && s < S(); s++) {
+                final Cand x = cands.get(steps[s]);
+                if (x.kind == RlSchema.K_DEFENDER && x.key != null) {
+                    m.put(slotCards.get(s).getId(), x.key);
+                }
+            }
+            return m;
+        }
+
         /** Lane block-search-1019 (a BLOCK menu): the declaration of valid steps (blocker card id -> attacker card ids). */
         java.util.Map<Integer, java.util.List<Integer>> blockMap(final short[] steps) {
             final java.util.Map<Integer, java.util.List<Integer>> m = new java.util.TreeMap<>();

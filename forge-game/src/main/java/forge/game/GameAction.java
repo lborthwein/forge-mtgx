@@ -2206,8 +2206,9 @@ public class GameAction {
 
         final ZoneType zone = cards.getFirst().getZone().getZoneType();
         final Player owner = cards.getFirst().getOwner();
-        if (zone == ZoneType.Library && game.hasLibraryInfoListeners()) {
+        if ((zone == ZoneType.Library || zone == ZoneType.Hand) && game.hasLibraryInfoListeners()) {
             // order-memory-1102: the players it is revealed to (research InfoState; no-op without a listener)
+            // attack-holdback-1118: a hand too (InfoState's known-in-hand reads it only when that tracking is on)
             game.fireLibraryInfo(forge.game.LibraryInfoListener.Kind.REVEAL, to, cards, zone);
         }
         for (final Player p : to) {
@@ -2236,9 +2237,10 @@ public class GameAction {
         reveal(cards, zt, cardOwner, dontRevealToOwner, messagePrefix, true);
     }
     public void reveal(CardCollectionView cards, ZoneType zt, Player cardOwner, boolean dontRevealToOwner, String messagePrefix, boolean msgAddSuffix) {
-        if (zt == ZoneType.Library && game.hasLibraryInfoListeners()) {
+        if ((zt == ZoneType.Library || zt == ZoneType.Hand) && game.hasLibraryInfoListeners()) {
             // order-memory-1102: every player learns them, the owner included (with dontRevealToOwner the owner has
             // already seen them); research InfoState, a no-op without a listener
+            // attack-holdback-1118: a hand too (InfoState's known-in-hand reads it only when that tracking is on)
             game.fireLibraryInfo(forge.game.LibraryInfoListener.Kind.REVEAL, game.getPlayers(), cards, zt);
         }
         for (Player p : game.getPlayers()) {

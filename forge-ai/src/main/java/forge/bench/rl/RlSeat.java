@@ -627,6 +627,16 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
 
         /**
+         * attack-holdback-1118: after the server's DECISION at a declare-attackers ask (family ATTACK) of the seat, the
+         * attack hold-back search may replace it: the steps to play instead (the policy's declaration less attackers), or
+         * null to keep the policy's own ({@code greedy}). Always null unless the search's spec turns it on.
+         */
+        default short[] decideAttacks(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, short[] greedy,
+                Object objs) {
+            return null;
+        }
+
+        /**
          * choice-scorer-1106: the spec's choice scorer answers this family ({@link #decideChoice}). Always false unless
          * the spec's {@code choiceScorer} is set.
          */
@@ -1164,6 +1174,24 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 final String badAlt = m.validate(alt);
                 if (badAlt != null) {
                     System.err.println("[rlseat] block search answered invalid steps for dec " + frame.decIdx + ": " + badAlt
+                            + "; the policy's own declaration stands");
+                } else {
+                    d.steps = alt;
+                    searchDepartures++;
+                    searchOverride(frame.decIdx);
+                    imitMark(seat, frame.decIdx, search.reason(), d.steps);
+                }
+            }
+        }
+        if (search != null && family == RlSchema.F_ATTACK
+                && d.status == RlWire.ST_OK) {
+            // attack-holdback-1118: the attack hold-back search (the policy's own declaration is its default; a no-op
+            // unless the spec turns it on)
+            final short[] alt = search.decideAttacks(g, player, m, frame, d.steps, objs);
+            if (alt != null && !java.util.Arrays.equals(alt, d.steps)) {
+                final String badAlt = m.validate(alt);
+                if (badAlt != null) {
+                    System.err.println("[rlseat] attack search answered invalid steps for dec " + frame.decIdx + ": " + badAlt
                             + "; the policy's own declaration stands");
                 } else {
                     d.steps = alt;
