@@ -378,8 +378,9 @@ public final class LookaheadSearch {
          * attack-holdback-1118 (report 2026-11-18T14-37-11; false = off, the default: every world exactly as before). Set
          * only by the policy spec's {@code knownHand=on} (with infoState). An opponent hand card the seat saw enter that
          * hand ({@link InfoStates#knowsInHand}: the human's Kolaghan, returned to hand at end of turn after a dash attack)
-         * stays where it is in every world dealer that keeps the hand cards Forge shows us ({@link #seatMayKnowHand}),
-         * and the seat's live tracker's remembered cards are kept by every dealer too.
+         * stays where it is in every world dealer that keeps the hand cards Forge shows us ({@link #seatMayKnowHand}).
+         * Review #248 round 3: with it on, the seat's live tracker (RlKnowledge, {@link #beliefRememberedHand}) is not
+         * consulted by any dealer, the uniform belief included: InfoStates' continuous identity alone decides.
          */
         public boolean knownHand = false;
         /** order-memory-1102: the version an armed seat's lines carry (its boot line, each K8 decision line). */
@@ -12382,21 +12383,23 @@ public final class LookaheadSearch {
      * attack-holdback-1118: the world dealers' one rule, "the seat may know this hand card" ({@code lc} in the live game):
      * Forge shows it to the seat, or {@link #knownHidden}. {@code remembered}: the dealer kept the seat's live tracker's
      * remembered cards before knownHand ({@link Config#beliefRememberedHand}); with knownHand off every dealer is
-     * exactly as before, with it on every dealer keeps the same cards.
+     * exactly as before, with it on every dealer keeps the same cards: {@code canBeShownTo || InfoStates.knowsInHand}.
      */
     boolean seatMayKnowHand(Game live, Player liveMe, Card lc, boolean remembered) {
         return lc.getView().canBeShownTo(liveMe.getView()) || knownHidden(live, liveMe, lc, remembered);
     }
 
     /**
-     * attack-holdback-1118: a hand card the seat knows without Forge showing it: with {@link Config#knownHand}, the live
-     * tracker remembers it ({@link #rememberedHand}) or InfoState(me) saw it enter that hand ({@link InfoStates#knowsInHand});
-     * without it, the tracker's card where the dealer counted it before ({@code remembered}). Also a solver re-draw's
-     * {@link ForcedWinSolver.Redraw#remembersHandCard}, so its world filter keeps what the re-draw kept.
+     * attack-holdback-1118: a hand card the seat knows without Forge showing it. With {@link Config#knownHand}: only
+     * InfoState(me) saw it enter that hand and kept its identity since ({@link InfoStates#knowsInHand}); review #248
+     * round 3: the live tracker ({@link #rememberedHand}) is not consulted, so it cannot restore what InfoStates forgot
+     * (RlKnowledge keeps a known card after a public exit of another card with its name). Without knownHand: the
+     * tracker's card where the dealer counted it before ({@code remembered}), byte for byte as before. Also a solver
+     * re-draw's {@link ForcedWinSolver.Redraw#remembersHandCard}, so its world filter keeps what the re-draw kept.
      */
     private boolean knownHidden(Game live, Player liveMe, Card lc, boolean remembered) {
         if (cfg.knownHand) {
-            return rememberedHand(live, liveMe, lc) || InfoStates.knownInHand(InfoStates.find(live), liveMe, lc);
+            return InfoStates.knownInHand(InfoStates.find(live), liveMe, lc);
         }
         return remembered && rememberedHand(live, liveMe, lc);
     }

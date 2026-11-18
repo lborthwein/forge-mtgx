@@ -278,6 +278,64 @@ public class KnownHandWorldsTest extends SimulationTest {
         }
     }
 
+    /**
+     * Review #248 round 3 (Astra's repro): with the live tracker (RlKnowledge) attached too, a publicly returned Serra
+     * Angel sits in a hand with another, unknown Angel; the unknown one is discarded. InfoStates forgets the returned
+     * Angel (the observer cannot tell which left); RlKnowledge still remembers it (its pre-existing same-name gap, not
+     * changed here). With knownHand on, no dealer fixes the remaining Angel in every world and no solver re-draw
+     * remembers it: the tracker is not consulted. Kolaghan, which InfoStates knows, is still kept in every world.
+     */
+    @Test
+    public void knownHandDoesNotConsultTheLiveTracker() throws Exception {
+        final Game g = initAndCreateGame();
+        final Player me = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+        fillLibrary(opp, 30);
+        fillLibrary(me, 30);
+        final Card other = addCardToZone("Serra Angel", opp, ZoneType.Hand);
+        final RlKnowledge k = new RlKnowledge(g);
+        k.v2 = true;
+        k.attach();
+        final InfoStates is = InfoStates.attach(g).trackHands();
+        final Card angel = g.getAction().moveToHand(addCard("Serra Angel", opp), null);
+        final Card dragon = g.getAction().moveToHand(addCard(DRAGON, opp), null);
+        assertTrue(is.knowsInHand(me, angel));
+        assertTrue(k.knows(k.seatOf(me), angel));
+        g.getAction().moveToGraveyard(other, null); // a public discard of the other Angel
+        assertTrue(angel.isInZone(ZoneType.Hand));
+        assertFalse(is.knowsInHand(me, angel), "InfoStates: an Angel left, it may have been the known one");
+        assertTrue(is.knowsInHand(me, dragon));
+        System.err.println("[knownhand-tracker] after the discard: InfoStates=" + is.knowsInHand(me, angel)
+                + " RlKnowledge=" + k.knows(k.seatOf(me), angel));
+        final int n = 8;
+        final List<String> rows = new ArrayList<>();
+        for (boolean on : new boolean[] {false, true}) {
+            final RlSearch s = new RlSearch(RlSearch.Config.parse(knownSpec(true, on)), 1, 2, null, k, "jar", "tracker", 2);
+            final RlSearch r = new RlSearch(RlSearch.Config.parse(knownSpec(false, on)), 1, 2, null, k, "jar", "tracker", 2);
+            try {
+                for (Map.Entry<String, Dealer> e : dealers(s, r).entrySet()) {
+                    final int ka = kept(g, me, angel.getId(), n, e.getValue());
+                    final int kd = kept(g, me, dragon.getId(), n, e.getValue());
+                    rows.add("knownHand=" + on + " " + e.getKey() + ": angel " + ka + " dragon " + kd);
+                    if (on) {
+                        assertTrue(ka < n, e.getKey() + " fixes the unknowable Angel in every world (" + ka + "/" + n + ")");
+                        assertEquals(kd, n, e.getKey() + " keeps Kolaghan (InfoStates knows it) in every world");
+                    }
+                }
+                if (on) {
+                    for (Map.Entry<String, forge.ai.simulation.ForcedWinSolver.Redraw> e : solverRedraws(s).entrySet()) {
+                        assertFalse(e.getValue().remembersHandCard(g, me, angel), e.getKey() + " remembers the Angel");
+                        assertTrue(e.getValue().remembersHandCard(g, me, dragon), e.getKey() + " remembers Kolaghan");
+                    }
+                }
+            } finally {
+                s.close();
+                r.close();
+            }
+        }
+        System.err.println("[knownhand-tracker] kept of " + n + " worlds: " + rows);
+    }
+
     /** The hand shuffled into the library (each card leaves the hand, the library is shuffled, a new hand drawn). */
     @Test
     public void aHandShuffledIntoTheLibraryIsForgotten() throws Exception {
