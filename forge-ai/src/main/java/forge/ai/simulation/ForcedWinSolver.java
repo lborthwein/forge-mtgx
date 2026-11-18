@@ -5044,9 +5044,11 @@ public final class ForcedWinSolver {
         final long planEnd = now + left * 1_000_000L;
         try {
             lim.nodes = cfg.nodes * cfg.lateEscalate;
-            lim.payPolicies = cfg.paySearch ? (cfg.payKeepUse ? ForcedWinPlanner.PAY_POLICIES_KEEP_USE : ForcedWinPlanner.PAY_POLICIES) : 1;
-            lim.grantSacMana = cfg.grantSacMana;
-            lim.pileTutorCast = cfg.pileTutorCast;
+            // the base passes' shape (greedy payment, no last-pass keys): only the node cap differs; the full payment
+            // search multiplies each node's branching and does not reach these lines in the pass's time
+            lim.payPolicies = 1;
+            lim.grantSacMana = false;
+            lim.pileTutorCast = false;
             lim.horizon = 1;
             lim.ms = Math.max(1L, left);
             ForcedWinPlanner.Result a = planCapped(pos, lim);
