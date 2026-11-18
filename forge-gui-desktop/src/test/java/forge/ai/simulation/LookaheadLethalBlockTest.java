@@ -1142,4 +1142,69 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertEquals(flags(lc), 5, lc.life[1]);
         AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, true}, lc.lethal));
     }
+
+    /** The Wild Cantor board: ai at 2 with a Grizzly Bears; opp's attacking Wild Cantor and Captive Flame, no other mana. */
+    private Card[] cantorBoard(Game g, Player ai, Player opp) {
+        ai.setLife(2, null);
+        final Card attacker = addCard("Wild Cantor", opp);
+        attacker.setSickness(false);
+        addCard("Captive Flame", opp);
+        final Card blocker = addCard("Grizzly Bears", ai);
+        blocker.setSickness(false);
+        fillLibrary(ai, 20);
+        fillLibrary(opp, 20);
+        g.getAction().checkStateEffects(true);
+        return new Card[] {attacker, blocker};
+    }
+
+    /**
+     * Re-review 3 S1: Wild Cantor's mana costs its own sacrifice; spent, the Cantor leaves combat. Kept, it deals 1 at 2
+     * life. 333d counted its mana for the Flame and its pumped damage too (2, lethal) and ON re-scored no blocks. An
+     * attacker's self-sacrifice mana is no longer counted: 1, nothing lethal, the live seat keeps none.
+     */
+    @Test
+    public void anAttackerSacrificedForManaIsNotAlsoDamage() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = cantorBoard(g, ai, opp);
+        attack(g, opp, ai, b[0]);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(b[1], b[0]), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 0, lc.mana);
+        AssertJUnit.assertEquals(flags(lc), 1, lc.life[1]);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, false}, lc.lethal));
+        final JsonObject lo = live(this::cantorBoard, "").line();
+        AssertJUnit.assertEquals(lo.toString(), "none", lo.get("chosen").getAsString());
+        final JsonObject ln = live(this::cantorBoard, "lethalBlock=on").line();
+        final JsonObject gn = ln.getAsJsonObject("lethalBlock");
+        AssertJUnit.assertNotNull(ln.toString(), gn);
+        AssertJUnit.assertFalse(ln.toString(), gn.has("rescored") && gn.get("rescored").getAsBoolean());
+        AssertJUnit.assertEquals(ln.toString(), "none", ln.get("chosen").getAsString());
+    }
+
+    /**
+     * The pump side of the same rule: an attacking Child of Thorns (sacrifice it: target creature +1/+1) and an attacking
+     * Grizzly Bears at 4 life. Kept or sacrificed for the Bears, 3 either way; 333d counted the Child's 1 and its +1 on
+     * the Bears (4, lethal). An attacker that leaves to pay its own cost is not counted as a pump: 3, not lethal.
+     */
+    @Test
+    public void anAttackerSacrificedForAPumpIsNotAlsoDamage() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card child = addCard("Child of Thorns", opp);
+        child.setSickness(false);
+        final Card bears = addCard("Grizzly Bears", opp);
+        bears.setSickness(false);
+        final Card blocker = addCard("Centaur Courser", ai);
+        blocker.setSickness(false);
+        fillLibrary(ai, 20);
+        fillLibrary(opp, 20);
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, child, bears);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(blocker, bears), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 3, lc.life[1]);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, false}, lc.lethal));
+    }
 }
