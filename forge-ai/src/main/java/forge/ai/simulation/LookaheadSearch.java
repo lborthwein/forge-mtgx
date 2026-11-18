@@ -198,6 +198,17 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode deadPump = AiFixes.Mode.OFF;
         /**
+         * Lethal-block guard (lane block-vs-open-pump-1118, report 2026-11-18T05:34Z; off|shadow|on, OFF by default: values
+         * and decisions unchanged). In the block search ({@link #decideBlocks}), a candidate declaration whose worst case of
+         * this combat's damage to the searching seat is lethal ({@link #lethalBlocks}: what the attackers' controller can add
+         * with the mana it has, through abilities the seat can see) scores as a lost play-out when another candidate's worst
+         * case is not lethal. On turn 22 at 8 life the search departed from the policy's double block to no blocks (0.322 vs
+         * 0.088, 8/8 worlds): no play-out had the opponent activate Polukranos's Monstrosity X = 3 with its seven open lands,
+         * which made it 8/8, unblocked, exactly lethal. ON re-scores; SHADOW counts and flags and decides as OFF; with every
+         * candidate lethal, or none, the values are unchanged.
+         */
+        public AiFixes.Mode lethalBlock = AiFixes.Mode.OFF;
+        /**
          * Dud-cast guard (lane live-ai-quality-1030, owner 2026-10-30; off|shadow|on, OFF by default: nothing runs and every
          * decision is unchanged). Before the live seat commits a non-permanent spell or a non-mana activated ability (Forge's
          * answer or a departure), {@link DudCast} resolves it in {@link #dudWorlds} belief-redrawn copies; when no copy's state
@@ -592,6 +603,9 @@ public final class LookaheadSearch {
             if (deadPump != AiFixes.Mode.OFF) {
                 o.addProperty("deadPump", deadPump.key());
             }
+            if (lethalBlock != AiFixes.Mode.OFF) {
+                o.addProperty("lethalBlock", lethalBlock.key());
+            }
             if (dudCast != AiFixes.Mode.OFF) {
                 o.addProperty("dudCast", dudCast.key());
                 o.addProperty("dudWorlds", dudWorlds);
@@ -751,6 +765,15 @@ public final class LookaheadSearch {
         /** deadPump guard (null = off): the same counters as deadEtb, for power-only pumps that cannot matter this turn. */
         public String deadPumpMode;
         public long deadPumpCands, deadPumpDecisions, deadPumpDropped, deadPumpShadowBest, deadPumpForge;
+        /**
+         * lethalBlock guard (null = off): block decisions checked; stood aside (the bound was not trusted); with a lethal
+         * candidate; re-scored (ON); with every candidate lethal (unchanged); whose played declaration was lethal; the
+         * lethal candidates; the default among them; failed checks (stood aside).
+         */
+        public String lethalBlockMode;
+        public long lethalBlockChecked, lethalBlockAside, lethalBlockFlagged, lethalBlockRescored, lethalBlockAllLethal,
+                lethalBlockPlayedLethal, lethalBlockCands, lethalBlockDefault, lethalBlockErrors;
+        public final Map<String, Long> lethalBlockWhy = new TreeMap<>();
         /** dudCast guard (null = off): answers checked, duds found, vetoed (re-asked), passed, unknown; time; dud cards. */
         public String dudCastMode;
         public long dudChecks, dudFound, dudVetoed, dudPassed, dudUnknown, dudNanos;
@@ -1011,6 +1034,23 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", deadPumpShadowBest);
                 d.addProperty("forgeAnswer", deadPumpForge);
                 o.add("deadPump", d);
+            }
+            if (lethalBlockMode != null) {
+                final JsonObject d = new JsonObject();
+                d.addProperty("mode", lethalBlockMode);
+                d.addProperty("checked", lethalBlockChecked);
+                d.addProperty("aside", lethalBlockAside);
+                d.addProperty("flagged", lethalBlockFlagged);
+                d.addProperty("rescored", lethalBlockRescored);
+                d.addProperty("allLethal", lethalBlockAllLethal);
+                d.addProperty("playedLethal", lethalBlockPlayedLethal);
+                d.addProperty("cands", lethalBlockCands);
+                d.addProperty("default", lethalBlockDefault);
+                d.addProperty("errors", lethalBlockErrors);
+                final JsonObject why = new JsonObject();
+                lethalBlockWhy.forEach(why::addProperty);
+                d.add("why", why);
+                o.add("lethalBlock", d);
             }
             if (dudCastMode != null) {
                 JsonObject d = new JsonObject();
@@ -1933,6 +1973,9 @@ public final class LookaheadSearch {
         if (cfg.deadPump != AiFixes.Mode.OFF) {
             stats.deadPumpMode = cfg.deadPump.key();
         }
+        if (cfg.lethalBlock != AiFixes.Mode.OFF) {
+            stats.lethalBlockMode = cfg.lethalBlock.key();
+        }
         if (cfg.dudCast != AiFixes.Mode.OFF) {
             stats.dudCastMode = cfg.dudCast.key();
         }
@@ -2649,6 +2692,15 @@ public final class LookaheadSearch {
          * terminal} as {@code pairs[0..2][candidate][world]} (P(win) of each seat; terminal 1 / 0 / 0.5, NaN = a leaf).
          */
         public double[][][] pairs;
+        /**
+         * lethalBlock (block search; null = the guard is off): per searched candidate, its worst case is lethal; empty
+         * when the guard stood aside ({@link #lethalAside} says why).
+         */
+        public boolean[] lethal;
+        /** lethalBlock: why the guard stood aside (null = it checked, or it is off). */
+        public String lethalAside;
+        /** lethalBlock ON: the lethal candidates were re-scored as lost play-outs. */
+        public boolean lethalRescored;
     }
 
     /**
@@ -8485,6 +8537,11 @@ public final class LookaheadSearch {
             res.leafFallback = stats.leafFallbacks != fb;
         }
         final boolean overBudget = aborted > 0;
+        if (cfg.lethalBlock != AiFixes.Mode.OFF && !overBudget) {
+            // block-vs-open-pump-1118: a worst-case lethal declaration scores as a lost play-out (ON), in the scale the
+            // values are in: the value leaf's P(win) of a loss is 0, the static value's is -TERMINAL
+            lethalBlockGuard(live, me, cands, values, ok, k, hookLeaf && !res.leafFallback ? 0.0 : -TERMINAL, res);
+        }
         final double[] ev = new double[n];
         for (int c = 0; c < n; c++) {
             double s = 0;
@@ -8545,6 +8602,9 @@ public final class LookaheadSearch {
             res.forced = res.played.equals(want);
             res.forcedMiss = !res.forced;
         }
+        if (res.lethal != null && res.lethal.length == n && res.lethal["departed".equals(outcome) ? best : 0]) {
+            stats.lethalBlockPlayedLethal++; // lethalBlock: the declaration played is worst-case lethal
+        }
         res.worlds = k;
         res.ev = ev;
         res.values = values;
@@ -8577,12 +8637,20 @@ public final class LookaheadSearch {
             x.addProperty("phase", String.valueOf(ph.getPhase()));
             x.addProperty("best", best);
             x.addProperty("outcome", outcome);
+            if (res.lethal != null) {
+                // lethalBlock (guard on or shadow only): checked (re-scored or not) or why it stood aside
+                x.addProperty("lethalBlock", res.lethalAside != null ? "aside: " + res.lethalAside
+                        : res.lethalRescored ? "rescored" : "checked");
+            }
             final JsonArray ca = new JsonArray();
             for (int c = 0; c < n; c++) {
                 final JsonObject co = new JsonObject();
                 co.addProperty("label", cands.get(c).label);
                 co.addProperty("ok", ok[c]);
                 co.addProperty("ev", ok[c] ? ev[c] : null);
+                if (res.lethal != null && res.lethal.length == n && res.lethal[c]) {
+                    co.addProperty("lethalBlock", true);
+                }
                 final JsonArray vs = new JsonArray();
                 for (int w = 0; w < k; w++) {
                     vs.add(values[c][w]);
@@ -8594,6 +8662,926 @@ public final class LookaheadSearch {
             System.err.println("[lookahead-explain] " + x);
         }
         return true;
+    }
+
+    // ------------------------------------------------------------------ lethalBlock guard (block-vs-open-pump-1118)
+
+    /**
+     * lethalBlock guard at the block search: flags every candidate whose worst-case combat damage is lethal
+     * ({@link #lethalBlocks}) and, ON, when at least one searched candidate is not lethal, gives each lethal one the value
+     * of a lost play-out ({@code loss}) in every world, before the argmax. With every candidate lethal, or none, the values
+     * are unchanged; SHADOW only counts and flags; a check that fails or is not trusted stands aside (nothing changes).
+     */
+    private void lethalBlockGuard(Game live, Player me, List<Cand> cands, double[][] values, boolean[] ok, int k, double loss,
+            GivenResult res) {
+        stats.lethalBlockChecked++;
+        LethalCheck lc;
+        try {
+            lc = lethalBlocks(live, me, cands);
+        } catch (RuntimeException | StackOverflowError e) {
+            stats.lethalBlockErrors++;
+            lc = LethalCheck.aside("error: " + e);
+            final StackTraceElement[] at = e.getStackTrace();
+            System.err.println("[lookahead] lethalBlock check failed, standing aside: " + e
+                    + (at.length > 0 ? " at " + at[0] : "") + (at.length > 1 ? " < " + at[1] : "") + (at.length > 2 ? " < " + at[2] : ""));
+        }
+        if (lc.aside == null && (lc.lethal == null || lc.lethal.length != cands.size())) {
+            lc = LethalCheck.aside("candidate count");
+        }
+        lethalBlockApply(lc, values, ok, k, loss, res);
+    }
+
+    /**
+     * lethalBlock: apply a check to the candidates' values (the guard's decision, apart from the check itself; tests drive
+     * it directly). Stood aside: nothing changes, {@code res.lethal} is empty. Otherwise {@code res.lethal} holds the flags;
+     * ON, with some searched candidate not lethal, each searched lethal candidate's values become {@code loss} in all
+     * {@code k} worlds. No candidate is removed (the default included: it keeps its place and its {@code ok}).
+     */
+    void lethalBlockApply(LethalCheck lc, double[][] values, boolean[] ok, int k, double loss, GivenResult res) {
+        if (lc.aside != null) {
+            stats.lethalBlockAside++;
+            stats.lethalBlockWhy.merge(lc.aside.startsWith("error") ? "error" : lc.aside, 1L, Long::sum);
+            res.lethal = new boolean[0];
+            res.lethalAside = lc.aside;
+            return;
+        }
+        final int n = lc.lethal.length;
+        res.lethal = lc.lethal.clone();
+        int lethalN = 0;
+        boolean safeOk = false;
+        for (int c = 0; c < n; c++) {
+            if (lc.lethal[c]) {
+                lethalN++;
+            } else if (ok[c]) {
+                safeOk = true;
+            }
+        }
+        if (lethalN == 0) {
+            return;
+        }
+        stats.lethalBlockFlagged++;
+        stats.lethalBlockCands += lethalN;
+        if (lc.lethal[0]) {
+            stats.lethalBlockDefault++;
+        }
+        if (!safeOk) {
+            stats.lethalBlockAllLethal++;
+            return;
+        }
+        if (cfg.lethalBlock != AiFixes.Mode.ON) {
+            return;
+        }
+        for (int c = 0; c < n; c++) {
+            if (lc.lethal[c] && ok[c]) {
+                Arrays.fill(values[c], 0, k, loss);
+            }
+        }
+        res.lethalRescored = true;
+        stats.lethalBlockRescored++;
+    }
+
+    /** lethalBlock: the check of one block decision. */
+    static final class LethalCheck {
+        /** Why the guard stands aside (null = the bound is trusted and {@link #lethal} holds). */
+        String aside;
+        /** Per candidate: its worst case is lethal. */
+        boolean[] lethal;
+        /** Per candidate: the worst-case life the player loses, and the poison counters it ends with (diagnostics, tests). */
+        int[] life, poison;
+        /** The mana the attackers' controller has, and the abilities counted for its boost (diagnostics, tests). */
+        int mana, abilities;
+
+        static LethalCheck aside(String why) {
+            final LethalCheck c = new LethalCheck();
+            c.aside = why;
+            return c;
+        }
+    }
+
+    /**
+     * lethalBlock: the check made in a copy of the live game (the live game is only read). The seat's knowledge is read
+     * in the live game first ({@link #pumpKnownIds}: the copy keeps card ids but not who may look at what); the copy's
+     * random, id and AI-cache scopes are its own, as for {@link #forgeBlocks}.
+     */
+    LethalCheck lethalBlocks(Game live, Player liveMe, List<Cand> cands) {
+        final List<Map<Integer, List<Integer>>> plans = new ArrayList<>(cands.size());
+        for (Cand c : cands) {
+            if (c.block == null) {
+                return LethalCheck.aside("not a block candidate");
+            }
+            plans.add(c.block.blocks);
+        }
+        return lethalBlocksOf(live, liveMe, plans);
+    }
+
+    /** lethalBlock: {@link #lethalBlocks} for declarations given as blocker card id -> attacker card ids (tests). */
+    LethalCheck lethalBlocksOf(Game live, Player liveMe, List<Map<Integer, List<Integer>>> plans) {
+        final Set<Integer> known = pumpKnownIds(live, liveMe);
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new Random(mix(cfg.seed, 0x1e7a1b10cL + decisionIndex)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                final GameCopier copier = copierOf(live);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+            }
+            return lethalBlocks(g, me, plans, known);
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /** lethalBlock: the mana budget is capped here (the knapsack's size); more mana only makes the bound larger. */
+    static final int LB_MANA_CAP = 60;
+    /** lethalBlock: no limit on an ability's activations (the mana bounds them). */
+    static final int LB_UNLIMITED = Integer.MAX_VALUE;
+
+    /**
+     * lethalBlock: per candidate declaration (blocker card id -> attacker card ids), an upper bound on the combat damage
+     * {@code me}, the defending seat, takes this combat if the declaration stands and the attackers' controller does its
+     * best with what it can afford, and whether that bound is lethal. Runs on {@code g}, a copy of the live game: it sets
+     * activating players and X on the copy's abilities and drops the controller's hand cards the seat does not know
+     * ({@code known}: card ids it may know of, read in the live game). Engine primitives only:
+     * <ul>
+     * <li>An unblocked attacker (or one that assigns its damage as though unblocked) deals its combat damage now plus its
+     * boost, twice with double strike. A blocked trampler deals what is left after the lethal damage its blockers need
+     * (1 each against deathtouch; a blocker counted once): at most max(0, s * power - lethal) + s * boost for s strikes. A
+     * blocked attacker without trample deals none. Infect damage counts as poison, kept apart from life, with toxic and
+     * combat-damage poison triggers.</li>
+     * <li>The boost is the most power the attackers' controller can add before combat damage with its mana
+     * ({@code ComputerUtilMana.getAvailableManaEstimate}: its untapped sources, each once, and its pool), through the
+     * spells and abilities it may play now ({@code Card.getAllPossibleAbilities}: timing, zone, activator and limits are the
+     * engine's) on the cards the seat knows: permanents, its own hand only where the seat knows the card, its graveyard,
+     * exile and command zone. Counted: Pump with a positive NumAtt and PumpAll on an attacker, and +1/+1-style counters
+     * (PutCounter / PutCounterAll, Monstrosity once and only if not monstrous, Adapt only without +1/+1 counters), in the
+     * whole resolution chain and its modes. Each counted ability must be payable on its own at X = 0
+     * ({@code ComputerUtilCost.canPayCost}: colors). X takes any value the mana allows; a repeatable ability repeats while
+     * mana and its other costs last (tap, a limit, a spell card: once); the mana is split among the abilities for the most
+     * damage (a small knapsack, colors ignored: an upper bound). A grant of double strike, trample or deathtouch the
+     * controller can pay for counts as given for free.</li>
+     * <li>Lethal: the life total at or below 0 when the player can lose from life, or the poison count at the rules'
+     * limit when it can lose to poison. Damage to planeswalkers and battles is not life.</li>
+     * </ul>
+     * Stands aside ({@link LethalCheck#aside}; nothing re-scored) when the bound is not trusted: not two players, not the
+     * declare-blockers step, an extra phase pending, an attacker the seat cannot see (face-down), an attacker that assigns
+     * damage by toughness, a damage replacement or prevention that applies to the attackers' damage to the player, a
+     * life-loss replacement, a playable ability that changes power another way (Animate, an Effect with a power static,
+     * ...) or puts a creature onto the battlefield attacking, a cost it cannot count, or a free unlimited pump.
+     * <p>
+     * Out of scope (they can only lower the true damage, or are not combat damage): the controller's hidden cards,
+     * removal of blockers before damage, blockers' first strike, and life loss that is not combat damage.
+     */
+    static LethalCheck lethalBlocks(Game g, Player me, List<Map<Integer, List<Integer>>> plans, Set<Integer> known) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        final forge.game.combat.Combat combat = ph.getCombat();
+        if (combat == null || ph.getPhase() != forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS) {
+            return LethalCheck.aside("not at declare blockers");
+        }
+        if (g.getPlayers().size() != 2) {
+            return LethalCheck.aside("not two players");
+        }
+        if (extraPhasePending(ph)) {
+            return LethalCheck.aside("extra phase pending");
+        }
+        final Player opp = combat.getAttackingPlayer();
+        if (opp == null || opp.equals(me) || !me.isInGame()) {
+            return LethalCheck.aside("no attacking opponent");
+        }
+        final int n = plans.size();
+        final LethalCheck out = new LethalCheck();
+        out.lethal = new boolean[n];
+        out.life = new int[n];
+        out.poison = new int[n];
+        final List<Card> atk = new ArrayList<>(combat.getAttackersOf(me));
+        if (atk.isEmpty()) {
+            return out; // nothing attacks the player
+        }
+        for (Card a : combat.getAttackers()) {
+            if (!known.contains(a.getId()) || a.isFaceDown()) {
+                return LethalCheck.aside("an attacker the seat cannot see");
+            }
+        }
+        for (Card a : atk) {
+            if (a.toughnessAssignsDamage()) {
+                return LethalCheck.aside("an attacker assigns damage by toughness");
+            }
+        }
+        final String repl = lbReplacement(g, me, atk, known);
+        if (repl != null) {
+            return LethalCheck.aside(repl);
+        }
+        // the controller's hand cards the seat does not know are out of the copy: no read below may use them (mana
+        // payments from a hidden hand included); their number is public
+        final int oppHand = opp.getCardsIn(ZoneType.Hand).size();
+        final List<Card> keepHand = new ArrayList<>();
+        for (Card c : opp.getCardsIn(ZoneType.Hand)) {
+            if (known.contains(c.getId())) {
+                keepHand.add(c);
+            }
+        }
+        if (keepHand.size() != oppHand) {
+            opp.getZone(ZoneType.Hand).setCards(keepHand);
+        }
+        final int hiddenHand = oppHand - keepHand.size();
+        final int mana = Math.max(0, Math.min(LB_MANA_CAP, lbMana(opp)));
+        out.mana = mana;
+        final int na = atk.size();
+        final boolean[] ds = new boolean[na], trample = new boolean[na], deathtouch = new boolean[na];
+        final List<List<LbAbility>> items = new ArrayList<>();
+        final Map<Integer, List<LbAbility>> byCard = new TreeMap<>();
+        for (Card c : new ArrayList<>(g.getCardsInGame())) {
+            if (!known.contains(c.getId())) {
+                continue;
+            }
+            final forge.game.zone.Zone z = g.getZoneOf(c);
+            if (z == null) {
+                continue;
+            }
+            final ZoneType zt = z.getZoneType();
+            final boolean field = zt == ZoneType.Battlefield;
+            if (!field && !(opp.equals(c.getOwner())
+                    && (zt == ZoneType.Hand || zt == ZoneType.Graveyard || zt == ZoneType.Exile || zt == ZoneType.Command))) {
+                continue;
+            }
+            for (SpellAbility sa : c.getAllPossibleAbilities(opp, true)) {
+                if (sa.isManaAbility() || sa.isLandAbility()) {
+                    continue;
+                }
+                final LbAbility ab = lbAbility(sa, opp, atk, mana, hiddenHand);
+                if (ab == null) {
+                    continue;
+                }
+                if (ab.unsure != null) {
+                    return LethalCheck.aside(ab.unsure);
+                }
+                out.abilities++;
+                for (int i = 0; i < na; i++) {
+                    ds[i] |= ab.ds[i];
+                    trample[i] |= ab.trample[i];
+                    deathtouch[i] |= ab.deathtouch[i];
+                }
+                if (field) {
+                    items.add(Collections.singletonList(ab)); // each activated ability of a permanent on its own
+                } else {
+                    byCard.computeIfAbsent(c.getId(), x -> new ArrayList<>()).add(ab); // one use of the card
+                }
+            }
+        }
+        items.addAll(byCard.values());
+        final boolean canLoseLife = me.canLoseLife() && !me.cantLoseForZeroOrLessLife();
+        final boolean canPoison = me.canReceiveCounters(forge.game.card.CounterEnumType.POISON)
+                && !me.cantLoseCheck(forge.game.player.GameLossReason.Poisoned);
+        final int poisonLimit = g.getRules().getPoisonCountersToLose();
+        for (int p = 0; p < n; p++) {
+            final int[] wLife = new int[na], wPoison = new int[na];
+            int life = 0, poison = me.getPoisonCounters();
+            final Set<Integer> usedBlockers = new HashSet<>();
+            for (int i = 0; i < na; i++) {
+                final Card a = atk.get(i);
+                final List<Card> blockers = new ArrayList<>();
+                for (Map.Entry<Integer, List<Integer>> e : plans.get(p).entrySet()) {
+                    if (e.getValue().contains(a.getId())) {
+                        final Card b = g.findById(e.getKey());
+                        if (b == null) {
+                            return LethalCheck.aside("a blocker is not in the copy");
+                        }
+                        blockers.add(b);
+                    }
+                }
+                if (a.assignNoCombatDamage()) {
+                    continue;
+                }
+                final int strikes = a.hasDoubleStrike() || ds[i] ? 2 : 1;
+                final int power = Math.max(0, a.getNetCombatDamage());
+                int base = 0, w = 0;
+                if (blockers.isEmpty()
+                        || forge.game.staticability.StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(a)) {
+                    base = strikes * power;
+                    w = strikes;
+                } else if (a.hasKeyword(forge.game.keyword.Keyword.TRAMPLE) || trample[i]) {
+                    final boolean dt = a.hasKeyword(forge.game.keyword.Keyword.DEATHTOUCH) || deathtouch[i];
+                    int lethal = 0;
+                    for (Card b : blockers) {
+                        if (usedBlockers.add(b.getId())) {
+                            final int need = Math.max(0, b.getLethalDamage());
+                            lethal += dt ? Math.min(1, need) : need;
+                        }
+                    }
+                    base = Math.max(0, strikes * power - lethal);
+                    w = strikes;
+                }
+                if (w == 0) {
+                    continue;
+                }
+                if (a.isInfectDamage(me)) {
+                    poison += base;
+                    wPoison[i] = w;
+                } else {
+                    life += base;
+                    wLife[i] = w;
+                }
+                poison += strikes * lbExtraPoison(a, opp, known);
+            }
+            life += lbBoost(items, wLife, mana);
+            poison += lbBoost(items, wPoison, mana);
+            out.life[p] = life;
+            out.poison[p] = poison;
+            out.lethal[p] = canLoseLife && life >= me.getLife() || canPoison && poison >= poisonLimit;
+        }
+        return out;
+    }
+
+    /**
+     * lethalBlock: the mana {@code p} can make now, each source once: per untapped permanent it controls, the most one of
+     * its playable mana abilities makes (Produced symbols x Amount, a "Combo" choice one symbol, less its own mana cost),
+     * plus its mana pool. As {@code ComputerUtilMana.getAvailableManaEstimate}, except that one counts the words of a
+     * "Combo R G" choice (3 mana for a land that makes 1).
+     */
+    static int lbMana(Player p) {
+        int mana = p.getManaPool().totalMana();
+        for (Card src : p.getCardsIn(ZoneType.Battlefield)) {
+            int best = 0;
+            for (SpellAbility ma : src.getManaAbilities()) {
+                ma.setActivatingPlayer(p);
+                if (!ma.canPlay()) {
+                    continue;
+                }
+                final String produced = ma.getParamOrDefault("Produced", "").trim();
+                final int symbols = produced.isEmpty() ? 1 : produced.startsWith("Combo") ? 1 : produced.split("\\s+").length;
+                final int amount = forge.game.ability.AbilityUtils.calculateAmount(src, ma.getParamOrDefault("Amount", "1"), ma);
+                final forge.game.cost.CostPartMana cm = ma.getPayCosts() == null ? null : ma.getPayCosts().getCostMana();
+                final Integer pay = cm == null ? Integer.valueOf(0) : cm.convertAmount();
+                best = Math.max(best, symbols * Math.max(0, amount) - (pay == null ? 0 : pay));
+            }
+            mana += best;
+        }
+        return mana;
+    }
+
+    /** lethalBlock: a cost part paid with hand cards (discard, reveal, exile or put from the hand, or from anywhere). */
+    static boolean lbFromHand(forge.game.cost.CostPart part) {
+        if (part.payCostFromSource()) {
+            return false;
+        }
+        if (part instanceof forge.game.cost.CostDiscard || part instanceof forge.game.cost.CostReveal) {
+            return true;
+        }
+        if (part instanceof forge.game.cost.CostExile) {
+            final List<ZoneType> from = ((forge.game.cost.CostExile) part).getFrom();
+            return from == null || from.isEmpty() || from.contains(ZoneType.Hand);
+        }
+        if (part instanceof forge.game.cost.CostPutCardToLib) {
+            return ((forge.game.cost.CostPutCardToLib) part).getFrom() == ZoneType.Hand;
+        }
+        return false;
+    }
+
+    /**
+     * lethalBlock: why the bound would not hold, or null. A replacement effect on a card the seat knows (an effect in the
+     * command zone included), working where it is: a DamageDone replacement that applies to an attacker's combat damage to
+     * the player (prevention, doubling, redirection), or a LifeReduced replacement.
+     */
+    static String lbReplacement(Game g, Player me, List<Card> atk, Set<Integer> known) {
+        for (Card c : g.getCardsInGame()) {
+            if (!known.contains(c.getId())) {
+                continue;
+            }
+            final forge.game.zone.Zone z = g.getZoneOf(c);
+            if (z == null) {
+                continue;
+            }
+            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                final forge.game.replacement.ReplacementType m = re.getMode();
+                if (m != forge.game.replacement.ReplacementType.DamageDone && m != forge.game.replacement.ReplacementType.LifeReduced
+                        || !re.zonesCheck(z) || !re.requirementsCheck(g)) {
+                    continue;
+                }
+                if (m == forge.game.replacement.ReplacementType.LifeReduced) {
+                    return "a life-loss replacement";
+                }
+                for (Card a : atk) {
+                    final Map<forge.game.ability.AbilityKey, Object> rp = forge.game.ability.AbilityKey.mapFromAffected(me);
+                    rp.put(forge.game.ability.AbilityKey.DamageSource, a);
+                    rp.put(forge.game.ability.AbilityKey.DamageAmount, Math.max(1, a.getNetCombatDamage()));
+                    rp.put(forge.game.ability.AbilityKey.IsCombat, true);
+                    try {
+                        if (re.canReplace(rp)) {
+                            return "a damage replacement";
+                        }
+                    } catch (RuntimeException e) {
+                        return "a damage replacement";
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * lethalBlock: poison counters {@code a} gives with each hit of combat damage on the player besides infect: its toxic,
+     * and the poison triggers on combat damage of the controller's permanents the seat knows.
+     */
+    static int lbExtraPoison(Card a, Player opp, Set<Integer> known) {
+        int poison = a.getKeywordMagnitude(forge.game.keyword.Keyword.TOXIC);
+        for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+            if (!known.contains(c.getId())) {
+                continue;
+            }
+            for (Trigger t : c.getTriggers()) {
+                if (t.getMode() == TriggerType.DamageDone && !"False".equals(t.getParam("CombatDamage"))
+                        && t.matchesValidParam("ValidSource", a)) {
+                    final SpellAbility ab = t.getOverridingAbility();
+                    if (ab != null && ab.getApi() == forge.game.ability.ApiType.Poison) {
+                        poison += Math.max(0, forge.game.ability.AbilityUtils.calculateAmount(a, ab.getParamOrDefault("Num", "1"), ab));
+                    }
+                }
+            }
+        }
+        return poison;
+    }
+
+    /** lethalBlock: one spell or ability the attackers' controller may play now that can add power to an attacker. */
+    static final class LbAbility {
+        /** Why the bound cannot count it (the guard stands aside), or null. */
+        String unsure;
+        /** Mana per activation at X = 0 (cost adjustments applied), mana per X, activations at most, largest X. */
+        int cost, xPer, cap, xMax;
+        final List<LbPart> parts = new ArrayList<>();
+        /** Per attacker: the ability may give it double strike / trample / deathtouch. */
+        boolean[] ds, trample, deathtouch;
+    }
+
+    /** lethalBlock: one part of an ability's resolution that adds power to attackers. */
+    static final class LbPart {
+        /** The part of the resolution chain this reads. */
+        SpellAbility owner;
+        /** It picks up to {@link #maxTargets} of the attackers it may hit; otherwise it hits all of them. */
+        boolean pick;
+        int maxTargets = 1;
+        /** Per attacker: it may hit it. */
+        boolean[] hit;
+        /** Power added per attacker, by X: amount[x][attacker]. */
+        int[][] amount;
+        /** The amount's text ("Double" / "Triple" read the attacker's power), and power per counter (0: a pump's NumAtt). */
+        String num;
+        int perUnit;
+    }
+
+    /** lethalBlock: unsure marker for an ability. */
+    private static LbAbility lbUnsure(String why) {
+        final LbAbility u = new LbAbility();
+        u.unsure = why;
+        return u;
+    }
+
+    /**
+     * lethalBlock: {@code sa} as {@code opp} may play it now, or null when it adds no power to an attacker or cannot be
+     * paid for. Unsure (the guard stands aside) when a payable ability changes power another way or makes a new attacker,
+     * or has a cost this cannot count.
+     */
+    static LbAbility lbAbility(SpellAbility sa, Player opp, List<Card> atk, int mana, int hiddenHand) {
+        final int na = atk.size();
+        final LbAbility ab = new LbAbility();
+        ab.ds = new boolean[na];
+        ab.trample = new boolean[na];
+        ab.deathtouch = new boolean[na];
+        final Card host = sa.getHostCard();
+        String unsure = null;
+        final List<SpellAbility> chain = new ArrayList<>();
+        final java.util.ArrayDeque<SpellAbility> todo = new java.util.ArrayDeque<>();
+        final Set<SpellAbility> seen = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        todo.add(sa);
+        while (!todo.isEmpty()) {
+            final SpellAbility s = todo.poll();
+            if (s == null || !seen.add(s)) {
+                continue;
+            }
+            chain.add(s);
+            if (s.getSubAbility() != null) {
+                todo.add(s.getSubAbility());
+            }
+            for (SpellAbility a : s.getAdditionalAbilities().values()) {
+                if (a != null) {
+                    todo.add(a);
+                }
+            }
+            for (List<? extends SpellAbility> l : s.getAdditionalAbilityLists().values()) {
+                for (SpellAbility a : l) {
+                    if (a != null) {
+                        todo.add(a);
+                    }
+                }
+            }
+        }
+        for (SpellAbility s : chain) {
+            for (String key : s.getMapParams().keySet()) {
+                if (key.endsWith("Attacking") || "Ninjutsu".equals(key)) {
+                    unsure = "a playable ability puts a creature onto the battlefield attacking";
+                }
+            }
+            final forge.game.ability.ApiType api = s.getApi();
+            if (api == forge.game.ability.ApiType.Pump || api == forge.game.ability.ApiType.PumpAll) {
+                final LbPart part = lbHits(s, atk, api == forge.game.ability.ApiType.PumpAll ? "ValidCards" : null);
+                if (part == null) {
+                    continue;
+                }
+                final String kw = s.getParamOrDefault("KW", "");
+                for (int i = 0; i < na; i++) {
+                    if (part.hit[i]) {
+                        ab.ds[i] |= kw.contains("Double Strike");
+                        ab.trample[i] |= kw.contains("Trample");
+                        ab.deathtouch[i] |= kw.contains("Deathtouch");
+                    }
+                }
+                part.num = s.getParam("NumAtt");
+                if (part.num != null) {
+                    ab.parts.add(part);
+                }
+            } else if (api == forge.game.ability.ApiType.PutCounter || api == forge.game.ability.ApiType.PutCounterAll) {
+                if (s.hasParam("Monstrosity") && host.isMonstrous()
+                        || s.hasParam("Adapt") && host.getCounters(forge.game.card.CounterEnumType.P1P1) > 0
+                        && !forge.game.staticability.StaticAbilityAdapt.anyWithAdapt(s, host)) {
+                    continue; // the engine puts no counter
+                }
+                int per = 0;
+                boolean gDs = false, gTr = false, gDt = false;
+                for (String t : s.getParamOrDefault("CounterType", "").split(",")) {
+                    final String name = t.trim();
+                    final java.util.regex.Matcher pm = java.util.regex.Pattern.compile("P(\\d+)P(\\d+)").matcher(name);
+                    if (pm.matches()) {
+                        per = Math.max(per, Integer.parseInt(pm.group(1)));
+                    }
+                    gDs |= "Double Strike".equalsIgnoreCase(name) || "DOUBLE_STRIKE".equalsIgnoreCase(name);
+                    gTr |= "Trample".equalsIgnoreCase(name) || "TRAMPLE".equalsIgnoreCase(name);
+                    gDt |= "Deathtouch".equalsIgnoreCase(name) || "DEATHTOUCH".equalsIgnoreCase(name);
+                }
+                if (per == 0 && !gDs && !gTr && !gDt) {
+                    continue;
+                }
+                final LbPart part = lbHits(s, atk, api == forge.game.ability.ApiType.PutCounterAll ? "ValidCards" : null);
+                if (part == null) {
+                    continue;
+                }
+                for (int i = 0; i < na; i++) {
+                    if (part.hit[i]) {
+                        ab.ds[i] |= gDs;
+                        ab.trample[i] |= gTr;
+                        ab.deathtouch[i] |= gDt;
+                    }
+                }
+                if (per > 0) {
+                    part.num = s.getParamOrDefault("CounterNum", "1");
+                    part.perUnit = per;
+                    ab.parts.add(part);
+                }
+                if (s.hasParam("Monstrosity") || s.hasParam("Adapt")) {
+                    ab.cap = 1;
+                }
+            } else if (lbOtherPower(s, atk)) {
+                unsure = "a playable ability changes power another way (" + api + ")";
+            }
+        }
+        boolean grants = false;
+        for (int i = 0; i < na; i++) {
+            grants |= ab.ds[i] || ab.trample[i] || ab.deathtouch[i];
+        }
+        if (ab.parts.isEmpty() && !grants && unsure == null) {
+            return null;
+        }
+        final forge.game.cost.Cost cost = sa.getPayCosts();
+        if (hiddenHand > 0 && cost != null) {
+            for (forge.game.cost.CostPart part : cost.getCostParts()) {
+                if (lbFromHand(part)) {
+                    // payable or not with cards the seat has not seen: the bound cannot tell
+                    return lbUnsure("a cost paid from a hidden hand (" + part.getClass().getSimpleName() + ")");
+                }
+            }
+        }
+        final SpellAbility root = sa.getRootAbility();
+        final Integer xWas = root.getXManaCostPaid();
+        try {
+            root.setXManaCostPaid(0);
+            if (!forge.ai.ComputerUtilCost.canPayCost(sa, opp, false)) {
+                return null; // not payable on its own (colors), at X = 0
+            }
+            if (unsure != null) {
+                return lbUnsure(unsure);
+            }
+            // the cost: mana at X = 0 with the engine's cost adjustments, mana per X, and how often the other parts allow it
+            int cap = ab.cap > 0 ? ab.cap : sa.isSpell() ? 1 : LB_UNLIMITED;
+            boolean selfGone = false;
+            if (cost != null) {
+                if (cost.hasManaCost()) {
+                    ab.cost = Math.max(0, forge.ai.ComputerUtilMana.calculateManaCost(cost, sa, opp, true, 0, false)
+                            .getConvertedManaCost());
+                    ab.xPer = cost.getTotalMana().countX();
+                }
+                for (forge.game.cost.CostPart part : cost.getCostParts()) {
+                    if (part instanceof forge.game.cost.CostPartMana) {
+                        continue;
+                    }
+                    if (part instanceof forge.game.cost.CostTap || part instanceof forge.game.cost.CostUntap
+                            || part instanceof forge.game.cost.CostExert) {
+                        cap = Math.min(cap, 1);
+                        continue;
+                    }
+                    if (part.payCostFromSource() && (part instanceof forge.game.cost.CostSacrifice
+                            || part instanceof forge.game.cost.CostExile || part instanceof forge.game.cost.CostReturn
+                            || part instanceof forge.game.cost.CostDiscard || part instanceof forge.game.cost.CostPutCardToLib)) {
+                        cap = Math.min(cap, 1); // the host leaves: once, and not a beneficiary
+                        selfGone = true;
+                        continue;
+                    }
+                    final Integer amt = part.convertAmount();
+                    if (amt == null) {
+                        return lbUnsure("a cost it cannot count (" + part.getClass().getSimpleName() + ")");
+                    }
+                    if (amt <= 0) {
+                        continue;
+                    }
+                    final Integer m = part.getMaxAmountX(sa, opp, false);
+                    if (m == null) {
+                        return lbUnsure("a cost it cannot count (" + part.getClass().getSimpleName() + ")");
+                    }
+                    cap = Math.min(cap, Math.max(0, m) / amt);
+                }
+            }
+            if (!sa.isSpell()) {
+                final forge.game.spellability.SpellAbilityRestriction r = sa.getRestrictions();
+                if (r != null && r.getLimitToCheck() != null) {
+                    cap = Math.min(cap, Math.max(0, forge.game.ability.AbilityUtils.calculateAmount(host, r.getLimitToCheck(), sa)
+                            - sa.getActivationsThisTurn()));
+                }
+                if (r != null && r.getGameLimitToCheck() != null) {
+                    cap = Math.min(cap, Math.max(0, forge.game.ability.AbilityUtils.calculateAmount(host,
+                            r.getGameLimitToCheck(), sa) - sa.getActivationsThisGame()));
+                }
+            }
+            if (cap <= 0) {
+                return null;
+            }
+            ab.cap = cap;
+            if (selfGone) {
+                // the cost takes the host itself: it is not there to be pumped
+                for (LbPart part : ab.parts) {
+                    for (int i = 0; i < na; i++) {
+                        part.hit[i] &= atk.get(i) != host;
+                    }
+                }
+                for (int i = 0; i < na; i++) {
+                    if (atk.get(i) == host) {
+                        ab.ds[i] = ab.trample[i] = ab.deathtouch[i] = false;
+                    }
+                }
+            }
+            ab.xMax = ab.xPer > 0 ? Math.max(0, (mana - ab.cost) / ab.xPer) : 0;
+            // the power each part adds, for every X the mana allows (X is the root's paid X, as the engine reads it)
+            for (LbPart part : ab.parts) {
+                part.amount = new int[ab.xMax + 1][na];
+            }
+            for (int x = 0; x <= ab.xMax; x++) {
+                root.setXManaCostPaid(x);
+                for (LbPart part : ab.parts) {
+                    final SpellAbility s = part.owner;
+                    for (int i = 0; i < na; i++) {
+                        if (!part.hit[i]) {
+                            continue;
+                        }
+                        final int v;
+                        if ("Double".equals(part.num)) {
+                            v = Math.max(0, atk.get(i).getNetPower());
+                        } else if ("Triple".equals(part.num)) {
+                            v = 2 * Math.max(0, atk.get(i).getNetPower());
+                        } else if (part.perUnit == 0) {
+                            v = forge.game.ability.AbilityUtils.calculateAmount(s.getHostCard(), part.num, s, true);
+                        } else {
+                            v = forge.game.ability.AbilityUtils.calculateAmount(s.getHostCard(), part.num, s) * part.perUnit;
+                        }
+                        part.amount[x][i] = Math.max(0, v);
+                    }
+                }
+            }
+        } finally {
+            root.setXManaCostPaid(xWas);
+        }
+        if (ab.xPer == 0 && ab.cost == 0 && ab.cap == LB_UNLIMITED) {
+            for (LbPart part : ab.parts) {
+                for (int i = 0; i < na; i++) {
+                    if (part.amount[0][i] > 0) {
+                        return lbUnsure("a free pump with no limit");
+                    }
+                }
+            }
+        }
+        return ab;
+    }
+
+    /**
+     * lethalBlock: which attackers part {@code s} may hit, or null for none. Targeted: every attacker it can target, up to
+     * its most targets. All (ValidCards, or a Choices list): its current valid set (a choice picks one). Defined (default
+     * Self): those cards; a Defined that names a parent's target picks among the attackers that parent can target, and one
+     * that names nothing yet (Remembered, Chosen...) picks any attacker.
+     */
+    static LbPart lbHits(SpellAbility s, List<Card> atk, String validKey) {
+        final int na = atk.size();
+        final LbPart part = new LbPart();
+        part.owner = s;
+        part.hit = new boolean[na];
+        final Card host = s.getHostCard();
+        if (s.hasParam("Bolster")) {
+            // the creature with the least toughness among its controller's: any attacker of it
+            part.pick = true;
+            for (int i = 0; i < na; i++) {
+                part.hit[i] = atk.get(i).getController().equals(s.getActivatingPlayer());
+            }
+        } else if (s.usesTargeting()) {
+            part.pick = true;
+            part.maxTargets = Math.max(1, s.getMaxTargets());
+            for (int i = 0; i < na; i++) {
+                part.hit[i] = s.canTarget(atk.get(i));
+            }
+        } else if (validKey != null && s.hasParam(validKey) || s.hasParam("Choices")) {
+            final String valid = validKey != null && s.hasParam(validKey) ? s.getParam(validKey) : s.getParam("Choices");
+            final CardCollectionView set = forge.game.ability.AbilityUtils.filterListByType(
+                    host.getGame().getCardsIn(ZoneType.Battlefield), valid, s);
+            part.pick = !(validKey != null && s.hasParam(validKey));
+            for (int i = 0; i < na; i++) {
+                part.hit[i] = set.contains(atk.get(i));
+            }
+        } else {
+            final String def = s.getParamOrDefault("Defined", "Self");
+            if (def.contains("Target")) {
+                SpellAbility t = s.getParent();
+                while (t != null && !t.usesTargeting()) {
+                    t = t.getParent();
+                }
+                part.pick = true;
+                part.maxTargets = t == null ? 1 : Math.max(1, t.getMaxTargets());
+                for (int i = 0; i < na; i++) {
+                    part.hit[i] = t == null || t.canTarget(atk.get(i));
+                }
+            } else {
+                final List<Card> cards = new ArrayList<>();
+                for (String d : def.split(" & ")) {
+                    cards.addAll(forge.game.ability.AbilityUtils.getDefinedCards(host, d, s));
+                }
+                if (cards.isEmpty() && !"Self".equals(def)) {
+                    part.pick = true;
+                    Arrays.fill(part.hit, true);
+                } else {
+                    for (int i = 0; i < na; i++) {
+                        part.hit[i] = cards.contains(atk.get(i));
+                    }
+                }
+            }
+        }
+        for (boolean h : part.hit) {
+            if (h) {
+                return part;
+            }
+        }
+        return null;
+    }
+
+    /** lethalBlock: APIs that change power or characteristics other than Pump, PumpAll and counters. */
+    static final Set<String> LB_POWER_APIS = new HashSet<>(Arrays.asList("Animate", "AnimateAll", "SetState", "Clone",
+            "ExchangePower", "SwitchPT", "Mutate", "Effect", "Attach"));
+
+    /**
+     * lethalBlock: part {@code s} may change an attacker's power another way: an API of {@link #LB_POWER_APIS} whose
+     * parameters, or the SVars they name, set or add power (Power, AddPower, SetPower, a power static of an Effect), on an
+     * attacker it may hit (an Effect's statics are not read for whom they affect: any attacker); or one that copies,
+     * transforms, exchanges or mutates onto an attacker it may hit.
+     */
+    static boolean lbOtherPower(SpellAbility s, List<Card> atk) {
+        final String api = s.getApi() == null ? "" : s.getApi().name();
+        if (!LB_POWER_APIS.contains(api)) {
+            return false;
+        }
+        final boolean setsPower = paramsMatch(s.getMapParams(), s, new HashSet<>(),
+                (k, v) -> k.contains("Power") || k.equals("StaticAbilities") && v.length() > 0 && lbStaticsAddPower(s, v),
+                v -> v.contains("AddPower") || v.contains("SetPower"));
+        boolean characteristics = "SetState".equals(api) || "Clone".equals(api) || "ExchangePower".equals(api)
+                || "SwitchPT".equals(api) || "Mutate".equals(api);
+        if ("Attach".equals(api)) {
+            // an Aura or Equipment attached now: its own statics may add power to what it is attached to
+            for (forge.game.staticability.StaticAbility st : s.getHostCard().getStaticAbilities()) {
+                characteristics |= st.hasParam("AddPower") || st.hasParam("SetPower");
+            }
+        }
+        if (!setsPower && !characteristics) {
+            return false;
+        }
+        if ("Effect".equals(api)) {
+            return true;
+        }
+        final LbPart hit = lbHits(s, atk, "ValidCards");
+        return hit != null;
+    }
+
+    /** lethalBlock: an Effect's StaticAbilities (SVar names) carry a power change. */
+    private static boolean lbStaticsAddPower(SpellAbility s, String names) {
+        for (String nm : names.split(",")) {
+            final String sv = s.hasSVar(nm.trim()) ? s.getSVar(nm.trim()) : "";
+            if (sv.contains("AddPower") || sv.contains("SetPower")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * lethalBlock: the most damage per point of weight the abilities add with {@code mana}: a group knapsack (one option
+     * per item: an ability's activation count, or its X, or one of a card's spells), damage = power x weight (strikes; a
+     * pick hits its best attackers).
+     */
+    static int lbBoost(List<List<LbAbility>> items, int[] w, int mana) {
+        boolean any = false;
+        for (int x : w) {
+            any |= x > 0;
+        }
+        if (!any || items.isEmpty()) {
+            return 0;
+        }
+        int[] best = new int[mana + 1];
+        for (List<LbAbility> item : items) {
+            final List<int[]> opts = new ArrayList<>(); // {mana, damage}
+            for (LbAbility ab : item) {
+                if (ab.parts.isEmpty()) {
+                    continue;
+                }
+                if (ab.xPer > 0) {
+                    for (int x = 0; x <= ab.xMax; x++) {
+                        final int c = ab.cost + x * ab.xPer;
+                        final int d = lbGain(ab, x, w);
+                        if (c <= mana && d > 0) {
+                            opts.add(new int[] {c, d});
+                        }
+                    }
+                } else {
+                    final int d = lbGain(ab, 0, w);
+                    if (d <= 0) {
+                        continue;
+                    }
+                    final int most = ab.cost == 0 ? Math.min(ab.cap, 1 << 16) : Math.min(ab.cap, mana / ab.cost);
+                    for (int j = 1; j <= most; j++) {
+                        opts.add(new int[] {j * ab.cost, (int) Math.min(1 << 24, (long) j * d)});
+                        if (ab.cost == 0) {
+                            opts.set(opts.size() - 1, new int[] {0, (int) Math.min(1 << 24, (long) most * d)});
+                            break;
+                        }
+                    }
+                }
+            }
+            if (opts.isEmpty()) {
+                continue;
+            }
+            final int[] next = best.clone();
+            for (int b = 0; b <= mana; b++) {
+                for (int[] o : opts) {
+                    if (o[0] <= b) {
+                        next[b] = Math.max(next[b], (int) Math.min(1 << 26, (long) best[b - o[0]] + o[1]));
+                    }
+                }
+            }
+            best = next;
+        }
+        return best[mana];
+    }
+
+    /** lethalBlock: one activation's damage at X = {@code x}: per part, power x weight over what it hits (a pick: its best). */
+    static int lbGain(LbAbility ab, int x, int[] w) {
+        long sum = 0;
+        for (LbPart part : ab.parts) {
+            final int[] am = part.amount[Math.min(x, part.amount.length - 1)];
+            if (part.pick) {
+                final List<Integer> vs = new ArrayList<>();
+                for (int i = 0; i < w.length; i++) {
+                    if (part.hit[i] && am[i] * w[i] > 0) {
+                        vs.add(am[i] * w[i]);
+                    }
+                }
+                vs.sort(Collections.reverseOrder());
+                for (int j = 0; j < Math.min(part.maxTargets, vs.size()); j++) {
+                    sum += vs.get(j);
+                }
+            } else {
+                for (int i = 0; i < w.length; i++) {
+                    if (part.hit[i]) {
+                        sum += (long) am[i] * w[i];
+                    }
+                }
+            }
+        }
+        return (int) Math.min(1 << 24, sum);
     }
 
     // ------------------------------------------------------------------ tutor ranking (lane tutor-ranking-0928)
