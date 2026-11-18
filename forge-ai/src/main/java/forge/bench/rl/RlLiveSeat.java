@@ -133,7 +133,10 @@ public final class RlLiveSeat {
                 // (ForcedWinSolver.Config.planEscalate)
                 "planEscalate",
                 // sdcc-verify-1117 (absent = 0 = off): verify up to k distinct lines until a proof (ForcedWinSolver.Config.verifyMax)
-                "verifyMax"));
+                "verifyMax",
+                // sdcc-late-escalate-1117 (absent = 0 = off): after the planner and the engine, one planner pass at k x the
+                // node cap in the decision's time left (ForcedWinSolver.Config.lateEscalate)
+                "lateEscalate"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
