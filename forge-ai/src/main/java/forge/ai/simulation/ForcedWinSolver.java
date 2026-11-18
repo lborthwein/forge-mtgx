@@ -387,6 +387,12 @@ public final class ForcedWinSolver {
          */
         public int planEscalate = 0;
         /**
+         * sdcc-verify-1117 (0 = off, the default: the top {@link #top} distinct lines, as before): verify up to this many
+         * distinct lines in rank order, stopping at the first proof or at the verification deadline, so a larger planner
+         * pass whose first-ranked lines fail cannot hide a proven line further down.
+         */
+        public int verifyMax = 0;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -1033,6 +1039,7 @@ public final class ForcedWinSolver {
             c.pileTutorCast = "true".equals(get.apply("pileTutorCast")); // sdcc-piletc-1117
             c.planWiden = intOr(get.apply("planWiden"), c.planWiden); // sdcc-widen-1117
             c.planEscalate = intOr(get.apply("planEscalate"), c.planEscalate); // sdcc-escalate-1117
+            c.verifyMax = intOr(get.apply("verifyMax"), c.verifyMax); // sdcc-verify-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1127,6 +1134,7 @@ public final class ForcedWinSolver {
                 + (pileTutorCast ? " pileTutorCast" : "") // sdcc-piletc-1117
                 + (planWiden > 0 ? " planWiden=" + planWiden : "") // sdcc-widen-1117
                 + (planEscalate > 1 ? " planEscalate=" + planEscalate : "") // sdcc-escalate-1117
+                + (verifyMax > 0 ? " verifyMax=" + verifyMax : "") // sdcc-verify-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -6629,8 +6637,8 @@ public final class ForcedWinSolver {
             if (shapes.add(shape)) {
                 picked.add(l);
             }
-            if (picked.size() >= cfg.top) {
-                break;
+            if (picked.size() >= (cfg.verifyMax > cfg.top ? cfg.verifyMax : cfg.top)) {
+                break; // sdcc-verify-1117 (verifyMax): more distinct lines, verified in rank order until one is proven
             }
         }
         Eval best = null;

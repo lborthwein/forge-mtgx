@@ -131,7 +131,9 @@ public final class RlLiveSeat {
                 "planWiden",
                 // sdcc-escalate-1117 (absent = 0 = off): one planner pass at k x the cap where the passes stopped at it
                 // (ForcedWinSolver.Config.planEscalate)
-                "planEscalate"));
+                "planEscalate",
+                // sdcc-verify-1117 (absent = 0 = off): verify up to k distinct lines until a proof (ForcedWinSolver.Config.verifyMax)
+                "verifyMax"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
