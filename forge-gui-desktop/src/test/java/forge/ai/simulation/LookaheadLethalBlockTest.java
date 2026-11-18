@@ -1250,7 +1250,16 @@ public class LookaheadLethalBlockTest extends SimulationTest {
 
     private static String witnessOf(LookaheadSearch.LethalCheck lc) {
         return flags(lc) + " witnessed=" + Arrays.toString(lc.witnessed) + " line=" + Arrays.toString(lc.witnessLine)
-                + " runs=" + lc.witnessRuns + " capped=" + lc.witnessCapped + " ms=" + lc.witnessNanos / 1e6;
+                + " runs=" + lc.witnessRuns + " capped=" + lc.witnessCapped + round7(lc) + " ms=" + lc.witnessNanos / 1e6;
+    }
+
+    /** Round 7's fields (absent from an older jar the new tests also run on, to show they fail there). */
+    private static String round7(LookaheadSearch.LethalCheck lc) {
+        try {
+            return " timedOut=" + lc.witnessTimedOut + " void=" + lc.witnessVoid;
+        } catch (NoSuchFieldError e) {
+            return "";
+        }
     }
 
     private static void logWitness(String label, LookaheadSearch.LethalCheck lc) {
@@ -2006,5 +2015,388 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertFalse(r.lethalRescored);
         AssertJUnit.assertTrue(Arrays.deepEquals(values(), v));
         AssertJUnit.assertTrue(Arrays.equals(new boolean[] {true, false, true}, r.witnessed));
+    }
+
+    // ------------------------------------- round 7 (review/245/r6): nothing the seat cannot see, or no witness at all
+
+    /** ON with every candidate searched: each keeps its values, nothing is re-scored (530bcb291c7 re-scored these). */
+    private static void assertNoRescore(String label, LookaheadSearch.LethalCheck lc, int n) {
+        final double[][] v = new double[n][2];
+        for (int c = 0; c < n; c++) {
+            Arrays.fill(v[c], 0.30 + 0.10 * c);
+        }
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        final LookaheadSearch.GivenResult r = apply(AiFixes.Mode.ON, lc, v, ok);
+        for (int c = 0; c < n; c++) {
+            AssertJUnit.assertEquals(label + " candidate " + c + " values: " + witnessOf(lc) + " " + Arrays.deepToString(v),
+                    0.30 + 0.10 * c, v[c][0], 1e-12);
+        }
+        AssertJUnit.assertFalse(label + ": " + witnessOf(lc), r.lethalRescored);
+    }
+
+    /**
+     * The original-board control: the block {@code plan} and {@code line} played on the real game itself, by the witness's
+     * own controllers (the seat declares and passes; the attacking player plays the line and assigns combat damage by the
+     * rules), through combat damage.
+     */
+    private static void playLive(Game g, Map<Integer, List<Integer>> plan, LookaheadSearch.LbLine line) throws Exception {
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final LookaheadSearch.BlockPlan bp = new LookaheadSearch.BlockPlan("live");
+        bp.blocks.putAll(plan);
+        final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+        LookaheadSearch.BlockPlan.clear(ph.getCombat(), ai);
+        ph.devModeSet(PhaseType.COMBAT_DECLARE_ATTACKERS, opp, false, ph.getTurn());
+        final java.lang.reflect.Method m = LookaheadSearch.class.getDeclaredMethod("setPriorityState",
+                forge.game.phase.PhaseHandler.class, Player.class, Player.class, boolean.class);
+        m.setAccessible(true);
+        m.invoke(null, ph, ai, opp, false);
+        ai.dangerouslySetController(new LookaheadSearch.WitnessSeat(g, ai, ai.getController().getLobbyPlayer(), bp));
+        opp.dangerouslySetController(new LookaheadSearch.WitnessAi(g, opp, opp.getController().getLobbyPlayer(), line, -1,
+                Integer.MAX_VALUE));
+        final int turn = ph.getTurn();
+        for (int i = 0; i < 400 && !g.isGameOver(); i++) {
+            if (ph.getTurn() != turn || ph.getPhase().ordinal() > PhaseType.COMBAT_DAMAGE.ordinal()) {
+                break;
+            }
+            ph.mainLoopStep();
+        }
+        g.getAction().checkStateEffects(true);
+    }
+
+    /**
+     * Review S1 1 (hellbent): Rakdos Pit Dragon (double strike while its controller has no cards in hand) attacks ai at 5;
+     * the attacking player has a Mountain, a Forest and one hand card ai has not seen. 530bcb291c7 deleted that card in the
+     * copy, so the Dragon had double strike and no blocks was witnessed with no line. Now the hand keeps its size, with a
+     * placeholder: 3 + 1 (firebreathing) is 4, nothing is witnessed or re-scored. Controls: the line on the original board
+     * leaves ai alive; with the hand really empty, no blocks is witnessed with no line (3 double strike).
+     */
+    @Test
+    public void r7AHiddenHandKeepsItsSize() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card dragon = creature("Rakdos Pit Dragon", opp);
+        final Card courser = creature("Centaur Courser", ai);
+        addCard("Mountain", opp);
+        addCard("Forest", opp);
+        addCardToZone("Forest", opp, ZoneType.Hand);
+        ready(g);
+        attack(g, opp, ai, dragon);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(courser, dragon), plan());
+        logWitness("hellbent, a hidden hand card", lc);
+        assertNoRescore("hellbent", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.lethal[1]);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[1]);
+        AssertJUnit.assertEquals(1, opp.getCardsIn(ZoneType.Hand).size());
+        playLive(g, plan(), lc.lines.get(0));
+        AssertJUnit.assertFalse("the line on the original board leaves ai alive: life " + ai.getLife(), ai.hasLost());
+        // the hand really empty: the Dragon has double strike, and no blocks is witnessed with no line
+        final Game e = game();
+        final Player ai2 = e.getPlayers().get(0), opp2 = e.getPlayers().get(1);
+        ai2.setLife(5, null);
+        final Card dragon2 = creature("Rakdos Pit Dragon", opp2);
+        final Card courser2 = creature("Centaur Courser", ai2);
+        addCard("Mountain", opp2);
+        addCard("Forest", opp2);
+        ready(e);
+        attack(e, opp2, ai2, dragon2);
+        AssertJUnit.assertTrue(opp2.getCardsIn(ZoneType.Hand).isEmpty());
+        final LookaheadSearch.LethalCheck lc2 = check(e, plan(courser2, dragon2), plan());
+        logWitness("hellbent, an empty hand", lc2);
+        AssertJUnit.assertTrue(witnessOf(lc2), Arrays.equals(new boolean[] {false, true}, lc2.witnessed));
+        AssertJUnit.assertEquals(witnessOf(lc2), "nothing", lc2.witnessLine[1]);
+    }
+
+    /**
+     * Review S1 2 (artifact placeholders): Salvage Slasher (+1/+0 per artifact card in its controller's graveyard) wears two
+     * Umbral Mantles ({3},{Q}: +2/+2); two Mesmeric Orbs mill a card whenever a permanent untaps; six Forests; the attacking
+     * player's library is ten Forests; ai at 5. 530bcb291c7's artifact placeholders, milled, grew the Slasher: witnessed.
+     * Now a placeholder moved voids the run: nothing is witnessed or re-scored. Control: the line on the original board
+     * mills Forests and leaves ai alive.
+     */
+    @Test
+    public void r7AMovedPlaceholderVoidsTheRun() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        fillLibrary(ai, 20);
+        for (int i = 0; i < 10; i++) {
+            addCardToZone("Forest", opp, ZoneType.Library);
+        }
+        final Card slasher = creature("Salvage Slasher", opp);
+        final Card courser = creature("Centaur Courser", ai);
+        for (int i = 0; i < 2; i++) {
+            addCard("Umbral Mantle", opp).attachToEntity(slasher, null);
+            addCard("Mesmeric Orb", opp);
+        }
+        lands(opp, "Forest", 6);
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, slasher);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(courser, slasher), plan());
+        logWitness("salvage slasher, milled placeholders", lc);
+        assertNoRescore("salvage slasher", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[1]);
+        AssertJUnit.assertTrue(witnessOf(lc) + " " + lc.witnessVoid, lc.witnessVoid.containsKey("a placeholder moved"));
+        playLive(g, plan(), lc.lines.get(0));
+        AssertJUnit.assertFalse("the line on the original board leaves ai alive: life " + ai.getLife(), ai.hasLost());
+    }
+
+    /**
+     * Review S1 3 (unknown face-down card): Mortivore (power = creature cards in all graveyards) and Bloodthrone Vampire
+     * ("Sacrifice a creature: +2/+2") attack ai at 6, with three Grizzly Bears in a graveyard, and the attacking player has a
+     * face-down card ai cannot identify. Sacrificed, it is a Forest or Emrakul, the Aeons Torn; 530bcb291c7 witnessed one and
+     * not the other. Now the guard stands aside with either card, and witnesses nothing. Control: with the attacking
+     * player's card face up and a face-down card of ai's own (ai knows it), the guard does not stand aside.
+     */
+    @Test
+    public void r7AnUnidentifiedFaceDownCardStandsAside() {
+        for (String name : new String[] {"Forest", "Emrakul, the Aeons Torn"}) {
+            final Game g = game();
+            final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+            ai.setLife(6, null);
+            for (int i = 0; i < 3; i++) {
+                addCardToZone("Grizzly Bears", opp, ZoneType.Graveyard);
+            }
+            final Card mortivore = creature("Mortivore", opp);
+            final Card vampire = creature("Bloodthrone Vampire", opp);
+            final Card fodder = addCard(name, opp);
+            fodder.turnFaceDown(true);
+            final Card wall = creature("Wall of Stone", ai);
+            ready(g);
+            attack(g, opp, ai, mortivore, vampire);
+            AssertJUnit.assertFalse(LookaheadSearch.pumpKnows(ai, fodder));
+            final LookaheadSearch.LethalCheck lc = check(g, plan(wall, vampire), plan());
+            logWitness("face-down " + name, lc);
+            assertNoRescore("face-down " + name, lc, 2);
+            AssertJUnit.assertNotNull(name + ": " + witnessOf(lc), lc.aside);
+            AssertJUnit.assertTrue(name + ": " + lc.aside, lc.aside.contains("face-down"));
+            AssertJUnit.assertNull("no witness ran", lc.witnessed);
+        }
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(6, null);
+        for (int i = 0; i < 3; i++) {
+            addCardToZone("Grizzly Bears", opp, ZoneType.Graveyard);
+        }
+        final Card mortivore = creature("Mortivore", opp);
+        final Card vampire = creature("Bloodthrone Vampire", opp);
+        creature("Grizzly Bears", opp);
+        final Card mine = addCard("Forest", ai);
+        mine.turnFaceDown(true);
+        final Card wall = creature("Wall of Stone", ai);
+        ready(g);
+        attack(g, opp, ai, mortivore, vampire);
+        AssertJUnit.assertTrue(LookaheadSearch.pumpKnows(ai, mine));
+        final LookaheadSearch.LethalCheck lc = check(g, plan(wall, vampire), plan());
+        logWitness("face-up fodder, ai's own face-down card", lc);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+    }
+
+    /**
+     * Review S1 4 (copy fidelity): ai at 2 resolved Time to Feed on the attacking Boros Swiftblade this turn (when it dies
+     * this turn, ai gains 3 life); Precinct Captain (first strike) blocks it, Fencing Ace is unblocked. 530bcb291c7's copy
+     * dropped the delayed trigger: the block was witnessed (2 at 2). Now witness copies are strict about pending state and
+     * must match the live game: here the copy carries the trigger (no run voided) and does not witness; nothing is
+     * re-scored. Control: on the original board the trigger fires and ai ends at 3. Then pending state the strict copy
+     * cannot carry (an until-end-of-turn command holding an object the copier cannot map): an unblocked Fencing Ace at 2,
+     * witnessed without it, makes the guard stand aside with it.
+     */
+    @Test
+    public void r7PendingStateIsCarriedOrTheGuardStandsAside() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(2, null);
+        final Card swift = creature("Boros Swiftblade", opp);
+        final Card ace = creature("Fencing Ace", opp);
+        final Card captain = creature("Precinct Captain", ai);
+        final Card orn = addCard("Ornithopter", ai);
+        addCard("Vedalken Orrery", ai);
+        final Card spell = addCardToZone("Time to Feed", ai, ZoneType.Graveyard);
+        final forge.game.spellability.SpellAbility sa = spell.getFirstSpellAbility();
+        sa.setActivatingPlayer(ai);
+        sa.getTargets().add(swift);
+        sa.getSubAbility().getSubAbility().getTargets().add(orn);
+        forge.game.ability.AbilityUtils.resolve(sa);
+        ready(g);
+        attack(g, opp, ai, swift, ace);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(captain, swift), plan(captain, swift, orn, ace));
+        logWitness("delayed life gain", lc);
+        assertNoRescore("delayed life gain", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.lethal[0] && !lc.witnessed[0] && lc.witnessRuns > 0);
+        AssertJUnit.assertTrue("the copy carried it faithfully: " + witnessOf(lc), lc.witnessVoid.isEmpty());
+        playLive(g, plan(captain, swift), null);
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(3, ai.getLife());
+        // pending state the strict copy cannot carry: the guard stands aside
+        final Game e = game();
+        final Player ai2 = e.getPlayers().get(0), opp2 = e.getPlayers().get(1);
+        ai2.setLife(2, null);
+        final Card ace2 = creature("Fencing Ace", opp2);
+        final Card bear = creature("Grizzly Bears", ai2);
+        ready(e);
+        attack(e, opp2, ai2, ace2);
+        e.getEndOfTurn().addUntil(new Opaque());
+        final LookaheadSearch.LethalCheck lc2 = check(e, plan(bear, ace2), plan());
+        logWitness("double striker, an uncarried command", lc2);
+        AssertJUnit.assertEquals(witnessOf(lc2), "pending state the copy cannot carry", lc2.aside);
+    }
+
+    /**
+     * Copy fidelity, this turn's state (with review S1 4): Basking Rootwalla ("{1}{G}: +2/+2. Activate only once each
+     * turn.") was already activated this turn (its pump gone, as if countered) and attacks ai at 3, with two untapped
+     * Forests. Given the Rootwalla's line, 530bcb291c7's copy forgot the activation and pumped again (3 at 3): witnessed.
+     * Witness copies now carry this turn's state: nothing is witnessed. Control: not yet activated, the line is witnessed.
+     */
+    @Test
+    public void r7AnActivationThisTurnIsCarried() {
+        for (boolean activated : new boolean[] {true, false}) {
+            final Game g = game();
+            final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+            ai.setLife(3, null);
+            final Card walla = creature("Basking Rootwalla", opp);
+            lands(opp, "Forest", 2);
+            ready(g);
+            attack(g, opp, ai, walla);
+            final List<LookaheadSearch.LbLine> line = Arrays.asList(LookaheadSearch.lbLineFor(walla, opp, new ArrayList<>()));
+            if (activated) {
+                forge.game.spellability.SpellAbility pump = null;
+                for (forge.game.spellability.SpellAbility sa : walla.getSpellAbilities()) {
+                    if (sa.isActivatedAbility() && !sa.isManaAbility()) {
+                        pump = sa;
+                    }
+                }
+                AssertJUnit.assertNotNull(pump);
+                pump.setActivatingPlayer(opp);
+                walla.addAbilityActivated(pump);
+                AssertJUnit.assertEquals(1, pump.getActivationsThisTurn());
+            }
+            final LookaheadSearch.LethalCheck lc = witness(g, line, plan());
+            logWitness("rootwalla, activated " + activated, lc);
+            AssertJUnit.assertEquals("activated " + activated + ": " + witnessOf(lc), !activated, lc.witnessed[0]);
+        }
+    }
+
+    /** An until-end-of-turn command the copier cannot map (it holds a thread). */
+    static final class Opaque implements forge.GameCommand {
+        private static final long serialVersionUID = 1L;
+        final transient Thread hold = Thread.currentThread();
+
+        @Override
+        public void run() {
+        }
+    }
+
+    /**
+     * Review S1 5 (trample assignment): Bolrac-Clan Basher (3/2 double strike, trample) attacks ai at 2; White Knight wears
+     * Inquisitor's Flail (combat damage to it is doubled); a Wall of Stone. Blocked by the Knight, Forge AI assigned 1 to it
+     * (doubled to lethal) and 2 to ai: witnessed. By the rules lethal damage ignores the doubling: 2 to the Knight, 1 to ai,
+     * who survives. The witness now assigns by the rules: nothing is witnessed or re-scored. Its assignment, called
+     * directly: lethal (2) to the Knight, the rest to the player; less after damage already marked; 1 per blocker with
+     * deathtouch, the rest to the last blocker without trample. Control: on the original board ai ends at 1.
+     */
+    @Test
+    public void r7TrampleDamageIsAssignedByTheRules() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(2, null);
+        final Card basher = creature("Bolrac-Clan Basher", opp);
+        final Card knight = creature("White Knight", ai);
+        final Card wall = creature("Wall of Stone", ai);
+        addCard("Inquisitor's Flail", ai).attachToEntity(knight, null);
+        ready(g);
+        attack(g, opp, ai, basher);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(knight, basher), plan(wall, basher));
+        logWitness("flail trample", lc);
+        assertNoRescore("flail trample", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[0]);
+        final LookaheadSearch.WitnessAi wa = new LookaheadSearch.WitnessAi(g, opp, opp.getController().getLobbyPlayer(), null, -1,
+                Integer.MAX_VALUE);
+        Map<Card, Integer> m = wa.assignCombatDamage(basher, new forge.game.card.CardCollection(knight),
+                new forge.game.card.CardCollection(), 3, ai, false);
+        AssertJUnit.assertEquals(2, (int) m.get(knight));
+        AssertJUnit.assertEquals(1, (int) m.get(null));
+        knight.setDamage(1);
+        m = wa.assignCombatDamage(basher, new forge.game.card.CardCollection(knight), new forge.game.card.CardCollection(), 3, ai,
+                false);
+        AssertJUnit.assertEquals(1, (int) m.get(knight));
+        AssertJUnit.assertEquals(2, (int) m.get(null));
+        knight.setDamage(0);
+        final Card scorpion = addCard("Sedge Scorpion", opp);
+        m = wa.assignCombatDamage(scorpion, new forge.game.card.CardCollection(Arrays.asList(wall, knight)),
+                new forge.game.card.CardCollection(), 3, ai, false);
+        AssertJUnit.assertEquals(1, (int) m.get(wall));
+        AssertJUnit.assertEquals(2, (int) m.get(knight));
+        AssertJUnit.assertFalse(m.containsKey(null));
+        playLive(g, plan(knight, basher), null);
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(1, ai.getLife());
+    }
+
+    /**
+     * Review S2 (determinism): six Grizzly Bears attack ai at 1 with six Walls of Stone; both libraries 80 cards, eight
+     * Forests each. Candidates: the full block (not lethal), the 32 subsets of the first five blocks (each lethal), and no
+     * blocks again: 33 flagged. 530bcb291c7 stopped at its 300 ms wall cap, after 14 to 31 lines depending on the run. Now
+     * the budget is 32 lines: each run plays exactly 32, witnesses the same 32 candidates (the last is not witnessed), and
+     * the 1000 ms safety cap does not fire.
+     */
+    @Test
+    public void r7TheBudgetIs32LinesTheSameEachRun() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(1, null);
+        final List<Card> bears = new ArrayList<>(), walls = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            bears.add(creature("Grizzly Bears", opp));
+            walls.add(creature("Wall of Stone", ai));
+        }
+        for (Player p : g.getPlayers()) {
+            fillLibrary(p, 80);
+            lands(p, "Forest", 8);
+        }
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, bears.toArray(new Card[0]));
+        final List<Map<Integer, List<Integer>>> plans = new ArrayList<>();
+        final Map<Integer, List<Integer>> safe = new TreeMap<>();
+        for (int i = 0; i < 6; i++) {
+            safe.put(walls.get(i).getId(), new ArrayList<>(Arrays.asList(bears.get(i).getId())));
+        }
+        plans.add(safe);
+        for (int mask = 0; mask < 32; mask++) {
+            final Map<Integer, List<Integer>> pl = new TreeMap<>();
+            for (int i = 0; i < 5; i++) {
+                if ((mask & (1 << i)) != 0) {
+                    pl.put(walls.get(i).getId(), new ArrayList<>(Arrays.asList(bears.get(i).getId())));
+                }
+            }
+            plans.add(pl);
+        }
+        plans.add(plan());
+        String first = null;
+        for (int round = 0; round < 3; round++) {
+            final LookaheadSearch s = new LookaheadSearch(config(AiFixes.Mode.ON));
+            try {
+                final LookaheadSearch.LethalCheck lc = s.lethalBlocksOf(g, ai, plans);
+                logWitness("six attackers, round " + round, lc);
+                AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+                AssertJUnit.assertEquals(witnessOf(lc), LookaheadSearch.WITNESS_LINES, lc.witnessRuns);
+                AssertJUnit.assertTrue(witnessOf(lc), lc.witnessCapped);
+                AssertJUnit.assertFalse("the safety cap fired: " + witnessOf(lc), lc.witnessTimedOut);
+                final boolean[] want = new boolean[34];
+                Arrays.fill(want, 1, 33, true);
+                AssertJUnit.assertTrue(witnessOf(lc), Arrays.equals(want, lc.witnessed));
+                final String result = Arrays.toString(lc.witnessed) + Arrays.toString(lc.witnessLine);
+                if (first != null) {
+                    AssertJUnit.assertEquals(first, result);
+                }
+                first = result;
+            } finally {
+                s.shutdown();
+            }
+        }
     }
 }

@@ -776,6 +776,9 @@ public final class LookaheadSearch {
         public long lethalBlockChecked, lethalBlockAside, lethalBlockFlagged, lethalBlockRescored, lethalBlockAllLethal,
                 lethalBlockPlayedLethal, lethalBlockCands, lethalBlockDefault, lethalBlockErrors;
         public long lethalBlockWitnessed, lethalBlockWitnessRuns, lethalBlockWitnessNanos, lethalBlockWitnessCapped;
+        /** Round 7: decisions whose witness hit the wall-clock safety cap; witness runs voided, by reason. */
+        public long lethalBlockWitnessTimedOut;
+        public final Map<String, Long> lethalBlockWitnessVoid = new TreeMap<>();
         public final Map<String, Long> lethalBlockWhy = new TreeMap<>();
         /** dudCast guard (null = off): answers checked, duds found, vetoed (re-asked), passed, unknown; time; dud cards. */
         public String dudCastMode;
@@ -1054,6 +1057,10 @@ public final class LookaheadSearch {
                 d.addProperty("witnessRuns", lethalBlockWitnessRuns);
                 d.addProperty("witnessMs", lethalBlockWitnessNanos / 1_000_000L);
                 d.addProperty("witnessCapped", lethalBlockWitnessCapped);
+                d.addProperty("witnessTimedOut", lethalBlockWitnessTimedOut);
+                final JsonObject voids = new JsonObject();
+                lethalBlockWitnessVoid.forEach(voids::addProperty);
+                d.add("witnessVoid", voids);
                 final JsonObject why = new JsonObject();
                 lethalBlockWhy.forEach(why::addProperty);
                 d.add("why", why);
@@ -8747,6 +8754,10 @@ public final class LookaheadSearch {
         if (lc.witnessCapped) {
             stats.lethalBlockWitnessCapped++;
         }
+        if (lc.witnessTimedOut) {
+            stats.lethalBlockWitnessTimedOut++;
+        }
+        lc.witnessVoid.forEach((why, count) -> stats.lethalBlockWitnessVoid.merge(why, (long) count, Long::sum));
         int lethalN = 0, witN = 0;
         boolean safeOk = false;
         for (int c = 0; c < n; c++) {
@@ -8809,11 +8820,21 @@ public final class LookaheadSearch {
         long witnessNanos;
         int witnessRuns;
         boolean witnessCapped;
+        /** Round 7: the wall-clock safety cap stopped the witness (else any cap was the line budget); voided runs by reason. */
+        boolean witnessTimedOut;
+        final Map<String, Integer> witnessVoid = new TreeMap<>();
 
         static LethalCheck aside(String why) {
             final LethalCheck c = new LethalCheck();
             c.aside = why;
             return c;
+        }
+
+        /** Round 7: count a voided witness run by its reason. */
+        void noteVoid(WitnessRun r) {
+            if (r.voided != null) {
+                witnessVoid.merge(r.voided, 1, Integer::sum);
+            }
         }
     }
 
@@ -8869,6 +8890,19 @@ public final class LookaheadSearch {
                 any |= lc.lethal[p] && (ok == null || p < ok.length && ok[p]);
             }
             if (any) {
+                // round 7: the witness must not depend on, or touch, anything the seat cannot see; where the sandbox cannot
+                // guarantee that, there is no witness: the whole check stands aside
+                final String fd = lbHiddenFaceDown(live, known);
+                if (fd != null) {
+                    return LethalCheck.aside(fd);
+                }
+                final List<String> gaps;
+                synchronized (live) {
+                    gaps = GameCopier.unsupportedPending(live);
+                }
+                if (gaps != null) {
+                    return LethalCheck.aside("pending state the copy cannot carry");
+                }
                 lethalWitness(live, liveMe, plans, known, lc, ok);
             } else {
                 lc.witnessed = new boolean[lc.lethal.length];
@@ -8893,9 +8927,14 @@ public final class LookaheadSearch {
 
     // ------------------------------------------------------------------ lethalBlock round 6: the engine's witness
 
-    /** lethalBlock witness: the most lines played per decision, its wall time (ms), and an ability's most repeats. */
+    /**
+     * lethalBlock witness: the budget per decision is {@link #WITNESS_LINES} runs (each line in its own copy, the
+     * placeholder confirmation included), so a position gives the same witnesses wherever it runs; {@link #WITNESS_MS}
+     * is only a wall-clock safety cap (round 7, review S2), checked before each run and after each engine step of a run.
+     * An ability's most repeats.
+     */
     static final int WITNESS_LINES = 32;
-    static final long WITNESS_MS = 300;
+    static final long WITNESS_MS = 1000;
     static final int WITNESS_REPEATS = 30;
     /** This search's witness budget (the defaults above; tests that try every ability may raise it, never the guard). */
     int witnessLineCap = WITNESS_LINES;
@@ -8989,9 +9028,13 @@ public final class LookaheadSearch {
      * live game for a line that kills the seat: (a) nothing; (b) each ability the bound counted ({@link LethalCheck#lines})
      * alone, once per attacker it may target (or once), X at the most the engine can pay (one less again if the payment
      * fails), a repeatable one repeated while payable up to the bound's cap. Single abilities only: a combo the bound
-     * needed is not witnessed (an undercount, never a false lethal). At most {@link #WITNESS_LINES} lines and about
-     * {@link #WITNESS_MS} ms per decision; a candidate not witnessed in budget is not lethal. Each line runs in its own
-     * copy ({@link #witnessRun}).
+     * needed is not witnessed (an undercount, never a false lethal). Each line runs in its own copy ({@link #witnessRun}).
+     *
+     * <p>Round 7 (review S2): the budget is at most {@link #witnessLineCap} runs per decision, the primary budget, so a
+     * position gives the same witnesses wherever it runs; {@link #witnessWallMs} is only a safety cap, checked before each
+     * run and after each engine step of a run (a run it stops is not witnessed). The candidates left are not witnessed. A
+     * run can still overrun the cap by one copy, one placeholder setup, or one engine step (an AI decision, a payment or a
+     * resolution), none of which is interrupted.
      */
     void lethalWitness(Game live, Player liveMe, List<Map<Integer, List<Integer>>> plans, Set<Integer> known, LethalCheck lc,
             boolean[] ok) {
@@ -8999,7 +9042,8 @@ public final class LookaheadSearch {
         lc.witnessed = new boolean[n];
         lc.witnessLine = new String[n];
         final long t0 = System.nanoTime();
-        final long wall = witnessWallMs * 1_000_000L;
+        final long deadline = t0 + witnessWallMs * 1_000_000L;
+        final String liveKey = lbFidelityKeyOfLive(live);
         int runs = 0;
         for (int p = 0; p < n && !lc.witnessCapped; p++) {
             if (!lc.lethal[p] || ok != null && (p >= ok.length || !ok[p])) {
@@ -9022,16 +9066,27 @@ public final class LookaheadSearch {
                 }
                 int xCap = Integer.MAX_VALUE;
                 while (true) {
-                    if (runs >= witnessLineCap || System.nanoTime() - t0 > wall) {
+                    if (runs >= witnessLineCap) {
                         lc.witnessCapped = true;
                         break;
                     }
+                    if (System.nanoTime() > deadline) {
+                        lc.witnessCapped = true;
+                        lc.witnessTimedOut = true;
+                        break;
+                    }
                     final WitnessRun r = witnessRun(live, liveMe, plans.get(p), known, (LbLine) line[0], (Integer) line[1], xCap,
-                            mix(cfg.seed, 0x5717e55L + 1009L * decisionIndex + runs));
+                            mix(cfg.seed, 0x5717e55L + 1009L * decisionIndex + runs), liveKey, deadline);
                     runs++;
+                    lc.noteVoid(r);
                     if (r.witnessed) {
                         lc.witnessed[p] = true;
                         lc.witnessLine[p] = r.label;
+                        break;
+                    }
+                    if (r.timedOut) {
+                        lc.witnessCapped = true;
+                        lc.witnessTimedOut = true;
                         break;
                     }
                     if (!r.payFailed || r.x <= 0) {
@@ -9048,59 +9103,221 @@ public final class LookaheadSearch {
         lc.witnessNanos = System.nanoTime() - t0;
     }
 
-    /** lethalBlock: one witness line's outcome. */
+    /** lethalBlock: one witness line's outcome. {@code voided}: why the run cannot witness (null = it ran faithfully). */
     static final class WitnessRun {
-        boolean witnessed, payFailed;
+        boolean witnessed, payFailed, timedOut;
         int x = -1, played;
-        String label, error;
+        String label, error, voided;
     }
 
     /**
-     * lethalBlock: the neutral card the witness puts in every library ("hidden", an artifact with no abilities, as
-     * GameCopier's hidden-information card); built on first use (nothing is built while the guard is off).
+     * lethalBlock: the opaque card the witness puts where the seat cannot see (unseen hand cards, every library), built on
+     * first use (nothing is built while the guard is off): "hidden", no types, no cost, no colors, no abilities. No
+     * placeholder is neutral for every reader, so a run that moves, reveals or offers one is void ({@link WitnessWatch}).
      */
     private static final class LbPlaceholder {
-        static final forge.item.PaperCard CARD = new forge.item.PaperCard(forge.card.CardRules.fromScript(
-                java.util.Arrays.asList("Name:hidden", "Types:Artifact", "Oracle:")), "", forge.card.CardRarity.Common);
+        static final forge.item.PaperCard CARD = new forge.item.PaperCard(
+                forge.card.CardRules.fromScript(java.util.Arrays.asList("Name:hidden", "Types:", "Oracle:")), "",
+                forge.card.CardRarity.Common);
     }
 
     /**
-     * lethalBlock: the copy {@code g} forgets what the seat cannot know before anything is played in it: the attackers'
-     * controller keeps only the hand cards the seat knows ({@code known}), and both libraries become as many neutral
-     * placeholders ({@link LbPlaceholder}), so nothing the line executes can read an unseen card (a library's top
-     * included). The public counts stay.
+     * lethalBlock: the copy {@code g} forgets what the seat cannot know before anything is played in it. Round 7: each
+     * hand card the seat does not know ({@code known}; the attacking player's, and any other player's) becomes a
+     * placeholder in its place (the hand size, a public count, stays); every library becomes as many placeholders. Every
+     * placeholder is recorded in the returned watch, in its zone order.
      */
-    static void lbHide(Game g, Player opp, Set<Integer> known) {
-        final List<Card> keep = new ArrayList<>();
-        for (Card c : opp.getCardsIn(ZoneType.Hand)) {
-            if (known.contains(c.getId())) {
-                keep.add(c);
+    static WitnessWatch lbHide(Game g, Set<Integer> known) {
+        final WitnessWatch w = new WitnessWatch();
+        final forge.item.PaperCard ph = LbPlaceholder.CARD;
+        for (Player p : g.getPlayers()) {
+            final List<Card> hand = new ArrayList<>();
+            final List<Card> blanks = new ArrayList<>();
+            for (Card c : p.getCardsIn(ZoneType.Hand)) {
+                if (known.contains(c.getId())) {
+                    hand.add(c);
+                } else {
+                    final Card b = forge.game.card.CardFactory.getCard(ph, p, g.nextCardId(), g);
+                    hand.add(b);
+                    blanks.add(b);
+                }
             }
-        }
-        if (keep.size() != opp.getCardsIn(ZoneType.Hand).size()) {
-            opp.getZone(ZoneType.Hand).setCards(keep);
+            if (!blanks.isEmpty()) {
+                p.getZone(ZoneType.Hand).setCards(hand);
+                for (Card b : blanks) {
+                    w.add(p, ZoneType.Hand, b);
+                }
+            }
         }
         for (Player p : g.getPlayers()) {
             final int size = p.getCardsIn(ZoneType.Library).size();
             final List<Card> blank = new ArrayList<>(size);
             for (int i = 0; i < size; i++) {
-                blank.add(forge.game.card.CardFactory.getCard(LbPlaceholder.CARD, p, g.nextCardId(), g));
+                blank.add(forge.game.card.CardFactory.getCard(ph, p, g.nextCardId(), g));
             }
             p.getZone(ZoneType.Library).setCards(blank);
+            for (Card c : blank) {
+                w.add(p, ZoneType.Library, c);
+            }
         }
+        return w;
+    }
+
+    /**
+     * lethalBlock: a face-down card on the battlefield or in exile whose face the seat cannot see (round 7, review S1 3):
+     * its identity can change what a line does (sacrificed, it is a Forest or Emrakul), and the witness does not scrub
+     * it. Null when there is none.
+     */
+    static String lbHiddenFaceDown(Game live, Set<Integer> known) {
+        for (Player p : live.getPlayers()) {
+            for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Exile}) {
+                for (Card c : p.getCardsIn(z)) {
+                    if (c.isFaceDown() && !known.contains(c.getId())) {
+                        return "a face-down card the seat cannot identify";
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * lethalBlock: what a faithful copy keeps of the live game (round 7, review S1 4), compared between the live game and
+     * each fresh witness copy before anything changes in it: turn, step, the active player; each player's life, poison,
+     * counters, mana pool and per-turn counts (lands, spells, draws, life lost and gained); each zone's cards in order (id, name, state, tapped, sickness, face-down,
+     * phased out, token, controller, owner; in play: power, toughness, damage, counters, attachment); the combat; the
+     * stack; the delayed triggers. Reads plain fields only (no AI or lazy computation on the live game).
+     */
+    static String lbFidelityKey(Game g) {
+        final StringBuilder sb = new StringBuilder(4096);
+        final PhaseHandler ph = g.getPhaseHandler();
+        final List<Player> ps = g.getPlayers();
+        sb.append('T').append(ph.getTurn()).append(' ').append(ph.getPhase()).append(" pt").append(ps.indexOf(ph.getPlayerTurn()))
+                .append(" over").append(g.isGameOver()).append('\n');
+        for (Player p : ps) {
+            sb.append('P').append(ps.indexOf(p)).append(" life").append(p.getLife()).append(" poison").append(p.getPoisonCounters())
+                    .append(" lost").append(p.hasLost()).append(" lands").append(p.getLandsPlayedThisTurn())
+                    .append(" spells").append(p.getSpellsCastThisTurn()).append(" drawn").append(p.getNumDrawnThisTurn())
+                    .append(" lost").append(p.getLifeLostThisTurn()).append(" gained").append(p.getLifeGainedThisTurn())
+                    .append(" n").append(new TreeMap<>(counterMap(p)));
+            final List<String> mana = new ArrayList<>();
+            for (forge.game.mana.Mana m : p.getManaPool()) {
+                mana.add(m.toString() + "@" + (m.getSourceCard() == null ? -1 : m.getSourceCard().getId()));
+            }
+            Collections.sort(mana);
+            sb.append(" mana").append(mana).append('\n');
+            for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile,
+                    ZoneType.Battlefield, ZoneType.Command}) {
+                sb.append(' ').append(z).append(':');
+                for (Card c : p.getCardsIn(z)) {
+                    sb.append(" {").append(c.getId()).append(' ').append(c.getName()).append(' ').append(c.getCurrentStateName())
+                            .append(c.isTapped() ? " T" : " U").append(c.isFirstTurnControlled() ? " s" : "").append(c.isFaceDown() ? " fd" : "")
+                            .append(c.isPhasedOut() ? " po" : "").append(c.isToken() ? " tok" : "")
+                            .append(" c").append(ps.indexOf(c.getController())).append(" o").append(ps.indexOf(c.getOwner()));
+                    if (z == ZoneType.Battlefield) {
+                        sb.append(" pt").append(c.getNetPower()).append('/').append(c.getNetToughness()).append(" d").append(c.getDamage());
+                        if (c.getEntityAttachedTo() instanceof Card) {
+                            sb.append(" at").append(((Card) c.getEntityAttachedTo()).getId());
+                        } else if (c.getEntityAttachedTo() instanceof Player) {
+                            sb.append(" atP").append(ps.indexOf(c.getEntityAttachedTo()));
+                        }
+                    }
+                    final Map<String, Integer> cn = counterMap(c);
+                    if (!cn.isEmpty()) {
+                        sb.append(" n").append(new TreeMap<>(cn));
+                    }
+                    sb.append('}');
+                }
+                sb.append('\n');
+            }
+        }
+        final forge.game.combat.Combat combat = ph.getCombat();
+        if (combat != null) {
+            sb.append("combat");
+            for (Card a : combat.getAttackers()) {
+                final forge.game.GameEntity d = combat.getDefenderByAttacker(a);
+                sb.append(' ').append(a.getId()).append('>').append(d instanceof Card ? "C" + ((Card) d).getId()
+                        : d instanceof Player ? "P" + ps.indexOf(d) : String.valueOf(d));
+            }
+            sb.append(" |");
+            for (Card b : combat.getAllBlockers()) {
+                sb.append(' ').append(b.getId()).append(':');
+                for (Card a : combat.getAttackersBlockedBy(b)) {
+                    sb.append(a.getId()).append(',');
+                }
+            }
+            sb.append('\n');
+        }
+        sb.append("stack").append(g.getStack().size());
+        for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+            sb.append(' ').append(si.getSourceCard() == null ? -1 : si.getSourceCard().getId());
+        }
+        final forge.game.trigger.TriggerHandler th = g.getTriggerHandler();
+        sb.append(" delayed").append(th.getDelayedTriggersView().size()).append('/').append(th.getPlayerDefinedDelayedTriggersView().size());
+        return sb.toString();
+    }
+
+    /** {@link #lbFidelityKey} of the live game, read under its lock in scratch id, AI-cache and random scopes. */
+    static String lbFidelityKeyOfLive(Game live) {
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new Random(0x5717e55L));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            synchronized (live) {
+                return lbFidelityKey(live);
+            }
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /** The first line where two fidelity keys differ (a diagnostic). */
+    static String lbFirstDiff(String a, String b) {
+        final String[] x = a.split("\n"), y = b.split("\n");
+        for (int i = 0; i < Math.max(x.length, y.length); i++) {
+            final String u = i < x.length ? x[i] : "", v = i < y.length ? y[i] : "";
+            if (!u.equals(v)) {
+                return "live[" + u + "] copy[" + v + "]";
+            }
+        }
+        return "";
+    }
+
+    private static Map<String, Integer> counterMap(forge.game.GameEntity e) {
+        final Map<String, Integer> m = new java.util.HashMap<>();
+        for (com.google.common.collect.Multiset.Entry<forge.game.card.CounterType> x : e.getCounters().entrySet()) {
+            m.put(String.valueOf(x.getElement()), x.getCount());
+        }
+        return m;
     }
 
     /**
      * lethalBlock: one witness line in its own copy of {@code live} (own id scope, AI-cache scope and random stream, all
-     * restored; the live game is only read, under its lock). The copy forgets what the seat cannot know ({@link #lbHide}),
-     * is rewound to the end of declare attackers (as a block play-out), and advances into declare blockers, where the
-     * seat declares {@code plan}. Assumption: the seat then only passes (it does not respond). The attackers' controller
-     * plays {@code line} with its first priority there (Forge AI pays the costs and makes the choices on resolution),
-     * then passes; combat damage is Forge AI's assignment (any assignment it makes is achievable). The engine runs through
-     * combat damage. Witnessed: the seat has lost, by life or poison, and the attackers' controller has not.
+     * restored; the live game is only read, under its lock). Round 7: the copy carries this turn's state (copy fidelity 1:
+     * activations and once-per-turn limits, spells cast, zone entries; a record it leaves out voids the run) and everything
+     * pending, strictly (a delayed trigger or command it cannot carry fails the copy: no witness), and must match the live
+     * game on {@link #lbFidelityKey} before anything changes in it (else no witness). The copy forgets what the seat cannot know
+     * ({@link #lbHide}), is rewound to the end of declare attackers (as a block play-out), and advances into declare
+     * blockers, where the seat declares {@code plan}. Assumption: the seat then only passes (it does not respond). The
+     * attackers' controller plays {@code line} with its first priority there (Forge AI pays the costs and makes the choices
+     * on resolution), then passes, and assigns combat damage by the rules alone ({@link WitnessAi#assignCombatDamage}).
+     * The engine runs through combat damage. Witnessed: the seat has lost, by life or poison, the attackers' controller
+     * has not, and no placeholder was moved, revealed or offered as a choice ({@link WitnessWatch}).
      */
     WitnessRun witnessRun(Game live, Player liveMe, Map<Integer, List<Integer>> plan, Set<Integer> known, LbLine line,
             int target, int xCap, long seed) {
+        final String liveKey = lbFidelityKeyOfLive(live);
+        return witnessRun(live, liveMe, plan, known, line, target, xCap, seed, liveKey,
+                System.nanoTime() + witnessWallMs * 1_000_000L);
+    }
+
+    WitnessRun witnessRun(Game live, Player liveMe, Map<Integer, List<Integer>> plan, Set<Integer> known, LbLine line,
+            int target, int xCap, long seed, String liveKey, long deadline) {
         final WitnessRun r = new WitnessRun();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -9111,19 +9328,43 @@ public final class LookaheadSearch {
         try {
             final Game g;
             final Player me;
-            synchronized (live) {
-                final GameCopier copier = copierOf(live);
-                g = copier.makeCopy();
-                me = (Player) copier.find(liveMe);
+            final int leftOut;
+            try {
+                synchronized (live) {
+                    final GameCopier copier = copierOf(live);
+                    copier.setCopyFidelity(1);
+                    copier.setCopyPending(true);
+                    copier.setPendingStrict(true);
+                    g = copier.makeCopy();
+                    me = (Player) copier.find(liveMe);
+                    leftOut = copier.getFidelityLeftOut();
+                }
+            } catch (IllegalStateException e) {
+                if (!String.valueOf(e.getMessage()).startsWith("pending gap")) {
+                    throw e;
+                }
+                r.voided = "pending gap";
+                r.error = String.valueOf(e);
+                return r;
+            }
+            if (leftOut > 0) {
+                r.voided = "turn state the copy left out";
+                return r;
             }
             final PhaseHandler ph = g.getPhaseHandler();
             final forge.game.combat.Combat c = ph.getCombat();
             if (c == null || me == null) {
-                r.error = "no combat in the copy";
+                r.voided = "no combat in the copy";
+                return r;
+            }
+            final String copyKey = lbFidelityKey(g);
+            if (!copyKey.equals(liveKey)) {
+                r.voided = "copy differs from the live game";
+                r.error = lbFirstDiff(liveKey, copyKey);
                 return r;
             }
             final Player opp = c.getAttackingPlayer();
-            lbHide(g, opp, known);
+            final WitnessWatch watch = lbHide(g, known);
             final BlockPlan bp = new BlockPlan("witness");
             bp.blocks.putAll(plan);
             BlockPlan.clear(c, me);
@@ -9131,19 +9372,25 @@ public final class LookaheadSearch {
             final Player other = g.getNextPlayerAfter(active);
             ph.devModeSet(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS, active, false, ph.getTurn());
             setPriorityState(ph, other, active, false);
-            final WitnessSeat seat = new WitnessSeat(g, me, me.getController().getLobbyPlayer(), bp);
+            final WitnessSeat seat = new WitnessSeat(g, me, me.getController().getLobbyPlayer(), bp, watch);
             me.dangerouslySetController(seat);
-            final WitnessAi wa = new WitnessAi(g, opp, opp.getController().getLobbyPlayer(), line, target, xCap);
+            final WitnessAi wa = new WitnessAi(g, opp, opp.getController().getLobbyPlayer(), line, target, xCap, watch);
             opp.dangerouslySetController(wa);
             for (Player o : g.getPlayers()) {
                 if (o != me && o != opp) {
-                    o.dangerouslySetController(new ForcedWinProbe.PassAi(g, o, o.getController().getLobbyPlayer()));
+                    o.dangerouslySetController(new WitnessPass(g, o, o.getController().getLobbyPlayer(), watch));
                 }
             }
+            g.subscribeToEvents(watch);
             final int turn = ph.getTurn();
             for (int steps = 0; steps < 400 && !g.isGameOver(); steps++) {
                 if (ph.getTurn() != turn || ph.getPhase() == null
                         || ph.getPhase().ordinal() > forge.game.phase.PhaseType.COMBAT_DAMAGE.ordinal()) {
+                    break;
+                }
+                if (System.nanoTime() > deadline) {
+                    r.timedOut = true;
+                    r.voided = "time";
                     break;
                 }
                 ph.mainLoopStep();
@@ -9151,16 +9398,22 @@ public final class LookaheadSearch {
             if (!g.isGameOver()) {
                 g.getAction().checkStateEffects(true);
             }
+            watch.verifyZones();
             r.played = wa.played;
             r.x = wa.x;
             r.payFailed = wa.failed;
+            if (r.voided == null && watch.touched != null) {
+                r.voided = watch.touched;
+            }
             final forge.game.player.PlayerOutcome mo = me.getOutcome();
             final boolean byDamage = mo != null && (mo.lossState == forge.game.player.GameLossReason.LifeReachedZero
                     || mo.lossState == forge.game.player.GameLossReason.Poisoned);
-            r.witnessed = seat.applied && me.hasLost() && byDamage && !opp.hasLost() && (line == null || wa.played > 0);
+            r.witnessed = r.voided == null && seat.applied && me.hasLost() && byDamage && !opp.hasLost()
+                    && (line == null || wa.played > 0);
             r.label = line == null ? "nothing" : line.label(target, g, wa.x, wa.played);
         } catch (RuntimeException | StackOverflowError e) {
             r.error = String.valueOf(e);
+            r.voided = "error";
             r.witnessed = false;
             final StackTraceElement[] at = e.getStackTrace();
             System.err.println("[lookahead] lethalBlock witness line failed, not witnessed: " + e + (at.length > 0 ? " at " + at[0] : ""));
@@ -9172,8 +9425,201 @@ public final class LookaheadSearch {
         return r;
     }
 
+    /**
+     * lethalBlock (round 7, review S1 1-2): the placeholders of one witness copy and whether the run touched one. A
+     * placeholder moved out of its zone or reordered in it, a shuffled, scried or surveilled library, a placeholder
+     * revealed to a player or offered to one as a choice (a search, a look, a discard): each voids the run, since the
+     * real card there may differ.
+     */
+    public static final class WitnessWatch {
+        private final Set<Integer> ids = new HashSet<>();
+        private final Map<forge.game.zone.Zone, List<Card>> order = new java.util.IdentityHashMap<>();
+        private final Map<forge.game.zone.Zone, Player> owners = new java.util.IdentityHashMap<>();
+        /** Why the run touched a placeholder (the first reason), or null. */
+        String touched;
+
+        void add(Player p, ZoneType z, Card c) {
+            ids.add(c.getId());
+            final forge.game.zone.Zone zone = p.getZone(z);
+            order.computeIfAbsent(zone, x -> new ArrayList<>()).add(c);
+            owners.put(zone, p);
+        }
+
+        boolean isPlaceholder(int id) {
+            return ids.contains(id);
+        }
+
+        void touch(String why) {
+            if (touched == null) {
+                touched = why;
+            }
+        }
+
+        /** Some of {@code cards} are placeholders: {@code why}. */
+        void check(Iterable<?> cards, String why) {
+            if (cards == null) {
+                return;
+            }
+            for (Object o : cards) {
+                final int id = o instanceof Card ? ((Card) o).getId() : o instanceof forge.game.card.CardView
+                        ? ((forge.game.card.CardView) o).getId() : Integer.MIN_VALUE;
+                if (ids.contains(id)) {
+                    touch(why);
+                    return;
+                }
+            }
+        }
+
+        /** Each zone keeps its placeholders, in their order. */
+        void verifyZones() {
+            for (Map.Entry<forge.game.zone.Zone, List<Card>> e : order.entrySet()) {
+                final List<Card> now = new ArrayList<>();
+                for (Card c : e.getKey().getCards()) {
+                    if (ids.contains(c.getId())) {
+                        now.add(c);
+                    }
+                }
+                if (!now.equals(e.getValue())) {
+                    touch("a placeholder moved");
+                    return;
+                }
+            }
+        }
+
+        @Subscribe
+        public void on(forge.game.event.GameEventCardChangeZone e) {
+            if (e.card() != null && ids.contains(e.card().getId())) {
+                touch("a placeholder moved");
+            }
+        }
+
+        @Subscribe
+        public void on(forge.game.event.GameEventShuffle e) {
+            touch("a library was shuffled");
+        }
+
+        @Subscribe
+        public void on(forge.game.event.GameEventScry e) {
+            touch("a library was looked at");
+        }
+
+        @Subscribe
+        public void on(forge.game.event.GameEventSurveil e) {
+            touch("a library was looked at");
+        }
+    }
+
+    /**
+     * lethalBlock: a witness copy's controller (Forge AI) that reports to its {@link WitnessWatch} each placeholder it is
+     * shown or offered: reveals, effect choices, scry and surveil, zone-change choices, discards, move orders.
+     */
+    static class WitnessController extends PlayerControllerAi {
+        final WitnessWatch watch;
+
+        WitnessController(Game g, Player p, forge.LobbyPlayer lp, WitnessWatch watch) {
+            super(g, p, lp);
+            this.watch = watch;
+        }
+
+        private void seen(Iterable<?> cards, String why) {
+            if (watch != null) {
+                watch.check(cards, why);
+            }
+        }
+
+        @Override
+        public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addSuffix) {
+            seen(cards, "a placeholder was revealed");
+            super.reveal(cards, zone, owner, messagePrefix, addSuffix);
+        }
+
+        @Override
+        public void reveal(List<forge.game.card.CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix,
+                boolean addSuffix) {
+            seen(cards, "a placeholder was revealed");
+            super.reveal(cards, zone, owner, messagePrefix, addSuffix);
+        }
+
+        @Override
+        public CardCollectionView chooseCardsForEffect(CardCollectionView sourceList, SpellAbility sa, String title, int min,
+                int max, boolean isOptional, Map<String, Object> params) {
+            seen(sourceList, "a placeholder was offered");
+            return super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
+        }
+
+        @Override
+        public <T extends forge.game.GameEntity> T chooseSingleEntityForEffect(forge.util.collect.FCollectionView<T> optionList,
+                forge.game.player.DelayedReveal delayedReveal, SpellAbility sa, String title, boolean isOptional,
+                Player targetedPlayer, Map<String, Object> params) {
+            seen(optionList, "a placeholder was offered");
+            return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, targetedPlayer, params);
+        }
+
+        @Override
+        public <T extends forge.game.GameEntity> List<T> chooseEntitiesForEffect(forge.util.collect.FCollectionView<T> optionList,
+                int min, int max, forge.game.player.DelayedReveal delayedReveal, SpellAbility sa, String title,
+                Player targetedPlayer, Map<String, Object> params) {
+            seen(optionList, "a placeholder was offered");
+            return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title, targetedPlayer, params);
+        }
+
+        @Override
+        public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+            seen(topN, "a library was looked at");
+            return super.arrangeForScry(topN);
+        }
+
+        @Override
+        public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+            seen(topN, "a library was looked at");
+            return super.arrangeForSurveil(topN);
+        }
+
+        @Override
+        public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
+            seen(cards, "a placeholder was offered");
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+
+        @Override
+        public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards,
+                int min, int max, CardCollectionView visibleToChooser) {
+            seen(validCards, "a placeholder was offered");
+            return super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser);
+        }
+
+        @Override
+        public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+                CardCollection fetchList, forge.game.player.DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
+                Player decider) {
+            seen(fetchList, "a placeholder was offered");
+            return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional,
+                    decider);
+        }
+
+        @Override
+        public List<Card> chooseCardsForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+                CardCollection fetchList, int min, int max, forge.game.player.DelayedReveal delayedReveal, String selectPrompt,
+                Player decider) {
+            seen(fetchList, "a placeholder was offered");
+            return super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max, delayedReveal, selectPrompt, decider);
+        }
+    }
+
+    /** lethalBlock witness: a player other than the seat and the attacking player only passes. */
+    static final class WitnessPass extends WitnessController {
+        WitnessPass(Game g, Player p, forge.LobbyPlayer lp, WitnessWatch watch) {
+            super(g, p, lp, watch);
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            return null;
+        }
+    }
+
     /** lethalBlock witness: the seat in a copy declares the candidate's blocks, then only passes. */
-    static final class WitnessSeat extends PlayerControllerAi {
+    static final class WitnessSeat extends WitnessController {
         private final BlockPlan block;
         private boolean used;
         /**
@@ -9183,7 +9629,11 @@ public final class LookaheadSearch {
         boolean applied;
 
         WitnessSeat(Game g, Player p, forge.LobbyPlayer lp, BlockPlan block) {
-            super(g, p, lp);
+            this(g, p, lp, block, null);
+        }
+
+        WitnessSeat(Game g, Player p, forge.LobbyPlayer lp, BlockPlan block, WitnessWatch watch) {
+            super(g, p, lp, watch);
             this.block = block;
             this.applied = block.blocks.isEmpty();
         }
@@ -9205,16 +9655,21 @@ public final class LookaheadSearch {
     /**
      * lethalBlock witness: the attackers' controller in a copy. At its priority in declare blockers with an empty stack it
      * plays its line (found again in the copy; the target set; X at the most the engine can pay, at most {@code xCap};
-     * repeated while payable up to the line's cap; X once), and otherwise passes. Forge AI makes its other choices.
+     * repeated while payable up to the line's cap; X once), and otherwise passes. Forge AI makes its other choices, except
+     * combat damage ({@link #assignCombatDamage}).
      */
-    static final class WitnessAi extends PlayerControllerAi {
+    static final class WitnessAi extends WitnessController {
         private final LbLine line;
         private final int target, xCap;
         int played, x = -1;
         boolean failed, done;
 
         WitnessAi(Game g, Player p, forge.LobbyPlayer lp, LbLine line, int target, int xCap) {
-            super(g, p, lp);
+            this(g, p, lp, line, target, xCap, null);
+        }
+
+        WitnessAi(Game g, Player p, forge.LobbyPlayer lp, LbLine line, int target, int xCap, WitnessWatch watch) {
+            super(g, p, lp, watch);
             this.line = line;
             this.target = target;
             this.xCap = xCap;
@@ -9268,6 +9723,43 @@ public final class LookaheadSearch {
                 done = true;
             }
             return true;
+        }
+
+        /**
+         * Round 7 (review S1 5): combat damage by the rules alone, not Forge AI's assignment. Each blocker in damage order
+         * gets lethal damage (its toughness less the damage already marked and assigned this step, 1 with deathtouch),
+         * ignoring prevention and replacement, while damage lasts; with trample the rest goes to the player or
+         * planeswalker, else to the last blocker.
+         */
+        @Override
+        public Map<Card, Integer> assignCombatDamage(Card attacker, CardCollectionView blockers, CardCollectionView remaining,
+                int damageDealt, forge.game.GameEntity defender, boolean overrideOrder) {
+            final Map<Card, Integer> out = new java.util.LinkedHashMap<>();
+            int left = Math.max(0, damageDealt);
+            final boolean deathtouch = attacker.hasKeyword(forge.game.keyword.Keyword.DEATHTOUCH);
+            Card last = null;
+            for (Card b : blockers) {
+                last = b;
+                int need = Math.max(0, b.getLethalDamage());
+                if (deathtouch) {
+                    need = Math.min(1, need);
+                }
+                final int give = Math.min(need, left);
+                if (give > 0) {
+                    out.merge(b, give, Integer::sum);
+                    left -= give;
+                }
+            }
+            if (left > 0) {
+                if (attacker.hasKeyword(forge.game.keyword.Keyword.TRAMPLE) && defender != null) {
+                    out.merge(null, left, Integer::sum);
+                } else if (last != null) {
+                    out.merge(last, left, Integer::sum);
+                } else {
+                    out.merge(null, left, Integer::sum);
+                }
+            }
+            return out;
         }
     }
 
