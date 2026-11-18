@@ -52,6 +52,11 @@ import forge.game.zone.ZoneType;
  * guard does); the mode tests drive {@link LookaheadSearch#lethalBlockApply} on given values; the reported board also runs
  * end to end through the live seat ({@link RlLiveSeat}) against {@link FakeSearchService}, as {@code RlBlockSearchTest}
  * does. Plays real Forge copies: run inside a broker test lease, cwd = forge-gui with res/.
+ *
+ * <p>Round 6 (brief-r6): the bound is a prefilter; a candidate counts as lethal only when the engine witnesses it in a
+ * sandboxed copy ({@link LookaheadSearch#lethalWitness}). The sweep tests replay Astra's re-review 4 boards
+ * (review/245/recheck4): none is re-scored where its real maximum is not lethal, and the witness alone, given every ability,
+ * does not witness it either. The positive, hidden-information and live-state tests follow the brief.
  */
 public class LookaheadLethalBlockTest extends SimulationTest {
 
@@ -648,9 +653,11 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         return new double[][] {{0.10, 0.12}, {0.09, 0.08}, {0.32, 0.33}};
     }
 
+    /** A check whose bound flags {@code lethal} and whose witness confirms each of them (round 6). */
     private static LookaheadSearch.LethalCheck flagged(boolean... lethal) {
         final LookaheadSearch.LethalCheck lc = new LookaheadSearch.LethalCheck();
         lc.lethal = lethal;
+        lc.witnessed = lethal.clone();
         return lc;
     }
 
@@ -909,7 +916,8 @@ public class LookaheadLethalBlockTest extends SimulationTest {
     /**
      * The reported board end to end. OFF (key absent): the search departs from the policy's block to no blocks, as live,
      * and the decision line has no lethalBlock field. SHADOW: the same declaration, with "none" flagged lethal and
-     * nothing re-scored. ON: no blocks scores as a loss and the search keeps a block.
+     * witnessed (round 6: by Monstrosity X = 3), nothing re-scored. ON: no blocks, witnessed, scores as a loss and the
+     * search keeps the policy's block; the witness takes under 300 ms.
      */
     @Test
     public void theReportedBoardKeepsABlockWhenOn() throws Exception {
@@ -933,14 +941,24 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         final int none = noneIndex(ls);
         for (int i = 0; i < fs.size(); i++) {
             AssertJUnit.assertEquals(ls.toString(), i == none, fs.get(i).getAsBoolean());
+            AssertJUnit.assertEquals(ls.toString(), i == none, gs.getAsJsonArray("witnessed").get(i).getAsBoolean());
         }
+        AssertJUnit.assertTrue(ls.toString(), gs.getAsJsonArray("line").get(none).getAsString().contains("Monstrosity"));
         AssertJUnit.assertTrue(shadow.bootLine, shadow.bootLine.contains("\"lethalBlock\":\"shadow\""));
 
         final Run on = reportedLive("lethalBlock=on");
         final JsonObject ln = on.line();
-        AssertJUnit.assertTrue(ln.toString(), ln.getAsJsonObject("lethalBlock").get("rescored").getAsBoolean());
+        final JsonObject gn = ln.getAsJsonObject("lethalBlock");
+        AssertJUnit.assertTrue(ln.toString(), gn.get("rescored").getAsBoolean());
         AssertJUnit.assertFalse(ln.toString(), ln.get("chosen").getAsString().equals("none"));
+        AssertJUnit.assertEquals(ln.toString(), "policy", ln.get("chosen").getAsString());
         AssertJUnit.assertFalse("a block is kept: " + ln, on.combat.getAllBlockers().isEmpty());
+        final int noneOn = noneIndex(ln);
+        AssertJUnit.assertTrue(ln.toString(), gn.getAsJsonArray("witnessed").get(noneOn).getAsBoolean());
+        AssertJUnit.assertTrue(ln.toString(), gn.getAsJsonArray("line").get(noneOn).getAsString().contains("[X=3]"));
+        final double ms = gn.get("witnessMs").getAsDouble();
+        System.err.println("[lethal-witness] reported board, live seat ON: witnessMs=" + ms);
+        AssertJUnit.assertTrue(ln.toString(), ms < 300);
     }
 
     /**
@@ -1206,5 +1224,786 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertNull(flags(lc), lc.aside);
         AssertJUnit.assertEquals(flags(lc), 3, lc.life[1]);
         AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, false}, lc.lethal));
+    }
+
+    // ------------------------------------------------------------------------ round 6: the engine witnesses the bound
+
+    /** A creature of {@code p}'s that may act now (no summoning sickness). */
+    private Card creature(String name, Player p) {
+        final Card c = addCard(name, p);
+        c.setSickness(false);
+        return c;
+    }
+
+    private void lands(Player p, String name, int n) {
+        for (int i = 0; i < n; i++) {
+            addCard(name, p);
+        }
+    }
+
+    /** Both libraries filled and state-based actions checked: the board is ready for {@link #attack}. */
+    private void ready(Game g) {
+        fillLibrary(g.getPlayers().get(0), 20);
+        fillLibrary(g.getPlayers().get(1), 20);
+        g.getAction().checkStateEffects(true);
+    }
+
+    private static String witnessOf(LookaheadSearch.LethalCheck lc) {
+        return flags(lc) + " witnessed=" + Arrays.toString(lc.witnessed) + " line=" + Arrays.toString(lc.witnessLine)
+                + " runs=" + lc.witnessRuns + " capped=" + lc.witnessCapped + " ms=" + lc.witnessNanos / 1e6;
+    }
+
+    private static void logWitness(String label, LookaheadSearch.LethalCheck lc) {
+        System.err.println("[lethal-witness] " + label + ": " + witnessOf(lc));
+    }
+
+    /**
+     * A sweep board's guard decision. {@code real}: per candidate, whether its real maximum is lethal. The bound's check,
+     * then ON with every candidate searched: a candidate whose real maximum is not lethal keeps its values (262814126dc
+     * re-scored the ones the bound flagged); one whose real maximum is lethal is re-scored, as there is a candidate that
+     * is not. Then the round-6 fields: nothing not really lethal is witnessed; and the witness alone, given every ability
+     * of the attacking player's ({@link #witnessAll}), does not witness it either, whatever the bound did.
+     */
+    @SafeVarargs
+    private final void sweep(String label, Game g, boolean[] real, Map<Integer, List<Integer>>... plans) {
+        final int n = plans.length;
+        final LookaheadSearch.LethalCheck lc = check(g, plans);
+        final double[][] v = new double[n][2];
+        for (int c = 0; c < n; c++) {
+            Arrays.fill(v[c], 0.30 + 0.10 * c);
+        }
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        final LookaheadSearch.GivenResult r = apply(AiFixes.Mode.ON, lc, v, ok);
+        boolean anySafe = false;
+        for (boolean x : real) {
+            anySafe |= !x;
+        }
+        for (int c = 0; c < n; c++) {
+            final boolean rescore = lc.aside == null && real[c] && anySafe;
+            AssertJUnit.assertEquals(label + " candidate " + c + " values: " + flags(lc) + " " + Arrays.deepToString(v),
+                    rescore ? 0.0 : 0.30 + 0.10 * c, v[c][0], 1e-12);
+        }
+        AssertJUnit.assertEquals(label + ": " + flags(lc), lc.aside == null && anySafe && contains(real, true), r.lethalRescored);
+        logWitness(label, lc);
+        if (lc.aside == null) {
+            for (int c = 0; c < n; c++) {
+                AssertJUnit.assertEquals(label + " candidate " + c + ": " + witnessOf(lc), lc.lethal[c] && real[c], lc.witnessed[c]);
+            }
+        }
+        for (int c = 0; c < n; c++) {
+            if (!real[c]) {
+                final LookaheadSearch.LethalCheck all = witnessAll(g, plans[c]);
+                logWitness(label + " candidate " + c + ", every ability", all);
+                AssertJUnit.assertFalse(label + " candidate " + c + ": " + witnessOf(all), all.witnessed[0]);
+            }
+        }
+    }
+
+    private static boolean contains(boolean[] a, boolean x) {
+        for (boolean b : a) {
+            if (b == x) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The witness alone on {@code plan}, given every non-mana ability of the attacking player's battlefield and of the hand
+     * cards the seat knows, each once per attacker it may target, repeated while payable (up to 30 times; X at the most);
+     * with a budget large enough that it never runs out (asserted).
+     */
+    private static LookaheadSearch.LethalCheck witnessAll(Game g, Map<Integer, List<Integer>> plan) {
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final List<Card> atk = g.getPhaseHandler().getCombat().getAttackers();
+        final List<LookaheadSearch.LbLine> lines = new ArrayList<>();
+        final List<Card> cards = new ArrayList<>(opp.getCardsIn(ZoneType.Battlefield));
+        for (Card c : opp.getCardsIn(ZoneType.Hand)) {
+            if (LookaheadSearch.pumpKnows(ai, c)) {
+                cards.add(c);
+            }
+        }
+        for (Card c : cards) {
+            lines.addAll(LookaheadSearch.lbLinesFor(c, opp, atk, LookaheadSearch.WITNESS_REPEATS));
+        }
+        final LookaheadSearch s = new LookaheadSearch(config(AiFixes.Mode.ON));
+        s.witnessLineCap = 1000;
+        s.witnessWallMs = 120_000;
+        try {
+            final LookaheadSearch.LethalCheck lc = s.lethalWitnessOf(g, ai, Arrays.asList(plan), lines);
+            AssertJUnit.assertFalse("the exhaustive witness ran out of budget: " + witnessOf(lc), lc.witnessCapped);
+            return lc;
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    /** The witness alone on {@code plans}, given {@code lines}, with the guard's own budget. */
+    @SafeVarargs
+    private static LookaheadSearch.LethalCheck witness(Game g, List<LookaheadSearch.LbLine> lines,
+            Map<Integer, List<Integer>>... plans) {
+        final LookaheadSearch s = new LookaheadSearch(config(AiFixes.Mode.ON));
+        try {
+            return s.lethalWitnessOf(g, g.getPlayers().get(0), Arrays.asList(plans), lines);
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    // ------------------------------------------- Astra re-review 4 (recheck4/findings.md): the 14 findings' 21 boards
+
+    /**
+     * Finding 1, one tapped host pays two untap costs: Grizzly Bears wearing two Umbral Mantles, six Forests, ai at 6. The
+     * bound counts both {3},{Q} pumps (6); the second untap cannot be paid on an untapped Bears: 4. A Bears blocks or not.
+     */
+    @Test
+    public void sweep01DuplicateUntapIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(6, null);
+        final Card a = creature("Grizzly Bears", opp);
+        addCard("Umbral Mantle", opp).attachToEntity(a, null);
+        addCard("Umbral Mantle", opp).attachToEntity(a, null);
+        lands(opp, "Forest", 6);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("duplicateUntap", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 2a, payments keep the bonus they remove: Metallic Sliver; Basal Sliver, Muscle Sliver, Dragon Blood; ai at 3 (real 2). */
+    @Test
+    public void sweep02aSacrificedManaLordIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(3, null);
+        final Card a = creature("Metallic Sliver", opp);
+        creature("Basal Sliver", opp);
+        creature("Muscle Sliver", opp);
+        addCard("Dragon Blood", opp);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("sacrificedManaLord", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 2b: Bloodthrone Vampire with Captivating Vampire as fodder; ai at 4 (real 3). */
+    @Test
+    public void sweep02bSacrificedPoolLordIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card a = creature("Bloodthrone Vampire", opp);
+        creature("Captivating Vampire", opp);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("sacrificedPoolLord", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 2c: Grizzly Bears; Juniper Order Advocate wearing Paradise Mantle; Captive Flame; ai at 4 (real 3). */
+    @Test
+    public void sweep02cTappedManaLordIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card a = creature("Grizzly Bears", opp);
+        final Card lord = creature("Juniper Order Advocate", opp);
+        addCard("Paradise Mantle", opp).attachToEntity(lord, null);
+        addCard("Captive Flame", opp);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("tappedManaLord", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 2d: Duergar Mine-Captain wearing Sword of the Paruns, two Mountains; ai at 5 (real 4). */
+    @Test
+    public void sweep02dUntappedLordIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card a = creature("Duergar Mine-Captain", opp);
+        addCard("Sword of the Paruns", opp).attachToEntity(a, null);
+        lands(opp, "Mountain", 2);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("untappedLord", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 3a, keyword grants reuse payment: Carrion Ants, Sunhome, three Mountains, a Plains; ai at 10 (real 5). */
+    @Test
+    public void sweep03aFreeKeywordPaymentIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(10, null);
+        final Card a = creature("Carrion Ants", opp);
+        addCard("Sunhome, Fortress of the Legion", opp);
+        lands(opp, "Mountain", 3);
+        lands(opp, "Plains", 1);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("freeKeywordPayment", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 3b, one activation's double strike on two targets: two Grizzly Bears, Sunhome, three Mountains, a Plains; ai at 8 (real 6). */
+    @Test
+    public void sweep03bFreeKeywordTargetsIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(8, null);
+        final Card a1 = creature("Grizzly Bears", opp);
+        final Card a2 = creature("Grizzly Bears", opp);
+        addCard("Sunhome, Fortress of the Legion", opp);
+        lands(opp, "Mountain", 3);
+        lands(opp, "Plains", 1);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a1, a2);
+        sweep("freeKeywordTargets", g, new boolean[] {false, false}, plan(b, a1), plan());
+    }
+
+    /** Finding 4, X spends mana that cannot be started: Grizzly Bears, two Boros Signets, Puffer Extract; ai at 4 (real 2). */
+    @Test
+    public void sweep04ManaWithoutSeedIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card a = creature("Grizzly Bears", opp);
+        addCard("Boros Signet", opp);
+        addCard("Boros Signet", opp);
+        addCard("Puffer Extract", opp);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("manaWithoutSeed", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 5, a Forest is not another red: Shivan Dragon, a Mountain, a Forest; ai at 7 (real 6); a Wind Drake may block. */
+    @Test
+    public void sweep05ColorsSpentTwiceIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(7, null);
+        final Card a = creature("Shivan Dragon", opp);
+        lands(opp, "Mountain", 1);
+        lands(opp, "Forest", 1);
+        final Card b = creature("Wind Drake", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("colorsSpentTwice", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 6, restricted mana: Carrion Ants, Mishra's Workshop, a Swamp; ai at 4 (real 1). */
+    @Test
+    public void sweep06RestrictedManaIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card a = creature("Carrion Ants", opp);
+        addCard("Mishra's Workshop", opp);
+        addCard("Swamp", opp);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("restrictedMana", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 7, mana replacement: Carrion Ants, Ancient Tomb, Damping Sphere; ai at 2 (real 1). */
+    @Test
+    public void sweep07ManaReplacementIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(2, null);
+        final Card a = creature("Carrion Ants", opp);
+        addCard("Ancient Tomb", opp);
+        addCard("Damping Sphere", opp);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("manaReplacement", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 8a, the last life buys no damage: opp at 3 with Wall of Blood and Rolling Stones; ai at 3 (real 2). */
+    @Test
+    public void sweep08aLifePaidToZeroIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(3, null);
+        opp.setLife(3, null);
+        final Card a = creature("Wall of Blood", opp);
+        addCard("Rolling Stones", opp);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("lifePaidToZero", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 8b, a mana source's damage kills its controller: opp at 2, Grizzly Bears, Ancient Tomb, Puffer Extract; ai at 4 (real 2). */
+    @Test
+    public void sweep08bLethalManaEffectIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        opp.setLife(2, null);
+        final Card a = creature("Grizzly Bears", opp);
+        addCard("Ancient Tomb", opp);
+        addCard("Puffer Extract", opp);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("lethalManaEffect", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 9a, a pump kills its own attacker: Grizzly Bears enchanted with Flowstone Embrace; ai at 4 (real 2). */
+    @Test
+    public void sweep09aOwnTapKillsAttackerIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card a = creature("Grizzly Bears", opp);
+        addCard("Flowstone Embrace", opp).attachToEntity(a, null);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("ownTapKillsAttacker", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 9b: Flowstone Shambler ({R}: +1/-1), three Mountains; ai at 5 (real 3). */
+    @Test
+    public void sweep09bToughnessPaidToZeroIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card a = creature("Flowstone Shambler", opp);
+        lands(opp, "Mountain", 3);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("toughnessPaidToZero", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 10, a pump changes who the next one may hit: Suntail Hawk, two Pendelhaven Elders; ai at 3 (real 2); a Wind Drake may block. */
+    @Test
+    public void sweep10ChangingEligibilityIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(3, null);
+        final Card a = creature("Suntail Hawk", opp);
+        creature("Pendelhaven Elder", opp);
+        creature("Pendelhaven Elder", opp);
+        final Card b = creature("Wind Drake", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("changingEligibility", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /** Finding 11, negative power: Char-Rumbler (-1/3, double strike, {R}: +1/+0), two Mountains; ai at 4 (real 2). */
+    @Test
+    public void sweep11NegativeBasePowerIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card a = creature("Char-Rumbler", opp);
+        lands(opp, "Mountain", 2);
+        final Card b = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("negativeBasePower", g, new boolean[] {false, false}, plan(b, a), plan());
+    }
+
+    /**
+     * Finding 12, trample through unpaid toughness: Defiant Elf (1/1 trample), Captive Flame, a Mountain; ai at 1. Blocked
+     * by Centaur Courser the real most is 0 (the bound: 1); with a Grizzly Bears too, 0 (not flagged); unblocked, 1 (lethal,
+     * witnessed with no line). ON re-scores only no blocks.
+     */
+    @Test
+    public void sweep12TrampleDeficitIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(1, null);
+        final Card a = creature("Defiant Elf", opp);
+        addCard("Captive Flame", opp);
+        lands(opp, "Mountain", 1);
+        final Card courser = creature("Centaur Courser", ai);
+        final Card bears = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("trampleDeficit", g, new boolean[] {false, false, true}, plan(courser, a), plan(courser, a, bears, a), plan());
+    }
+
+    /**
+     * Finding 13a, double strike against protection: Bolrac-Clan Basher (3/2 double strike, trample) blocked by Auriok
+     * Champion (protection from red); ai at 5. The bound: 5; the real most 4. A Grizzly Bears also blocking: not flagged;
+     * unblocked: 6, lethal.
+     */
+    @Test
+    public void sweep13aProtectionDoubleStrikeIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card a = creature("Bolrac-Clan Basher", opp);
+        final Card champ = creature("Auriok Champion", ai);
+        final Card bears = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("protectionDoubleStrike", g, new boolean[] {false, false, true}, plan(champ, a), plan(champ, a, bears, a), plan());
+    }
+
+    /** Finding 13b, the first-strike exclusion: Bolrac-Clan Basher blocked by Porcelain Legionnaire (it dies first); ai at 5 (real 2). */
+    @Test
+    public void sweep13bFirstStrikeSurvivalIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card a = creature("Bolrac-Clan Basher", opp);
+        final Card leg = creature("Porcelain Legionnaire", ai);
+        final Card bears = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("firstStrikeSurvival", g, new boolean[] {false, false, true}, plan(leg, a), plan(leg, a, bears, a), plan());
+    }
+
+    /**
+     * Finding 14, toxic without a hit: Bloated Contaminator (4/4 trample, toxic 1) blocked by Colossal Dreadmaw, ai at 9
+     * poison. The bound gives the toxic counter without player damage (10, lethal); the real block deals none. Unblocked it
+     * hits: lethal. Every declaration was flagged at 262814126dc, so nothing was re-scored there; now only no blocks is
+     * witnessed and re-scored.
+     */
+    @Test
+    public void sweep14ToxicWithoutHitIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setPoisonCounters(9, opp);
+        final Card a = creature("Bloated Contaminator", opp);
+        final Card maw = creature("Colossal Dreadmaw", ai);
+        ready(g);
+        attack(g, opp, ai, a);
+        sweep("toxicWithoutHit", g, new boolean[] {false, true}, plan(maw, a), plan());
+    }
+
+    /**
+     * The earlier boards (Kessig Wolf Run with one Forest, Springleaf Drum, Workhorse, Wild Cantor, Child of Thorns): their
+     * tests above keep the bound's stand-aside or not-lethal; here the witness alone, given every ability, does not witness
+     * their non-lethal declaration either.
+     */
+    @Test
+    public void theEarlierBoardsAreNotWitnessed() {
+        final List<Board> boards = Arrays.asList((g, ai, opp) -> wolfRun(g, ai, opp, 3, 1), this::drumBoard, this::counterBoard,
+                this::cantorBoard);
+        final String[] names = {"wolfRun", "drum", "workhorse", "cantor"};
+        for (int i = 0; i < boards.size(); i++) {
+            final Game g = game();
+            final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+            final Card[] b = boards.get(i).build(g, ai, opp);
+            attack(g, opp, ai, b[0]);
+            final LookaheadSearch.LethalCheck lc = witnessAll(g, plan());
+            logWitness(names[i] + " (no blocks), every ability", lc);
+            AssertJUnit.assertFalse(names[i] + ": " + witnessOf(lc), lc.witnessed[0]);
+            final LookaheadSearch.LethalCheck guard = check(g, plan(b[1], b[0]), plan());
+            logWitness(names[i], guard);
+            AssertJUnit.assertTrue(names[i] + ": " + witnessOf(guard), guard.aside != null || !guard.lethal[1] && !guard.witnessed[1]);
+        }
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card child = creature("Child of Thorns", opp);
+        final Card bears = creature("Grizzly Bears", opp);
+        final Card blocker = creature("Centaur Courser", ai);
+        ready(g);
+        attack(g, opp, ai, child, bears);
+        final LookaheadSearch.LethalCheck lc = witnessAll(g, plan(blocker, bears));
+        logWitness("childOfThorns (Courser blocks the Bears), every ability", lc);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[0]);
+    }
+
+    // ---------------------------------------------------------------------------------- positives the engine witnesses
+
+    /** The reported board: only no blocks is flagged, and the engine witnesses it by Monstrosity X = 3, within 300 ms. */
+    @Test
+    public void theReportedBoardIsWitnessedByMonstrosityX3() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = reported(g, ai, opp, 7);
+        attack(g, opp, ai, b[0]);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(b[1], b[0], b[2], b[0], b[3], b[0]), plan(b[1], b[0], b[2], b[0]),
+                plan(b[2], b[0]), plan());
+        logWitness("reported board", lc);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertTrue(witnessOf(lc), Arrays.equals(new boolean[] {false, false, false, true}, lc.witnessed));
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessLine[3].contains("Monstrosity") && lc.witnessLine[3].contains("[X=3]"));
+        AssertJUnit.assertTrue("under 300 ms: " + witnessOf(lc), lc.witnessNanos < 300_000_000L);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessCapped);
+        // six lands: the bound does not flag it, so nothing is witnessed or played
+        final Game g6 = game();
+        final Card[] b6 = reported(g6, g6.getPlayers().get(0), g6.getPlayers().get(1), 6);
+        attack(g6, g6.getPlayers().get(1), g6.getPlayers().get(0), b6[0]);
+        final LookaheadSearch.LethalCheck lc6 = check(g6, plan(b6[2], b6[0]), plan());
+        AssertJUnit.assertEquals(witnessOf(lc6), 0, lc6.witnessRuns);
+        // and the witness alone with every ability: X = 2 at most, 7 < 8
+        final LookaheadSearch.LethalCheck all6 = witnessAll(g6, plan());
+        logWitness("reported board, six lands, every ability", all6);
+        AssertJUnit.assertFalse(witnessOf(all6), all6.witnessed[0]);
+    }
+
+    /** Firebreathing repeated: Shivan Dragon with three Mountains at 8: {R} three times, 8 (blocked by a Wind Drake: none). */
+    @Test
+    public void firebreathingRepeatedIsWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(8, null);
+        lands(opp, "Mountain", 3);
+        final Card dragon = creature("Shivan Dragon", opp);
+        final Card drake = creature("Wind Drake", ai);
+        ready(g);
+        attack(g, opp, ai, dragon);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(drake, dragon), plan());
+        logWitness("firebreathing", lc);
+        AssertJUnit.assertTrue(witnessOf(lc), Arrays.equals(new boolean[] {false, true}, lc.lethal));
+        AssertJUnit.assertTrue(witnessOf(lc), Arrays.equals(new boolean[] {false, true}, lc.witnessed));
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessLine[1].startsWith("Shivan Dragon") && lc.witnessLine[1].contains(" x3"));
+        final double[][] v = {{0.25, 0.25}, {0.40, 0.40}};
+        AssertJUnit.assertTrue(apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true}).lethalRescored);
+        AssertJUnit.assertTrue(Arrays.deepEquals(new double[][] {{0.25, 0.25}, {0.0, 0.0}}, v));
+    }
+
+    /** Another permanent's targeted pump: Captive Flame twice on the attacking Grizzly Bears, 4 at 4. */
+    @Test
+    public void anotherPermanentsTargetedPumpIsWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        addCard("Captive Flame", opp);
+        lands(opp, "Mountain", 2);
+        final Card bear = creature("Grizzly Bears", opp);
+        ready(g);
+        attack(g, opp, ai, bear);
+        final LookaheadSearch.LethalCheck lc = check(g, plan());
+        logWitness("targeted pump", lc);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessed[0]);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessLine[0].startsWith("Captive Flame")
+                && lc.witnessLine[0].contains(" x2") && lc.witnessLine[0].contains("-> Grizzly Bears (" + bear.getId() + ")"));
+    }
+
+    /** A boosted trampler over a chump: Colossal Dreadmaw plus Captive Flame twice over a Grizzly Bears, 6 at 6. */
+    @Test
+    public void aBoostedTramplerOverAChumpIsWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(6, null);
+        final Card chump = creature("Grizzly Bears", ai);
+        addCard("Captive Flame", opp);
+        lands(opp, "Mountain", 2);
+        final Card maw = creature("Colossal Dreadmaw", opp);
+        ready(g);
+        attack(g, opp, ai, maw);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(chump, maw), plan());
+        logWitness("trampler over a chump", lc);
+        AssertJUnit.assertTrue(witnessOf(lc), Arrays.equals(new boolean[] {true, true}, lc.witnessed));
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessLine[0].startsWith("Captive Flame") && lc.witnessLine[0].contains(" x2"));
+        AssertJUnit.assertEquals(witnessOf(lc), "nothing", lc.witnessLine[1]);
+        ai.setLife(7, null);
+        final LookaheadSearch.LethalCheck lc7 = check(g, plan(chump, maw), plan());
+        logWitness("trampler over a chump at 7", lc7);
+        AssertJUnit.assertTrue(witnessOf(lc7), Arrays.equals(new boolean[] {false, true}, lc7.witnessed));
+    }
+
+    /** An unblocked double striker: Fencing Ace deals 2 at 2 with no line; blocked, nothing (not flagged). */
+    @Test
+    public void anUnblockedDoubleStrikerIsWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(2, null);
+        final Card ace = creature("Fencing Ace", opp);
+        final Card bear = creature("Grizzly Bears", ai);
+        ready(g);
+        attack(g, opp, ai, ace);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(bear, ace), plan());
+        logWitness("double striker", lc);
+        AssertJUnit.assertTrue(witnessOf(lc), Arrays.equals(new boolean[] {false, true}, lc.witnessed));
+        AssertJUnit.assertEquals(witnessOf(lc), "nothing", lc.witnessLine[1]);
+    }
+
+    /** Kessig Wolf Run with a spare source: a Mountain and two Forests make X = 1 at most: 3 at 3, witnessed at X = 1. */
+    @Test
+    public void wolfRunWithASpareSourceIsWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = wolfRun(g, ai, opp, 3, 2);
+        attack(g, opp, ai, b[0]);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(b[1], b[0]), plan());
+        logWitness("wolf run, spare source", lc);
+        AssertJUnit.assertTrue(witnessOf(lc), Arrays.equals(new boolean[] {false, true}, lc.witnessed));
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessLine[1].startsWith("Kessig Wolf Run") && lc.witnessLine[1].contains("[X=1]"));
+    }
+
+    // ------------------------------------------------------------------------------------------- hidden information
+
+    /**
+     * Stormchaser Chimera ("+X/+0, X = the revealed top card's mana value") at 8 life: the bound stands aside, and the
+     * witness alone, given the Chimera's ability, decides the same with a Forest or Emrakul, the Aeons Torn on top: the copy's
+     * library is placeholders, so the top it reveals is never the real one (with Emrakul, 2 + 15 would be lethal).
+     */
+    @Test
+    public void theWitnessNeverReadsAHiddenLibraryTop() {
+        final String[] tops = {"Forest", "Emrakul, the Aeons Torn"};
+        final String[] results = new String[2];
+        for (int j = 0; j < 2; j++) {
+            final Game g = game();
+            final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+            ai.setLife(8, null);
+            final Card chimera = creature("Stormchaser Chimera", opp);
+            final Card drake = creature("Wind Drake", ai);
+            for (String land : new String[] {"Island", "Mountain", "Forest", "Forest"}) {
+                addCard(land, opp);
+            }
+            fillLibrary(ai, 20);
+            final Card top = addCardToZone(tops[j], opp, ZoneType.Library);
+            g.getAction().checkStateEffects(true);
+            attack(g, opp, ai, chimera);
+            final LookaheadSearch.LethalCheck lc = witness(g,
+                    Arrays.asList(LookaheadSearch.lbLineFor(chimera, opp, new ArrayList<>())), plan(drake, chimera), plan());
+            logWitness("chimera, " + tops[j] + " on top", lc);
+            AssertJUnit.assertTrue(tops[j] + ": " + witnessOf(lc), Arrays.equals(new boolean[] {false, false}, lc.witnessed));
+            AssertJUnit.assertEquals(top, opp.getCardsIn(ZoneType.Library).get(0));
+            results[j] = Arrays.toString(lc.witnessed) + " " + Arrays.toString(lc.witnessLine);
+        }
+        AssertJUnit.assertEquals("the same result whatever the hidden top", results[0], results[1]);
+    }
+
+    /**
+     * A Giant Growth in the attacking player's hand that ai has not seen is not in the witness's copy: given its line (as
+     * if the bound had counted it), the witness does not witness 2 + 3 at 5. Revealed to ai, it does (and the guard's own
+     * check flags and witnesses it).
+     */
+    @Test
+    public void aHiddenHandPumpIsNotWitnessed() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        addCard("Forest", opp);
+        final Card growth = addCardToZone("Giant Growth", opp, ZoneType.Hand);
+        final Card bear = creature("Grizzly Bears", opp);
+        ready(g);
+        attack(g, opp, ai, bear);
+        final List<LookaheadSearch.LbLine> line = Arrays.asList(LookaheadSearch.lbLineFor(growth, opp, Arrays.asList(bear)));
+        LookaheadSearch.LethalCheck lc = witness(g, line, plan());
+        logWitness("hidden Giant Growth", lc);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[0]);
+        AssertJUnit.assertEquals(1, opp.getCardsIn(ZoneType.Hand).size());
+        growth.addMayLookAt(g.getNextTimestamp(), Arrays.asList(ai));
+        lc = witness(g, line, plan());
+        logWitness("revealed Giant Growth", lc);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessed[0]);
+        lc = check(g, plan());
+        AssertJUnit.assertTrue(witnessOf(lc), lc.lethal[0] && lc.witnessed[0] && lc.witnessLine[0].startsWith("Giant Growth"));
+    }
+
+    // ------------------------------------------------------------------------------------------------- live state
+
+    /**
+     * The guard leaves the live game as it is with the guard off (where nothing runs): after the bound and the witness's
+     * lines on the reported board, the live game's card-id counters, the global id counters, this thread's id scope, its
+     * random stream (the same object, no draw taken) and its AI-cache scope (the same map, nothing added) are unchanged,
+     * and so are the hands, libraries, life totals and blocks.
+     */
+    @Test
+    public void theWitnessLeavesTheLiveStateAsOff() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = reported(g, ai, opp, 7);
+        attack(g, opp, ai, b[0]);
+        final List<Map<Integer, List<Integer>>> plans = Arrays.asList(plan(b[2], b[0]), plan());
+        final LookaheadSearch s = new LookaheadSearch(config(AiFixes.Mode.ON));
+        final java.util.Random wasRandom = forge.util.MyRandom.getThreadRandom();
+        final Object wasIds = forge.util.IdScope.capture();
+        final Object wasCache = forge.ai.AiCache.captureScope();
+        try {
+            final java.util.Random rnd = new java.util.Random(77);
+            forge.util.MyRandom.setThreadRandom(rnd);
+            forge.util.IdScope.open();
+            final Object ids = forge.util.IdScope.capture();
+            forge.ai.AiCache.openScope();
+            final Object cache = forge.ai.AiCache.captureScope();
+            final String before = liveState(g, ids, cache);
+            final LookaheadSearch.LethalCheck lc = s.lethalBlocksOf(g, ai, plans);
+            logWitness("live state", lc);
+            AssertJUnit.assertTrue(witnessOf(lc), lc.witnessed[1] && lc.witnessRuns > 0);
+            AssertJUnit.assertSame(rnd, forge.util.MyRandom.getThreadRandom());
+            AssertJUnit.assertEquals("no draw from the live stream", new java.util.Random(77).nextLong(), rnd.nextLong());
+            AssertJUnit.assertSame(ids, forge.util.IdScope.capture());
+            AssertJUnit.assertSame(cache, forge.ai.AiCache.captureScope());
+            AssertJUnit.assertEquals(before, liveState(g, ids, cache));
+        } finally {
+            s.shutdown();
+            forge.ai.AiCache.installScope(wasCache);
+            forge.util.IdScope.install(wasIds);
+            forge.util.MyRandom.setThreadRandom(wasRandom);
+        }
+    }
+
+    private static String liveState(Game g, Object ids, Object cache) {
+        final StringBuilder sb = new StringBuilder();
+        sb.append("cards=").append(Arrays.toString(g.peekCardIdCounters()));
+        sb.append(" scope=").append(Arrays.toString(forge.util.IdScope.peek(ids)));
+        sb.append(" global=").append(forge.game.spellability.SpellAbility.peekMaxId()).append('/')
+                .append(forge.game.trigger.Trigger.peekMaxId()).append('/').append(forge.game.replacement.ReplacementEffect.peekMaxId())
+                .append('/').append(forge.game.staticability.StaticAbility.peekMaxId()).append('/')
+                .append(forge.game.spellability.SpellAbilityStackInstance.peekMaxId()).append('/').append(Game.peekMaxId());
+        sb.append(" cache=").append(((com.google.common.collect.Multimap<?, ?>) cache).size());
+        for (Player p : g.getPlayers()) {
+            sb.append(" | ").append(p.getName()).append(" life=").append(p.getLife()).append(" poison=").append(p.getPoisonCounters());
+            for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Library, ZoneType.Battlefield, ZoneType.Graveyard}) {
+                sb.append(' ').append(z).append('=');
+                for (Card c : p.getCardsIn(z)) {
+                    sb.append(c.getId()).append(c.isTapped() ? "t" : "").append(c.getCounters().isEmpty() ? "" : "c").append(',');
+                }
+            }
+        }
+        sb.append(" blockers=").append(g.getPhaseHandler().getCombat().getAllBlockers().size());
+        sb.append(" phase=").append(g.getPhaseHandler().getPhase()).append(" stack=").append(g.getStack().size());
+        return sb.toString();
+    }
+
+    // ------------------------------------------------------------------------------------------- the modes, round 6
+
+    /**
+     * Only a witnessed candidate is re-scored: one the bound flags but the engine does not witness keeps its values (and
+     * counts as a candidate that is not lethal); a check without witnesses re-scores nothing.
+     */
+    @Test
+    public void onlyAWitnessedCandidateIsRescored() {
+        double[][] v = values();
+        LookaheadSearch.LethalCheck lc = flagged(false, false, true);
+        lc.witnessed = new boolean[3];
+        LookaheadSearch.GivenResult r = apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true, true});
+        AssertJUnit.assertFalse(r.lethalRescored);
+        AssertJUnit.assertTrue(Arrays.deepEquals(values(), v));
+        AssertJUnit.assertTrue(Arrays.equals(new boolean[] {false, false, true}, r.lethal));
+        AssertJUnit.assertTrue(Arrays.equals(new boolean[3], r.witnessed));
+        v = values();
+        lc = flagged(true, true, true);
+        lc.witnessed = null;
+        r = apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true, true});
+        AssertJUnit.assertFalse(r.lethalRescored);
+        AssertJUnit.assertTrue(Arrays.deepEquals(values(), v));
+        // all three flagged, two witnessed: the unwitnessed one is the candidate that is not lethal
+        v = values();
+        lc = flagged(true, true, true);
+        lc.witnessed = new boolean[] {true, false, true};
+        lc.witnessLine = new String[] {"a", null, "c"};
+        r = apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true, true});
+        AssertJUnit.assertTrue(r.lethalRescored);
+        AssertJUnit.assertTrue(Arrays.deepEquals(new double[][] {{0.0, 0.0}, values()[1], {0.0, 0.0}}, v));
+        AssertJUnit.assertEquals("c", r.witnessLine[2]);
+        // SHADOW: the same check flags without changing values
+        v = values();
+        r = apply(AiFixes.Mode.SHADOW, lc, v, new boolean[] {true, true, true});
+        AssertJUnit.assertFalse(r.lethalRescored);
+        AssertJUnit.assertTrue(Arrays.deepEquals(values(), v));
+        AssertJUnit.assertTrue(Arrays.equals(new boolean[] {true, false, true}, r.witnessed));
     }
 }
