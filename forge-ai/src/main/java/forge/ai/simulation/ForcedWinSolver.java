@@ -387,6 +387,13 @@ public final class ForcedWinSolver {
          */
         public int planEscalate = 0;
         /**
+         * sdcc-late-escalate-1117 (0 or 1 = off, the default, and then nothing changes): when the planner at its node cap
+         * and then the engine fallback found no proven line, one more planner pass runs at this many times the node cap
+         * within what is left of the decision (no budget extension), and its new lines are verified. The first two stages
+         * are unchanged, so a proof they find is never lost; the pass spends only time they left.
+         */
+        public int lateEscalate = 0;
+        /**
          * sdcc-verify-1117 (0 = off, the default: the top {@link #top} distinct lines, as before): verify up to this many
          * distinct lines in rank order, stopping at the first proof or at the verification deadline, so a larger planner
          * pass whose first-ranked lines fail cannot hide a proven line further down.
@@ -1039,6 +1046,7 @@ public final class ForcedWinSolver {
             c.pileTutorCast = "true".equals(get.apply("pileTutorCast")); // sdcc-piletc-1117
             c.planWiden = intOr(get.apply("planWiden"), c.planWiden); // sdcc-widen-1117
             c.planEscalate = intOr(get.apply("planEscalate"), c.planEscalate); // sdcc-escalate-1117
+            c.lateEscalate = intOr(get.apply("lateEscalate"), c.lateEscalate); // sdcc-late-escalate-1117
             c.verifyMax = intOr(get.apply("verifyMax"), c.verifyMax); // sdcc-verify-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
@@ -2843,6 +2851,10 @@ public final class ForcedWinSolver {
             if (bridged != null) {
                 return bridgeTake(pos, bridged, t0); // a likely or next-turn bridged line, the position's only one
             }
+            final Line lateLine = lateEscalate(live, pos, lim, res, index, null); // sdcc-late-escalate-1117
+            if (lateLine != null) {
+                return lateLine;
+            }
             gated++;
             if (cachesGated(cfg, engineUnverified)) {
                 noLineKey = key;
@@ -2911,6 +2923,10 @@ public final class ForcedWinSolver {
                     return engine;
                 }
                 lastOutcome = "declined";
+            }
+            final Line lateLine = lateEscalate(live, pos, lim, res, index, best); // sdcc-late-escalate-1117
+            if (lateLine != null) {
+                return lateLine;
             }
             if (cachesDeclined(cfg, best)) {
                 noLineKey = key;
@@ -4959,6 +4975,85 @@ public final class ForcedWinSolver {
             lim.ms = ms0;
         }
     }
+    /**
+     * sdcc-late-escalate-1117 ({@link Config#lateEscalate}): after the planner at its cap and the engine fallback found no
+     * proven line, one planner pass at lateEscalate x the node cap, its time bounded by what is left of the decision wall
+     * (less the verification reserve); new lines (not among {@code before}'s) are verified and the first proof taken.
+     * Null = off, already escalated, no time left, or no new proven line.
+     */
+    private Line lateEscalate(final Game live, final Position pos, final ForcedWinPlanner.Limits lim, final ForcedWinPlanner.Result before,
+            final int index, final Eval prevBest) {
+        if (cfg.lateEscalate <= 1 || !cfg.forced || escalated || !before.exhausted || cfg.counter) {
+            return null;
+        }
+        if (prevBest != null && prevBest.pBelief >= cfg.threshold && prevBest.pUnopposed >= 1.0) {
+            return null;
+        }
+        final long now = forge.game.WorkClock.nanoTime();
+        final long wall = decisionWall != 0L ? decisionWall : decisionStart + budgetMs() * 1_000_000L;
+        final long left = (wall - now) / 1_000_000L - cfg.evalReserveMs;
+        if (left <= 200L) {
+            receipt("FORCED_WIN late-escalate" + tag() + " skipped left=" + left);
+            return null;
+        }
+        escalated = true;
+        escalations++;
+        final int nodes0 = lim.nodes, horizon0 = lim.horizon, pay0 = lim.payPolicies;
+        final long ms0 = lim.ms;
+        final boolean gs0 = lim.grantSacMana, ptc0 = lim.pileTutorCast;
+        final ForcedWinPlanner.Result r;
+        final long planEnd = now + left * 1_000_000L;
+        try {
+            lim.nodes = cfg.nodes * cfg.lateEscalate;
+            lim.payPolicies = cfg.paySearch ? (cfg.payKeepUse ? ForcedWinPlanner.PAY_POLICIES_KEEP_USE : ForcedWinPlanner.PAY_POLICIES) : 1;
+            lim.grantSacMana = cfg.grantSacMana;
+            lim.pileTutorCast = cfg.pileTutorCast;
+            lim.horizon = 1;
+            lim.ms = Math.max(1L, left);
+            ForcedWinPlanner.Result a = planCapped(pos, lim);
+            if (a.lines.isEmpty() && cfg.horizon >= 2) {
+                final long left2 = (planEnd - forge.game.WorkClock.nanoTime()) / 1_000_000L;
+                if (left2 > 200L) {
+                    lim.horizon = cfg.horizon;
+                    lim.ms = left2;
+                    a = planCapped(pos, lim);
+                }
+            }
+            r = a;
+        } finally {
+            lim.nodes = nodes0;
+            lim.ms = ms0;
+            lim.horizon = horizon0;
+            lim.payPolicies = pay0;
+            lim.grantSacMana = gs0;
+            lim.pileTutorCast = ptc0;
+        }
+        final java.util.Set<String> seen = new java.util.HashSet<>();
+        for (Line l : before.lines) {
+            seen.add(l.key());
+        }
+        final List<Line> fresh = new ArrayList<>();
+        for (Line l : r.lines) {
+            if (!seen.contains(l.key())) {
+                fresh.add(l);
+            }
+        }
+        receipt("FORCED_WIN late-escalate" + tag() + " x" + cfg.lateEscalate + " left=" + left + " lines=" + r.lines.size()
+                + " fresh=" + fresh.size() + " " + r.summary());
+        if (fresh.isEmpty()) {
+            return null;
+        }
+        // its lines are verified in the decision's own allowance: from the start the planner pass left them (the reserve)
+        final Eval e = evaluateTop(live, fresh, index, forge.game.WorkClock.nanoTime() - (budgetMs() - cfg.evalReserveMs) * 1_000_000L);
+        if (e != null && e.pBelief >= cfg.threshold && e.pUnopposed >= 1.0 && !(cfg.honestProbes && e.worldsRun < cfg.worlds)) {
+            escalateTakes++;
+            receipt("FORCED_WIN take-late-escalated" + tag() + " turn=" + pos.turn + " " + e);
+            lastOutcome = "take";
+            return e.line;
+        }
+        return null;
+    }
+
     /** sdcc-escalate-1117: whether this decision's planner already escalated; takes by an escalated pass (report only). */
     private boolean escalated;
     /** sdcc-escalate-1117: the decision's budget extension once the planner escalated ((k - 1) x budgetMs; 0 otherwise). */
