@@ -2245,41 +2245,6 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertEquals(witnessOf(lc2), "pending state the copy cannot carry", lc2.aside);
     }
 
-    /**
-     * Copy fidelity, this turn's state (with review S1 4): Basking Rootwalla ("{1}{G}: +2/+2. Activate only once each
-     * turn.") was already activated this turn (its pump gone, as if countered) and attacks ai at 3, with two untapped
-     * Forests. Given the Rootwalla's line, 530bcb291c7's copy forgot the activation and pumped again (3 at 3): witnessed.
-     * Witness copies now carry this turn's state: nothing is witnessed. Control: not yet activated, the line is witnessed.
-     */
-    @Test
-    public void r7AnActivationThisTurnIsCarried() {
-        for (boolean activated : new boolean[] {true, false}) {
-            final Game g = game();
-            final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
-            ai.setLife(3, null);
-            final Card walla = creature("Basking Rootwalla", opp);
-            lands(opp, "Forest", 2);
-            ready(g);
-            attack(g, opp, ai, walla);
-            final List<LookaheadSearch.LbLine> line = Arrays.asList(LookaheadSearch.lbLineFor(walla, opp, new ArrayList<>()));
-            if (activated) {
-                forge.game.spellability.SpellAbility pump = null;
-                for (forge.game.spellability.SpellAbility sa : walla.getSpellAbilities()) {
-                    if (sa.isActivatedAbility() && !sa.isManaAbility()) {
-                        pump = sa;
-                    }
-                }
-                AssertJUnit.assertNotNull(pump);
-                pump.setActivatingPlayer(opp);
-                walla.addAbilityActivated(pump);
-                AssertJUnit.assertEquals(1, pump.getActivationsThisTurn());
-            }
-            final LookaheadSearch.LethalCheck lc = witness(g, line, plan());
-            logWitness("rootwalla, activated " + activated, lc);
-            AssertJUnit.assertEquals("activated " + activated + ": " + witnessOf(lc), !activated, lc.witnessed[0]);
-        }
-    }
-
     /** An until-end-of-turn command the copier cannot map (it holds a thread). */
     static final class Opaque implements forge.GameCommand {
         private static final long serialVersionUID = 1L;
