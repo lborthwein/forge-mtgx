@@ -6708,8 +6708,9 @@ public final class LookaheadSearch {
     /**
      * deadPump (review S1 2, 3): some card the seat sees reads power, so a power change may matter outside combat damage
      * (an attack restriction by power, lethal damage by power, an end-step trigger counting power, a fling on the
-     * battlefield). Read: each static ability, trigger and replacement effect that works where its card is, each non-mana
-     * activated ability on the battlefield or in the command zone, each spell in a hand the seat sees, and each keyword's
+     * battlefield, a mana ability whose amount is its power). Read: each static ability, trigger and replacement effect
+     * that works where its card is, each activated ability (mana abilities included, re-review S1) on the battlefield or
+     * in the command zone, each spell in a hand the seat sees, and each keyword's
      * text. Any of their parameters, or the SVars those name (an Execute, a SubAbility, an X), counts.
      */
     static boolean pumpReadsPower(List<Card> seen, Player me) {
@@ -6733,8 +6734,14 @@ public final class LookaheadSearch {
                 }
             }
             if (zt == ZoneType.Battlefield || zt == ZoneType.Command || zt == ZoneType.Hand) {
+                // mana abilities too: one whose amount reads power makes more or less mana after the change
                 for (SpellAbility sa : c.getSpellAbilities()) {
-                    if (!sa.isManaAbility() && readsPower(sa)) {
+                    if (readsPower(sa)) {
+                        return true;
+                    }
+                }
+                for (SpellAbility sa : c.getManaAbilities()) {
+                    if (readsPower(sa)) {
                         return true;
                     }
                 }

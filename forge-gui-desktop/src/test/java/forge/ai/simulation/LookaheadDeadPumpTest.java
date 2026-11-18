@@ -521,6 +521,27 @@ public class LookaheadDeadPumpTest extends SimulationTest {
         AssertJUnit.assertFalse("ON keeps it", droppedLive(g, a, prowler(a), AiFixes.Mode.ON));
     }
 
+    /**
+     * Re-review S1: a mana ability whose amount reads power is a power reader. After combat, +1/+0 on the seat's own
+     * Viridian Joiner still makes it tap for one more green this turn.
+     */
+    @Test
+    public void aManaAbilityThatReadsPowerKeepsIt() {
+        Game g = reviewBoard();
+        Player a = g.getPlayers().get(0);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN2, a);
+        final Card joiner = addCard("Viridian Joiner", a);
+        joiner.setSickness(false);
+        addCard("Mountain", a);
+        final Card crown = addCard("Crown of Flames", a);
+        crown.attachToEntity(joiner, null);
+        addCardToZone("Kalonian Tusker", a, ZoneType.Hand);
+        g.getAction().checkStateEffects(true);
+        final SpellAbility sa = pump(a, "Crown of Flames");
+        AssertJUnit.assertNotNull("the fixture: Crown of Flames' pump is legal", sa);
+        AssertJUnit.assertFalse("ON keeps it", droppedLive(g, a, sa, AiFixes.Mode.ON));
+    }
+
     /** A blocker already declared stays live until combat damage (kills the mutation that drops isBlocking). */
     @Test
     public void aDeclaredBlockerStays() {
