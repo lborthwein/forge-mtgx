@@ -8905,6 +8905,9 @@ public final class LookaheadSearch {
         // each source's mana, kept per card: a cost that taps or takes a source spends that mana too (joint allocation)
         final Map<Integer, Integer> sources = new TreeMap<>();
         final int made = lbMana(opp, sources);
+        if (made == -2) {
+            return LethalCheck.aside("a mana ability whose cost takes another permanent");
+        }
         if (made < 0) {
             return LethalCheck.aside("a mana ability whose amount is not a number");
         }
@@ -9040,7 +9043,9 @@ public final class LookaheadSearch {
      * plus its mana pool. As {@code ComputerUtilMana.getAvailableManaEstimate}, except that one counts the words of a
      * "Combo R G" choice (3 mana for a land that makes 1). Each source's mana goes into {@code bySource} (card id -> mana)
      * when it makes any. -1 when a playable mana ability's Amount is not a number ({@link #lbLiteral}): its value may read
-     * what the seat cannot see, so the bound does not use it.
+     * what the seat cannot see, so the bound does not use it. -2 when a playable mana ability has a cost part other than
+     * mana, its own tap, life, or a cost paid from the source itself (re-review S1: Springleaf Drum taps another
+     * creature, which a pump's cost may also tap; the per-source split cannot see that, so the guard stands aside).
      */
     static int lbMana(Player p, Map<Integer, Integer> bySource) {
         int mana = p.getManaPool().totalMana();
@@ -9056,6 +9061,16 @@ public final class LookaheadSearch {
                 final Integer amount = lbLiteral(ma.getParamOrDefault("Amount", "1"), ma);
                 if (amount == null) {
                     return -1;
+                }
+                if (ma.getPayCosts() != null) {
+                    for (forge.game.cost.CostPart part : ma.getPayCosts().getCostParts()) {
+                        // re-review S1: a cost that takes another permanent (tap an untapped creature, sacrifice one) is
+                        // not this source's alone, and a pump's cost may take the same permanent; not bounded jointly
+                        if (!(part instanceof forge.game.cost.CostPartMana || part instanceof forge.game.cost.CostTap
+                                || part instanceof forge.game.cost.CostPayLife || part.payCostFromSource())) {
+                            return -2;
+                        }
+                    }
                 }
                 final forge.game.cost.CostPartMana cm = ma.getPayCosts() == null ? null : ma.getPayCosts().getCostMana();
                 final Integer pay = cm == null ? Integer.valueOf(0) : cm.convertAmount();
