@@ -64,8 +64,10 @@ public class PlanDumpTest extends forge.ai.AITest {
             go.active = Integer.getInteger("plandump.gfActive", 3);
             go.nodes = Integer.getInteger("plandump.gfNodes", 15000);
             go.maxNodes = Long.getLong("plandump.gfMax", 600000L);
-            go.ms = -1L;
+            go.ms = Long.getLong("plandump.gfMs", -1L);
+            final long g0 = System.nanoTime();
             final ForcedWinSolver.Goldfish gf = s.goldfish(g, s.knownTop(g), go);
+            System.out.println("PLANDUMP goldfish ms=" + (System.nanoTime() - g0) / 1_000_000 + " nodes/screen=" + go.nodes + " max=" + go.maxNodes + " screenMs=" + go.ms);
             System.out.println("PLANDUMP goldfish g=" + gf.g + " p=" + gf.p + " bestTurn=" + gf.bestTurn + " direct=" + gf.direct
                     + " samples=" + gf.samples + " screens=" + gf.screens + " capped=" + gf.capped + " cut=" + gf.cut + " failed=" + gf.failed);
         }
