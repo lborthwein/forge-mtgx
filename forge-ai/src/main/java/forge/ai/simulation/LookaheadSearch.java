@@ -7138,20 +7138,23 @@ public final class LookaheadSearch {
      * in combat ({@link #DFU_KEYWORDS}): no static, other trigger, activated or mana ability, replacement or other keyword.
      * </li>
      * <li><b>The seat gets priority again before the body could matter, and before its own untap step</b> ("stack",
-     * "combat", "phase", "timing", "untap"): the stack is empty (otherwise the top item resolves before the seat's next
+     * "combat", "phase", "timing", "untap", "cleanup"): the stack is empty (otherwise the top item resolves before the seat's next
      * priority and the body may matter to it), the permanent is not attacking or blocking, no extra turn or phase is
      * pending, and the next combat declaration or damage it could take part in comes after the seat's next priority: on its
      * own turn, before combat only if it cannot attack this turn (tapped, or summoning sick with no haste source the seat
-     * sees), from declare attackers through main phase 2 (not in combat), and the end step unless the next turn is its own;
+     * sees), from declare attackers through main phase 2 (not in combat), never the end step (cleanup comes first);
      * on another player's turn, upkeep through beginning of combat and declare blockers through main phase 2 only (never
      * declare attackers: tapped does not prove it cannot block; never the end step: the seat's untap step may come first,
      * and waiting would spend next turn's mana; never untap or cleanup).</li>
-     * <li><b>Paying now gains nothing over paying later</b> ("cost", "pool", "watcher", "other"): the turn-up cost is mana
+     * <li><b>Paying now gains nothing over paying later</b> ("cost", "pool", "watcher", "other", "offBattlefield"): the
+     * turn-up cost is mana
      * only (no X), the seat's mana pool is empty, no card the seat sees other than this one has a trigger or replacement on a
      * permanent turning face up, or a battlefield or command-zone ability whose text names face-down or face-up status,
      * morph, manifest, cloak or disguise; and no other battlefield or command-zone object, on either side, has a static or
      * triggered ability, a keyword or a replacement effect (but its own entering), and no delayed trigger is pending
-     * ({@link #dfuOtherAbilities}: anything that could read the changed characteristics or the megamorph counter).</li>
+     * ({@link #dfuOtherAbilities}: anything that could read the changed characteristics or the megamorph counter); and no
+     * card in a graveyard, exile, the command zone or the seat's own hand has a trigger, static or replacement active
+     * where it is ("offBattlefield", {@link #dfuActiveOffBattlefield}).</li>
      * <li><b>What the seat may know</b>: only its own face-down card (whose face it knows) and public state are read;
      * {@code known} (card ids, {@link #pumpKnownIds}, read in the live game) or {@link #pumpKnows} when null. An opponent's
      * hand or library, or an opponent's face-down card, is never read.</li>
@@ -7290,7 +7293,12 @@ public final class LookaheadSearch {
         }
         // review round 2 (S1 3, 4): no other battlefield or command-zone object, on either side, has anything that could read
         // the changed characteristics or the megamorph counter (a static or triggered ability, a keyword, a replacement)
-        return dfuOtherAbilities(host, game) ? "other" : DFU_DEAD;
+        if (dfuOtherAbilities(host, game)) {
+            return "other";
+        }
+        // review round 3 (S1 1): nor any card in a graveyard, exile (as the seat sees it), the command zone or the seat's own
+        // hand with a trigger, static or replacement active in the zone it is in (Flamewake Phoenix in a graveyard)
+        return dfuActiveOffBattlefield(host, me, game, known) ? "offBattlefield" : DFU_DEAD;
     }
 
     /**
@@ -7400,8 +7408,10 @@ public final class LookaheadSearch {
                 case COMBAT_END: case MAIN2:
                     return null; // attackers are declared and it is not attacking
                 case END_OF_TURN:
-                    // review round 2 (S1 1): if the next turn is the seat's own, its untap step comes before its next priority
-                    return me.equals(ph.getNextTurn()) ? "untap" : null;
+                    // review round 3 (S1 2): always: cleanup (until-end-of-turn effects ending, damage wearing off) comes
+                    // before the seat's next priority and may change the body's survival; and if the next turn is the
+                    // seat's own, its untap step does too (review round 2, S1 1)
+                    return "cleanup";
                 default:
                     return "phase";
             }
@@ -7595,6 +7605,59 @@ public final class LookaheadSearch {
         }
         final forge.game.trigger.TriggerHandler th = game.getTriggerHandler();
         return !th.getDelayedTriggersView().isEmpty() || !th.getPlayerDefinedDelayedTriggersView().isEmpty();
+    }
+
+    /**
+     * deadFaceUp (review round 3, S1 1): some card other than {@code host} in a graveyard, in exile (only a card the seat may
+     * see: {@code known}, or {@link #pumpKnows} when null), in the command zone, or in the seat's own hand, has a trigger,
+     * a static ability or a replacement effect that is active in the zone it is in, by Forge's own checks
+     * ({@code TriggerZones} / {@code ActiveZones}: {@link forge.game.TriggerReplacementBase#zonesCheck}, which counts one
+     * without a zone list as active everywhere; {@code EffectZone}: {@link forge.game.staticability.StaticAbility#zonesCheck},
+     * which counts a characteristic-defining one as active everywhere). An opponent's hand and the libraries are not read.
+     */
+    static boolean dfuActiveOffBattlefield(Card host, Player me, Game game, Set<Integer> known) {
+        for (Card c : game.getCardsInGame()) {
+            if (c == host || c.getId() == host.getId()) {
+                continue;
+            }
+            final forge.game.zone.Zone z = game.getZoneOf(c);
+            if (z == null) {
+                continue;
+            }
+            final boolean read;
+            switch (z.getZoneType()) {
+                case Graveyard: case Command:
+                    read = true;
+                    break;
+                case Exile:
+                    read = known == null ? pumpKnows(me, c) : known.contains(c.getId());
+                    break;
+                case Hand:
+                    read = me.equals(z.getPlayer());
+                    break;
+                default:
+                    read = false;
+            }
+            if (!read) {
+                continue;
+            }
+            for (Trigger t : c.getTriggers()) {
+                if (t.zonesCheck(z)) {
+                    return true;
+                }
+            }
+            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                if (re.zonesCheck(z)) {
+                    return true;
+                }
+            }
+            for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {
+                if (st.zonesCheck()) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** deadFaceUp: a replacement for its own card entering the battlefield only (Moved, ValidCard Card.Self, Destination Battlefield). */
