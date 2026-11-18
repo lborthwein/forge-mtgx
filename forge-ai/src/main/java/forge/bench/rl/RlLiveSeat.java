@@ -128,7 +128,10 @@ public final class RlLiveSeat {
                 // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
                 "pileTutorCast",
                 // sdcc-widen-1117 (absent = 0 = off): narrow first planner pass (ForcedWinSolver.Config.planWiden)
-                "planWiden"));
+                "planWiden",
+                // sdcc-escalate-1117 (absent = 0 = off): one planner pass at k x the cap where the passes stopped at it
+                // (ForcedWinSolver.Config.planEscalate)
+                "planEscalate"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
