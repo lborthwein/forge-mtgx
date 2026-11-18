@@ -1029,4 +1029,117 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertEquals(flags(lc), 3, lc.life[1]);
         AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, true}, lc.lethal));
     }
+
+    /** The Workhorse board: ai at 2 with a Grizzly Bears; opp's attacking Carrion Ants, a Workhorse with one +1/+1 counter, Power Conduit. */
+    private Card[] counterBoard(Game g, Player ai, Player opp) {
+        ai.setLife(2, null);
+        final Card attacker = addCard("Carrion Ants", opp);
+        attacker.setSickness(false);
+        final Card horse = addCard("Workhorse", opp);
+        horse.setSickness(false);
+        horse.setCounters(forge.game.card.CounterEnumType.P1P1, 1);
+        addCard("Power Conduit", opp);
+        final Card blocker = addCard("Grizzly Bears", ai);
+        blocker.setSickness(false);
+        fillLibrary(ai, 20);
+        fillLibrary(opp, 20);
+        g.getAction().checkStateEffects(true);
+        return new Card[] {attacker, blocker};
+    }
+
+    /**
+     * Re-review 2 S1: Workhorse's one counter buys either its {C} (the Ants' +1) or Power Conduit's +1/+1 counter, not
+     * both: the real most is 1 at 2 life. fa29 let the source pay from itself and the Conduit remove the same counter
+     * (2, lethal) and ON re-scored no blocks. A mana ability paid with anything but mana, its own tap or its own sacrifice
+     * now stands aside (and so does a pump cost that removes counters): nothing re-scored, the live seat keeps none.
+     */
+    @Test
+    public void aCounterPaidManaAbilityStandsAside() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = counterBoard(g, ai, opp);
+        attack(g, opp, ai, b[0]);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(b[1], b[0]), plan());
+        AssertJUnit.assertNotNull(flags(lc), lc.aside);
+        AssertJUnit.assertTrue(flags(lc), lc.aside.contains("shared pool"));
+        final double[][] v = {{0.40, 0.40}, {0.55, 0.55}};
+        final LookaheadSearch.GivenResult r = apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true});
+        AssertJUnit.assertFalse(r.lethalRescored);
+        AssertJUnit.assertTrue(Arrays.deepEquals(new double[][] {{0.40, 0.40}, {0.55, 0.55}}, v));
+        final JsonObject lo = live(this::counterBoard, "").line();
+        AssertJUnit.assertEquals(lo.toString(), "none", lo.get("chosen").getAsString());
+        final JsonObject ln = live(this::counterBoard, "lethalBlock=on").line();
+        final JsonObject gn = ln.getAsJsonObject("lethalBlock");
+        AssertJUnit.assertNotNull(ln.toString(), gn);
+        AssertJUnit.assertFalse(ln.toString(), gn.has("rescored") && gn.get("rescored").getAsBoolean());
+        AssertJUnit.assertEquals(ln.toString(), "none", ln.get("chosen").getAsString());
+    }
+
+    /**
+     * Two pumps whose costs take creatures from one pool: Bloodthrone Vampire (sacrifice a creature: +2/+2) attacks; Mogg
+     * Raider (sacrifice a Goblin: target creature +1/+1) and Goblin Piker stay home. Each alone could use both Goblins,
+     * but there are only two: the guard stands aside rather than count four sacrifices.
+     */
+    @Test
+    public void twoPumpsSharingSacrificeFodderStandAside() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(7, null);
+        final Card attacker = addCard("Bloodthrone Vampire", opp);
+        attacker.setSickness(false);
+        addCard("Mogg Raider", opp).setSickness(false);
+        addCard("Goblin Piker", opp).setSickness(false);
+        final Card blocker = addCard("Grizzly Bears", ai);
+        blocker.setSickness(false);
+        fillLibrary(ai, 20);
+        fillLibrary(opp, 20);
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, attacker);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(blocker, attacker), plan());
+        AssertJUnit.assertNotNull(flags(lc), lc.aside);
+        AssertJUnit.assertTrue(flags(lc), lc.aside.contains("same pool"));
+    }
+
+    /**
+     * An attacker is never fodder for a sacrifice cost (it would leave combat): a lone attacking Bloodthrone Vampire
+     * adds nothing (1 at 3 life, not lethal; fa29 counted sacrificing itself: 3). With two Grizzly Bears at home it may
+     * sacrifice both: 1 + 4 = 5, lethal at 5.
+     */
+    @Test
+    public void anAttackerIsNeverItsOwnFodder() {
+        Game g = game();
+        Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(3, null);
+        Card attacker = addCard("Bloodthrone Vampire", opp);
+        attacker.setSickness(false);
+        Card blocker = addCard("Grizzly Bears", ai);
+        blocker.setSickness(false);
+        fillLibrary(ai, 20);
+        fillLibrary(opp, 20);
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, attacker);
+        LookaheadSearch.LethalCheck lc = check(g, plan(blocker, attacker), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 1, lc.life[1]);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, false}, lc.lethal));
+
+        g = game();
+        ai = g.getPlayers().get(0);
+        opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        attacker = addCard("Bloodthrone Vampire", opp);
+        attacker.setSickness(false);
+        addCard("Grizzly Bears", opp).setSickness(false);
+        addCard("Grizzly Bears", opp).setSickness(false);
+        blocker = addCard("Grizzly Bears", ai);
+        blocker.setSickness(false);
+        fillLibrary(ai, 20);
+        fillLibrary(opp, 20);
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, attacker);
+        lc = check(g, plan(blocker, attacker), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 5, lc.life[1]);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, true}, lc.lethal));
+    }
 }
