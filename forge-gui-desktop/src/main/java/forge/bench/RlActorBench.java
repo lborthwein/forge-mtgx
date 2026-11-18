@@ -2417,7 +2417,12 @@ public final class RlActorBench {
                     g.add("seeding", t.get("seeding")); // cm-curriculum-1009: the seeding it played, re-applied
                 }
                 if (t.has("start_state")) {
-                    g.add("start_state", t.get("start_state")); // sdcc-curric-1111: the position start, re-applied
+                    // dp-replay-1118: an exact start (schema mtgx-rl-exact/1) is re-applied as exact_start (it needs
+                    // -Dforge.bench.exactStart, research only); any other position start as before
+                    final com.google.gson.JsonElement ss = t.get("start_state");
+                    final boolean exact = ss.isJsonObject() && ss.getAsJsonObject().has("schema")
+                            && RlStartState.EXACT_SCHEMA.equals(ss.getAsJsonObject().get("schema").getAsString());
+                    g.add(exact ? "exact_start" : "start_state", ss); // sdcc-curric-1111: the position start, re-applied
                 }
                 // r4-design-1015: the loop guard it played (absent = off), whatever the replay actor's own loopGuard
                 g.addProperty("loop_guard", t.has("loop_guard") ? t.get("loop_guard").getAsInt() : 0);
