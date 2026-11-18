@@ -2644,6 +2644,7 @@ public final class ForcedWinSolver {
         decisions++;
         final int index = decisionIndex++;
         escalated = false; // sdcc-escalate-1117
+        escalateShift = 0L;
         final long t0 = forge.game.WorkClock.nanoTime();
         // bvw-step1-build-1024: budget=counter reads no wall clock (0 = no wall); unified-search-1106: else the hard deadline
         decisionWall = cfg.counter ? 0L
@@ -2818,7 +2819,8 @@ public final class ForcedWinSolver {
             receipt("FW_POSITION " + pos.describe());
         }
         final long t1 = forge.game.WorkClock.nanoTime();
-        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch || hardDeadline != 0 ? t0 : forge.game.WorkClock.nanoTime());
+        final Eval best = evaluateTop(live, res.lines, index, (cfg.paySearch || hardDeadline != 0 ? t0 : forge.game.WorkClock.nanoTime())
+                + escalateShift); // sdcc-escalate-1117: 0 unless the planner escalated
         engineNanos += forge.game.WorkClock.nanoTime() - t1;
         if (cfg.engineAfterPlanFail && evalSink != null && (best == null || best.pUnopposed < 1.0 || best.pBelief < 1.0
                 || best.worldsRun < cfg.worlds)) {
@@ -2843,7 +2845,7 @@ public final class ForcedWinSolver {
                 }
             }
             if (!fresh.isEmpty()) {
-                bestEsc = evaluateTop(live, fresh, index, cfg.paySearch || hardDeadline != 0 ? t0 : forge.game.WorkClock.nanoTime());
+                bestEsc = evaluateTop(live, fresh, index, forge.game.WorkClock.nanoTime());
                 if (bestEsc != null && bestEsc.pBelief >= cfg.threshold && bestEsc.pUnopposed >= 1.0
                         && !(cfg.honestProbes && bestEsc.worldsRun < cfg.worlds)) {
                     escalateTakes++;
@@ -4919,6 +4921,8 @@ public final class ForcedWinSolver {
     }
     /** sdcc-escalate-1117: whether this decision's planner already escalated; takes by an escalated pass (report only). */
     private boolean escalated;
+    /** sdcc-escalate-1117: the decision's budget extension once the planner escalated ((k - 1) x budgetMs; 0 otherwise). */
+    private long escalateShift;
     public int escalateTakes, escalations;
 
     /**
@@ -4928,6 +4932,11 @@ public final class ForcedWinSolver {
     private ForcedWinPlanner.Result escalate(final Position pos, final ForcedWinPlanner.Limits lim, final ForcedWinPlanner.Result before) {
         escalated = true;
         escalations++;
+        // the escalated pass gets the decision (k - 1) more budgets: its plan time and its lines' verification
+        escalateShift = (cfg.planEscalate - 1L) * budgetMs() * 1_000_000L;
+        if (decisionWall != 0L) {
+            decisionWall += escalateShift;
+        }
         final int nodes0 = lim.nodes, horizon0 = lim.horizon, pay0 = lim.payPolicies;
         final long ms0 = lim.ms;
         final boolean gs0 = lim.grantSacMana, ptc0 = lim.pileTutorCast;
