@@ -111,6 +111,7 @@ public final class HonestGenerator {
         defaults.put("planWiden", 0); // sdcc-widen-1117: off = the recorded config unchanged
         defaults.put("planEscalate", 0); // sdcc-escalate-1117: off = the recorded config unchanged
         defaults.put("verifyMax", 0); // sdcc-verify-1117: off = the recorded config unchanged
+        defaults.put("lateEscalate", 0); // sdcc-late-escalate-1117: off = the recorded config unchanged
         defaults.put("probeObjects", false); // sdcc-probeobj-1111: off = the recorded config unchanged
         defaults.put("engineModeChoice", false); // owner-misplays-1113: off = the recorded config unchanged
         for (java.util.Map.Entry<String, Object> e : defaults.entrySet()) {
