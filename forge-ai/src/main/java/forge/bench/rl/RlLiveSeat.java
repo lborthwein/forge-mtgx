@@ -395,6 +395,11 @@ public final class RlLiveSeat {
                     case "prioGfMargin": c.prioGfMargin = Double.parseDouble(v); break;
                     case "prioGfTurns": c.prioGfTurns = Integer.parseInt(v); break;
                     case "prioGfHold": c.prioGfHold = flagKey(k, v); break;
+                    // sdcc-bundle8-1117 (absent / off = unchanged): the S-W0 keep pick K-mull live. on = the bench spec's
+                    // "mullKeep": {} (RlSearch.Config#mullKeep: a mulligan the policy asks for is kept unless the engine's
+                    // stock rule mulligans too); alwaysKeep=on = the bench's "alwaysKeep": true (for completeness)
+                    case "mullKeep": c.mullKeep = flagKey(k, v) ? new JsonObject() : null; break;
+                    case "alwaysKeep": c.alwaysKeep = flagKey(k, v); break;
                     default:
                         if (k.startsWith("choiceScorer.")) {
                             c.choiceScorer = objKey(c.choiceScorer, k, k.substring("choiceScorer.".length()), v);
