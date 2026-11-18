@@ -1821,15 +1821,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final boolean own = cfg.mainBreadth > 0 && g.getStack().isEmpty() && ph.isPlayerTurn(me) && ph.getPhase() != null
                 && ph.getPhase().isMain();
         lastBreadth = givenBreadth(base, cfg.mainBreadth, own, entries);
-        if (lastForced > 0 && forcedBase == base) {
-            lastBreadth = Math.max(lastBreadth, Math.min(entries, base + lastForced)); // forced-include-1117
+        if (fiMoved > 0 && fiBase == base) {
+            lastBreadth = Math.max(lastBreadth, Math.min(entries, base + fiMoved)); // forced-include-1117
         }
         return lastBreadth;
     }
 
     /** forced-include-1117: entries moved in at this decision, and the breadth they were placed after. */
-    private int lastForced;
-    private int forcedBase = -1;
+    private int fiMoved;
+    private int fiBase = -1;
 
     /** forced-include-1117: the first non-pass step's host card id of a proposed line, or -1. */
     static int lineFirstHost(final Object plan) {
@@ -1840,15 +1840,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * forced-include-1117: at our own main phase with an empty stack, moves at most {@link Config#FORCE_MAX} given entries
      * from past the breadth cut to just after it (order and given in step), so the search covers them: the entry whose
      * host is the first step's host of a proposed line ("plan"), and the given spell whose card scores highest in the
-     * deck's profile ("wincon"). {@link #lastForced} = how many were moved; the breadth then grows by that many.
+     * deck's profile ("wincon"). {@link #fiMoved} = how many were moved; the breadth then grows by that many.
      */
     private void forceInclude(final Game g, final Player me, final List<Integer> order, final List<SpellAbility> given,
-            final PlanSearch.Stage stage) {
+            final PlanSearch.Stage stage, final int base) {
         final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
         if (!g.getStack().isEmpty() || !ph.isPlayerTurn(me) || ph.getPhase() == null || !ph.getPhase().isMain()) {
             return;
         }
-        final int base = stage != null && sb != null ? (stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth)) : cfg.breadth;
         if (stage != null && stage.duel || given.size() <= base) {
             return;
         }
@@ -1914,8 +1913,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         order.addAll(o2);
         given.clear();
         given.addAll(g2);
-        lastForced = pick.size();
-        forcedBase = base;
+        fiMoved = pick.size();
+        fiBase = base;
     }
 
     /** activate-miss-1116: the breadth the last given search used (logged only when mainBreadth is on). */
@@ -2083,9 +2082,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return RlSeat.PrioritySearch.HOOK;
             }
         }
-        lastForced = 0;
+        fiMoved = 0;
         if (!cfg.forceInclude.isEmpty()) {
-            forceInclude(g, me, order, given, stage); // forced-include-1117 (off: never reached)
+            // forced-include-1117 (off: never reached): the base the given search below uses
+            forceInclude(g, me, order, given, stage, stage != null && sb != null ? (stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth))
+                    : cfg.breadth);
         }
         armForce(mark());
         if (cfg.anytime && "value".equals(cfg.leaf)) {
@@ -2287,7 +2288,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("breadth_used", lastBreadth); // activate-miss-1116: written only when the key is on
             }
             if (!cfg.forceInclude.isEmpty()) {
-                row.addProperty("forced", lastForced); // forced-include-1117: written only when the key is on
+                row.addProperty("forced", fiMoved); // forced-include-1117: written only when the key is on
                 row.addProperty("breadth_used", lastBreadth);
             }
             row.addProperty("v_root", sc.valueObs);
