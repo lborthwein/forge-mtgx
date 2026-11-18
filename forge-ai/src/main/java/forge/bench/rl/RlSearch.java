@@ -141,6 +141,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * General: a count of candidates, no card, kind or effect is named. Written to JSON only when on.
          */
         public int mainBreadth = 0;
+        /**
+         * forced-include-1117 (empty = off, the default, and then nothing changes): at our own main-phase priority with an
+         * empty stack, given candidates past the breadth cut that are also searched, at most {@link #FORCE_MAX} in all:
+         * "plan" = the given entry whose host card is the host of the FIRST non-pass step of a planner line or the SETUP
+         * line proposed at this decision; "wincon" = the castable spell (a given spell entry) whose card has the highest
+         * positive score in {@link #forceProfile} for the seat's deck. Tokens comma-separated. General: the planner's own
+         * line and an offline-computed per-deck profile (data); no card, kind or effect is named.
+         */
+        public String forceInclude = "";
+        /** forced-include-1117: a {@link WinconProfile} file for the "wincon" token ("" = that token is off). */
+        public String forceProfile = "";
+        static final int FORCE_MAX = 2;
         /** host:port of tools/ml/rl/search_server.py. */
         public String server;
         public int readTimeoutMs = 120_000;
@@ -462,7 +474,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "departMedian", "stack", "server", "readTimeoutMs",
-                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "mainBreadth", "budgetMs", "connectTimeoutMs",
+                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "mainBreadth", "forceInclude", "forceProfile", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
@@ -530,6 +542,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
             if (o.has("includePass")) c.includePass = o.get("includePass").getAsBoolean();
             if (o.has("mainBreadth")) c.mainBreadth = o.get("mainBreadth").getAsInt();
+            if (o.has("forceInclude")) c.forceInclude = o.get("forceInclude").getAsString();
+            if (o.has("forceProfile")) {
+                c.forceProfile = o.get("forceProfile").getAsString();
+                if (!c.forceProfile.isEmpty()) {
+                    WinconProfile.load(c.forceProfile); // forced-include-1117: a bad file fails at parse
+                }
+            }
             if (o.has("server") && !o.get("server").isJsonNull()) c.server = o.get("server").getAsString();
             if (o.has("readTimeoutMs")) c.readTimeoutMs = o.get("readTimeoutMs").getAsInt();
             if (o.has("cpuCapMs")) c.cpuCapMs = o.get("cpuCapMs").getAsLong();
@@ -662,6 +681,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (worlds < 1 || breadth < 2 || horizon < 1) {
                 throw new IllegalArgumentException("search: worlds >= 1, breadth >= 2, horizon >= 1");
+            }
+            for (String t : forceInclude.isEmpty() ? new String[0] : forceInclude.split(",")) {
+                if (!"plan".equals(t.trim()) && !"wincon".equals(t.trim())) {
+                    throw new IllegalArgumentException("search.forceInclude: tokens plan, wincon; got " + t);
+                }
             }
             if (mainBreadth != 0 && mainBreadth <= breadth) {
                 throw new IllegalArgumentException("search.mainBreadth: 0 (off) or more than breadth (" + breadth + ")");
@@ -799,6 +823,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("includePass", includePass);
             if (mainBreadth > 0) {
                 o.addProperty("mainBreadth", mainBreadth);
+            }
+            if (!forceInclude.isEmpty()) {
+                o.addProperty("forceInclude", forceInclude); // forced-include-1117: only when on
+            }
+            if (!forceProfile.isEmpty()) {
+                o.addProperty("forceProfile", forceProfile);
             }
             o.addProperty("cpuCapMs", cpuCapMs);
             o.addProperty("seedSalt", seedSalt);
@@ -1791,7 +1821,101 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final boolean own = cfg.mainBreadth > 0 && g.getStack().isEmpty() && ph.isPlayerTurn(me) && ph.getPhase() != null
                 && ph.getPhase().isMain();
         lastBreadth = givenBreadth(base, cfg.mainBreadth, own, entries);
+        if (lastForced > 0 && forcedBase == base) {
+            lastBreadth = Math.max(lastBreadth, Math.min(entries, base + lastForced)); // forced-include-1117
+        }
         return lastBreadth;
+    }
+
+    /** forced-include-1117: entries moved in at this decision, and the breadth they were placed after. */
+    private int lastForced;
+    private int forcedBase = -1;
+
+    /** forced-include-1117: the first non-pass step's host card id of a proposed line, or -1. */
+    static int lineFirstHost(final Object plan) {
+        return plan instanceof PlanSearch.LinePlan lp ? forge.ai.simulation.ForcedWinSolver.firstStepHostId(lp.line) : -1;
+    }
+
+    /**
+     * forced-include-1117: at our own main phase with an empty stack, moves at most {@link Config#FORCE_MAX} given entries
+     * from past the breadth cut to just after it (order and given in step), so the search covers them: the entry whose
+     * host is the first step's host of a proposed line ("plan"), and the given spell whose card scores highest in the
+     * deck's profile ("wincon"). {@link #lastForced} = how many were moved; the breadth then grows by that many.
+     */
+    private void forceInclude(final Game g, final Player me, final List<Integer> order, final List<SpellAbility> given,
+            final PlanSearch.Stage stage) {
+        final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+        if (!g.getStack().isEmpty() || !ph.isPlayerTurn(me) || ph.getPhase() == null || !ph.getPhase().isMain()) {
+            return;
+        }
+        final int base = stage != null && sb != null ? (stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth)) : cfg.breadth;
+        if (stage != null && stage.duel || given.size() <= base) {
+            return;
+        }
+        final List<Integer> pick = new ArrayList<>();
+        final java.util.Set<String> tok = new java.util.HashSet<>();
+        for (String t : cfg.forceInclude.split(",")) {
+            tok.add(t.trim());
+        }
+        if (tok.contains("plan") && stage != null) {
+            for (Object pl : stage.plans) {
+                final int host = lineFirstHost(pl);
+                if (host < 0) {
+                    continue;
+                }
+                for (int i = base; i < given.size(); i++) {
+                    final SpellAbility sa = given.get(i);
+                    if (sa != null && sa.getHostCard() != null && sa.getHostCard().getId() == host && !pick.contains(i)) {
+                        pick.add(i);
+                        break;
+                    }
+                }
+                if (pick.size() >= Config.FORCE_MAX) {
+                    break;
+                }
+            }
+        }
+        if (tok.contains("wincon") && !cfg.forceProfile.isEmpty() && pick.size() < Config.FORCE_MAX) {
+            final Map<String, Double> prof = WinconProfile.forSeat(cfg.forceProfile, me);
+            int best = -1;
+            double bv = 0;
+            for (int i = base; prof != null && i < given.size(); i++) {
+                final SpellAbility sa = given.get(i);
+                if (sa == null || !sa.isSpell() || sa.getHostCard() == null || pick.contains(i)) {
+                    continue;
+                }
+                final double v = prof.getOrDefault(sa.getHostCard().getName(), 0.0);
+                if (v > bv) {
+                    bv = v;
+                    best = i;
+                }
+            }
+            if (best >= 0) {
+                pick.add(best);
+            }
+        }
+        if (pick.isEmpty()) {
+            return;
+        }
+        java.util.Collections.sort(pick);
+        final List<Integer> o2 = new ArrayList<>(order.subList(0, base));
+        final List<SpellAbility> g2 = new ArrayList<>(given.subList(0, base));
+        for (int i : pick) {
+            o2.add(order.get(i));
+            g2.add(given.get(i));
+        }
+        for (int i = base; i < given.size(); i++) {
+            if (!pick.contains(i)) {
+                o2.add(order.get(i));
+                g2.add(given.get(i));
+            }
+        }
+        order.clear();
+        order.addAll(o2);
+        given.clear();
+        given.addAll(g2);
+        lastForced = pick.size();
+        forcedBase = base;
     }
 
     /** activate-miss-1116: the breadth the last given search used (logged only when mainBreadth is on). */
@@ -1958,6 +2082,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 tap("proven_line", stage, null, order.size(), RlSeat.PrioritySearch.HOOK);
                 return RlSeat.PrioritySearch.HOOK;
             }
+        }
+        lastForced = 0;
+        if (!cfg.forceInclude.isEmpty()) {
+            forceInclude(g, me, order, given, stage); // forced-include-1117 (off: never reached)
         }
         armForce(mark());
         if (cfg.anytime && "value".equals(cfg.leaf)) {
@@ -2157,6 +2285,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("entries", by.size());
             if (cfg.mainBreadth > 0) {
                 row.addProperty("breadth_used", lastBreadth); // activate-miss-1116: written only when the key is on
+            }
+            if (!cfg.forceInclude.isEmpty()) {
+                row.addProperty("forced", lastForced); // forced-include-1117: written only when the key is on
+                row.addProperty("breadth_used", lastBreadth);
             }
             row.addProperty("v_root", sc.valueObs);
             if (cfg.reach != null && reachCfg().gate) {
