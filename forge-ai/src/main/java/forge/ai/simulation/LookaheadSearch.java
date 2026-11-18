@@ -9124,43 +9124,37 @@ public final class LookaheadSearch {
     /**
      * lethalBlock: the copy {@code g} forgets what the seat cannot know before anything is played in it. Round 7: each
      * hand card the seat does not know ({@code known}; the attacking player's, and any other player's) becomes a
-     * placeholder in its place (the hand size, a public count, stays); every library becomes as many placeholders. Every
-     * placeholder is recorded in the returned watch, in its zone order.
+     * placeholder in its place (the hand size, a public count, stays). Round 8 (review S1 1): the same in every library,
+     * card by card, so a card the seat knows there (a revealed top) stays itself. Every placeholder is recorded in the
+     * returned watch, in its zone order.
      */
     static WitnessWatch lbHide(Game g, Set<Integer> known) {
         final WitnessWatch w = new WitnessWatch();
-        final forge.item.PaperCard ph = LbPlaceholder.CARD;
         for (Player p : g.getPlayers()) {
-            final List<Card> hand = new ArrayList<>();
-            final List<Card> blanks = new ArrayList<>();
-            for (Card c : p.getCardsIn(ZoneType.Hand)) {
-                if (known.contains(c.getId())) {
-                    hand.add(c);
-                } else {
-                    final Card b = forge.game.card.CardFactory.getCard(ph, p, g.nextCardId(), g);
-                    hand.add(b);
-                    blanks.add(b);
-                }
-            }
-            if (!blanks.isEmpty()) {
-                p.getZone(ZoneType.Hand).setCards(hand);
-                for (Card b : blanks) {
-                    w.add(p, ZoneType.Hand, b);
-                }
-            }
-        }
-        for (Player p : g.getPlayers()) {
-            final int size = p.getCardsIn(ZoneType.Library).size();
-            final List<Card> blank = new ArrayList<>(size);
-            for (int i = 0; i < size; i++) {
-                blank.add(forge.game.card.CardFactory.getCard(ph, p, g.nextCardId(), g));
-            }
-            p.getZone(ZoneType.Library).setCards(blank);
-            for (Card c : blank) {
-                w.add(p, ZoneType.Library, c);
-            }
+            lbHideZone(g, p, ZoneType.Hand, known, w);
+            lbHideZone(g, p, ZoneType.Library, known, w);
         }
         return w;
+    }
+
+    private static void lbHideZone(Game g, Player p, ZoneType z, Set<Integer> known, WitnessWatch w) {
+        final List<Card> cards = new ArrayList<>();
+        final List<Card> blanks = new ArrayList<>();
+        for (Card c : p.getCardsIn(z)) {
+            if (known.contains(c.getId())) {
+                cards.add(c);
+            } else {
+                final Card b = forge.game.card.CardFactory.getCard(LbPlaceholder.CARD, p, g.nextCardId(), g);
+                cards.add(b);
+                blanks.add(b);
+            }
+        }
+        if (!blanks.isEmpty()) {
+            p.getZone(z).setCards(cards);
+            for (Card b : blanks) {
+                w.add(p, z, b);
+            }
+        }
     }
 
     /**
@@ -9257,7 +9251,13 @@ public final class LookaheadSearch {
         return sb.toString();
     }
 
-    /** {@link #lbFidelityKey} of the live game, read under its lock in scratch id, AI-cache and random scopes. */
+    /** Separates {@link #lbFidelityKey} from {@link #lbPublicKey} in the live game's key. */
+    static final String LB_PUBLIC = "\n#public\n";
+
+    /**
+     * {@link #lbFidelityKey} and {@link #lbPublicKey} of the live game (joined by {@link #LB_PUBLIC}), read under its lock
+     * in scratch id, AI-cache and random scopes.
+     */
     static String lbFidelityKeyOfLive(Game live) {
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -9267,13 +9267,109 @@ public final class LookaheadSearch {
         forge.util.IdScope.open();
         try {
             synchronized (live) {
-                return lbFidelityKey(live);
+                return lbFidelityKey(live) + LB_PUBLIC + lbPublicKey(live);
             }
         } finally {
             AiCache.installScope(prevCache);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
         }
+    }
+
+    /**
+     * lethalBlock round 8 (review S1 1-2): every public characteristic of the objects in play, compared between the live
+     * game and each witness copy after it hid what the seat cannot see and recomputed static abilities: each battlefield
+     * permanent's name, state, types, controller, tapped, face-down, net power and toughness, damage marked and assigned,
+     * counters, attachment, keywords (static grants included), loyalty, whether it attacks (and whom) or blocks (and
+     * what); each public command-zone and face-up exile object's name, state, types and counters; and, between each
+     * attacker and each creature of another player, protection either way and whether it can block. A copier that drops
+     * a choice (a chosen parity, and the protection it gave) or a static ability that reads a placeholder shows here.
+     * Nothing hidden is read (no hand or library), so a difference never depends on a hidden identity. Reads cached and
+     * computed characteristics only (no lazily built traits).
+     */
+    static String lbPublicKey(Game g) {
+        final StringBuilder sb = new StringBuilder(4096);
+        final List<Player> ps = g.getPlayers();
+        final forge.game.combat.Combat combat = g.getPhaseHandler().getCombat();
+        final List<Card> creatures = new ArrayList<>();
+        for (Player p : ps) {
+            sb.append('P').append(ps.indexOf(p));
+            for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Command, ZoneType.Exile}) {
+                sb.append(' ').append(z).append(':');
+                for (Card c : p.getCardsIn(z)) {
+                    if (z != ZoneType.Battlefield && c.isFaceDown()) {
+                        continue;
+                    }
+                    sb.append(" {").append(c.getId()).append(' ').append(c.getName()).append(' ').append(c.getCurrentStateName())
+                            .append(" [").append(c.getType()).append("] c").append(ps.indexOf(c.getController()));
+                    if (z == ZoneType.Battlefield) {
+                        sb.append(c.isTapped() ? " T" : " U").append(c.isFaceDown() ? " fd" : "").append(" pt").append(c.getNetPower())
+                                .append('/').append(c.getNetToughness()).append(" d").append(c.getDamage()).append('+')
+                                .append(c.getTotalAssignedDamage());
+                        if (c.isPlaneswalker()) {
+                            sb.append(" loy").append(c.getCurrentLoyalty());
+                        }
+                        if (c.getEntityAttachedTo() instanceof Card) {
+                            sb.append(" at").append(((Card) c.getEntityAttachedTo()).getId());
+                        } else if (c.getEntityAttachedTo() instanceof Player) {
+                            sb.append(" atP").append(ps.indexOf(c.getEntityAttachedTo()));
+                        }
+                        final List<String> kws = new ArrayList<>();
+                        for (forge.game.keyword.KeywordInterface k : c.getKeywords()) {
+                            kws.add(k.getOriginal());
+                        }
+                        Collections.sort(kws);
+                        sb.append(" kw").append(kws);
+                        if (combat != null) {
+                            final forge.game.GameEntity d = combat.getDefenderByAttacker(c);
+                            if (d != null) {
+                                sb.append(" atk>").append(d instanceof Card ? "C" + ((Card) d).getId() : "P" + ps.indexOf(d));
+                                for (Card b : combat.getBlockers(c)) {
+                                    sb.append(" by").append(b.getId());
+                                }
+                            }
+                            for (Card a : combat.getAttackersBlockedBy(c)) {
+                                sb.append(" blk").append(a.getId());
+                            }
+                        }
+                        if (c.isCreature()) {
+                            creatures.add(c);
+                        }
+                    }
+                    final Map<String, Integer> cn = counterMap(c);
+                    if (!cn.isEmpty()) {
+                        sb.append(" n").append(new TreeMap<>(cn));
+                    }
+                    sb.append('}');
+                }
+            }
+            sb.append('\n');
+        }
+        if (combat != null) {
+            sb.append("vs");
+            for (Card a : combat.getAttackers()) {
+                for (Card b : creatures) {
+                    if (b.getController() == a.getController()) {
+                        continue;
+                    }
+                    sb.append(' ').append(a.getId()).append('/').append(b.getId()).append(lbProtected(b, a) ? 'p' : '-')
+                            .append(lbProtected(a, b) ? 'q' : '-').append(forge.game.combat.CombatUtil.canBlock(a, b) ? 'b' : '-');
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /** {@code c} has protection from {@code source}: one of its protection keywords prevents {@code source}'s damage. */
+    static boolean lbProtected(Card c, Card source) {
+        for (forge.game.keyword.KeywordInterface k : c.getKeywords(forge.game.keyword.Keyword.PROTECTION)) {
+            for (forge.game.replacement.ReplacementEffect re : k.getReplacements()) {
+                if (re.matchesValidParam("ValidSource", source)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** The first line where two fidelity keys differ (a diagnostic). */
@@ -9357,14 +9453,26 @@ public final class LookaheadSearch {
                 r.voided = "no combat in the copy";
                 return r;
             }
+            final int cut = liveKey.indexOf(LB_PUBLIC);
+            final String liveState = cut < 0 ? liveKey : liveKey.substring(0, cut);
+            final String livePublic = cut < 0 ? null : liveKey.substring(cut + LB_PUBLIC.length());
             final String copyKey = lbFidelityKey(g);
-            if (!copyKey.equals(liveKey)) {
+            if (!copyKey.equals(liveState)) {
                 r.voided = "copy differs from the live game";
-                r.error = lbFirstDiff(liveKey, copyKey);
+                r.error = lbFirstDiff(liveState, copyKey);
                 return r;
             }
             final Player opp = c.getAttackingPlayer();
             final WitnessWatch watch = lbHide(g, known);
+            // round 8: with what the seat cannot see hidden and static abilities recomputed, every public characteristic
+            // must still be the live game's (a dropped choice, or a static reading a placeholder, differs)
+            g.getAction().checkStaticAbilities(false);
+            final String copyPublic = lbPublicKey(g);
+            if (livePublic == null || !copyPublic.equals(livePublic)) {
+                r.voided = "a public characteristic differs";
+                r.error = livePublic == null ? "no public key" : lbFirstDiff(livePublic, copyPublic);
+                return r;
+            }
             final BlockPlan bp = new BlockPlan("witness");
             bp.blocks.putAll(plan);
             BlockPlan.clear(c, me);
@@ -9404,6 +9512,12 @@ public final class LookaheadSearch {
             r.payFailed = wa.failed;
             if (r.voided == null && watch.touched != null) {
                 r.voided = watch.touched;
+            }
+            if (r.voided == null && wa.voided != null) {
+                r.voided = wa.voided;
+            }
+            if (r.voided == null && wa.illegalTarget) {
+                r.voided = "illegal target";
             }
             final forge.game.player.PlayerOutcome mo = me.getOutcome();
             final boolean byDamage = mo != null && (mo.lossState == forge.game.player.GameLossReason.LifeReachedZero
@@ -9662,7 +9776,9 @@ public final class LookaheadSearch {
         private final LbLine line;
         private final int target, xCap;
         int played, x = -1;
-        boolean failed, done;
+        boolean failed, done, illegalTarget;
+        /** Why the run cannot witness (round 8: damage that tramples over a planeswalker), or null. */
+        String voided;
 
         WitnessAi(Game g, Player p, forge.LobbyPlayer lp, LbLine line, int target, int xCap) {
             this(g, p, lp, line, target, xCap, null);
@@ -9707,6 +9823,11 @@ public final class LookaheadSearch {
                 done = true;
                 return null;
             }
+            if (!lbTargetsLegal(sa)) {
+                done = true;
+                illegalTarget = true;
+                return null;
+            }
             if (!sa.canPlay() || !forge.ai.ComputerUtilCost.canPayCost(sa, me, false)) {
                 done = true;
                 return null;
@@ -9728,8 +9849,11 @@ public final class LookaheadSearch {
         /**
          * Round 7 (review S1 5): combat damage by the rules alone, not Forge AI's assignment. Each blocker in damage order
          * gets lethal damage (its toughness less the damage already marked and assigned this step, 1 with deathtouch),
-         * ignoring prevention and replacement, while damage lasts; with trample the rest goes to the player or
-         * planeswalker, else to the last blocker.
+         * ignoring prevention and replacement, while damage lasts; with trample the rest goes to the defender it attacks
+         * (the engine passes it: the player, or the planeswalker or battle, which then takes all of it), else to the last
+         * blocker. Round 8 (review S1 4): a planeswalker or battle in the damage order (trample over planeswalkers: only
+         * then may excess reach its controller) voids the run; it is given its loyalty or defense less the damage already
+         * assigned to it, never by toughness, and deathtouch's one damage counts for creatures only.
          */
         @Override
         public Map<Card, Integer> assignCombatDamage(Card attacker, CardCollectionView blockers, CardCollectionView remaining,
@@ -9740,9 +9864,16 @@ public final class LookaheadSearch {
             Card last = null;
             for (Card b : blockers) {
                 last = b;
-                int need = Math.max(0, b.getLethalDamage());
-                if (deathtouch) {
-                    need = Math.min(1, need);
+                int need;
+                if (b.isCreature()) {
+                    need = Math.max(0, b.getLethalDamage());
+                    if (deathtouch) {
+                        need = Math.min(1, need);
+                    }
+                } else {
+                    voided = "trample over planeswalkers";
+                    need = Math.max(0, (b.isPlaneswalker() ? b.getCurrentLoyalty()
+                            : b.getCounters(forge.game.card.CounterEnumType.DEFENSE)) - b.getTotalAssignedDamage());
                 }
                 final int give = Math.min(need, left);
                 if (give > 0) {
@@ -9761,6 +9892,30 @@ public final class LookaheadSearch {
             }
             return out;
         }
+    }
+
+    /**
+     * lethalBlock round 8 (review S1 3): the targets of {@code sa} (every targeting part, sub-abilities included) are
+     * legal the engine's full way before anything is paid: each part has a valid number of targets, each target is one
+     * the engine offers (its zone and {@code canTarget}), and the whole choice meets every must-target restriction
+     * ({@code StaticAbilityMustTarget}, a Flagbearer), as {@code SpellAbility.setupTargets} checks.
+     */
+    static boolean lbTargetsLegal(SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (!s.usesTargeting()) {
+                continue;
+            }
+            if (!s.isTargetNumberValid()) {
+                return false;
+            }
+            final List<forge.game.GameEntity> offered = s.getTargetRestrictions().getAllCandidates(s, false);
+            for (forge.game.GameObject o : s.getTargets()) {
+                if (!offered.contains(o)) {
+                    return false;
+                }
+            }
+        }
+        return forge.game.staticability.StaticAbilityMustTarget.meetsMustTargetRestriction(sa);
     }
 
     /** lethalBlock: {@code line}'s ability in game {@code g} (its place first, else by description), or null. */

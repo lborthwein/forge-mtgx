@@ -2041,6 +2041,12 @@ public class LookaheadLethalBlockTest extends SimulationTest {
      * rules), through combat damage.
      */
     private static void playLive(Game g, Map<Integer, List<Integer>> plan, LookaheadSearch.LbLine line) throws Exception {
+        playLive(g, plan, line, -1);
+    }
+
+    /** {@link #playLive}, the line's target the card with id {@code target} (-1: none set). */
+    private static void playLive(Game g, Map<Integer, List<Integer>> plan, LookaheadSearch.LbLine line, int target)
+            throws Exception {
         final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
         final LookaheadSearch.BlockPlan bp = new LookaheadSearch.BlockPlan("live");
         bp.blocks.putAll(plan);
@@ -2052,7 +2058,7 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         m.setAccessible(true);
         m.invoke(null, ph, ai, opp, false);
         ai.dangerouslySetController(new LookaheadSearch.WitnessSeat(g, ai, ai.getController().getLobbyPlayer(), bp));
-        opp.dangerouslySetController(new LookaheadSearch.WitnessAi(g, opp, opp.getController().getLobbyPlayer(), line, -1,
+        opp.dangerouslySetController(new LookaheadSearch.WitnessAi(g, opp, opp.getController().getLobbyPlayer(), line, target,
                 Integer.MAX_VALUE));
         final int turn = ph.getTurn();
         for (int i = 0; i < 400 && !g.isGameOver(); i++) {
@@ -2363,5 +2369,207 @@ public class LookaheadLethalBlockTest extends SimulationTest {
                 s.shutdown();
             }
         }
+    }
+
+    // ------------------------------- round 8 (review/245/r7): known cards stay, public characteristics, targets, walkers
+
+    /**
+     * Review S1 1 (static library read): ai at 4 blocks Bolrac-Clan Basher (3/2 double strike, trample, enchanted with
+     * Firebreathing; a Mountain and a Forest) with Mul Daya Channelers, whose controller plays with its library's top
+     * revealed (+3/+3 while it is a creature: a Grizzly Bears). 2c99c5fc05f replaced the known top too, the Channelers
+     * shrank to 2/2, and the block was witnessed with no line. Now a card the seat knows stays itself: nothing is witnessed
+     * or re-scored. Control: on the original board the pump leaves ai at 1. And the public check: hiding that top as if
+     * unknown shrinks the Channelers in the copy, which the public key shows (the run would be void).
+     */
+    @Test
+    public void r8AKnownLibraryCardStaysItself() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        for (int i = 0; i < 10; i++) {
+            addCardToZone("Grizzly Bears", ai, ZoneType.Library);
+        }
+        fillLibrary(opp, 20);
+        final Card basher = creature("Bolrac-Clan Basher", opp);
+        final Card channelers = creature("Mul Daya Channelers", ai);
+        final Card wall = creature("Wall of Stone", ai);
+        addCard("Firebreathing", opp).attachToEntity(basher, null);
+        addCard("Mountain", opp);
+        addCard("Forest", opp);
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, basher);
+        AssertJUnit.assertEquals(5, channelers.getNetToughness());
+        AssertJUnit.assertTrue(LookaheadSearch.pumpKnows(ai, ai.getCardsIn(ZoneType.Library).get(0)));
+        final LookaheadSearch.LethalCheck lc = check(g, plan(channelers, basher), plan(wall, basher));
+        logWitness("channelers, a revealed top", lc);
+        assertNoRescore("channelers", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[0]);
+        AssertJUnit.assertTrue("no run voided: " + witnessOf(lc), lc.witnessVoid.isEmpty());
+        // the public check, given the top as if unknown
+        final LookaheadSearch s = new LookaheadSearch(config(AiFixes.Mode.ON));
+        try {
+            final Game copy = s.copierOf(g).makeCopy();
+            LookaheadSearch.lbHide(copy, new java.util.HashSet<>());
+            copy.getAction().checkStaticAbilities(false);
+            AssertJUnit.assertEquals(2, copy.findById(channelers.getId()).getNetToughness());
+            final String diff = LookaheadSearch.lbFirstDiff(LookaheadSearch.lbPublicKey(g), LookaheadSearch.lbPublicKey(copy));
+            AssertJUnit.assertTrue(diff, diff.contains("Mul Daya Channelers"));
+        } finally {
+            s.shutdown();
+        }
+        playLive(g, plan(channelers, basher), lc.lines.get(0));
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(1, ai.getLife());
+    }
+
+    /**
+     * Review S1 2 (a choice the copier drops): ai at 3 blocks Bolrac-Clan Basher with Lavabrink Venturer, which chose even
+     * (protection from each even mana value: the Basher's is 6). The copy drops the chosen parity, so the Venturer lost its
+     * protection there while the state key still matched, and the block was witnessed with no line. Now the public check
+     * (protection between each attacker and creature) differs: the run is void, nothing is witnessed or re-scored.
+     * Control: on the original board the Venturer takes it all and ai stays at 3.
+     */
+    @Test
+    public void r8AChoiceTheCopierDropsVoidsTheRun() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(3, null);
+        final Card basher = creature("Bolrac-Clan Basher", opp);
+        final Card venturer = creature("Lavabrink Venturer", ai);
+        venturer.setChosenEvenOdd(forge.game.EvenOdd.Even);
+        final Card wall = creature("Wall of Stone", ai);
+        ready(g);
+        attack(g, opp, ai, basher);
+        AssertJUnit.assertTrue(LookaheadSearch.lbProtected(venturer, basher));
+        final LookaheadSearch.LethalCheck lc = check(g, plan(venturer, basher), plan(wall, basher));
+        logWitness("lavabrink, chosen even", lc);
+        assertNoRescore("lavabrink", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[0]);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessVoid.containsKey("a public characteristic differs"));
+        // the copy as the witness makes it: the state key matches; the protection keyword (and protection) is lost
+        final LookaheadSearch s = new LookaheadSearch(config(AiFixes.Mode.ON));
+        try {
+            final GameCopier copier = s.copierOf(g);
+            copier.setCopyFidelity(1);
+            copier.setCopyPending(true);
+            copier.setPendingStrict(true);
+            final Game copy = copier.makeCopy();
+            AssertJUnit.assertEquals(LookaheadSearch.lbFidelityKey(g), LookaheadSearch.lbFidelityKey(copy));
+            copy.getAction().checkStaticAbilities(false);
+            final String diff = LookaheadSearch.lbFirstDiff(LookaheadSearch.lbPublicKey(g), LookaheadSearch.lbPublicKey(copy));
+            AssertJUnit.assertTrue(diff, diff.contains("Protection:Card.cmcEven") && diff.contains("copy["));
+            AssertJUnit.assertFalse(LookaheadSearch.lbProtected(copy.findById(venturer.getId()), copy.findById(basher.getId())));
+        } finally {
+            s.shutdown();
+        }
+        playLive(g, plan(venturer, basher), null);
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(3, ai.getLife());
+    }
+
+    /**
+     * Review S1 3 (forced targets): ai at 5 with Standard Bearer (an opponent targeting must choose a Flagbearer if able)
+     * and Wall of Stone; Grizzly Bears attacks, with a Giant Growth ai has seen and a Forest. 2c99c5fc05f put the Growth on
+     * the Bears directly, against the must-target restriction, and witnessed no blocks. Now each forced target is checked
+     * the engine's full way before paying (the targets it offers, their number, must-target): the line is skipped, nothing
+     * is witnessed or re-scored. Control: the Growth on the Standard Bearer (the legal target), played on the original
+     * board, leaves ai at 3.
+     */
+    @Test
+    public void r8AForcedTargetMustBeLegal() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card bear = creature("Grizzly Bears", opp);
+        final Card bearer = creature("Standard Bearer", ai);
+        final Card wall = creature("Wall of Stone", ai);
+        final Card growth = addCardToZone("Giant Growth", opp, ZoneType.Hand);
+        growth.addMayLookAt(g.getNextTimestamp(), Arrays.asList(ai));
+        addCard("Forest", opp);
+        ready(g);
+        attack(g, opp, ai, bear);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(wall, bear), plan());
+        logWitness("standard bearer", lc);
+        assertNoRescore("standard bearer", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.lethal[1]);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[1]);
+        final forge.game.spellability.SpellAbility sa = growth.getFirstSpellAbility();
+        sa.setActivatingPlayer(opp);
+        sa.resetTargets();
+        sa.getTargets().add(bear);
+        AssertJUnit.assertFalse(LookaheadSearch.lbTargetsLegal(sa));
+        sa.resetTargets();
+        sa.getTargets().add(bearer);
+        AssertJUnit.assertTrue(LookaheadSearch.lbTargetsLegal(sa));
+        sa.resetTargets();
+        playLive(g, plan(), lc.lines.get(0), bearer.getId());
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(3, ai.getLife());
+        AssertJUnit.assertEquals(4, bearer.getNetToughness());
+    }
+
+    /**
+     * Review S1 4 (trample over planeswalkers): ai at 5; Rakdos Pit Dragon attacks ai, and Thrasta, Tempest's Roar (7/7,
+     * trample over planeswalkers) attacks ai's Jace Beleren at 20 loyalty; a Mountain, a Forest, a hidden hand card; Wall
+     * of Air and Wall of Stone. 2c99c5fc05f gave Jace lethal damage by toughness (0) and all 7 to ai: no blocks witnessed.
+     * Now a planeswalker in the damage order voids the run (it would get its loyalty, never toughness, and excess reaches
+     * the player only this way): nothing is witnessed or re-scored. The assignment, called directly: Jace takes all 7
+     * (loyalty 20), deathtouch's one damage does not apply to it. Control: the Dragon pumped once on the original board,
+     * ai ends at 1 and Jace at 13.
+     */
+    @Test
+    public void r8APlaneswalkerTakesItsDamage() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card dragon = creature("Rakdos Pit Dragon", opp);
+        final Card thrasta = creature("Thrasta, Tempest's Roar", opp);
+        final Card air = creature("Wall of Air", ai);
+        final Card stone = creature("Wall of Stone", ai);
+        final Card jace = addCard("Jace Beleren", ai);
+        jace.setCounters(com.google.common.collect.HashMultiset.<forge.game.card.CounterType>create(
+                java.util.Collections.nCopies(20, forge.game.card.CounterEnumType.LOYALTY)));
+        addCard("Mountain", opp);
+        addCard("Forest", opp);
+        addCardToZone("Forest", opp, ZoneType.Hand);
+        ready(g);
+        attack(g, opp, ai, dragon);
+        thrasta.setTapped(true);
+        g.getCombat().addAttacker(thrasta, jace);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals(20, jace.getCurrentLoyalty());
+        final LookaheadSearch.LethalCheck lc = check(g, plan(air, dragon, stone, thrasta), plan());
+        logWitness("thrasta over jace", lc);
+        assertNoRescore("thrasta over jace", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[1]);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessVoid.containsKey("trample over planeswalkers"));
+        final LookaheadSearch.WitnessAi wa = new LookaheadSearch.WitnessAi(g, opp, opp.getController().getLobbyPlayer(), null, -1,
+                Integer.MAX_VALUE);
+        Map<Card, Integer> m = wa.assignCombatDamage(thrasta, new forge.game.card.CardCollection(jace),
+                new forge.game.card.CardCollection(), 7, ai, false);
+        AssertJUnit.assertEquals(7, (int) m.get(jace));
+        AssertJUnit.assertFalse(m.containsKey(null));
+        AssertJUnit.assertEquals("trample over planeswalkers", wa.voided);
+        final Card scorpion = addCard("Sedge Scorpion", opp);
+        m = wa.assignCombatDamage(scorpion, new forge.game.card.CardCollection(jace), new forge.game.card.CardCollection(), 3, ai,
+                false);
+        AssertJUnit.assertEquals(3, (int) m.get(jace));
+        forge.game.spellability.SpellAbility pump = null;
+        for (forge.game.spellability.SpellAbility sa : dragon.getSpellAbilities()) {
+            if (sa.getApi() == forge.game.ability.ApiType.Pump && sa.hasParam("NumAtt")) {
+                pump = sa;
+            }
+        }
+        AssertJUnit.assertNotNull(pump);
+        pump.setActivatingPlayer(opp);
+        forge.game.ability.AbilityUtils.resolve(pump);
+        playLive(g, plan(), null);
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(1, ai.getLife());
+        AssertJUnit.assertEquals(13, jace.getCurrentLoyalty());
     }
 }
