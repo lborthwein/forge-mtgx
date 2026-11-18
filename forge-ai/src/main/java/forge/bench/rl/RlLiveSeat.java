@@ -353,6 +353,7 @@ public final class RlLiveSeat {
                     case "zeroX": c.zeroX = v; break;
                     case "crewNoop": c.crewNoop = v; break;
                     case "deadAltCost": c.deadAltCost = v; break; // evoke-empty-board-1111 (live default off)
+                    case "deadPump": c.deadPump = v; break; // temp-pump-wrong-turn-1117 (live default off)
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
                     case "connectTimeoutMs": c.connectTimeoutMs = Integer.parseInt(v); break;

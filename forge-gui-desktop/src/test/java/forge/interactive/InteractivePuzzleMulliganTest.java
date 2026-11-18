@@ -64,10 +64,17 @@ public class InteractivePuzzleMulliganTest extends AITest {
         final int mulls;
         final List<String> bottomed = new ArrayList<>();
         final List<Integer> handSizesAsked = new ArrayList<>();
+        final boolean defers;
 
         Scripted(final Game game, final Player p, final int mulls) {
+            this(game, p, mulls, false);
+        }
+
+        /** {@code defers}: the browser seat's flow (InteractiveGuiGame), the bottom card chosen when it keeps. */
+        Scripted(final Game game, final Player p, final int mulls, final boolean defers) {
             super(game, p, p.getLobbyPlayer());
             this.mulls = mulls;
+            this.defers = defers;
         }
 
         @Override
@@ -78,7 +85,7 @@ public class InteractivePuzzleMulliganTest extends AITest {
 
         @Override
         public boolean defersLondonMulliganTuckUntilKeep() {
-            return false;
+            return defers;
         }
 
         @Override
@@ -116,10 +123,14 @@ public class InteractivePuzzleMulliganTest extends AITest {
     }
 
     private void runMulligan(final boolean humanOnThePlay) throws Exception {
+        runMulligan(humanOnThePlay, false);
+    }
+
+    private void runMulligan(final boolean humanOnThePlay, final boolean defers) throws Exception {
         final Game game = initAndCreateGame();
         final Player human = game.getPlayers().get(0);
         final Player ai = game.getPlayers().get(1);
-        final Scripted seat = new Scripted(game, human, 1);
+        final Scripted seat = new Scripted(game, human, 1, defers);
         human.dangerouslySetController(seat);
         final String st = state(humanOnThePlay);
         final InteractivePuzzle.Spec spec = spec(st, true);
@@ -129,7 +140,8 @@ public class InteractivePuzzleMulliganTest extends AITest {
         InteractivePuzzle.hook(InteractivePuzzle.position(spec, lines, 0), game).run();
 
         assertEquals(seat.asked, 2, "asked twice: mulligan, then keep");
-        assertEquals(seat.handSizesAsked, List.of(7, 7), "the dealt seven, then a fresh seven (London)");
+        assertEquals(seat.handSizesAsked, defers ? List.of(7, 7) : List.of(7, 6),
+                "the dealt seven, then a fresh seven (its bottom card now, or at the keep when the seat defers it)");
         assertEquals(seat.bottomed.size(), 1, "one card to the bottom after one mulligan");
         assertEquals(human.getCardsIn(ZoneType.Hand).size(), 6, "keeps six");
         assertEquals(human.getCardsIn(ZoneType.Library).size(), 34, "the forty minus the six");
@@ -155,6 +167,11 @@ public class InteractivePuzzleMulliganTest extends AITest {
     @Test(timeOut = 600000)
     public void mulliganOnTheDraw() throws Exception {
         runMulligan(false);
+    }
+
+    @Test(timeOut = 600000)
+    public void mulliganOnTheDrawBottomAtKeep() throws Exception {
+        runMulligan(false, true);
     }
 
     @Test(timeOut = 600000)
