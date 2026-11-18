@@ -394,6 +394,12 @@ public final class ForcedWinSolver {
          */
         public int lateEscalate = 0;
         /**
+         * sdcc-planwall-1117 (0 = off, the default, and then nothing changes): every planner pass of an offense decision
+         * ends by this many ms after the decision's start, so a larger node cap cannot take the engine fallback's time
+         * (each pass keeps its own planMs too).
+         */
+        public int planWallMs = 0;
+        /**
          * sdcc-verify-1117 (0 = off, the default: the top {@link #top} distinct lines, as before): verify up to this many
          * distinct lines in rank order, stopping at the first proof or at the verification deadline, so a larger planner
          * pass whose first-ranked lines fail cannot hide a proven line further down.
@@ -1047,6 +1053,7 @@ public final class ForcedWinSolver {
             c.planWiden = intOr(get.apply("planWiden"), c.planWiden); // sdcc-widen-1117
             c.planEscalate = intOr(get.apply("planEscalate"), c.planEscalate); // sdcc-escalate-1117
             c.lateEscalate = intOr(get.apply("lateEscalate"), c.lateEscalate); // sdcc-late-escalate-1117
+            c.planWallMs = intOr(get.apply("planWallMs"), c.planWallMs); // sdcc-planwall-1117
             c.verifyMax = intOr(get.apply("verifyMax"), c.verifyMax); // sdcc-verify-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
@@ -2666,6 +2673,7 @@ public final class ForcedWinSolver {
         decisionWall = cfg.counter ? 0L
                 : hardDeadline != 0 ? hardDeadline : t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
         decisionStart = t0;
+        planWallEnd = cfg.planWallMs > 0 && !cfg.counter ? t0 + cfg.planWallMs * 1_000_000L : 0L; // sdcc-planwall-1117
         respEnd = 0L; // opp-response-1108: the check's allowance opens at its first line of this decision
         decisionSteps0 = meter.playoutSteps;
         meter.offenses++;
@@ -4957,10 +4965,12 @@ public final class ForcedWinSolver {
 
     /** wu-reads-1107: one planner search ({@link #plan}), within the hard deadline when windowCap is on (unchanged otherwise). */
     ForcedWinPlanner.Result planCapped(Position pos, ForcedWinPlanner.Limits lim) {
-        if (!windowCap || hardDeadline == 0) {
+        final boolean hard = windowCap && hardDeadline != 0;
+        if (!hard && planWallEnd == 0L) {
             return plan(pos, lim);
         }
-        final long left = (hardDeadline - forge.game.WorkClock.nanoTime()) / 1_000_000L;
+        final long end = !hard ? planWallEnd : planWallEnd == 0L ? hardDeadline : Math.min(hardDeadline, planWallEnd);
+        final long left = (end - forge.game.WorkClock.nanoTime()) / 1_000_000L;
         if (left <= 0) {
             final ForcedWinPlanner.Result r = new ForcedWinPlanner.Result();
             r.exhausted = true;
@@ -4998,6 +5008,7 @@ public final class ForcedWinSolver {
         }
         escalated = true;
         escalations++;
+        planWallEnd = 0L; // sdcc-planwall-1117: an escalation has its own time (the main passes' wall is over)
         final int nodes0 = lim.nodes, horizon0 = lim.horizon, pay0 = lim.payPolicies;
         final long ms0 = lim.ms;
         final boolean gs0 = lim.grantSacMana, ptc0 = lim.pileTutorCast;
@@ -5054,6 +5065,9 @@ public final class ForcedWinSolver {
         return null;
     }
 
+    /** sdcc-planwall-1117: the end of this decision's planner passes (0 = none: {@link Config#planWallMs} off). */
+    private long planWallEnd;
+
     /** sdcc-escalate-1117: whether this decision's planner already escalated; takes by an escalated pass (report only). */
     private boolean escalated;
     /** sdcc-escalate-1117: the decision's budget extension once the planner escalated ((k - 1) x budgetMs; 0 otherwise). */
@@ -5067,6 +5081,7 @@ public final class ForcedWinSolver {
     private ForcedWinPlanner.Result escalate(final Position pos, final ForcedWinPlanner.Limits lim, final ForcedWinPlanner.Result before) {
         escalated = true;
         escalations++;
+        planWallEnd = 0L; // sdcc-planwall-1117: an escalation has its own time (the main passes' wall is over)
         // the escalated pass gets the decision (k - 1) more budgets: its plan time and its lines' verification
         escalateShift = (cfg.planEscalate - 1L) * budgetMs() * 1_000_000L;
         if (decisionWall != 0L) {
