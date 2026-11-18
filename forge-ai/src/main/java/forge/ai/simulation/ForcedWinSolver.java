@@ -2968,6 +2968,22 @@ public final class ForcedWinSolver {
     private List<Eval> evalSink;
 
     /** A line the solver proposes to a search, with its own engine verification. */
+    /**
+     * forced-include-1117: the host card id of the first non-pass step of a proposed line ({@link Proposal#line}), or -1
+     * (not a line, or no such step). Read-only.
+     */
+    public static int firstStepHostId(final Object line) {
+        if (!(line instanceof ForcedWinPlanner.Line l)) {
+            return -1;
+        }
+        for (ForcedWinPlanner.Step st : l.steps) {
+            if (!st.pass && st.hostId > 0) {
+                return st.hostId;
+            }
+        }
+        return -1;
+    }
+
     public static final class Proposal {
         /** The line (opaque outside this package): {@link #adopt} it to follow it. */
         public final Object line;
