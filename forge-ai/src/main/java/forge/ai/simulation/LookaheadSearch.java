@@ -8904,7 +8904,7 @@ public final class LookaheadSearch {
         final int hiddenHand = oppHand - keepHand.size();
         // each source's mana, kept per card: a cost that taps or takes a source spends that mana too (joint allocation)
         final Map<Integer, Integer> sources = new TreeMap<>();
-        final int made = lbMana(opp, sources);
+        final int made = lbMana(opp, sources, atk);
         if (made == -2) {
             return LethalCheck.aside("a mana ability whose cost takes another permanent or a shared pool");
         }
@@ -9046,9 +9046,11 @@ public final class LookaheadSearch {
      * what the seat cannot see, so the bound does not use it. -2 when a playable mana ability has a cost part other than
      * mana, its own tap or its own sacrifice (re-review S1: Springleaf Drum taps another creature, which a pump's cost
      * may also tap; re-review 2 S1: Workhorse removes its own counter, which Power Conduit's cost may also remove; life
-     * likewise): the per-source split cannot see a shared permanent or pool, so the guard stands aside.
+     * likewise): the per-source split cannot see a shared permanent or pool, so the guard stands aside. A mana ability that
+     * sacrifices its source is not counted when the source is one of {@code attackers} (re-review 3 S1: Wild Cantor's
+     * damage stays counted, so its mana is not).
      */
-    static int lbMana(Player p, Map<Integer, Integer> bySource) {
+    static int lbMana(Player p, Map<Integer, Integer> bySource, java.util.Collection<Card> attackers) {
         int mana = p.getManaPool().totalMana();
         for (Card src : p.getCardsIn(ZoneType.Battlefield)) {
             int best = 0;
@@ -9063,8 +9065,10 @@ public final class LookaheadSearch {
                 if (amount == null) {
                     return -1;
                 }
+                boolean selfSac = false;
                 if (ma.getPayCosts() != null) {
                     for (forge.game.cost.CostPart part : ma.getPayCosts().getCostParts()) {
+                        selfSac |= part instanceof forge.game.cost.CostSacrifice && part.payCostFromSource();
                         // re-review S1: a cost that takes another permanent (tap an untapped creature, sacrifice one) is
                         // not this source's alone, and a pump's cost may take the same permanent; not bounded jointly
                         if (!(part instanceof forge.game.cost.CostPartMana || part instanceof forge.game.cost.CostTap
@@ -9072,6 +9076,9 @@ public final class LookaheadSearch {
                             return -2; // re-review 2 S1: life and the source's counters are pools a pump may share too
                         }
                     }
+                }
+                if (selfSac && attackers != null && attackers.contains(src)) {
+                    continue; // re-review 3 S1: an attacker sacrificed for mana deals nothing; its damage stays counted, so its mana is not
                 }
                 final forge.game.cost.CostPartMana cm = ma.getPayCosts() == null ? null : ma.getPayCosts().getCostMana();
                 final Integer pay = cm == null ? Integer.valueOf(0) : cm.convertAmount();
@@ -9675,6 +9682,9 @@ public final class LookaheadSearch {
                         takenPer = amt;
                     }
                 }
+            }
+            if (selfGone && atk.contains(host)) {
+                return null; // re-review 3: an attacker that leaves to pay its own cost deals nothing; its damage stays counted, so this is not
             }
             if (!sa.isSpell()) {
                 // activation limits: read from the text only (lbAmount)
