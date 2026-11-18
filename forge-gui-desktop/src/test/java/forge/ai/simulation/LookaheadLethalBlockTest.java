@@ -1617,8 +1617,9 @@ public class LookaheadLethalBlockTest extends SimulationTest {
 
     /**
      * Finding 12, trample through unpaid toughness: Defiant Elf (1/1 trample), Captive Flame, a Mountain; ai at 1. Blocked
-     * by Centaur Courser the real most is 0 (the bound: 1); with a Grizzly Bears too, 0 (not flagged); unblocked, 1 (lethal,
-     * witnessed with no line). ON re-scores only no blocks.
+     * by Centaur Courser the real most is 0 (the bound: 1); with a Grizzly Bears too, 0 (the bound: 1 again); unblocked, 1
+     * (lethal, witnessed with no line). The bound flags all three, so 262814126dc re-scored nothing; ON now re-scores only
+     * no blocks.
      */
     @Test
     public void sweep12TrampleDeficitIsNotWitnessed() {
