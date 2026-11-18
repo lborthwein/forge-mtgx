@@ -384,6 +384,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * Generic: no card or deck logic.
          */
         public boolean imit = false;
+        /**
+         * sdcc-c1-priogf-1117 (C1; 0 = off, the default, and then nothing changes): {@link LookaheadSearch.Config#prioGf},
+         * the goldfish tie-break among near-equal priority candidates at our own main phase (own turns of its horizon;
+         * the choiceScorer's gf* knobs and the plans' solver config are reused). {@code prioGfMargin}: the tie set's margin
+         * on the mean leaf value; {@code prioGfTurns}: only while our own-turn count is at most this (0 = any turn).
+         */
+        public int prioGf = 0;
+        public double prioGfMargin = 0.01;
+        public int prioGfTurns = 4;
+        /** sdcc-c1-priogf-1117 (false = off): {@link LookaheadSearch.Config#prioGfHold}; needs prioGf > 0. */
+        public boolean prioGfHold = false;
         /** bugfix-basics (false = off): {@link forge.ai.simulation.BeliefSampler#BASICS_BY_TYPE}, basics found by type. */
         public boolean basicsByType = false;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
@@ -461,7 +472,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "copyStaleRefs", "copyTriggers", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit", "prioGf", "prioGfMargin", "prioGfTurns", "prioGfHold"));
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -495,6 +506,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("lineGo")) c.lineGo = o.get("lineGo").getAsDouble();
             if (o.has("planEvery")) c.planEvery = o.get("planEvery").getAsBoolean();
             if (o.has("imit")) c.imit = o.get("imit").getAsBoolean();
+            if (o.has("prioGf")) c.prioGf = o.get("prioGf").getAsInt(); // sdcc-c1-priogf-1117
+            if (o.has("prioGfMargin")) c.prioGfMargin = o.get("prioGfMargin").getAsDouble();
+            if (o.has("prioGfTurns")) c.prioGfTurns = o.get("prioGfTurns").getAsInt();
+            if (o.has("prioGfHold")) c.prioGfHold = o.get("prioGfHold").getAsBoolean();
             if (o.has("explore") && !o.get("explore").isJsonNull()) {
                 c.explore = o.getAsJsonObject("explore");
                 for (String k : c.explore.keySet()) {
@@ -754,6 +769,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 throw new IllegalArgumentException("search.playoutLoopGuard / playoutMaxDecisions / replayMayPlayLoose "
                         + "need playout=policy");
             }
+            // sdcc-c1-priogf-1117: the goldfish reuses the choiceScorer's gf* knobs and the plans' solver config
+            if (prioGf < 0 || prioGfTurns < 0 || !(prioGfMargin >= 0)) {
+                throw new IllegalArgumentException("search: prioGf >= 0, prioGfMargin >= 0, prioGfTurns >= 0");
+            }
+            if (prioGfHold && prioGf <= 0) {
+                throw new IllegalArgumentException("search.prioGfHold needs prioGf > 0");
+            }
+            if (prioGf > 0 && (choiceScorer == null || plans == null)) {
+                throw new IllegalArgumentException("search.prioGf needs choiceScorer (its gf* knobs) and plans (the solver config)");
+            }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
             AiFixes.Mode.parse(zeroX);
@@ -853,6 +878,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (imit) {
                 o.addProperty("imit", true); // sdcc-imit-1111: only when on
+            }
+            if (prioGf > 0) {
+                // sdcc-c1-priogf-1117: only when on, so every other spec's JSON is unchanged
+                o.addProperty("prioGf", prioGf);
+                o.addProperty("prioGfMargin", prioGfMargin);
+                o.addProperty("prioGfTurns", prioGfTurns);
+                if (prioGfHold) {
+                    o.addProperty("prioGfHold", true); // only when on
+                }
             }
             if (alwaysKeep) {
                 o.addProperty("alwaysKeep", true); // mull-off: only when on
@@ -1251,6 +1285,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.threads = cfg.threads;
         lc.departZ = cfg.departZ;
         lc.anytime = cfg.anytime;
+        lc.prioGf = cfg.prioGf; // sdcc-c1-priogf-1117 (0 = off)
+        lc.prioGfMargin = cfg.prioGfMargin;
+        lc.prioGfTurns = cfg.prioGfTurns;
+        lc.prioGfHold = cfg.prioGfHold;
         lc.margin = cfg.margin;
         lc.deadEtb = AiFixes.Mode.parse(cfg.deadEtb);
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
@@ -2228,6 +2266,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("fw_ms", Math.round(sd.lastMs * 10) / 10.0);
             }
             row.addProperty("outcome", r.outcome);
+            if (r.prioGf != null) {
+                row.addProperty("prioGf", r.prioGf); // sdcc-c1-priogf-1117: only when the rule ran
+            }
             if (r.stackNote != null || MENU_NOTE) {
                 // measurement only (-Dsdcc.stackNote=true): the stack, the policy's answer and the menu by name;
                 // exact-start-1116: -Dsdcc.menuNote=true writes the menu by name on every row (research, default off)
@@ -2642,6 +2683,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         if (r != null) {
             row.addProperty("outcome", r.outcome);
+            if (r.prioGf != null) {
+                row.addProperty("prioGf", r.prioGf); // sdcc-c1-priogf-1117: only when the rule ran
+            }
             row.addProperty("proven", r.proven);
             row.addProperty("chosen_given", r.chosen);
             row.addProperty("given", order.size());
@@ -4671,6 +4715,47 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public double reachPart(final double[] r) {
         return cfg.reach == null || r == null || Double.isNaN(r[0]) ? 0.0 : reachCfg().alpha * r[0];
+    }
+
+    /** sdcc-c1-priogf-1117: the prioGf goldfish's solver config and plan reader (set at its first use). */
+    private forge.ai.simulation.ForcedWinSolver.Config prioGfSolverCfg;
+    private Object prioGfReader;
+
+    /**
+     * sdcc-c1-priogf-1117 ({@link LookaheadSearch.SearchHooks#prioGoldfish}; only with prioGf > 0): the CARDS scorer's
+     * goldfish (its gf* knobs, the per-ask node allowance shared over {@code share} positions) over {@code horizon} of our
+     * turns, on the copy's own knowledge: only the library top this seat knows is given; the rest of the library is a
+     * multiset to the solver (its true order is never read), and the goldfish has no opponent.
+     */
+    @Override
+    public double prioGoldfish(final Object copyCtx, final Game g, final Player me, final int horizon, final long seed,
+            final int share) {
+        if (cfg.prioGf <= 0 || cfg.choiceScorer == null || cfg.plans == null) {
+            return Double.NaN;
+        }
+        final ChoiceScorer.Config sc = scorer().config();
+        if (prioGfSolverCfg == null) {
+            prioGfSolverCfg = sc.solverCfg != null ? sc.solverCfg : PlanSearch.Spec.parse(cfg.plans).solverConfig();
+        }
+        if (prioGfReader == null) {
+            prioGfReader = forge.ai.simulation.ForcedWinSolver.newSharedReader();
+        }
+        final RlKnowledge k = copyCtx instanceof CopyCtx cc ? cc.know : null;
+        final forge.ai.simulation.ForcedWinSolver.GoldfishOpts go = new forge.ai.simulation.ForcedWinSolver.GoldfishOpts();
+        go.horizon = horizon;
+        go.samples = sc.gfSamples;
+        go.nodes = sc.gfNodes;
+        go.extra = sc.gfExtra;
+        go.ms = sc.gfMs;
+        go.gamma = sc.gfGamma;
+        go.active = sc.gfActive;
+        go.lambda = sc.gfLambda;
+        go.lands = sc.gfLands;
+        go.maxNodes = sc.gfAskNodes <= 0 ? 0 : Math.max(sc.gfNodes, sc.gfAskNodes / Math.max(1, share));
+        go.seed = seed;
+        final forge.ai.simulation.ForcedWinSolver.Goldfish gf = forge.ai.simulation.ForcedWinSolver
+                .withReader(me, prioGfSolverCfg, prioGfReader).goldfish(g, knownTopOf(k, me), go);
+        return gf.failed ? Double.NaN : gf.g;
     }
 
     @Override
