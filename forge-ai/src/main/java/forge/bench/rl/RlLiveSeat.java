@@ -349,6 +349,9 @@ public final class RlLiveSeat {
                     // and the worlds keeping an opponent hand card the seat saw enter that hand (needs infoState=on)
                     case "attacks": c.attacks = blockKey(k, v, 0, 1); break;
                     case "knownHand": c.knownHand = LookaheadSearch.Config.infoStateKey(k, v); break;
+                    // knowledge-same-name-1118 (absent = off, the seat byte for byte as before): the seat's tracker
+                    // counts the opponent's hand by name (RlKnowledge.sameName; newKnowledge)
+                    case "knowledgeSameName": c.knowledgeSameName = LookaheadSearch.Config.infoStateKey(k, v); break;
                     // order-memory-1102 (absent = off, the seat byte for byte as before): the search worlds keep the
                     // library positions this seat knows (forge.ai.simulation.InfoStates); arming is its own decision
                     case "infoState": c.infoState = LookaheadSearch.Config.infoStateKey(k, v); break;
@@ -611,6 +614,17 @@ public final class RlLiveSeat {
         spec.search.beliefSeen = seen;
     }
 
+    /**
+     * The policy seat's live tracker of {@code g} as {@link #bind} makes it, not attached: observation v2 when the spec's
+     * obs is 2, and knowledge-same-name-1118's {@link RlKnowledge#sameName} when the spec has {@code knowledgeSameName=on}.
+     */
+    public static RlKnowledge newKnowledge(final Game g, final Spec spec) {
+        final RlKnowledge know = new RlKnowledge(g);
+        know.v2 = spec.obs() == 2;
+        know.sameName = spec.search.knowledgeSameName;
+        return know;
+    }
+
     public void bind(final Game g, final int seatIndex, final long seed, final LookaheadSearch.Config k8,
             final AiFixes.Mode k8AiFixes) {
         this.game = g;
@@ -651,8 +665,7 @@ public final class RlLiveSeat {
         this.seatAnswerer = rs;
         session.setLiveGame(g);
         rs.setGame(g);
-        final RlKnowledge know = new RlKnowledge(g);
-        know.v2 = spec.obs() == 2;
+        final RlKnowledge know = newKnowledge(g, spec);
         know.attach();
         session.setKnowledgeObserver(know);
         feat.setKnowledge(know);
