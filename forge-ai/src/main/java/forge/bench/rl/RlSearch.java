@@ -256,6 +256,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /** Block search: the policy's declarations searched in all, its own (greedy) one included. */
         public int blockTop = 3;
         /**
+         * attack-holdback-1118 (0 = off, the default, and then nothing changes): 1 = the look-ahead also searches the seat's
+         * declare-attackers asks ({@link #decideAttacks}), mirroring the block search with narrow candidates: the policy's
+         * own declaration (the default), that declaration minus one of its attackers (each of up to 4, the highest power
+         * first) and no attacks; never an attacker the policy did not choose. Policy play-outs only.
+         */
+        public int attacks = 0;
+        /**
+         * attack-holdback-1118 (false = off, the default, and then absent from the JSON): every world dealer keeps an
+         * opponent hand card the seat saw enter that hand ({@link LookaheadSearch.Config#knownHand}). Needs infoState.
+         */
+        public boolean knownHand = false;
+        /**
          * honest-belief-1020 ("off" = the default, and then nothing changes): "uniform" = every world, solver line check and
          * engine root draws the opponent's hidden hand and library from an observation-only pool
          * ({@link LookaheadSearch.Config#belief}): the cube list ({@link #beliefCube}, or the event's pool
@@ -464,7 +476,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "copyStaleRefs", "copyTriggers", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
                 "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
-                "provenOnly", "explore", "lineGo", "planEvery", "imit"));
+                "provenOnly", "explore", "lineGo", "planEvery", "imit",
+                "attacks", "knownHand")); // attack-holdback-1118
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -599,6 +612,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("blocks")) c.blocks = o.get("blocks").getAsInt();
             if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
+            if (o.has("attacks")) c.attacks = o.get("attacks").getAsInt(); // attack-holdback-1118
+            if (o.has("knownHand")) c.knownHand = o.get("knownHand").getAsBoolean(); // attack-holdback-1118
             if (o.has("belief")) c.belief = o.get("belief").getAsString();
             if (o.has("infoState")) c.infoState = o.get("infoState").getAsBoolean();
             if (o.has("infoAttach")) c.infoAttach = o.get("infoAttach").getAsBoolean();
@@ -703,6 +718,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (blockSamples < 0 || blockSamples > 64 || blockTop < 1 || blockTop > 8) {
                 throw new IllegalArgumentException("search: 0 <= blockSamples <= 64, 1 <= blockTop <= 8");
+            }
+            // attack-holdback-1118
+            if (attacks != 0 && attacks != 1) {
+                throw new IllegalArgumentException("search.attacks must be 0 (off) or 1, not " + attacks);
+            }
+            if (attacks > 0 && !"policy".equals(playout)) {
+                throw new IllegalArgumentException("search.attacks (attack hold-back search) needs playout=policy");
+            }
+            if (knownHand && !infoState) {
+                throw new IllegalArgumentException("search.knownHand needs infoState (the seat's InfoStates tracks the hands)");
             }
             if (!"off".equals(belief) && !"uniform".equals(belief) && !"codraft".equals(belief) && !"deck".equals(belief)) {
                 throw new IllegalArgumentException("search.belief must be off, uniform, codraft or deck, not " + belief);
@@ -900,6 +925,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (infoState) {
                 o.addProperty("infoState", true); // order-memory-1102: only when on
             }
+            if (attacks > 0) {
+                o.addProperty("attacks", attacks); // attack-holdback-1118: only when on
+            }
+            if (knownHand) {
+                o.addProperty("knownHand", true); // attack-holdback-1118: only when on
+            }
             if (!"off".equals(belief)) {
                 // honest-belief-1020: only when on, so every other spec's JSON is unchanged
                 o.addProperty("belief", belief);
@@ -1042,7 +1073,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** unified-search-1106: {@link Config#infoAttach}. */
     public static void attachInfoState(final Game g, final Config c) {
         if (c.infoAttach && c.infoState) {
-            forge.ai.simulation.InfoStates.attach(g);
+            final forge.ai.simulation.InfoStates is = forge.ai.simulation.InfoStates.attach(g);
+            if (c.knownHand) {
+                is.trackHands(); // attack-holdback-1118
+            }
         }
     }
 
@@ -1097,7 +1131,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** Attach {@code g}'s InfoStates when {@link #wantsInfoStates}; returns it (or null). Call on the game's thread. */
     public static forge.ai.simulation.InfoStates attachInfoStates(final Config c, final Game g) {
         // unified-jar-1106: research attaches here; a live-line bench seat doesn't (ledger row 26), so it's keyed
-        return g != null && forge.game.EngineFixes.researchClient() && wantsInfoStates(c) ? forge.ai.simulation.InfoStates.attach(g) : null;
+        final forge.ai.simulation.InfoStates is = g != null && forge.game.EngineFixes.researchClient() && wantsInfoStates(c)
+                ? forge.ai.simulation.InfoStates.attach(g) : null;
+        if (is != null && c.knownHand) {
+            is.trackHands(); // attack-holdback-1118
+        }
+        return is;
     }
 
     public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
@@ -1286,6 +1325,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.maxSameDepartures = cfg.sameDepartures;
         lc.copyFidelity = cfg.copyFidelity;
         lc.infoState = cfg.infoState; // order-memory-1102 (off by default)
+        lc.knownHand = cfg.knownHand; // attack-holdback-1118 (off by default)
         lc.beliefStatics = cfg.beliefStatics;
         lc.beliefPlayerStatics = cfg.beliefPlayerStatics;
         lc.beliefRememberedHand = cfg.beliefRememberedHand;
@@ -3615,6 +3655,239 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     public BlocksDecided onBlocksDecided;
 
+    // ------------------------------------------------------------------------------------------------ attack search
+
+    /** attack-holdback-1118: the attack search's counters (in {@link #summary} only when on). */
+    private int attackAsks = 0, attackSearched = 0, attackDepartures = 0, attackCapped = 0, attackSkipped = 0;
+
+    /** attack-holdback-1118: hold-back candidates at most (the highest-power attackers of the policy's declaration). */
+    static final int ATTACK_HOLDBACKS = 4;
+
+    /**
+     * attack-holdback-1118 (spec key {@code attacks}; off = null at once, nothing else runs): the look-ahead over the
+     * seat's attack declaration at a declare-attackers ask, after the server's greedy DECISION ({@code greedy}). It mirrors
+     * {@link #decideBlocks} with narrow candidates, deduplicated, in this order: the policy's own declaration (the
+     * default), that declaration minus one of its attackers (for each attacker, up to {@link #ATTACK_HOLDBACKS}, the
+     * highest power first) and no attacks. It never adds an attacker. A hold-back that would not be a legal answer
+     * (attack requirements) is skipped before the play-outs. The play-outs, worlds, value leaf, departZ gate and wall
+     * budget are the block search's. Returns the steps to play instead, or null to keep the policy's own.
+     */
+    @Override
+    public short[] decideAttacks(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
+        if (cfg.attacks <= 0) {
+            return null;
+        }
+        if (!cfg.svcMemo) {
+            return decideAttacksM(g, me, m, frame, greedy);
+        }
+        memoBegin(); // svcmemo-1114: this decision's own memo, dropped when it ends
+        try {
+            return decideAttacksM(g, me, m, frame, greedy);
+        } finally {
+            memoEnd();
+        }
+    }
+
+    private short[] decideAttacksM(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        if (forge.ai.simulation.LeakTrace.ON) {
+            forge.ai.simulation.LeakTrace.arm(g, me, null, c -> remembersHandCard(g, me, c)); // diagnostics; off: nothing
+        }
+        armRedraw(g, me); // sdcc-scorerleak-1115 (off: nothing)
+        final forge.game.WorkClock.Span ws = workBegin(); // work-units-1107 (off: null)
+        // the combat look-ahead's imitation reason (the block search's: the attack hold-back is its mirror)
+        lastReason = RlSeat.IMIT_BLOCK;
+        try {
+            return decideAttacks0(g, me, m, frame, greedy);
+        } finally {
+            workEnd(ws);
+        }
+    }
+
+    private short[] decideAttacks0(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy) {
+        final long t0 = System.nanoTime();
+        final long bt0 = budgetStart(t0); // work-units-1107: the budget's start (t0 when off)
+        if (cfg.budgetMs > 0) {
+            forge.ai.simulation.ForcedWinSolver.loopWindow(g, t0, cfg.budgetMs * 1_000_000L); // loop-probe-1113
+        }
+        attackAsks++;
+        lastProposeMs = -1;
+        if (m.family != RlSchema.F_ATTACK || greedy == null || greedy.length != m.S() || m.S() == 0
+                || m.validate(greedy) != null) {
+            return null;
+        }
+        if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
+            return null;
+        }
+        final List<short[]> cs = new ArrayList<>();
+        final List<String> labels = new ArrayList<>();
+        final java.util.Set<String> keys = new java.util.HashSet<>();
+        cs.add(greedy);
+        labels.add("policy");
+        keys.add(java.util.Arrays.toString(greedy));
+        // the policy's attackers, the highest power first (ties: menu order), each held back in turn
+        final List<Map.Entry<Integer, forge.game.card.Card>> attacking = new ArrayList<>(m.attackingSlots(greedy).entrySet());
+        attacking.sort((x, y) -> x.getValue().getNetPower() != y.getValue().getNetPower()
+                ? Integer.compare(y.getValue().getNetPower(), x.getValue().getNetPower())
+                : Integer.compare(x.getKey(), y.getKey()));
+        for (int j = 0; j < attacking.size() && j < ATTACK_HOLDBACKS; j++) {
+            final short[] st = m.attackWithout(greedy, attacking.get(j).getKey());
+            if (st != null && keys.add(java.util.Arrays.toString(st))) {
+                cs.add(st);
+                labels.add("hold" + attacking.get(j).getValue().getId());
+            }
+        }
+        short[] none = greedy;
+        for (Map.Entry<Integer, forge.game.card.Card> e : attacking) {
+            none = none == null ? null : m.attackWithout(none, e.getKey());
+        }
+        if (none != null && keys.add(java.util.Arrays.toString(none))) {
+            cs.add(none);
+            labels.add("none");
+        }
+        // a hold-back the live game would refuse (attack requirements: validateAttackers) is no candidate
+        final List<Map<Integer, String>> all = new ArrayList<>(cs.size());
+        for (short[] st : cs) {
+            all.add(m.attackMap(st));
+        }
+        final boolean[] legal = cs.size() > 1 ? ls.legalAttacks(g, me, all) : null;
+        int skipped = 0;
+        if (legal != null) {
+            if (!legal[0]) {
+                // the policy's own declaration: the bridge refuses it and Forge AI declares, as without the search
+                attackSkipped += cs.size() - 1;
+                skipped = cs.size() - 1;
+                for (int j = cs.size() - 1; j > 0; j--) {
+                    cs.remove(j);
+                    labels.remove(j);
+                    all.remove(j);
+                }
+            } else {
+                for (int j = cs.size() - 1; j > 0; j--) {
+                    if (!legal[j]) {
+                        cs.remove(j);
+                        labels.remove(j);
+                        all.remove(j);
+                        skipped++;
+                        attackSkipped++;
+                    }
+                }
+            }
+        }
+        final List<String> decls = new ArrayList<>(cs.size());
+        for (Map<Integer, String> am : all) {
+            decls.add(attackKey(am));
+        }
+        final double prepMs = (System.nanoTime() - t0) / 1e6;
+        lastForced = false;
+        lastForcedMiss = false;
+        armForce(mark());
+        final LookaheadSearch.GivenResult r = ls.decideAttacks(g, me, all, decls, bt0);
+        tookForce(r);
+        if (r.givenIndex.length > 0) {
+            attackSearched++;
+            searchCpuMs += r.cpuMs;
+        }
+        poolCpuMs += r.poolCpuMs;
+        if ("capped".equals(r.outcome)) {
+            attackCapped++;
+        }
+        final short[] answer = r.chosen > 0 && r.chosen < cs.size() ? cs.get(r.chosen) : null;
+        if (answer != null) {
+            attackDepartures++;
+        }
+        final double ms = (System.nanoTime() - t0) / 1e6;
+        final AttacksDecided hook = onAttacksDecided;
+        if (hook != null) {
+            try {
+                hook.decided(g, r, cs.size(), labels, r.chosen > 0 ? labels.get(r.chosen) : "policy", ms, prepMs, skipped);
+            } catch (RuntimeException e) {
+                System.err.println("[rlsearch] onAttacksDecided failed: " + e);
+            }
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("turn", g.getPhaseHandler().getTurn());
+            row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+            row.addProperty("kind", "attacks");
+            row.addProperty("C", m.C());
+            row.addProperty("S", m.S());
+            final JsonArray lb = new JsonArray();
+            for (String l : labels) {
+                lb.add(l);
+            }
+            row.add("cands", lb);
+            final JsonArray dk = new JsonArray();
+            for (String d : decls) {
+                dk.add(d);
+            }
+            row.add("decls", dk);
+            row.addProperty("skipped", skipped);
+            final JsonArray ix = new JsonArray();
+            final JsonArray ev = new JsonArray();
+            for (int j = 0; j < r.givenIndex.length; j++) {
+                ix.add(r.givenIndex[j]);
+                ev.add(Double.isNaN(r.ev[j]) ? null : r.ev[j]);
+            }
+            row.add("searched", ix);
+            row.add("ev", ev);
+            final JsonArray vw = new JsonArray();
+            for (int j = 0; j < r.values.length; j++) {
+                final JsonArray w = new JsonArray();
+                for (double x : r.values[j]) {
+                    if (Double.isInfinite(x) || Double.isNaN(x)) {
+                        w.add((Number) null);
+                    } else {
+                        w.add(Math.round(x * 1e4) / 1e4);
+                    }
+                }
+                vw.add(w);
+            }
+            row.add("values", vw);
+            row.addProperty("outcome", r.outcome);
+            row.addProperty("chosen", r.chosen <= 0 ? 0 : r.chosen);
+            row.addProperty("failed", r.failed);
+            row.addProperty("leaf_fallback", r.leafFallback);
+            row.addProperty("prep_ms", Math.round(prepMs * 10) / 10.0);
+            row.addProperty("ms", Math.round(ms * 10) / 10.0);
+            row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
+            addRow(row);
+        }
+        return answer;
+    }
+
+    /**
+     * attack-holdback-1118: an attack declaration's canonical identity: {@code a<attacker id>>p<player id>} (or
+     * {@code >c<card id>} for a planeswalker or battle) sorted by attacker, comma-separated; {@code none} for no attacks.
+     */
+    static String attackKey(final Map<Integer, String> attackers) {
+        if (attackers.isEmpty()) {
+            return "none";
+        }
+        final StringBuilder sb = new StringBuilder();
+        for (Map.Entry<Integer, String> e : new TreeMap<>(attackers).entrySet()) {
+            final String d = e.getValue();
+            sb.append(sb.length() == 0 ? "" : ",").append('a').append(e.getKey()).append('>')
+                    .append(d.startsWith("player:") ? "p" + d.substring(7) : "c" + d.substring(d.indexOf(':') + 1));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Live play (attack-holdback-1118; null by default, and never called without {@code attacks}): every attack decision
+     * the search made, searched or not, as {@link BlocksDecided}; {@code skipped}: hold-backs dropped as illegal answers.
+     */
+    public interface AttacksDecided {
+        void decided(Game g, LookaheadSearch.GivenResult r, int candidates, List<String> labels, String chosen, double ms,
+                double prepMs, int skipped);
+    }
+
+    public AttacksDecided onAttacksDecided;
+
     @Override
     public ChoiceWindow takeWindow() {
         final ChoiceWindow w = pendingWindow;
@@ -4160,6 +4433,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             bl.addProperty("forge_missing", blockForgeMissing);
             bl.addProperty("sample_failures", blockSampleFailures);
             o.add("blocks", bl);
+        }
+        if (cfg.attacks > 0) {
+            // attack-holdback-1118: only when on
+            final JsonObject at = new JsonObject();
+            at.addProperty("asks", attackAsks);
+            at.addProperty("searched", attackSearched);
+            at.addProperty("departures", attackDepartures);
+            at.addProperty("capped", attackCapped);
+            at.addProperty("skipped", attackSkipped);
+            o.add("attacks", at);
         }
         return o;
     }
@@ -5070,11 +5353,35 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             super.declareBlockers(defender, combat);
         }
 
+        /**
+         * Attack search (attack-holdback-1118): the searched declaration, declared at this copy's first declare-attackers
+         * step (null = none; then this seat is exactly as before). A declaration the copy refuses fails the play-out.
+         */
+        Object forcedAttacks;
+        private boolean forcedAttacksUsed = false;
+
+        @Override
+        public void declareAttackers(final Player attacker, final forge.game.combat.Combat combat) {
+            if (forcedAttacks != null && !forcedAttacksUsed) {
+                forcedAttacksUsed = true;
+                final String why = LookaheadSearch.applyAttacks(forcedAttacks, getGame(), combat);
+                if (why == null) {
+                    return;
+                }
+                forcedFailure = "the searched attacks could not be declared in the play-out: " + why;
+            }
+            super.declareAttackers(attacker, combat);
+        }
+
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             if (forcedBlocks != null && !forcedUsed && forcedFailure == null) {
                 // block-search-1019: the copy reached a priority before its declare-blockers step
                 forcedFailure = "the play-out reached a priority before declaring the searched blocks";
+            }
+            if (forcedAttacks != null && !forcedAttacksUsed && forcedFailure == null) {
+                // attack-holdback-1118: the copy reached a priority before its declare-attackers step
+                forcedFailure = "the play-out reached a priority before declaring the searched attacks";
             }
             if (probe != null) {
                 probe.onPriority(getGame(), getPlayer());
@@ -5208,7 +5515,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final String[] why = {null};
         // search-bones-1015 (S-b): a recording play-out or a plan candidate has no forced first action
         // block-search-1019: a block candidate has no forced priority action either (its seat declares the blocks)
-        final boolean planned = first.recorder != null || first.plan != null || first.block != null;
+        // attack-holdback-1118: nor an attack candidate (its seat declares the attacks)
+        final boolean planned = first.recorder != null || first.plan != null || first.block != null || first.attack != null;
         if (first.recorder instanceof PlanSearch.Recorder) {
             final PlanSearch.Recorder rec = (PlanSearch.Recorder) first.recorder;
             rec.seatPlayer = me;
@@ -5335,6 +5643,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     lineChoicesForge(), lineKeepOn());
         }
         pc.forcedBlocks = first.block;
+        pc.forcedAttacks = first.attack; // attack-holdback-1118 (null for every other candidate)
         return new LookaheadSearch.PlayoutSeat() {
             @Override
             public PlayerControllerAi controller() {

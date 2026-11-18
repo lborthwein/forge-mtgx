@@ -30,7 +30,13 @@ public interface LibraryInfoListener {
          */
         ARRANGE,
         /** These cards are about to go to {@code zone} in a random order nobody chose ({@code CardLists.shuffle}). */
-        RANDOM
+        RANDOM,
+        /**
+         * attack-holdback-1118 r2: the player is about to draw this one card ({@code Player.doDraw}: the top, or the
+         * bottom with the draw-from-the-bottom keyword); every player sees a card drawn, not which. {@code zone}: the
+         * library. The card's next zone change is the draw.
+         */
+        DRAW
     }
 
     /**

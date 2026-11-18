@@ -1214,6 +1214,10 @@ public class Player extends GameEntity implements Comparable<Player> {
                 }
             }
 
+            if (game.hasLibraryInfoListeners()) {
+                // attack-holdback-1118 r2: a draw, not a private choice (research InfoState; no-op without a listener)
+                game.fireLibraryInfo(forge.game.LibraryInfoListener.Kind.DRAW, game.getPlayers(), java.util.Collections.singletonList(c), ZoneType.Library);
+            }
             c = game.getAction().moveTo(hand, c, cause, params);
             drawn.add(c);
 

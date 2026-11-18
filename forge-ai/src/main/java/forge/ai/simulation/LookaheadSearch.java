@@ -385,6 +385,15 @@ public final class LookaheadSearch {
          * unknown slot is drawn from a canonical order.
          */
         public boolean infoState = false;
+        /**
+         * attack-holdback-1118 (report 2026-11-18T14-37-11; false = off, the default: every world exactly as before). Set
+         * only by the policy spec's {@code knownHand=on} (with infoState). An opponent hand card the seat saw enter that
+         * hand ({@link InfoStates#knowsInHand}: the human's Kolaghan, returned to hand at end of turn after a dash attack)
+         * stays where it is in every world dealer that keeps the hand cards Forge shows us ({@link #seatMayKnowHand}).
+         * Review #248 round 3: with it on, the seat's live tracker (RlKnowledge, {@link #beliefRememberedHand}) is not
+         * consulted by any dealer, the uniform belief included: InfoStates' continuous identity alone decides.
+         */
+        public boolean knownHand = false;
         /** order-memory-1102: the version an armed seat's lines carry (its boot line, each K8 decision line). */
         public static final String INFO_STATE_VERSION = "infostate-live-1";
 
@@ -563,6 +572,9 @@ public final class LookaheadSearch {
             o.addProperty("breadth", breadth);
             if (infoState) {
                 o.addProperty("infoState", true); // order-memory-1102: only when on
+            }
+            if (knownHand) {
+                o.addProperty("knownHand", true); // attack-holdback-1118: only when on
             }
             if (offTurnBreadth > 0) {
                 o.addProperty("offTurnBreadth", offTurnBreadth); // endstep-rows-1103: only when on
@@ -1429,6 +1441,11 @@ public final class LookaheadSearch {
          */
         final BlockPlan block;
         /**
+         * attack-holdback-1118: an attack declaration candidate ({@link AttackPlan}), or null. It has no first priority
+         * action: its play-out rewinds the copy to the end of beginning of combat and the play-out seat declares it.
+         */
+        final AttackPlan attack;
+        /**
          * Lane sdcc-copycast-1114 ({@link Config#copyCast}; null = off or not a may-play ability): the structure of the
          * may-play grant behind this cast or land play ({@link LookaheadSearch#maySig}), and its paid optional costs.
          * Never part of {@link #key}.
@@ -1449,6 +1466,24 @@ public final class LookaheadSearch {
             this.macro = null;
             this.plan = null;
             this.block = block;
+            this.attack = null;
+        }
+
+        /** attack-holdback-1118: an attack declaration candidate; {@code label} names it, its attackers are its key. */
+        Cand(AttackPlan attack, String label, boolean isDefault) {
+            this.pass = false;
+            this.hostId = -1;
+            this.desc = "";
+            this.land = false;
+            this.isDefault = isDefault;
+            this.label = "attacks " + label;
+            this.kind = "attack";
+            this.tgt = null;
+            this.schedule = null;
+            this.macro = null;
+            this.plan = null;
+            this.block = null;
+            this.attack = attack;
         }
 
         /** S-b: a turn-plan candidate; {@code label} names it (and is its key). */
@@ -1465,6 +1500,7 @@ public final class LookaheadSearch {
             this.macro = null;
             this.plan = plan;
             this.block = null;
+            this.attack = null;
         }
 
         private Cand(Cand base, String tgt, String tgtLabel) {
@@ -1480,6 +1516,7 @@ public final class LookaheadSearch {
             this.macro = null;
             this.plan = null;
             this.block = null;
+            this.attack = null;
             this.maySig = base.maySig;
             this.mayOpt = base.mayOpt;
         }
@@ -1498,6 +1535,7 @@ public final class LookaheadSearch {
             this.macro = macro;
             this.plan = null;
             this.block = null;
+            this.attack = null;
             this.maySig = base.maySig;
             this.mayOpt = base.mayOpt;
         }
@@ -1515,6 +1553,7 @@ public final class LookaheadSearch {
             this.macro = null;
             this.plan = null;
             this.block = null;
+            this.attack = null;
         }
 
         /** The prior request's candidate: {id, kind, fid} (fid = the host card's id, absent for pass). */
@@ -1534,6 +1573,9 @@ public final class LookaheadSearch {
             }
             if (block != null) {
                 return "block|" + block.key();
+            }
+            if (attack != null) {
+                return "attack|" + attack.key(); // attack-holdback-1118
             }
             return (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc + (tgt == null ? "" : "|T:" + tgt))
                     + (macro == null ? "" : "|M:" + macro);
@@ -1698,6 +1740,11 @@ public final class LookaheadSearch {
          * (opaque: {@link LookaheadSearch#applyBlocks}); null = a priority candidate.
          */
         public final Object block;
+        /**
+         * attack-holdback-1118: the attack declaration this play-out's seat declares at the copy's declare-attackers step
+         * (opaque: {@link LookaheadSearch#applyAttacks}); null = not an attack candidate.
+         */
+        public final Object attack;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
@@ -1707,6 +1754,7 @@ public final class LookaheadSearch {
             this.schedule = c.schedule;
             this.plan = c.plan;
             this.block = c.block;
+            this.attack = c.attack;
             this.maySig = c.maySig;
             this.mayOpt = c.mayOpt;
         }
@@ -8171,6 +8219,11 @@ public final class LookaheadSearch {
                     rewindToBlocks(p.g, p.me);
                     p.rewound = true;
                 }
+                if (c.attack != null) {
+                    // attack-holdback-1118: an attack candidate's copy resumes at the end of beginning of combat
+                    rewindToAttacks(p.g, p.me);
+                    p.rewound = true;
+                }
                 if (hookLeaf || hookPlayout) {
                     // S1: the hooks' per-copy context (a seat-knowledge tracker forked into the copy, attached to it)
                     p.hookCtx = hooks.onCopy(p.g, p.me);
@@ -8187,7 +8240,8 @@ public final class LookaheadSearch {
                     p.firstAction.mayPlayUnique = unique;
                     p.firstAction.oprRollout = p.noLeaf;
                     p.playoutSeed = mix(worldSeed, 5);
-                    if (!c.pass && c.plan == null && c.block == null && locate(p.g, p.me, c, loose, unique) == null) {
+                    if (!c.pass && c.plan == null && c.block == null && c.attack == null
+                            && locate(p.g, p.me, c, loose, unique) == null) {
                         p.failed = true;
                         p.missWhy = locateMiss(p.g, p.me, c);
                     }
@@ -8195,6 +8249,10 @@ public final class LookaheadSearch {
                     // block-search-1019: block candidates are searched with policy play-outs only
                     p.failed = true;
                     p.missWhy = "a block candidate needs policy play-outs";
+                } else if (c.attack != null) {
+                    // attack-holdback-1118: so are attack candidates
+                    p.failed = true;
+                    p.missWhy = "an attack candidate needs policy play-outs";
                 } else if (!c.pass) {
                     SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
                     if (sa == null) {
@@ -9430,6 +9488,330 @@ public final class LookaheadSearch {
                         co.addProperty("lethalLine", res.witnessLine[c]);
                     }
                 }
+                final JsonArray vs = new JsonArray();
+                for (int w = 0; w < k; w++) {
+                    vs.add(values[c][w]);
+                }
+                co.add("values", vs);
+                ca.add(co);
+            }
+            x.add("candidates", ca);
+            System.err.println("[lookahead-explain] " + x);
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------ attack hold-back search (attack-holdback-1118)
+
+    /**
+     * Attack search: rewind a copy made at the searching seat's declare-attackers ask to the end of beginning of combat (its
+     * attackers cleared, both players passed, the combat kept), so that its next main-loop step enters declare attackers
+     * and the seat's play-out controller declares there (as {@link #combatRollout} rewinds for C2).
+     */
+    static void rewindToAttacks(Game g, Player me) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        final forge.game.combat.Combat c = ph.getCombat();
+        if (c == null || ph.getPhase() != forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS || ph.getPlayerTurn() != me) {
+            throw new IllegalStateException("attack search: the copy is not at our declare attackers (" + ph.getPhase()
+                    + (c == null ? ", no combat)" : ")"));
+        }
+        final Player other = g.getNextPlayerAfter(me);
+        c.clearAttackers();
+        ph.devModeSet(forge.game.phase.PhaseType.COMBAT_BEGIN, me, false, ph.getTurn());
+        setPriorityState(ph, other, me, false);
+    }
+
+    /**
+     * Attack search: a declaration (attacker card id -> defender key, {@code player:<id>} or {@code card:<id>}) as the
+     * opaque plan of a candidate.
+     */
+    public static Object attackPlan(String label, Map<Integer, String> attackers) {
+        final AttackPlan a = new AttackPlan(label);
+        for (Map.Entry<Integer, String> e : attackers.entrySet()) {
+            final String d = e.getValue();
+            final int colon = d.indexOf(':');
+            if (colon < 0) {
+                throw new IllegalArgumentException("attack search: a defender key is player:<id> or card:<id>, not " + d);
+            }
+            a.attackers.put(e.getKey(), Integer.parseInt(d.substring(colon + 1)));
+            a.defenderIsPlayer.put(e.getKey(), d.startsWith("player:"));
+        }
+        return a;
+    }
+
+    /**
+     * Attack search: declare {@code attack} (an {@link #attackPlan}) into {@code combat}, as the bridge declares an answer
+     * (each pair must be a legal attack, then the whole declaration must validate). Null when declared; otherwise why not
+     * (and nothing of it stays declared).
+     */
+    public static String applyAttacks(Object attack, Game g, forge.game.combat.Combat combat) {
+        if (!(attack instanceof AttackPlan)) {
+            return "not an attack plan";
+        }
+        final AttackPlan a = (AttackPlan) attack;
+        combat.clearAttackers();
+        String bad = null;
+        for (Map.Entry<Integer, Integer> e : a.attackers.entrySet()) {
+            final Card at = g.findById(e.getKey());
+            final forge.game.GameEntity d = Boolean.TRUE.equals(a.defenderIsPlayer.get(e.getKey()))
+                    ? g.getPlayer(e.getValue()) : g.findById(e.getValue());
+            if (at == null || d == null) {
+                bad = "attacker " + e.getKey() + " or defender " + e.getValue() + " is not in the copy";
+                break;
+            }
+            if (!forge.game.combat.CombatUtil.canAttack(at, d)) {
+                bad = at.getName() + " cannot attack " + d;
+                break;
+            }
+            combat.addAttacker(at, d);
+        }
+        if (bad == null && !forge.game.combat.CombatUtil.validateAttackers(combat)) {
+            bad = "validateAttackers rejected the declaration";
+        }
+        if (bad != null) {
+            combat.clearAttackers();
+        }
+        return bad;
+    }
+
+    /**
+     * Attack search: which of {@code plans} (attacker card id -> defender key) the live game would accept as the seat's
+     * answer ({@link #applyAttacks}), checked in one copy of the live game (its scopes isolated; the live game is only
+     * read). Null when the check cannot be made.
+     */
+    public boolean[] legalAttacks(Game live, Player liveMe, List<Map<Integer, String>> plans) {
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new Random(mix(cfg.seed, 0xa77ac1L + decisionIndex)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            synchronized (live) {
+                g = copierOf(live).makeCopy();
+            }
+            final forge.game.combat.Combat c = g.getPhaseHandler().getCombat();
+            if (c == null) {
+                return null;
+            }
+            final boolean[] ok = new boolean[plans.size()];
+            for (int i = 0; i < plans.size(); i++) {
+                ok[i] = applyAttacks(attackPlan("check", plans.get(i)), g, c) == null;
+                c.clearAttackers();
+            }
+            return ok;
+        } catch (RuntimeException | StackOverflowError e) {
+            System.err.println("[lookahead] attack search: the legality check failed: " + e);
+            return null;
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /**
+     * Attack search (attack-holdback-1118): the S1 recipe over a GIVEN set of attack declarations at the searching seat's
+     * declare-attackers ask, as {@link #decideBlocks}. {@code plans} (attacker card id -> defender key) are in the caller's
+     * order; index 0 is the default the search departs from (the policy's own declaration). Duplicates are dropped. Each
+     * candidate is played out in K worlds (common random numbers) by the policy play-out seat, which declares the candidate
+     * at the copy's declare attackers (the copy is rewound to the end of beginning of combat) and is the policy afterwards;
+     * the value leaf, the departZ gate and the wall budget are the priority search's. Needs policy play-outs. The live game
+     * is only read.
+     */
+    public GivenResult decideAttacks(Game live, Player me, List<Map<Integer, String>> plans, List<String> labels,
+            long startNanos) {
+        final GivenResult res = new GivenResult();
+        decisionForce = forcePlayed;
+        forcePlayed = null;
+        stats.s1On = true;
+        stats.decisions++;
+        stats.attackDecisions++;
+        if (!hookPlayout) {
+            res.outcome = "unsupported";
+            return res;
+        }
+        final int index = decisionIndex++;
+        final List<Cand> cands = new ArrayList<>();
+        final List<Integer> at = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        for (int i = 0; i < plans.size(); i++) {
+            final Cand c = new Cand((AttackPlan) attackPlan(labels.get(i), plans.get(i)), labels.get(i), i == 0);
+            if (seen.add(c.key())) {
+                cands.add(c);
+                at.add(i);
+            }
+        }
+        if (cands.size() < 2) {
+            stats.uncontested++;
+            res.outcome = "uncontested";
+            return res;
+        }
+        final long t0 = System.nanoTime();
+        final long c0 = TMX.getCurrentThreadCpuTime();
+        final java.util.concurrent.atomic.AtomicLong pc = new java.util.concurrent.atomic.AtomicLong();
+        poolCpu = pc;
+        final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
+        forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
+        final long start = startNanos != 0L ? startNanos
+                : forge.game.WorkClock.active() ? forge.game.WorkClock.nanoTime() : t0;
+        final Budget b = cfg.budgetMs > 0 ? new Budget(start + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
+        budget = b;
+        boolean searched = false;
+        try {
+            searched = decideAttacks0(live, me, cands, at, index, res);
+        } catch (RuntimeException e) {
+            stats.departFallback++;
+            res.chosen = 0;
+            res.outcome = "failed";
+            System.err.println("[lookahead] attack search failed at decision " + index + ", playing the default: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
+        } finally {
+            budget = null;
+            if (b != null && b.wallCut) {
+                res.wall = true;
+            }
+            poolCpu = null;
+            forge.ai.CpuAccount.set(prevAcc);
+            final long dt = System.nanoTime() - t0;
+            final long cpu = TMX.getCurrentThreadCpuTime() - c0 + pc.get();
+            res.ms = dt / 1e6;
+            res.cpuMs = cpu / 1e6;
+            res.poolCpuMs = pc.get() / 1e6;
+            if (searched) {
+                stats.searchNanos += dt;
+                stats.maxSearchNanos = Math.max(stats.maxSearchNanos, dt);
+                stats.searchMsEach.add(dt / 1e6);
+                stats.searchCpuNanos += cpu;
+                stats.searchCpuMsEach.add(cpu / 1e6);
+                stats.combatNanos += dt;
+            }
+        }
+        return res;
+    }
+
+    private boolean decideAttacks0(Game live, Player me, List<Cand> cands, List<Integer> at, int index, GivenResult res) {
+        final long decisionSeed = mix(cfg.seed, 0xa77ac5eedL + index);
+        stats.searched++;
+        stats.attackSearched++;
+        lastCandidates = cands;
+        final int k = Math.max(1, cfg.worlds);
+        final int n = cands.size();
+        final double[][] values = new double[n][k];
+        final Rollout[][] outs = new Rollout[n][k];
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        explainChoices = EXPLAIN ? new String[n] : null;
+        labelChoices = null;
+        labelTargets = null;
+        final int aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+        if (hookLeaf && aborted == 0) {
+            final long fb = stats.leafFallbacks;
+            valueLeaves(values, outs, ok, k);
+            res.leafFallback = stats.leafFallbacks != fb;
+        }
+        final boolean overBudget = aborted > 0;
+        final double[] ev = new double[n];
+        for (int c = 0; c < n; c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += values[c][w];
+            }
+            ev[c] = ok[c] ? s / k : Double.NaN;
+            if (!ok[c]) {
+                stats.candidatesDropped++;
+                res.failed++;
+            }
+        }
+        int best = overBudget ? 0 : argmax(values, ok, n, k);
+        final java.util.function.IntUnaryOperator to = testOverride;
+        final java.util.function.IntSupplier lineOf = explainLine;
+        if (to != null && lineOf != null) {
+            final int o = to.applyAsInt(lineOf.getAsInt());
+            if (o >= 0 && o < n && ok[o]) {
+                best = o; // tests only (J1)
+            }
+        }
+        // J1: the live game's attack declaration, when the search would play another and it is a candidate
+        final String want = decisionForce;
+        decisionForce = null;
+        boolean forcing = false;
+        if (want != null && labelCount(cands, want) > 1) {
+            res.forcedMiss = true;
+        } else if (want != null) {
+            final int natural = overBudget || cfg.shadow ? 0 : best;
+            if (!want.equals(cands.get(natural).label)) {
+                final int idx = indexOfLabel(cands, want);
+                if (idx >= 0) {
+                    best = idx;
+                    forcing = true;
+                } else {
+                    res.forcedMiss = true;
+                }
+            }
+        }
+        res.chosen = 0;
+        String outcome = "kept";
+        if (best != 0 && !cfg.shadow) {
+            res.chosen = at.get(best);
+            stats.departed++;
+            stats.attackDeparted++;
+            outcome = "departed";
+        } else if (best != 0) {
+            outcome = "shadow-would-depart";
+        }
+        if (overBudget && !forcing) {
+            stats.capped++;
+            res.chosen = 0;
+            outcome = "capped";
+        }
+        res.outcome = outcome;
+        res.played = cands.get("departed".equals(outcome) ? best : 0).label;
+        if (forcing) {
+            res.forced = res.played.equals(want);
+            res.forcedMiss = !res.forced;
+        }
+        res.worlds = k;
+        res.ev = ev;
+        res.values = values;
+        res.givenIndex = new int[n];
+        for (int c = 0; c < n; c++) {
+            res.givenIndex[c] = at.get(c);
+        }
+        final PhaseHandler ph = live.getPhaseHandler();
+        if (Boolean.getBoolean("lookahead.trace")) {
+            final StringBuilder tb = new StringBuilder("[ltrace] attacks d=").append(index).append(" T").append(ph.getTurn())
+                    .append(' ').append(ph.getPhase()).append(" best=").append(best).append(" out=").append(outcome);
+            for (int c = 0; c < n; c++) {
+                tb.append(" | ").append(cands.get(c).label.replace('|', '/')).append(ok[c] ? "" : " FAIL");
+                for (int w = 0; w < k; w++) {
+                    tb.append(' ').append(Double.doubleToLongBits(values[c][w]));
+                }
+            }
+            System.err.println(tb);
+        }
+        if (EXPLAIN) {
+            final JsonObject x = new JsonObject();
+            x.addProperty("given", true);
+            x.addProperty("kind", "attacks");
+            x.addProperty("decision", index);
+            if (lineOf != null) {
+                x.addProperty("line", lineOf.getAsInt());
+            }
+            x.addProperty("played", res.played);
+            x.addProperty("turn", ph.getTurn());
+            x.addProperty("phase", String.valueOf(ph.getPhase()));
+            x.addProperty("best", best);
+            x.addProperty("outcome", outcome);
+            final JsonArray ca = new JsonArray();
+            for (int c = 0; c < n; c++) {
+                final JsonObject co = new JsonObject();
+                co.addProperty("label", cands.get(c).label);
+                co.addProperty("ok", ok[c]);
+                co.addProperty("ev", ok[c] ? ev[c] : null);
                 final JsonArray vs = new JsonArray();
                 for (int w = 0; w < k; w++) {
                     vs.add(values[c][w]);
@@ -12634,6 +13016,15 @@ public final class LookaheadSearch {
      * canonical order (by id), and our library through {@link InfoStates#keepOwnLibrary}.
      */
     static void resample(Game live, Player liveMe, Game g, Player me, Random rng, InfoStates is) {
+        resample(live, liveMe, g, me, rng, is, null);
+    }
+
+    /**
+     * attack-holdback-1118: as above; {@code known} (null = what Forge shows us, as before) is the dealers' rule for a live
+     * opponent hand card ({@link #seatMayKnowHand}): a card it accepts stays in the hand.
+     */
+    static void resample(Game live, Player liveMe, Game g, Player me, Random rng, InfoStates is,
+            java.util.function.Predicate<Card> known) {
         final PlayerView myView = liveMe.getView();
         for (Player opp : me.getOpponents()) {
             Player liveOpp = (Player) live.getPlayer(opp.getId());
@@ -12643,7 +13034,7 @@ public final class LookaheadSearch {
             List<Card> pool = new ArrayList<>(lib);
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && (known != null ? known.test(lc) : lc.getView().canBeShownTo(myView))) {
                     keep.add(c);
                 } else {
                     pool.add(c);
@@ -12735,7 +13126,32 @@ public final class LookaheadSearch {
     }
 
     private boolean handKnown(Game live, Player observer, Card card) {
-        return card.getView().canBeShownTo(observer.getView()) || rememberedHand(live, observer, card);
+        return seatMayKnowHand(live, observer, card, true);
+    }
+
+    /**
+     * attack-holdback-1118: the world dealers' one rule, "the seat may know this hand card" ({@code lc} in the live game):
+     * Forge shows it to the seat, or {@link #knownHidden}. {@code remembered}: the dealer kept the seat's live tracker's
+     * remembered cards before knownHand ({@link Config#beliefRememberedHand}); with knownHand off every dealer is
+     * exactly as before, with it on every dealer keeps the same cards: {@code canBeShownTo || InfoStates.knowsInHand}.
+     */
+    boolean seatMayKnowHand(Game live, Player liveMe, Card lc, boolean remembered) {
+        return lc.getView().canBeShownTo(liveMe.getView()) || knownHidden(live, liveMe, lc, remembered);
+    }
+
+    /**
+     * attack-holdback-1118: a hand card the seat knows without Forge showing it. With {@link Config#knownHand}: only
+     * InfoState(me) saw it enter that hand and kept its identity since ({@link InfoStates#knowsInHand}); review #248
+     * round 3: the live tracker ({@link #rememberedHand}) is not consulted, so it cannot restore what InfoStates forgot
+     * (RlKnowledge keeps a known card after a public exit of another card with its name). Without knownHand: the
+     * tracker's card where the dealer counted it before ({@code remembered}), byte for byte as before. Also a solver
+     * re-draw's {@link ForcedWinSolver.Redraw#remembersHandCard}, so its world filter keeps what the re-draw kept.
+     */
+    private boolean knownHidden(Game live, Player liveMe, Card lc, boolean remembered) {
+        if (cfg.knownHand) {
+            return InfoStates.knownInHand(InfoStates.find(live), liveMe, lc);
+        }
+        return remembered && rememberedHand(live, liveMe, lc);
     }
 
     /** The opponent's hidden hand cards / known library top, as the seat sees them in the live game. */
@@ -12889,7 +13305,7 @@ public final class LookaheadSearch {
             known.addAll(ownDeckNames(liveMe));
             for (Card c : live.getCardsInGame()) {
                 if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
-                        && (c.getView().canBeShownTo(myView) || rememberedHand(live, liveMe, c))) {
+                        && (c.getView().canBeShownTo(myView) || knownHidden(live, liveMe, c, true))) {
                     known.add(c.getPaperCard().getName());
                 }
             }
@@ -12960,7 +13376,8 @@ public final class LookaheadSearch {
         } else if (beliefCube != null && !cfg.beliefShadow) {
             resampleBelief(live, liveMe, g, me, rng, decisionBelief);
         } else if (cfg.infoState) {
-            resample(live, liveMe, g, me, rng, InfoStates.find(live)); // review #172 S2: find only
+            // review #172 S2: find only; attack-holdback-1118: knownHand keeps the hand cards the seat may know
+            resample(live, liveMe, g, me, rng, InfoStates.find(live), cfg.knownHand ? lc -> seatMayKnowHand(live, liveMe, lc, false) : null);
         } else {
             resample(live, liveMe, g, me, rng);
         }
@@ -12988,6 +13405,18 @@ public final class LookaheadSearch {
                 : opponentRedraw();
         if (base == null || !beliefWorldDecks()) {
             return base;
+        }
+        if (cfg.knownHand) {
+            // attack-holdback-1118: the wrapper keeps the base re-draw's hand rule too (its world filter keeps what it kept)
+            return new ForcedWinSolver.Redraw() {
+                @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                    base.apply(live, liveMe, g, me, rng);
+                    worldDecks(g, me);
+                }
+                @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                    return base.remembersHandCard(live, observer, card);
+                }
+            };
         }
         // review #123 S1-1 (S2T): the solver's belief worlds carry the world's own decklist for the opponent too
         return (live, liveMe, g, me, rng) -> {
@@ -13057,7 +13486,7 @@ public final class LookaheadSearch {
                 redrawOpponents(live, liveMe, g, me, rng, null);
             }
             @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
-                return rememberedHand(live, observer, card);
+                return knownHidden(live, observer, card, true); // attack-holdback-1118: knownHand off = rememberedHand
             }
         };
     }
@@ -13079,7 +13508,7 @@ public final class LookaheadSearch {
                 redrawOpponentsDeck(live, liveMe, g, me, rng, p);
             }
             @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
-                return rememberedHand(live, observer, card);
+                return knownHidden(live, observer, card, true); // attack-holdback-1118: knownHand off = rememberedHand
             }
         };
     }
@@ -13188,6 +13617,18 @@ public final class LookaheadSearch {
         if (beliefCube == null || cfg.beliefShadow || syn == null) {
             return null;
         }
+        if (cfg.knownHand) {
+            // attack-holdback-1118: the defender's worlds keep the hand cards the seat may know, and its filter agrees
+            return new ForcedWinSolver.Redraw() {
+                @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                    redrawOpponentsPrior(live, liveMe, g, me, rng, syn, gain, fillBasics,
+                            seenGain > 0 ? beliefSeenOf(live) : null, seenGain);
+                }
+                @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                    return knownHidden(live, observer, card, false);
+                }
+            };
+        }
         return (live, liveMe, g, me, rng) -> redrawOpponentsPrior(live, liveMe, g, me, rng, syn, gain, fillBasics,
                 seenGain > 0 ? beliefSeenOf(live) : null, seenGain);
     }
@@ -13226,7 +13667,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && seatMayKnowHand(live, liveMe, lc, false)) { // attack-holdback-1118 (off: canBeShownTo)
                     keep.add(c);
                 }
             }
@@ -13246,11 +13687,12 @@ public final class LookaheadSearch {
             if (need == 0 && libNeed == 0) {
                 continue;
             }
-            // what they have shown
+            // what they have shown (attack-holdback-1118, knownHand: a hand card the seat may know was shown too)
             final Set<String> shown = new HashSet<>();
             for (Card c : live.getCardsInGame()) {
                 if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
-                        && c.getView().canBeShownTo(myView) && !c.isInZone(ZoneType.Library)) {
+                        && (c.getView().canBeShownTo(myView) || cfg.knownHand && knownHidden(live, liveMe, c, false))
+                        && !c.isInZone(ZoneType.Library)) {
                     shown.add(c.getPaperCard().getName());
                 }
             }
@@ -13433,6 +13875,17 @@ public final class LookaheadSearch {
         if (beliefCube == null || cfg.beliefShadow || model == null) {
             return null;
         }
+        if (cfg.knownHand) {
+            // attack-holdback-1118: the deck model's worlds keep the hand cards the seat may know, and the filter agrees
+            return new ForcedWinSolver.Redraw() {
+                @Override public void apply(Game live, Player liveMe, Game g, Player me, Random rng) {
+                    redrawOpponentsDeck(live, liveMe, g, me, rng, model);
+                }
+                @Override public boolean remembersHandCard(Game live, Player observer, Card card) {
+                    return knownHidden(live, observer, card, false);
+                }
+            };
+        }
         return (live, liveMe, g, me, rng) -> redrawOpponentsDeck(live, liveMe, g, me, rng, model);
     }
 
@@ -13454,7 +13907,7 @@ public final class LookaheadSearch {
             final List<Card> keep = new ArrayList<>();
             for (Card c : hand) {
                 Card lc = live.findById(c.getId());
-                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                if (lc != null && seatMayKnowHand(live, liveMe, lc, false)) { // attack-holdback-1118 (off: canBeShownTo)
                     keep.add(c);
                 }
             }
@@ -13475,10 +13928,12 @@ public final class LookaheadSearch {
                 continue;
             }
             // the card instances they have shown (a name per card, so basics repeat), by card id order
+            // (attack-holdback-1118, knownHand: a hand card the seat may know was shown too)
             final List<Card> shownCards = new ArrayList<>();
             for (Card c : live.getCardsInGame()) {
                 if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && !c.isCopiedSpell()
-                        && c.getPaperCard() != null && c.getView().canBeShownTo(myView)) {
+                        && c.getPaperCard() != null
+                        && (c.getView().canBeShownTo(myView) || cfg.knownHand && knownHidden(live, liveMe, c, false))) {
                     shownCards.add(c);
                 }
             }

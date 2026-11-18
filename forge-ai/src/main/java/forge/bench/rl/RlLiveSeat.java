@@ -345,6 +345,10 @@ public final class RlLiveSeat {
                     case "blocks": c.blocks = blockKey(k, v, 0, 1); break;
                     case "blocks.samples": c.blockSamples = blockKey(k, v, 0, 64); break;
                     case "blocks.top": c.blockTop = blockKey(k, v, 1, 8); break;
+                    // attack-holdback-1118 (absent = off, the seat byte for byte as before): the attack hold-back search,
+                    // and the worlds keeping an opponent hand card the seat saw enter that hand (needs infoState=on)
+                    case "attacks": c.attacks = blockKey(k, v, 0, 1); break;
+                    case "knownHand": c.knownHand = LookaheadSearch.Config.infoStateKey(k, v); break;
                     // order-memory-1102 (absent = off, the seat byte for byte as before): the search worlds keep the
                     // library positions this seat knows (forge.ai.simulation.InfoStates); arming is its own decision
                     case "infoState": c.infoState = LookaheadSearch.Config.infoStateKey(k, v); break;
@@ -530,6 +534,9 @@ public final class RlLiveSeat {
             if (spec.search.blocks > 0) {
                 o.addProperty("blocks", true); // block-search-1019: block search on; absent otherwise
             }
+            if (spec.search.attacks > 0) {
+                o.addProperty("attacks", true); // attack-holdback-1118: attack hold-back search on; absent otherwise
+            }
             if (spec.search.plans != null && spec.search.plans.has("defend") && spec.search.plans.get("defend").getAsBoolean()) {
                 o.addProperty("defend", true); // strong-opp-1020: the solver's defense on; absent otherwise
             }
@@ -611,7 +618,10 @@ public final class RlLiveSeat {
         this.k8AiFixes = k8AiFixes == null ? AiFixes.Mode.OFF : k8AiFixes;
         if (spec.search.infoState || k8 != null && k8.infoState) {
             // order-memory-1102: watch the game from its creation (bind runs before the mulligans), only when a key is on
-            forge.ai.simulation.InfoStates.attach(g);
+            final forge.ai.simulation.InfoStates is = forge.ai.simulation.InfoStates.attach(g);
+            if (spec.search.knownHand) {
+                is.trackHands(); // attack-holdback-1118: the hands too, from bind on
+            }
         }
         final long uid = RlSearch.splitmix(seed ^ 0x6c697665L);
         final RlFeaturizer feat = new RlFeaturizer(index);
@@ -675,6 +685,9 @@ public final class RlLiveSeat {
         }
         if (spec.search.blocks > 0 && spec.log) {
             s.onBlocksDecided = this::blocksDecided; // block-search-1019
+        }
+        if (spec.search.attacks > 0 && spec.log) {
+            s.onAttacksDecided = this::attacksDecided; // attack-holdback-1118
         }
         // J1 (block-search-1019): every explain row names the decision line it belongs to; with -Dforge.interactive.aiReplay
         // the live choices are replayed by that line index
@@ -993,6 +1006,57 @@ public final class RlLiveSeat {
             }
             d.add("lethalBlock", lg);
         }
+        d.addProperty("searched", st.searched);
+        d.addProperty("departedTotal", st.departed);
+        d.addProperty("cappedTotal", st.capped);
+        if (forge.ai.WallClock.rebuilding()) {
+            d.addProperty("rebuild", true);
+        }
+        replayFlags(d);
+        System.err.println("[lookahead-decision] " + d);
+    }
+
+    /**
+     * attack-holdback-1118 (attack search only): one {@code [lookahead-decision]} line per declare-attackers ask of the
+     * seat, with {@code "kind":"attacks"}, as {@link #blocksDecided}. {@code skipped}: hold-back declarations dropped before
+     * the play-outs because they would not be a legal answer (attack requirements).
+     */
+    private void attacksDecided(final Game g, final LookaheadSearch.GivenResult r, final int candidates,
+            final java.util.List<String> labels, final String chosen, final double ms, final double prepMs, final int skipped) {
+        final LookaheadSearch.Stats st = search.lookaheadStats();
+        final JsonObject d = new JsonObject();
+        d.addProperty("seat", "policy");
+        d.addProperty("kind", "attacks");
+        d.addProperty("decision", searchedLines++);
+        d.addProperty("turn", g.getPhaseHandler().getTurn());
+        d.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        d.addProperty("stack", g.getStack().size());
+        d.addProperty("candidates", r.givenIndex.length);
+        d.addProperty("entries", candidates);
+        if (skipped > 0) {
+            d.addProperty("skipped", skipped);
+        }
+        d.addProperty("worlds", r.worlds);
+        d.addProperty("searchMs", Math.round(ms * 10) / 10.0);
+        d.addProperty("cpuMs", Math.round(r.cpuMs));
+        d.addProperty("scoreMs", Math.round(prepMs * 10) / 10.0);
+        d.addProperty("capped", "capped".equals(r.outcome));
+        if (r.wall) {
+            d.addProperty("wall", true);
+        }
+        d.addProperty("outcome", r.outcome);
+        d.addProperty("departed", r.chosen > 0);
+        d.addProperty("chosen", chosen);
+        final com.google.gson.JsonArray lb = new com.google.gson.JsonArray();
+        labels.forEach(lb::add);
+        d.add("labels", lb);
+        final com.google.gson.JsonArray ev = new com.google.gson.JsonArray();
+        for (double x : r.ev) {
+            ev.add(Double.isNaN(x) ? null : Math.round(x * 1e4) / 1e4);
+        }
+        d.add("ev", ev);
+        d.addProperty("failed", r.failed);
+        d.addProperty("leafFallback", r.leafFallback);
         d.addProperty("searched", st.searched);
         d.addProperty("departedTotal", st.departed);
         d.addProperty("cappedTotal", st.capped);

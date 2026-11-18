@@ -55,6 +55,25 @@ import forge.game.zone.ZoneView;
  *
  * <p><b>Threads:</b> fed on the game thread; every public method is synchronized. A query with a player of ANOTHER game
  * (a copy) is read-only against this state (review #168 S2) and keeps the ids found in the copy's library.
+ *
+ * <p><b>Known in hand</b> (attack-holdback-1118; off until {@link #trackHands}, and then nothing above changes): per
+ * observer o and per other player's hand H, the card ids o saw enter H, kept only through continuous, observable
+ * identity (review #248 round 2; when unsure, forget; an engine id never resolves what o could not see):
+ * <ul>
+ * <li>Entering H: from a public zone (battlefield, graveyard, stack, command; exile only face up), from o's own hand, a
+ * DRAW ({@code Kind.DRAW}) of the card o knew at that end of the library, or a library card revealed (or peeked) to o in
+ * this resolution whose identity stayed continuous since; or a hand card revealed to o where it is. A private search or
+ * choice never teaches it, even of a library place o knew.</li>
+ * <li>Reveal evidence expires on a shuffle, a random order ({@code RANDOM}), another seat's arrangement, any forgotten
+ * library (an unexplained change, a card put in at an unnamed place) and on the card's own move.</li>
+ * <li>Leaving H: only a card shown face up where it lands (graveyard; battlefield, stack, exile or command if it is still
+ * there face up at the next priority, until then H reads as unknown) is an observable exit: it is forgotten, and when o
+ * did not know it, so is one known card of H with the same identity (o cannot tell them apart). Any other exit (library,
+ * face-down exile or cast, another hand, ...) forgets all of H for every observer.</li>
+ * <li>H is forgotten when its contents change in a way the events do not explain (snapshot of ids, which only ever
+ * forgets) and at any internal failure.</li>
+ * </ul>
+ * The hidden cards' identities are never read to decide what is known. Copies ({@link #forkFor}) do not track hands.
  */
 public final class InfoStates implements LibraryInfoListener {
 
@@ -123,6 +142,11 @@ public final class InfoStates implements LibraryInfoListener {
             return res == key && ids.contains(id);
         }
 
+        /** attack-holdback-1118 r2: the card's evidence expires. */
+        void remove(final int id) {
+            ids.remove(id);
+        }
+
         void clear() {
             key = null;
             ids.clear();
@@ -146,6 +170,27 @@ public final class InfoStates implements LibraryInfoListener {
     private boolean attached = false;
     /** Diagnostics. */
     public int shuffles = 0, learnt = 0, silent = 0, events = 0, observations = 0;
+    /** attack-holdback-1118: known-in-hand tracking on ({@link #trackHands}; false = off, the default). */
+    private boolean hands = false;
+    /** attack-holdback-1118: (observer, hand owner) -> the ids of that hand the observer saw enter it. */
+    private final Map<Long, Set<Integer>> handKnown = new HashMap<>();
+    /** attack-holdback-1118: hand owner -> its ids after the last event (null: unexplained). Only ever forgets. */
+    private final Map<Integer, Set<Integer>> handSnap = new HashMap<>();
+    /** attack-holdback-1118 diagnostics: hand cards learnt, hands forgotten (an unexplained change or a failure). */
+    public int handLearnt = 0, handForgot = 0;
+    /**
+     * attack-holdback-1118 r2: observer -> the library cards revealed or peeked to it in this resolution whose identity
+     * stayed continuous since (see {@link #expireShown}). Read only by known-in-hand; the library state keeps
+     * {@link #revealed}.
+     */
+    private final Map<Integer, ResSet> handShown = new HashMap<>();
+    /** attack-holdback-1118 r2: the card the engine is drawing ({@code Kind.DRAW}), until the next zone change; -1 none. */
+    private int drawing = -1;
+    /**
+     * attack-holdback-1118 r2: hand exits to a zone where the card may yet turn face down (Forge turns an exiled card face
+     * down after the move): {owner, card id, zone type ordinal, zone player id or -1}, settled at the next priority.
+     */
+    private final List<int[]> pendingExits = new ArrayList<>();
 
     private InfoStates(final Game g) {
         this.game = g;
@@ -202,6 +247,359 @@ public final class InfoStates implements LibraryInfoListener {
     }
 
     /**
+     * attack-holdback-1118 (knownHand): start tracking the cards each observer saw enter the other players' hands (from
+     * now on; nothing is known of the hands as they stand). Idempotent. Call on the game's thread, at bind.
+     */
+    public synchronized InfoStates trackHands() {
+        if (!hands) {
+            hands = true;
+            handKnown.clear();
+            handShown.clear();
+            pendingExits.clear();
+            drawing = -1;
+            for (int w : seats) {
+                final Player wp = game.getPlayer(w);
+                handSnap.put(w, wp == null ? null : handIds(wp));
+            }
+        }
+        return this;
+    }
+
+    /** attack-holdback-1118: known-in-hand tracking is on. */
+    public synchronized boolean tracksHands() {
+        return hands;
+    }
+
+    static Set<Integer> handIds(final Player p) {
+        final Set<Integer> out = new HashSet<>();
+        for (Card c : p.getCardsIn(ZoneType.Hand)) {
+            out.add(c.getId());
+        }
+        return out;
+    }
+
+    private Set<Integer> handSet(final int observer, final int owner) {
+        return handKnown.computeIfAbsent(key(observer, owner), k -> new HashSet<>());
+    }
+
+    /** attack-holdback-1118: every observer forgets {@code owner}'s hand. */
+    private void forgetHand(final int owner) {
+        for (int o : seats) {
+            final Set<Integer> s = handKnown.get(key(o, owner));
+            if (s != null && !s.isEmpty()) {
+                s.clear();
+                handForgot++;
+            }
+        }
+    }
+
+    /** attack-holdback-1118 (fail closed): every hand forgotten, the snapshots taken again. */
+    private void forgetHands() {
+        try {
+            handKnown.clear();
+            handShown.clear();
+            pendingExits.clear();
+            drawing = -1;
+            handForgot++;
+            for (int w : seats) {
+                final Player wp = game.getPlayer(w);
+                handSnap.put(w, wp == null ? null : handIds(wp));
+            }
+        } catch (RuntimeException ignored) {
+            // the sets are cleared first
+        }
+    }
+
+    /** attack-holdback-1118: {@code owner}'s hand changed in a way no event explains: forget it. */
+    private void checkHand(final int owner) {
+        final Player wp = game.getPlayer(owner);
+        final Set<Integer> now = wp == null ? null : handIds(wp);
+        final Set<Integer> s = handSnap.get(owner);
+        if (s == null || !s.equals(now)) {
+            forgetHand(owner);
+            handSnap.put(owner, now);
+        }
+    }
+
+    private Integer handOwner(final ZoneView z) {
+        if (z == null || z.zoneType() != ZoneType.Hand || z.player() == null) {
+            return null;
+        }
+        return seats.contains(z.player().getId()) ? z.player().getId() : null;
+    }
+
+    /**
+     * attack-holdback-1118: one zone change touching a hand. The hand it left: {@link #handExit}; it is learnt by each
+     * other observer of the hand it entered when that observer saw its identity on the way ({@link #seenEntering}). A
+     * touched hand whose other ids changed since the last event is forgotten first.
+     */
+    private void handChange(final forge.game.event.GameEventCardChangeZone e, final Set<Integer> knewIt) {
+        final Integer fh = handOwner(e.from()), th = handOwner(e.to());
+        if (fh == null && th == null) {
+            return;
+        }
+        if (e.card() == null) {
+            for (Integer w : new Integer[] {fh, th}) {
+                if (w != null) {
+                    forgetHand(w);
+                    final Player wp = game.getPlayer(w);
+                    handSnap.put(w, wp == null ? null : handIds(wp));
+                }
+            }
+            return;
+        }
+        final int id = e.card().getId();
+        for (Integer w : new Integer[] {fh, th}) {
+            if (w == null) {
+                continue;
+            }
+            final Player wp = game.getPlayer(w);
+            final Set<Integer> now = wp == null ? new HashSet<>() : handIds(wp);
+            final Set<Integer> b = handSnap.get(w);
+            boolean explained = b != null;
+            if (explained) {
+                final Set<Integer> x = new HashSet<>(b), y = new HashSet<>(now);
+                x.remove(id);
+                y.remove(id);
+                explained = x.equals(y);
+            }
+            if (!explained) {
+                forgetHand(w);
+            }
+        }
+        if (fh != null) {
+            handExit(fh, id, e);
+        }
+        if (th != null) {
+            for (int o : seats) {
+                if (o != th && seenEntering(e, o, knewIt, id)) {
+                    handSet(o, th).add(id);
+                    handLearnt++;
+                }
+            }
+        }
+        for (Integer w : new Integer[] {fh, th}) {
+            if (w != null) {
+                final Player wp = game.getPlayer(w);
+                handSnap.put(w, wp == null ? null : handIds(wp));
+            }
+        }
+    }
+
+    /**
+     * attack-holdback-1118: observer {@code o} saw the identity of the card entering a hand: it came from a public zone
+     * (battlefield, graveyard, stack, command: Forge reveals a face-down permanent or spell leaving, CR 708.9), from exile
+     * face up (the moved object's own face; a face-down exiled card was never shown), from o's own hand, or from a library
+     * by an observably identified transfer (review #248 round 2): a DRAW of the card o knew at that end of the library, or
+     * a card revealed (or peeked) to o in this resolution whose identity stayed continuous since ({@link #handShown}). A
+     * private search or choice is never seen, even of a place o knew. Anything else: not seen.
+     */
+    private boolean seenEntering(final forge.game.event.GameEventCardChangeZone e, final int o, final Set<Integer> knewIt,
+            final int id) {
+        final ZoneView from = e.from();
+        if (from == null) {
+            return false;
+        }
+        switch (from.zoneType()) {
+            case Battlefield: case Graveyard: case Stack: case Command:
+                return true;
+            case Exile:
+                return !e.card().isFaceDown();
+            case Hand:
+                return from.player() != null && from.player().getId() == o;
+            case Library: {
+                if (drawing == id && knewIt != null && knewIt.contains(o)) {
+                    return true; // drawn, and o knew the card at the end it was drawn from
+                }
+                final ResSet r = handShown.get(o);
+                return r != null && r.has(KnownOwnLibrary.resolvingSa(game), id);
+            }
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * attack-holdback-1118 r2 (review #248 S1 1): card {@code id} left {@code owner}'s hand. It is forgotten by every
+     * observer (forgetting needs no evidence). The exit is observable only when the card is shown face up where it lands:
+     * the graveyard at once; the battlefield, stack, exile or command zone if it is still there face up at the next
+     * priority ({@link #settleExits}; Forge turns a face-down exile down after the move, and until then the hand reads as
+     * unknown). An observer that did not know the card cannot tell it from a known card of the same identity, so one such
+     * card is forgotten too. Any other exit (library, another hand, a face-down card, ...) forgets the whole hand.
+     */
+    private void handExit(final int owner, final int id, final forge.game.event.GameEventCardChangeZone e) {
+        final ZoneType tz = e.to() == null ? null : e.to().zoneType();
+        final Card moved = game.findById(id);
+        final boolean shown = moved != null && !moved.isFaceDown() && tz != null && (tz == ZoneType.Graveyard
+                || tz == ZoneType.Battlefield || tz == ZoneType.Stack || tz == ZoneType.Exile || tz == ZoneType.Command);
+        if (!shown) {
+            forgetHand(owner);
+            return;
+        }
+        final String name = identity(moved);
+        for (int o : seats) {
+            final Set<Integer> s = handKnown.get(key(o, owner));
+            if (s == null || s.isEmpty() || s.remove(id)) {
+                continue;
+            }
+            for (int k : new java.util.TreeSet<>(s)) {
+                final Card hc = game.findById(k);
+                if (hc == null || name.equals(identity(hc))) {
+                    s.remove(k); // o saw "a <name> left": it may have been this one
+                    break;
+                }
+            }
+        }
+        if (tz != ZoneType.Graveyard) {
+            pendingExits.add(new int[] {owner, id, tz.ordinal(), e.to().player() == null ? -1 : e.to().player().getId()});
+        }
+    }
+
+    /** attack-holdback-1118 r2: what an observer can tell two cards apart by (the card itself, not a face or an id). */
+    private static String identity(final Card c) {
+        final forge.card.CardRules r = c.getRules();
+        return r != null && r.getName() != null ? r.getName() : String.valueOf(c.getName());
+    }
+
+    /** attack-holdback-1118 r2: a pending exit whose card is no longer face up where it landed was never observable. */
+    private void settleExits() {
+        if (pendingExits.isEmpty()) {
+            return;
+        }
+        final List<int[]> ps = new ArrayList<>(pendingExits);
+        pendingExits.clear();
+        for (int[] p : ps) {
+            final Card c = game.findById(p[1]);
+            final boolean still = c != null && !c.isFaceDown() && c.getZone() != null
+                    && c.getZone().getZoneType().ordinal() == p[2]
+                    && (c.getZone().getPlayer() == null ? -1 : c.getZone().getPlayer().getId()) == p[3];
+            if (!still) {
+                forgetHand(p[0]);
+            }
+        }
+    }
+
+    private boolean exitPending(final int owner) {
+        for (int[] p : pendingExits) {
+            if (p[0] == owner) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** attack-holdback-1118 r2 (review #248 S1 3): every observer's reveal evidence of these cards expires. */
+    private void expireShown(final Iterable<Card> cards, final List<Player> except) {
+        for (Card c : cards) {
+            for (Map.Entry<Integer, ResSet> x : handShown.entrySet()) {
+                if (!containsSeat(except, x.getKey())) {
+                    x.getValue().remove(c.getId());
+                }
+            }
+        }
+    }
+
+    private static boolean containsSeat(final List<Player> ps, final int id) {
+        if (ps != null) {
+            for (Player p : ps) {
+                if (p != null && p.getId() == id) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** attack-holdback-1118 r2: the library-info channel's part for known-in-hand (tracking on only). */
+    private void handLibraryInfo(final Kind kind, final List<Player> observers, final List<Card> cards,
+            final ZoneType zone) {
+        if (zone != ZoneType.Library || cards == null) {
+            return;
+        }
+        switch (kind) {
+            case REVEAL: case PEEK:
+                // identity shown to these observers, valid in this resolution while it stays continuous
+                for (Player p : observers) {
+                    if (seats.contains(p.getId())) {
+                        handShown.computeIfAbsent(p.getId(), k -> new ResSet()).add(KnownOwnLibrary.resolvingSa(game), cards);
+                    }
+                }
+                return;
+            case RANDOM:
+                expireShown(cards, null); // put in an order nobody chose: which one is which is lost
+                return;
+            case ARRANGE:
+                expireShown(cards, observers); // an order only the chooser saw
+                return;
+            default:
+        }
+    }
+
+    /** attack-holdback-1118: hand cards revealed (or shown) to {@code observers} where they are. */
+    private void handRevealed(final List<Player> observers, final List<Card> cards) {
+        for (Card c : cards) {
+            if (c.getZone() == null || !c.getZone().is(ZoneType.Hand) || c.getZone().getPlayer() == null) {
+                continue;
+            }
+            final int w = c.getZone().getPlayer().getId();
+            if (!seats.contains(w)) {
+                continue;
+            }
+            checkHand(w);
+            for (Player p : observers) {
+                if (p.getId() != w && seats.contains(p.getId())) {
+                    handSet(p.getId(), w).add(c.getId());
+                    handLearnt++;
+                }
+            }
+        }
+    }
+
+    /**
+     * attack-holdback-1118 (knownHand): {@code observer} saw {@code card}, now in another player's hand of the watched
+     * game, enter that hand (or had it revealed there), and nothing since broke its identity. False when tracking is off,
+     * for a copy's objects, for the observer's own hand, and on any doubt.
+     */
+    public synchronized boolean knowsInHand(final Player observer, final Card card) {
+        if (!hands || observer == null || card == null || observer.getGame() != game || card.getGame() != game) {
+            return false;
+        }
+        try {
+            if (!card.isInZone(ZoneType.Hand) || card.isFaceDown() || card.getZone().getPlayer() == null) {
+                return false;
+            }
+            final int w = card.getZone().getPlayer().getId();
+            if (w == observer.getId() || !seats.contains(w)) {
+                return false;
+            }
+            checkHand(w);
+            if (exitPending(w)) {
+                return false; // a card left that hand and may yet turn face down: unsure until the next priority
+            }
+            final Set<Integer> s = handKnown.get(key(observer.getId(), w));
+            return s != null && s.contains(card.getId());
+        } catch (RuntimeException ex) {
+            forgetHands();
+            return false;
+        }
+    }
+
+    /** attack-holdback-1118: {@link #knowsInHand} of a consumer's state (null = not attached: nothing known). */
+    public static boolean knownInHand(final InfoStates is, final Player observer, final Card card) {
+        return is != null && is.knowsInHand(observer, card);
+    }
+
+    /** attack-holdback-1118 diagnostics/tests: the ids {@code observer} knows in {@code owner}'s hand (refreshed first). */
+    public synchronized Set<Integer> knownHand(final Player observer, final Player owner) {
+        if (!hands || observer == null || owner == null || owner.getGame() != game) {
+            return java.util.Collections.emptySet();
+        }
+        checkHand(owner.getId());
+        final Set<Integer> s = handKnown.get(key(observer.getId(), owner.getId()));
+        return s == null || exitPending(owner.getId()) ? java.util.Collections.emptySet() : new java.util.TreeSet<>(s);
+    }
+
+    /**
      * A search copy's state: this state, kept where it holds in the copy's order (a TOP/BOTTOM card at its computed index,
      * a RUN inside its band; anything else is dropped), attached to the copy so it evolves from the copy's own events.
      */
@@ -246,6 +644,11 @@ public final class InfoStates implements LibraryInfoListener {
             v.blk.clear();
             v.blkClean = true;
             v.blkRun = -1;
+        }
+        if (hands) {
+            // attack-holdback-1118 r2: a shuffle, an unexplained change or an unnamed insertion may have broken any
+            // revealed card's identity (the moved card has already left the library): every reveal evidence expires
+            handShown.clear();
         }
     }
 
@@ -465,10 +868,37 @@ public final class InfoStates implements LibraryInfoListener {
     @Override
     public synchronized void onLibraryInfo(final Kind kind, final List<Player> observers, final List<Card> cards,
             final ZoneType zone) {
+        if (zone == ZoneType.Hand && (kind == Kind.REVEAL || kind == Kind.PEEK)) {
+            // attack-holdback-1118: a hand card shown to these players (GameAction's hand reveals); only known-in-hand
+            // tracking reads it, and the library state never sees it
+            if (hands) {
+                try {
+                    handRevealed(observers, cards);
+                } catch (RuntimeException e) {
+                    forgetHands();
+                }
+            }
+            return;
+        }
+        if (kind == Kind.DRAW) {
+            // attack-holdback-1118 r2: the engine is drawing this card (the next zone change is the draw); only
+            // known-in-hand tracking reads it, and the library state never sees it
+            if (hands) {
+                drawing = cards != null && cards.size() == 1 && cards.get(0) != null ? cards.get(0).getId() : -1;
+            }
+            return;
+        }
         try {
             onLibraryInfo0(kind, observers, cards, zone);
         } catch (RuntimeException e) {
             failClosed(e);
+        }
+        if (hands) {
+            try {
+                handLibraryInfo(kind, observers, cards, zone);
+            } catch (RuntimeException e) {
+                forgetHands();
+            }
         }
     }
 
@@ -511,6 +941,9 @@ public final class InfoStates implements LibraryInfoListener {
             libResCount.clear();
         } catch (RuntimeException ignored) {
             // nothing more to do: the views are cleared first
+        }
+        if (hands) {
+            forgetHands(); // attack-holdback-1118: knowing nothing is always safe
         }
     }
 
@@ -613,6 +1046,20 @@ public final class InfoStates implements LibraryInfoListener {
         } catch (RuntimeException ex) {
             failClosed(ex);
         }
+        if (hands) {
+            // attack-holdback-1118: a hand that changed with no event since is forgotten; r2: the pending exits settle
+            // (a card no longer face up where it landed was never observable) and the per-resolution evidence ends
+            try {
+                drawing = -1;
+                handShown.clear();
+                settleExits();
+                for (int w : seats) {
+                    checkHand(w);
+                }
+            } catch (RuntimeException ex) {
+                forgetHands();
+            }
+        }
     }
 
     private void onPriority0() {
@@ -665,26 +1112,42 @@ public final class InfoStates implements LibraryInfoListener {
     @Subscribe
     public synchronized void on(final forge.game.event.GameEventCardChangeZone e) {
         final Integer fo = libOwner(e.from()), to = libOwner(e.to());
-        if (fo == null && to == null) {
-            return;
-        }
-        events++;
-        try {
-            change(e, fo, to);
-        } catch (RuntimeException ex) {
-            // fail closed
-            if (fo != null) {
-                forgetLib(fo);
-                snap.put(fo, null);
+        Set<Integer> knewIt = null;
+        if (fo != null || to != null) {
+            events++;
+            try {
+                knewIt = change(e, fo, to);
+            } catch (RuntimeException ex) {
+                // fail closed
+                if (fo != null) {
+                    forgetLib(fo);
+                    snap.put(fo, null);
+                }
+                if (to != null) {
+                    forgetLib(to);
+                    snap.put(to, null);
+                }
             }
-            if (to != null) {
-                forgetLib(to);
-                snap.put(to, null);
+        }
+        if (hands) {
+            // attack-holdback-1118: known-in-hand (its own fail-closed: a failure forgets every hand, never a library)
+            try {
+                handChange(e, knewIt);
+                // r2: a DRAW is good for this one move; the moved card's reveal evidence ends with its move
+                drawing = -1;
+                if (e.card() != null) {
+                    for (ResSet r : handShown.values()) {
+                        r.remove(e.card().getId());
+                    }
+                }
+            } catch (RuntimeException ex) {
+                forgetHands();
             }
         }
     }
 
-    private void change(final forge.game.event.GameEventCardChangeZone e, final Integer fo, final Integer to) {
+    /** The library part of one zone change; returns the observers that knew the card's place in the library it left. */
+    private Set<Integer> change(final forge.game.event.GameEventCardChangeZone e, final Integer fo, final Integer to) {
         if (e.card() == null) {
             for (Integer w : new Integer[] {fo, to}) {
                 if (w != null) {
@@ -692,7 +1155,7 @@ public final class InfoStates implements LibraryInfoListener {
                     snap.put(w, null);
                 }
             }
-            return;
+            return null;
         }
         final int id = e.card().getId();
         // explained? each touched library's order before, less this card, equals its order now, less this card
@@ -846,6 +1309,7 @@ public final class InfoStates implements LibraryInfoListener {
             snap.put(x.getKey(), x.getValue());
             scan(x.getKey());
         }
+        return knewIt;
     }
 
     /**

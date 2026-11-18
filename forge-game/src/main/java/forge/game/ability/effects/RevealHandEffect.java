@@ -49,6 +49,12 @@ public class RevealHandEffect extends SpellAbilityEffect {
                 hand = CardLists.getType(hand, sa.getParam("RevealType"));
             }
             if (sa.hasParam("Look")) {
+                if (host.getGame().hasLibraryInfoListeners()) {
+                    // attack-holdback-1118: the hand cards this player looked at (research InfoState's known-in-hand,
+                    // read only when that tracking is on; a no-op without a listener)
+                    host.getGame().fireLibraryInfo(forge.game.LibraryInfoListener.Kind.PEEK,
+                            java.util.List.of(sa.getActivatingPlayer()), hand, ZoneType.Hand);
+                }
                 sa.getActivatingPlayer().getController().reveal(hand, ZoneType.Hand, p);
             } else {
                 host.getGame().getAction().reveal(hand, p);
