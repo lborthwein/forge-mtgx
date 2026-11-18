@@ -198,6 +198,17 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode deadPump = AiFixes.Mode.OFF;
         /**
+         * Dead turn-face-up guard (lane turn-face-up-timing-1118, report 2026-11-18T14:33Z; off|shadow|on, OFF by default:
+         * candidates and decisions unchanged). Turning one of the seat's face-down permanents face up is not a departure
+         * candidate when its only payoff is a "when this is turned face up" trigger that has no legal target now, nothing
+         * else on the card needs it face up now, the seat gets priority again before the body could matter in combat, and
+         * paying now gains nothing over paying later ({@link #deadFaceUpWhy}). At the end of its own combat the policy seat
+         * turned Stratus Dancer face up with an empty stack (+0.031 mean, 4 of 8 worlds better): its counter trigger had no
+         * target, and it gave up countering a spell on the opponent's turn with the same mana. ON drops it as deadEtb drops a
+         * dead-ETB permanent; SHADOW counts; Forge's own answer and the policy's default are never dropped.
+         */
+        public AiFixes.Mode deadFaceUp = AiFixes.Mode.OFF;
+        /**
          * Lethal-block guard (lane block-vs-open-pump-1118, report 2026-11-18T05:34Z; off|shadow|on, OFF by default: values
          * and decisions unchanged). In the block search ({@link #decideBlocks}), a candidate declaration whose worst case of
          * this combat's damage to the searching seat is lethal ({@link #lethalBlocks}: what the attackers' controller can add
@@ -603,6 +614,9 @@ public final class LookaheadSearch {
             if (deadPump != AiFixes.Mode.OFF) {
                 o.addProperty("deadPump", deadPump.key());
             }
+            if (deadFaceUp != AiFixes.Mode.OFF) {
+                o.addProperty("deadFaceUp", deadFaceUp.key());
+            }
             if (lethalBlock != AiFixes.Mode.OFF) {
                 o.addProperty("lethalBlock", lethalBlock.key());
             }
@@ -765,6 +779,14 @@ public final class LookaheadSearch {
         /** deadPump guard (null = off): the same counters as deadEtb, for power-only pumps that cannot matter this turn. */
         public String deadPumpMode;
         public long deadPumpCands, deadPumpDecisions, deadPumpDropped, deadPumpShadowBest, deadPumpForge;
+        /**
+         * deadFaceUp guard (null = off): the same counters as deadEtb, for turn-ups that gain nothing now; plus the turn-up
+         * candidates it checked, its stand-asides by reason, and the time spent in the check.
+         */
+        public String deadFaceUpMode;
+        public long deadFaceUpCands, deadFaceUpDecisions, deadFaceUpDropped, deadFaceUpShadowBest, deadFaceUpForge,
+                deadFaceUpChecked, deadFaceUpNanos;
+        public final Map<String, Long> deadFaceUpWhy = new TreeMap<>();
         /**
          * lethalBlock guard (null = off): block decisions checked; stood aside (the bound was not trusted); with a candidate
          * the bound flags; re-scored (ON); with every searched candidate witnessed (unchanged); whose played declaration
@@ -1040,6 +1062,21 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", deadPumpShadowBest);
                 d.addProperty("forgeAnswer", deadPumpForge);
                 o.add("deadPump", d);
+            }
+            if (deadFaceUpMode != null) {
+                final JsonObject d = new JsonObject();
+                d.addProperty("mode", deadFaceUpMode);
+                d.addProperty("cands", deadFaceUpCands);
+                d.addProperty("decisions", deadFaceUpDecisions);
+                d.addProperty("dropped", deadFaceUpDropped);
+                d.addProperty("shadowBest", deadFaceUpShadowBest);
+                d.addProperty("forgeAnswer", deadFaceUpForge);
+                d.addProperty("checked", deadFaceUpChecked);
+                final JsonObject why = new JsonObject();
+                deadFaceUpWhy.forEach(why::addProperty);
+                d.add("aside", why);
+                d.addProperty("ms", Math.round(deadFaceUpNanos / 1e5) / 10.0);
+                o.add("deadFaceUp", d);
             }
             if (lethalBlockMode != null) {
                 final JsonObject d = new JsonObject();
@@ -1582,6 +1619,14 @@ public final class LookaheadSearch {
     final Set<String> deadAltCostKeys = new HashSet<>();
     /** deadPump SHADOW: keys of the last enumeration's dead pump candidates (kept); tests read it. */
     final Set<String> deadPumpKeys = new HashSet<>();
+    /** deadFaceUp SHADOW: keys of the last enumeration's dead turn-up candidates (kept); tests read it. */
+    final Set<String> deadFaceUpKeys = new HashSet<>();
+    /**
+     * deadFaceUp (null = off, or no turn-up candidate at the last guarded enumeration): that enumeration's turn-up
+     * candidates, dropped (ON) or flagged (SHADOW), stand-asides by reason and ms ({@link DfuTally#finish}); the given search puts it
+     * in its result and explain row.
+     */
+    JsonObject deadFaceUpLast = null;
     private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
@@ -1987,6 +2032,9 @@ public final class LookaheadSearch {
         if (cfg.deadPump != AiFixes.Mode.OFF) {
             stats.deadPumpMode = cfg.deadPump.key();
         }
+        if (cfg.deadFaceUp != AiFixes.Mode.OFF) {
+            stats.deadFaceUpMode = cfg.deadFaceUp.key();
+        }
         if (cfg.lethalBlock != AiFixes.Mode.OFF) {
             stats.lethalBlockMode = cfg.lethalBlock.key();
         }
@@ -2287,6 +2335,7 @@ public final class LookaheadSearch {
         // Label dump: the root ForgeState comes from the same enumeration copy (never the live game).
         final JsonObject[] labelRoot = labelSink != null || ranker != null ? new JsonObject[1] : null;
         final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv, beliefRoot, labelRoot);
+        final JsonObject faceUpNote = cfg.deadFaceUp != AiFixes.Mode.OFF ? deadFaceUpLast : null; // this decision's (null = none)
         if (check) {
             checkLive("enumerate", before, live, defSa, index);
         }
@@ -2412,6 +2461,9 @@ public final class LookaheadSearch {
         if (cfg.deadPump == AiFixes.Mode.SHADOW && best != 0 && deadPumpKeys.contains(cands.get(best).key())) {
             stats.deadPumpShadowBest++;
         }
+        if (cfg.deadFaceUp == AiFixes.Mode.SHADOW && best != 0 && deadFaceUpKeys.contains(cands.get(best).key())) {
+            stats.deadFaceUpShadowBest++;
+        }
         if (cfg.copyEot != AiFixes.Mode.OFF) {
             final int[] u;
             synchronized (live) {
@@ -2534,6 +2586,9 @@ public final class LookaheadSearch {
             x.addProperty("outcome", outcome);
             x.addProperty("line", index); // J1: the K8 decision line's own index (its "decision")
             x.addProperty("played", played);
+            if (faceUpNote != null) {
+                x.add("deadFaceUp", faceUpNote); // deadFaceUp on or shadow, with a turn-up among the candidates
+            }
             final JsonArray ca = new JsonArray();
             for (int c = 0; c < n; c++) {
                 final JsonObject co = new JsonObject();
@@ -2555,6 +2610,9 @@ public final class LookaheadSearch {
                 }
                 if (cfg.deadPump == AiFixes.Mode.SHADOW && deadPumpKeys.contains(cands.get(c).key())) {
                     co.addProperty("deadPump", true);
+                }
+                if (cfg.deadFaceUp == AiFixes.Mode.SHADOW && deadFaceUpKeys.contains(cands.get(c).key())) {
+                    co.addProperty("deadFaceUp", true);
                 }
                 final JsonArray vs = new JsonArray();
                 final JsonArray ds = new JsonArray();
@@ -2713,6 +2771,11 @@ public final class LookaheadSearch {
         public boolean[] lethal;
         /** lethalBlock: why the guard stood aside (null = it checked, or it is off). */
         public String lethalAside;
+        /**
+         * deadFaceUp (null = the guard is off, or no given candidate turns a face-down permanent up): the turn-up candidates
+         * checked, dropped (ON) or flagged (SHADOW), the default's own dead turn-up, stand-asides by reason, and ms.
+         */
+        public JsonObject deadFaceUp;
         /** lethalBlock ON: the witnessed candidates were re-scored as lost play-outs. */
         public boolean lethalRescored;
         /**
@@ -3287,6 +3350,9 @@ public final class LookaheadSearch {
         List<Cand> cands = new ArrayList<>();
         final List<Integer> at = new ArrayList<>();
         guardGiven(live, me, all, allAt, breadth, decisionSeed, cands, at);
+        if (cfg.deadFaceUp != AiFixes.Mode.OFF) {
+            res.deadFaceUp = deadFaceUpLast; // this decision's turn-up checks (null = none)
+        }
         final List<Object> plans = pendingPlans;
         if (plans != null) {
             // search-bones-1015 (S-b): the turn-plan candidates, after the given ones (their index: given.size() + i)
@@ -3596,6 +3662,9 @@ public final class LookaheadSearch {
         if (cfg.deadPump == AiFixes.Mode.SHADOW && best != 0 && deadPumpKeys.contains(cands.get(best).key())) {
             stats.deadPumpShadowBest++;
         }
+        if (cfg.deadFaceUp == AiFixes.Mode.SHADOW && best != 0 && deadFaceUpKeys.contains(cands.get(best).key())) {
+            stats.deadFaceUpShadowBest++;
+        }
         final java.util.function.IntUnaryOperator to = testOverride;
         final java.util.function.IntSupplier lineOf = explainLine;
         if (to != null && lineOf != null) {
@@ -3696,6 +3765,9 @@ public final class LookaheadSearch {
             x.addProperty("phase", String.valueOf(ph.getPhase()));
             x.addProperty("best", best);
             x.addProperty("outcome", outcome);
+            if (res.deadFaceUp != null) {
+                x.add("deadFaceUp", res.deadFaceUp); // deadFaceUp on or shadow, with a turn-up among the given candidates
+            }
             final JsonArray ca = new JsonArray();
             for (int c = 0; c < n; c++) {
                 final JsonObject co = new JsonObject();
@@ -3703,6 +3775,9 @@ public final class LookaheadSearch {
                 co.addProperty("choices", explainChoices != null && explainChoices[c] != null ? explainChoices[c] : "");
                 co.addProperty("ok", ok[c]);
                 co.addProperty("ev", ok[c] ? ev[c] : null);
+                if (cfg.deadFaceUp == AiFixes.Mode.SHADOW && deadFaceUpKeys.contains(cands.get(c).key())) {
+                    co.addProperty("deadFaceUp", true);
+                }
                 final JsonArray vs = new JsonArray();
                 for (int w = 0; w < k; w++) {
                     vs.add(values[c][w]);
@@ -3746,7 +3821,8 @@ public final class LookaheadSearch {
         final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
         final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
         final boolean pguard = cfg.deadPump != AiFixes.Mode.OFF;
-        if (!guard && !zguard && !cguard && !aguard && !pguard) {
+        final boolean dguard = cfg.deadFaceUp != AiFixes.Mode.OFF;
+        if (!guard && !zguard && !cguard && !aguard && !pguard && !dguard) {
             for (int i = 0; i < all.size() && out.size() < breadth; i++) {
                 out.add(all.get(i));
                 outAt.add(allAt.get(i));
@@ -3758,15 +3834,18 @@ public final class LookaheadSearch {
         crewNoopKeys.clear();
         deadAltCostKeys.clear();
         deadPumpKeys.clear();
+        deadFaceUpKeys.clear();
+        deadFaceUpLast = null;
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 7)));
         final Object prevAiCache1 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds = forge.util.IdScope.capture();
         forge.util.IdScope.open();
-        int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0;
+        int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0, faceHere = 0;
         final List<Cand> o = new ArrayList<>();
         final List<Integer> oAt = new ArrayList<>();
+        final DfuTally dfu = dguard ? new DfuTally(() -> pumpKnownIds(live, liveMe), () -> dfuLivePending(live)) : null;
         try {
             final Set<Integer> pumpKnown = pguard ? pumpKnownIds(live, liveMe) : null; // the seat's knowledge, from the live game
             final GameCopier copier = copierOf(live);
@@ -3784,6 +3863,7 @@ public final class LookaheadSearch {
                 final boolean crew = cguard && sa != null && crewNoop(sa, me);
                 final boolean alt = aguard && sa != null && deadAltCost(sa, me);
                 final boolean pump = pguard && sa != null && deadPump(sa, me, pumpKnown);
+                final boolean face = dguard && DFU_DEAD.equals(dfu.check(sa, me));
                 if (i == 0) {
                     // the default is never dropped (as Forge's answer in enumerate)
                     if (dead) {
@@ -3800,6 +3880,10 @@ public final class LookaheadSearch {
                     }
                     if (pump) {
                         stats.deadPumpForge++;
+                    }
+                    if (face) {
+                        stats.deadFaceUpForge++;
+                        dfu.defaultDead++;
                     }
                 } else {
                     if (dead) {
@@ -3847,6 +3931,16 @@ public final class LookaheadSearch {
                         }
                         deadPumpKeys.add(c.key());
                     }
+                    if (face) {
+                        faceHere++;
+                        dfu.dead++;
+                        stats.deadFaceUpCands++;
+                        if (cfg.deadFaceUp == AiFixes.Mode.ON) {
+                            stats.deadFaceUpDropped++;
+                            continue;
+                        }
+                        deadFaceUpKeys.add(c.key());
+                    }
                 }
                 o.add(c);
                 oAt.add(allAt.get(i));
@@ -3865,6 +3959,12 @@ public final class LookaheadSearch {
             }
             if (pumpHere > 0) {
                 stats.deadPumpDecisions++;
+            }
+            if (faceHere > 0) {
+                stats.deadFaceUpDecisions++;
+            }
+            if (dfu != null) {
+                deadFaceUpLast = dfu.finish(stats, cfg.deadFaceUp);
             }
         } catch (RuntimeException e) {
             o.clear();
@@ -4203,6 +4303,9 @@ public final class LookaheadSearch {
                 }
                 if (cfg.deadPump == AiFixes.Mode.SHADOW && deadPumpKeys.contains(cd.key())) {
                     co.addProperty("deadPump", true);
+                }
+                if (cfg.deadFaceUp == AiFixes.Mode.SHADOW && deadFaceUpKeys.contains(cd.key())) {
+                    co.addProperty("deadFaceUp", true);
                 }
                 ca.add(co);
             }
@@ -5453,8 +5556,18 @@ public final class LookaheadSearch {
             final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
             final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
             final boolean pguard = cfg.deadPump != AiFixes.Mode.OFF;
-            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0;
+            final boolean dguard = cfg.deadFaceUp != AiFixes.Mode.OFF;
+            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0, faceHere = 0;
             final Set<Integer> pumpKnown = pguard ? pumpKnownIds(live, liveMe) : null; // the seat's knowledge, from the live game
+            final DfuTally dfu = dguard ? new DfuTally(() -> pumpKnownIds(live, liveMe), () -> dfuLivePending(live)) : null;
+            if (dguard) {
+                deadFaceUpKeys.clear();
+                deadFaceUpLast = null;
+                if (defSa != null && DFU_DEAD.equals(dfu.check(locate(g, me, out.get(0)), me))) {
+                    stats.deadFaceUpForge++; // Forge's own answer: never dropped
+                    dfu.defaultDead++;
+                }
+            }
             if (pguard) {
                 deadPumpKeys.clear();
                 if (defSa != null) {
@@ -5561,6 +5674,17 @@ public final class LookaheadSearch {
                     }
                     deadPumpKeys.add(c.key());
                 }
+                if (dguard && !seen.contains(c.key()) && DFU_DEAD.equals(dfu.check(sa, me))) {
+                    faceHere++;
+                    dfu.dead++;
+                    stats.deadFaceUpCands++;
+                    if (cfg.deadFaceUp == AiFixes.Mode.ON) {
+                        seen.add(c.key());
+                        stats.deadFaceUpDropped++;
+                        continue;
+                    }
+                    deadFaceUpKeys.add(c.key());
+                }
                 if (seen.add(c.key())) {
                     out.add(c);
                 }
@@ -5579,6 +5703,12 @@ public final class LookaheadSearch {
             }
             if (pumpHere > 0) {
                 stats.deadPumpDecisions++;
+            }
+            if (faceHere > 0) {
+                stats.deadFaceUpDecisions++;
+            }
+            if (dfu != null) {
+                deadFaceUpLast = dfu.finish(stats, cfg.deadFaceUp);
             }
             if (pv != null) {
                 priorView(pv, g, me, legal, seen);
@@ -6957,6 +7087,626 @@ public final class LookaheadSearch {
 
     static boolean hasteText(String v) {
         return v.contains("Haste");
+    }
+
+    // ------------------------------------------------------------------ deadFaceUp (turn-face-up-timing-1118)
+
+    /** deadFaceUp: {@link #deadFaceUpWhy}'s answer for a turn-up that is dead (dropped when ON). */
+    static final String DFU_DEAD = "dead";
+
+    /** deadFaceUp: the parameters a "when this is turned face up" trigger may carry (anything else is a condition). */
+    static final Set<String> DFU_TRIGGER_PARAMS = new HashSet<>(Arrays.asList("Mode", "ValidCard", "Execute", "TriggerZones",
+            "TriggerDescription", "OptionalDecider", "Secondary"));
+
+    /** deadFaceUp: the zones a wasted trigger's target may come from (public zones the seat sees in full). */
+    static final Set<ZoneType> DFU_TARGET_ZONES = java.util.EnumSet.of(ZoneType.Battlefield, ZoneType.Stack, ZoneType.Graveyard);
+
+    /** deadFaceUp: keywords that matter only in combat, and the turn-up keywords themselves (condition 2). */
+    static final Set<forge.game.keyword.Keyword> DFU_KEYWORDS = java.util.EnumSet.of(forge.game.keyword.Keyword.FLYING,
+            forge.game.keyword.Keyword.REACH, forge.game.keyword.Keyword.FIRST_STRIKE, forge.game.keyword.Keyword.DOUBLE_STRIKE,
+            forge.game.keyword.Keyword.TRAMPLE, forge.game.keyword.Keyword.VIGILANCE, forge.game.keyword.Keyword.MENACE,
+            forge.game.keyword.Keyword.DEATHTOUCH, forge.game.keyword.Keyword.LIFELINK, forge.game.keyword.Keyword.INTIMIDATE,
+            forge.game.keyword.Keyword.FEAR, forge.game.keyword.Keyword.SHADOW, forge.game.keyword.Keyword.HORSEMANSHIP,
+            forge.game.keyword.Keyword.SKULK, forge.game.keyword.Keyword.LANDWALK, forge.game.keyword.Keyword.MORPH,
+            forge.game.keyword.Keyword.MEGAMORPH, forge.game.keyword.Keyword.DISGUISE);
+
+    /** deadFaceUp: the turn-up keywords (their own abilities are the turn-up itself, the face-down cast and megamorph's counter). */
+    static final Set<forge.game.keyword.Keyword> DFU_TURN_KEYWORDS = java.util.EnumSet.of(forge.game.keyword.Keyword.MORPH,
+            forge.game.keyword.Keyword.MEGAMORPH, forge.game.keyword.Keyword.DISGUISE);
+
+    /**
+     * deadFaceUp guard (lane turn-face-up-timing-1118): true for a candidate that turns one of the seat's face-down
+     * permanents face up when doing it now gains nothing over doing it at a later priority. See {@link #deadFaceUpWhy}.
+     */
+    static boolean deadFaceUp(SpellAbility sa, Player me) {
+        return DFU_DEAD.equals(deadFaceUpWhy(sa, me, null));
+    }
+
+    /**
+     * deadFaceUp guard: null when {@code sa} is not a turn-up of a face-down permanent (not this guard's candidate),
+     * {@link #DFU_DEAD} when it is dead, otherwise why the guard stands aside. Dead only when all five hold, and anything
+     * this check cannot read leaves the candidate to the search:
+     * <ol>
+     * <li><b>Wasted trigger</b> ("trigger", "untargeted", "targetZone", "target", "filter", "noTrigger"): the face-up card
+     * has at least one "when this is turned face up" trigger (ValidCard Self, no condition), and every one targets (its root
+     * ability, at least one target) with no possible target now, from the battlefield, the stack and the graveyards only:
+     * neither the engine's own target candidates nor any object of a card type the filter names, with every
+     * source-dependent restriction ignored ({@link #dfuTypeCandidates}; a filter that is not card types stands aside).
+     * Rule 603.3d: such a trigger is removed from the stack, so it does nothing.</li>
+     * <li><b>Nothing else on the face-up card needs it face up now</b> ("card", "ability", "keyword"): it is a creature of
+     * one face, and besides those triggers and its morph, megamorph or disguise keyword it has only keywords that matter only
+     * in combat ({@link #DFU_KEYWORDS}): no static, other trigger, activated or mana ability, replacement or other keyword.
+     * </li>
+     * <li><b>The seat gets priority again before the body could matter, and before its own untap step</b> ("stack",
+     * "combat", "phase", "timing", "untap", "cleanup"): the stack is empty (otherwise the top item resolves before the seat's next
+     * priority and the body may matter to it), the permanent is not attacking or blocking, no extra turn or phase is
+     * pending, and the next combat declaration or damage it could take part in comes after the seat's next priority: on its
+     * own turn, before combat only if it cannot attack this turn (tapped, or summoning sick with no haste source the seat
+     * sees), from declare attackers through main phase 2 (not in combat), never the end step (cleanup comes first);
+     * on another player's turn, upkeep through beginning of combat and declare blockers through main phase 2 only (never
+     * declare attackers: tapped does not prove it cannot block; never the end step: the seat's untap step may come first,
+     * and waiting would spend next turn's mana; never untap or cleanup).</li>
+     * <li><b>Paying now gains nothing over paying later</b> ("cost", "pool", "watcher", "other", "offBattlefield"): the
+     * turn-up cost is mana
+     * only (no X), the seat's mana pool is empty, no card the seat sees other than this one has a trigger or replacement on a
+     * permanent turning face up, or a battlefield or command-zone ability whose text names face-down or face-up status,
+     * morph, manifest, cloak or disguise; and no other battlefield or command-zone object, on either side, has a static or
+     * triggered ability, a keyword or a replacement effect (but its own entering), and no delayed trigger is pending
+     * ({@link #dfuOtherAbilities}: anything that could read the changed characteristics or the megamorph counter); and no
+     * card in a graveyard, exile, the command zone or the seat's own hand has a trigger, static or replacement (but its own
+     * entering) active where it is ("offBattlefield", {@link #dfuActiveOffBattlefield}).</li>
+     * <li><b>What the seat may know</b>: only its own face-down card (whose face it knows) and public state are read;
+     * {@code known} (card ids, {@link #pumpKnownIds}, read in the live game) or {@link #pumpKnows} when null. An opponent's
+     * hand or library, or an opponent's face-down card, is never read.</li>
+     * </ol>
+     * Never the policy's default or Forge's answer (the sites keep them). Reads only: the trigger's ability is copied before
+     * its targets are counted.
+     */
+    static String deadFaceUpWhy(SpellAbility sa, Player me, Set<Integer> known) {
+        if (sa == null || me == null || sa.getHostCard() == null || !sa.isTurnFaceUp()) {
+            return null;
+        }
+        try {
+            return dfuWhy(sa, sa.getHostCard(), me, known);
+        } catch (RuntimeException e) {
+            return "error";
+        }
+    }
+
+    private static String dfuWhy(SpellAbility sa, Card host, Player me, Set<Integer> known) {
+        final Game game = me.getGame();
+        // condition 2 (the card): the seat's own face-down permanent, which turns to its one original face, a creature
+        if (!host.isFaceDown() || !host.isInPlay() || host.isPhasedOut() || !me.equals(host.getController())
+                || host.getCurrentStateName() != forge.card.CardStateName.FaceDown || host.hasMergedCard()) {
+            return "card";
+        }
+        for (forge.card.CardStateName s : host.getStates()) {
+            if (s != forge.card.CardStateName.Original && s != forge.card.CardStateName.FaceDown) {
+                return "card";
+            }
+        }
+        final CardState up = host.getState(forge.card.CardStateName.Original);
+        if (up == null || !up.getType().isCreature()) {
+            return "card";
+        }
+        // condition 1: every "when this is turned face up" trigger targets and has no legal target now
+        int wasted = 0;
+        for (Trigger t : up.getTriggers()) {
+            if (dfuKeywordTrait(t)) {
+                continue;
+            }
+            if (t.getMode() != TriggerType.TurnFaceUp || !selfOnly(t.getParam("ValidCard"))) {
+                return "ability"; // another trigger (condition 2)
+            }
+            for (String k : t.getMapParams().keySet()) {
+                if (!DFU_TRIGGER_PARAMS.contains(k)) {
+                    return "trigger";
+                }
+            }
+            final SpellAbility ex = t.ensureAbility();
+            if (ex == null) {
+                return "trigger";
+            }
+            final SpellAbility x = ex.copy(me);
+            x.setActivatingPlayer(me);
+            if (!x.usesTargeting() || x.getMinTargets() < 1 || x.getTargetRestrictions() == null) {
+                return "untargeted";
+            }
+            final forge.game.spellability.TargetRestrictions tr = x.getTargetRestrictions();
+            if (tr.getZone().isEmpty() || !DFU_TARGET_ZONES.containsAll(tr.getZone())) {
+                return "targetZone";
+            }
+            if (tr.getNumCandidates(x) > 0) {
+                return "target";
+            }
+            // review round 2 (S1 2): the engine counted with the face-down source; count again with no source-dependent
+            // restriction at all (any object of the filter's card type in the target zones), and stand aside on any
+            final int loose = dfuTypeCandidates(tr, game);
+            if (loose < 0) {
+                return "filter";
+            }
+            if (loose > 0) {
+                return "target";
+            }
+            wasted++;
+        }
+        if (wasted == 0) {
+            return "noTrigger";
+        }
+        // condition 2: nothing else on the face-up card
+        for (forge.game.staticability.StaticAbility st : up.getStaticAbilities()) {
+            if (!dfuKeywordTrait(st)) {
+                return "ability";
+            }
+        }
+        for (forge.game.replacement.ReplacementEffect re : up.getReplacementEffects(false)) {
+            if (!dfuKeywordTrait(re)) {
+                return "ability";
+            }
+        }
+        for (SpellAbility a : up.getSpellAbilities()) {
+            // its own casts (from a hand only) and turn-ups are not abilities of the permanent
+            if (!(a.isSpell() || a.isTurnFaceUp() || dfuKeywordTrait(a))) {
+                return "ability";
+            }
+        }
+        for (forge.game.keyword.KeywordInterface k : up.getIntrinsicKeywords()) {
+            if (k.getKeyword() == null || !DFU_KEYWORDS.contains(k.getKeyword())) {
+                return "keyword";
+            }
+        }
+        // condition 4 (cost): mana only, no X, nothing floating
+        final forge.game.cost.Cost cost = sa.getPayCosts();
+        if (cost == null || !cost.isOnlyManaCost() || cost.hasXInAnyCostPart()) {
+            return "cost";
+        }
+        if (!me.getManaPool().isEmpty()) {
+            return "pool";
+        }
+        // condition 3: the seat's next priority comes before the body could matter
+        if (!game.getStack().isEmpty()) {
+            return "stack";
+        }
+        final PhaseHandler ph = game.getPhaseHandler();
+        final forge.game.phase.PhaseType phase = ph.getPhase();
+        final Player active = ph.getPlayerTurn();
+        if (phase == null || active == null || ph.hasExtraTurnsOrPhases()) {
+            return "phase"; // review round 2: an extra turn may bring the seat's untap step before its next priority
+        }
+        final forge.game.combat.Combat combat = ph.getCombat();
+        if (combat != null && (combat.isAttacking(host) || combat.isBlocking(host))) {
+            return "combat";
+        }
+        final List<Card> seen = new ArrayList<>();
+        for (Card c : game.getCardsInGame()) {
+            if (c != host && (known == null ? pumpKnows(me, c) : known.contains(c.getId()))) {
+                seen.add(c);
+            }
+        }
+        final String timing = dfuTiming(host, me, ph, phase, active, combat, seen);
+        if (timing != null) {
+            return timing;
+        }
+        // condition 4 (others): nothing the seat sees reacts to a permanent turning face up or reads face-down status
+        if (dfuWatched(seen, game)) {
+            return "watcher";
+        }
+        // review round 2 (S1 3, 4): no other battlefield or command-zone object, on either side, has anything that could read
+        // the changed characteristics or the megamorph counter (a static or triggered ability, a keyword, a replacement)
+        if (dfuOtherAbilities(host, game)) {
+            return "other";
+        }
+        // review round 3 (S1 1): nor any card in a graveyard, exile (as the seat sees it), the command zone or the seat's own
+        // hand with a trigger, static or replacement active in the zone it is in (Flamewake Phoenix in a graveyard)
+        return dfuActiveOffBattlefield(host, me, game, known) ? "offBattlefield" : DFU_DEAD;
+    }
+
+    /**
+     * deadFaceUp: one enumeration's checks. The seat's knowledge is read from the live game only when a turn-up candidate
+     * comes up ({@code knownOf}); {@link #finish} adds the tally to the stats and gives the decision's note, or null when no
+     * candidate was a turn-up.
+     */
+    static final class DfuTally {
+        private final java.util.function.Supplier<Set<Integer>> knownOf;
+        private final java.util.function.BooleanSupplier pendingOf;
+        private Set<Integer> known;
+        private Boolean pending;
+        int checked, dead, defaultDead;
+        long nanos;
+        final Map<String, Long> aside = new TreeMap<>();
+
+        DfuTally(java.util.function.Supplier<Set<Integer>> knownOf, java.util.function.BooleanSupplier pendingOf) {
+            this.knownOf = knownOf;
+            this.pendingOf = pendingOf;
+        }
+
+        /**
+         * {@link #deadFaceUpWhy} for {@code sa} (null when it is not a turn-up), timed and tallied; a dead one stands aside
+         * ("pending") when the live game has what the copy leaves out ({@link #dfuLivePending}).
+         */
+        String check(SpellAbility sa, Player me) {
+            if (sa == null || !sa.isTurnFaceUp()) {
+                return null;
+            }
+            final long t0 = System.nanoTime();
+            try {
+                if (known == null) {
+                    known = knownOf.get();
+                }
+                String why = deadFaceUpWhy(sa, me, known);
+                if (DFU_DEAD.equals(why)) {
+                    if (pending == null) {
+                        pending = pendingOf.getAsBoolean();
+                    }
+                    if (pending) {
+                        why = "pending";
+                    }
+                }
+                if (why != null) {
+                    checked++;
+                    if (!DFU_DEAD.equals(why)) {
+                        aside.merge(why, 1L, Long::sum);
+                    }
+                }
+                return why;
+            } finally {
+                nanos += System.nanoTime() - t0;
+            }
+        }
+
+        JsonObject finish(Stats stats, AiFixes.Mode mode) {
+            stats.deadFaceUpChecked += checked;
+            stats.deadFaceUpNanos += nanos;
+            aside.forEach((k, v) -> stats.deadFaceUpWhy.merge(k, v, Long::sum));
+            if (checked == 0) {
+                return null;
+            }
+            final JsonObject o = new JsonObject();
+            o.addProperty("checked", checked);
+            o.addProperty(mode == AiFixes.Mode.ON ? "dropped" : "flagged", dead);
+            if (defaultDead > 0) {
+                o.addProperty("forgeAnswer", defaultDead); // the default's own turn-up: dead, never dropped
+            }
+            final JsonObject a = new JsonObject();
+            aside.forEach(a::addProperty);
+            o.add("aside", a);
+            o.addProperty("ms", Math.round(nanos / 1e4) / 100.0);
+            return o;
+        }
+    }
+
+    /**
+     * deadFaceUp (review round 2): read in the live game, because the look-ahead's copies leave pending state out
+     * ({@link GameCopier#setCopyPending} is off at the live sites): an extra turn or extra phase, or any delayed trigger.
+     * All of them come from resolved abilities (public).
+     */
+    static boolean dfuLivePending(Game live) {
+        final forge.game.trigger.TriggerHandler th = live.getTriggerHandler();
+        return live.getPhaseHandler().hasExtraTurnsOrPhases() || !th.getDelayedTriggersView().isEmpty()
+                || !th.getPlayerDefinedDelayedTriggersView().isEmpty();
+    }
+
+    /** deadFaceUp: a trait of a turn-up keyword or of a combat-only keyword ({@link #DFU_KEYWORDS}) of the card itself. */
+    static boolean dfuKeywordTrait(forge.game.CardTraitBase t) {
+        final forge.game.keyword.KeywordInterface k = t.getKeyword();
+        return k != null && k.getKeyword() != null && DFU_KEYWORDS.contains(k.getKeyword());
+    }
+
+    /**
+     * deadFaceUp, condition 3: null when the seat gets priority again before the face-down permanent {@code host} could
+     * take part in a combat declaration or combat damage, else why not ("timing", or "phase" for a step this check does not
+     * classify: untap, cleanup).
+     */
+    static String dfuTiming(Card host, Player me, PhaseHandler ph, forge.game.phase.PhaseType phase, Player active,
+            forge.game.combat.Combat combat, List<Card> seen) {
+        if (active.equals(me)) {
+            switch (phase) {
+                case UPKEEP: case DRAW: case MAIN1: case COMBAT_BEGIN:
+                    // its own turn before attackers: only if it cannot attack this turn
+                    return dfuMayAttack(host, seen, me.getGame()) ? "timing" : null;
+                case COMBAT_DECLARE_ATTACKERS: case COMBAT_DECLARE_BLOCKERS: case COMBAT_FIRST_STRIKE_DAMAGE: case COMBAT_DAMAGE:
+                case COMBAT_END: case MAIN2:
+                    return null; // attackers are declared and it is not attacking
+                case END_OF_TURN:
+                    // review round 3 (S1 2): always: cleanup (until-end-of-turn effects ending, damage wearing off) comes
+                    // before the seat's next priority and may change the body's survival; and if the next turn is the
+                    // seat's own, its untap step does too (review round 2, S1 1)
+                    return "cleanup";
+                default:
+                    return "phase";
+            }
+        }
+        switch (phase) {
+            case UPKEEP: case DRAW: case MAIN1: case COMBAT_BEGIN:
+                return null; // it gets priority again after attackers are declared, before blockers
+            case COMBAT_DECLARE_ATTACKERS:
+                // review round 2 (S1 5): the next priority comes after blockers, and tapped does not prove it cannot block
+                return "timing";
+            case COMBAT_DECLARE_BLOCKERS: case COMBAT_FIRST_STRIKE_DAMAGE: case COMBAT_DAMAGE:
+            case COMBAT_END: case MAIN2:
+                return null; // blockers are declared and it is not blocking
+            case END_OF_TURN:
+                // review round 2 (S1 1): another player's end step: the seat's untap step may come before its next priority,
+                // so waiting spends next turn's mana instead of mana about to untap
+                return "untap";
+            default:
+                return "phase";
+        }
+    }
+
+    /**
+     * deadFaceUp: the face-down permanent may still attack this turn: it is untapped, and it is not summoning sick or some
+     * battlefield or command-zone ability the seat sees names haste (the face-up creature might get it).
+     */
+    static boolean dfuMayAttack(Card host, List<Card> seen, Game game) {
+        if (host.isTapped()) {
+            return false;
+        }
+        if (!host.hasSickness()) {
+            return true;
+        }
+        for (Card c : seen) {
+            final forge.game.zone.Zone z = game.getZoneOf(c);
+            final ZoneType zt = z == null ? null : z.getZoneType();
+            if (zt != ZoneType.Battlefield && zt != ZoneType.Command) {
+                continue;
+            }
+            final List<forge.game.CardTraitBase> traits = new ArrayList<>();
+            traits.addAll(c.getStaticAbilities());
+            traits.addAll(c.getTriggers());
+            traits.addAll(c.getSpellAbilities());
+            for (forge.game.CardTraitBase t : traits) {
+                if (paramsMatch(t.getMapParams(), t, new HashSet<>(), (k, v) -> false, LookaheadSearch::hasteText)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * deadFaceUp, condition 4: some card the seat sees (other than the one turning up) may react to a permanent turning face
+     * up or reads face-down status: a TurnFaceUp trigger or replacement that works where its card is and does not watch
+     * only its own card, a delayed TurnFaceUp trigger, or a battlefield or command-zone static, trigger, replacement or
+     * ability (with the SVars it names) whose text names face-down or face-up status, morph, manifest, cloak or disguise.
+     * A face-up card's own morph keyword (its turn-up, its face-down cast, megamorph's counter) watches only itself.
+     */
+    static boolean dfuWatched(List<Card> seen, Game game) {
+        for (Card c : seen) {
+            final forge.game.zone.Zone z = game.getZoneOf(c);
+            final ZoneType zt = z == null ? null : z.getZoneType();
+            for (Trigger t : c.getTriggers()) {
+                if (t.getMode() == TriggerType.TurnFaceUp && t.zonesCheck(z) && !selfOnly(t.getParam("ValidCard"))) {
+                    return true;
+                }
+            }
+            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                if (re.getMode() == forge.game.replacement.ReplacementType.TurnFaceUp && re.zonesCheck(z)
+                        && !selfOnly(re.getParam("ValidCard"))) {
+                    return true;
+                }
+            }
+            if (zt != ZoneType.Battlefield && zt != ZoneType.Command) {
+                continue;
+            }
+            final List<forge.game.CardTraitBase> traits = new ArrayList<>();
+            traits.addAll(c.getStaticAbilities());
+            for (Trigger t : c.getTriggers()) {
+                if (!(t.getMode() == TriggerType.TurnFaceUp && selfOnly(t.getParam("ValidCard")))) {
+                    traits.add(t);
+                }
+            }
+            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                if (!(re.getMode() == forge.game.replacement.ReplacementType.TurnFaceUp && selfOnly(re.getParam("ValidCard")))) {
+                    traits.add(re);
+                }
+            }
+            for (SpellAbility a : c.getSpellAbilities()) {
+                if (!a.isTurnFaceUp() && !a.isCastFaceDown()) {
+                    traits.add(a);
+                }
+            }
+            for (forge.game.CardTraitBase t : traits) {
+                if (paramsMatch(t.getMapParams(), t, new HashSet<>(), LookaheadSearch::faceKey, LookaheadSearch::faceText)) {
+                    return true;
+                }
+            }
+        }
+        final forge.game.trigger.TriggerHandler th = game.getTriggerHandler();
+        for (Trigger t : th.getDelayedTriggersView()) {
+            if (t.getMode() == TriggerType.TurnFaceUp) {
+                return true;
+            }
+        }
+        for (Trigger t : th.getPlayerDefinedDelayedTriggersView().values()) {
+            if (t.getMode() == TriggerType.TurnFaceUp) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** deadFaceUp (review round 2): the card types a source-independent target filter may name (anything else stands aside). */
+    static final Set<String> DFU_TARGET_TYPES = new HashSet<>(Arrays.asList("Card", "Permanent", "Creature", "Artifact",
+            "Enchantment", "Land", "Planeswalker", "Battle", "Instant", "Sorcery"));
+
+    /**
+     * deadFaceUp, condition 1 (review round 2, S1 2): the trigger's possible targets with every source-dependent
+     * restriction ignored: each object in its target zones whose card type is one its valid-target filter names, whatever
+     * the filter's properties (power, controller, color ...), protection, hexproof, shroud, ward or "can't be the target
+     * of". Any object on the stack counts. -1 when the filter is not a list of card types ({@link #DFU_TARGET_TYPES}),
+     * e.g. it can target a player: the guard stands aside.
+     */
+    static int dfuTypeCandidates(forge.game.spellability.TargetRestrictions tr, Game game) {
+        final String[] valid = tr.getValidTgts();
+        if (valid == null || valid.length == 0 || tr.canTgtPlayer()) {
+            return -1;
+        }
+        final Set<String> types = new HashSet<>();
+        for (String v : valid) {
+            String t = v == null ? "" : v.trim();
+            final int dot = t.indexOf('.');
+            if (dot >= 0) {
+                t = t.substring(0, dot);
+            }
+            if (!DFU_TARGET_TYPES.contains(t)) {
+                return -1;
+            }
+            types.add(t);
+        }
+        int n = 0;
+        for (ZoneType z : tr.getZone()) {
+            if (z == ZoneType.Stack) {
+                n += game.getStack().size();
+                continue;
+            }
+            for (Card c : game.getCardsIn(z)) {
+                if (dfuTypeMatch(c, types)) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    static boolean dfuTypeMatch(Card c, Set<String> types) {
+        if (types.contains("Card") || types.contains("Permanent")) {
+            return true; // any card (a permanent card is any card but an instant or sorcery: count them all)
+        }
+        final forge.card.CardTypeView t = c.getType();
+        return types.contains("Creature") && t.isCreature() || types.contains("Artifact") && t.isArtifact()
+                || types.contains("Enchantment") && t.isEnchantment() || types.contains("Land") && t.isLand()
+                || types.contains("Planeswalker") && t.isPlaneswalker() || types.contains("Battle") && t.isBattle()
+                || types.contains("Instant") && t.isInstant() || types.contains("Sorcery") && t.isSorcery();
+    }
+
+    /**
+     * deadFaceUp (review round 2, S1 3 and 4): some other battlefield or command-zone object, on either side, could read
+     * the face-up card's changed characteristics or its megamorph counter: it has a static or triggered ability, a keyword,
+     * or a replacement effect other than one for its own entering the battlefield (a shockland's or a tapped land's, which
+     * cannot apply to a card already there); or any delayed trigger is pending. Mana and other activated abilities do not
+     * count. A face-down object is read as its face-down state (public). This replaces any finer reading of other cards.
+     */
+    static boolean dfuOtherAbilities(Card host, Game game) {
+        for (ZoneType zt : new ZoneType[] {ZoneType.Battlefield, ZoneType.Command}) {
+            for (Card c : game.getCardsIn(zt)) {
+                if (c == host || c.getId() == host.getId()) {
+                    continue;
+                }
+                if (!c.getStaticAbilities().isEmpty() || !c.getTriggers().isEmpty() || !c.getKeywords().isEmpty()) {
+                    return true;
+                }
+                for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                    if (!dfuOwnEntry(re)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        final forge.game.trigger.TriggerHandler th = game.getTriggerHandler();
+        return !th.getDelayedTriggersView().isEmpty() || !th.getPlayerDefinedDelayedTriggersView().isEmpty();
+    }
+
+    /**
+     * deadFaceUp (review round 3, S1 1): some card other than {@code host} in a graveyard, in exile (only a card the seat may
+     * see: {@code known}, or {@link #pumpKnows} when null), in the command zone, or in the seat's own hand, has a trigger,
+     * a static ability or a replacement effect that is active in the zone it is in, by Forge's own checks
+     * ({@code TriggerZones} / {@code ActiveZones}: {@link forge.game.TriggerReplacementBase#zonesCheck}, which counts one
+     * without a zone list as active everywhere; {@code EffectZone}: {@link forge.game.staticability.StaticAbility#zonesCheck},
+     * which counts a characteristic-defining one as active everywhere). An opponent's hand and the libraries are not read.
+     * Review round 3b: a replacement for the card's own entering the battlefield ({@link #dfuOwnEntry}) is exempt, as on
+     * the battlefield: it changes only how that card enters, and off the battlefield the card can enter before the seat's
+     * next priority only through a trigger (which stands aside) or a spell or ability on the stack (the seat gets priority
+     * first, and a non-empty stack stands aside).
+     */
+    static boolean dfuActiveOffBattlefield(Card host, Player me, Game game, Set<Integer> known) {
+        for (Card c : game.getCardsInGame()) {
+            if (c == host || c.getId() == host.getId()) {
+                continue;
+            }
+            final forge.game.zone.Zone z = game.getZoneOf(c);
+            if (z == null) {
+                continue;
+            }
+            final boolean read;
+            switch (z.getZoneType()) {
+                case Graveyard: case Command:
+                    read = true;
+                    break;
+                case Exile:
+                    read = known == null ? pumpKnows(me, c) : known.contains(c.getId());
+                    break;
+                case Hand:
+                    read = me.equals(z.getPlayer());
+                    break;
+                default:
+                    read = false;
+            }
+            if (!read) {
+                continue;
+            }
+            for (Trigger t : c.getTriggers()) {
+                if (t.zonesCheck(z)) {
+                    return true;
+                }
+            }
+            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                // review round 3b: a replacement for the card's own entering the battlefield is exempt here too
+                if (re.zonesCheck(z) && !dfuOwnEntry(re)) {
+                    return true;
+                }
+            }
+            for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {
+                if (st.zonesCheck()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * deadFaceUp (review round 3b): the only parameters an exempt own-entry replacement may have. Any other parameter (a
+     * condition such as {@code CheckSVar}, {@code Origin}, {@code ValidCause}, {@code Optional}, {@code Layer},
+     * {@code ActiveZones}, ...) is not classified, so the replacement is not exempt.
+     */
+    static final Set<String> DFU_OWN_ENTRY_PARAMS = new HashSet<>(Arrays.asList(
+            "Event", "ValidCard", "Destination", "ReplaceWith", "ReplacementResult", "Description", "Secondary"));
+
+    /**
+     * deadFaceUp: a replacement for its own card entering the battlefield only: event Moved, {@code ValidCard$ Card.Self},
+     * {@code Destination$ Battlefield}, and since review round 3b no parameter outside {@link #DFU_OWN_ENTRY_PARAMS}. That
+     * includes the keyword-generated ones ({@code etbCounter}: loyalty, +1/+1 counters, ...) when they carry no condition.
+     */
+    static boolean dfuOwnEntry(forge.game.replacement.ReplacementEffect re) {
+        if (re.getMode() != forge.game.replacement.ReplacementType.Moved || !"Card.Self".equals(re.getParam("ValidCard"))
+                || !"Battlefield".equals(re.getParam("Destination"))) {
+            return false;
+        }
+        for (String k : re.getMapParams().keySet()) {
+            if (!DFU_OWN_ENTRY_PARAMS.contains(k)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** deadFaceUp: words that name face-down or face-up status, or a way to be face down. */
+    static final String[] DFU_FACE_WORDS = {"facedown", "faceup", "face down", "face up", "morph", "manifest", "cloak",
+            "disguise", "turnface"};
+
+    static boolean faceText(String v) {
+        final String l = v.toLowerCase(java.util.Locale.ROOT);
+        for (String w : DFU_FACE_WORDS) {
+            if (l.contains(w)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean faceKey(String k, String v) {
+        return faceText(k);
     }
 
     /**

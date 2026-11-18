@@ -128,6 +128,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String deadAltCost = "off";
         /** temp-pump-wrong-turn-1117: the look-ahead's deadPump guard (off|shadow|on; written to JSON only when not off). */
         public String deadPump = "off";
+        /** turn-face-up-timing-1118: the look-ahead's deadFaceUp guard (off|shadow|on; written to JSON only when not off). */
+        public String deadFaceUp = "off";
         /** block-vs-open-pump-1118: the block search's lethalBlock guard (off|shadow|on; written to JSON only when not off). */
         public String lethalBlock = "off";
         public boolean stack = false;
@@ -453,7 +455,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
-                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "lethalBlock", "departMedian", "stack", "server", "readTimeoutMs",
+                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "deadFaceUp", "lethalBlock", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
@@ -519,6 +521,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("crewNoop")) c.crewNoop = o.get("crewNoop").getAsString();
             if (o.has("deadAltCost")) c.deadAltCost = o.get("deadAltCost").getAsString();
             if (o.has("deadPump")) c.deadPump = o.get("deadPump").getAsString();
+            if (o.has("deadFaceUp")) c.deadFaceUp = o.get("deadFaceUp").getAsString();
             if (o.has("lethalBlock")) c.lethalBlock = o.get("lethalBlock").getAsString();
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
@@ -763,6 +766,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             AiFixes.Mode.parse(crewNoop);
             AiFixes.Mode.parse(deadAltCost);
             AiFixes.Mode.parse(deadPump);
+            AiFixes.Mode.parse(deadFaceUp);
             if (!"off".equals(lethalBlock) && !"shadow".equals(lethalBlock) && !"on".equals(lethalBlock)) {
                 // block-vs-open-pump-1118: exactly off|shadow|on, as the host validator takes it (no aliases)
                 throw new IllegalArgumentException("lethalBlock: expected off|shadow|on, got '" + lethalBlock + "'");
@@ -791,6 +795,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (!"off".equals(deadPump)) {
                 o.addProperty("deadPump", deadPump);
+            }
+            if (!"off".equals(deadFaceUp)) {
+                o.addProperty("deadFaceUp", deadFaceUp);
             }
             if (!"off".equals(lethalBlock)) {
                 o.addProperty("lethalBlock", lethalBlock);
@@ -1271,6 +1278,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.crewNoop = AiFixes.Mode.parse(cfg.crewNoop);
         lc.deadAltCost = AiFixes.Mode.parse(cfg.deadAltCost);
         lc.deadPump = AiFixes.Mode.parse(cfg.deadPump);
+        lc.deadFaceUp = AiFixes.Mode.parse(cfg.deadFaceUp);
         lc.lethalBlock = AiFixes.Mode.parse(cfg.lethalBlock);
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
