@@ -1,6 +1,7 @@
 package forge.ai.simulation;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.testng.AssertJUnit;
@@ -14,6 +15,7 @@ import forge.game.Game;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.combat.Combat;
+import forge.game.combat.CombatUtil;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
@@ -280,15 +282,24 @@ public class LookaheadDeadPumpTest extends SimulationTest {
         Player a = game.getPlayers().get(0);
         List<SpellAbility> giv = given(a);
         int at = prowlerAt(giv);
+        LookaheadSearch off = search(AiFixes.Mode.OFF);
         LookaheadSearch s = search(AiFixes.Mode.SHADOW);
         try {
-            AssertJUnit.assertTrue("SHADOW decides as OFF", searched(s.decideGiven(game, a, giv, 4), at));
+            // review: SHADOW's decision is OFF's (the same searched set, values and choice), on the same position
+            LookaheadSearch.GivenResult o = off.decideGiven(game, a, giv, 4);
+            LookaheadSearch.GivenResult r = s.decideGiven(game, a, giv, 4);
+            AssertJUnit.assertTrue("SHADOW searches the activation", searched(r, at));
+            AssertJUnit.assertEquals("SHADOW chooses what OFF chooses", o.chosen, r.chosen);
+            AssertJUnit.assertEquals(o.outcome, r.outcome);
+            AssertJUnit.assertTrue(Arrays.equals(o.givenIndex, r.givenIndex));
+            AssertJUnit.assertTrue(Arrays.equals(o.ev, r.ev));
             AssertJUnit.assertEquals(1, s.getStats().deadPumpCands);
             AssertJUnit.assertEquals(1, s.getStats().deadPumpDecisions);
             AssertJUnit.assertEquals(0, s.getStats().deadPumpDropped);
             AssertJUnit.assertEquals(1, s.deadPumpKeys.size());
             AssertJUnit.assertEquals("shadow", s.getStats().toJson().getAsJsonObject("deadPump").get("mode").getAsString());
         } finally {
+            off.shutdown();
             s.shutdown();
         }
     }
@@ -394,5 +405,138 @@ public class LookaheadDeadPumpTest extends SimulationTest {
         Player a = game.getPlayers().get(0);
         addCardToZone("Fiery Temper", a, ZoneType.Hand);
         AssertJUnit.assertFalse("a discard outlet casts a madness card", LookaheadSearch.deadPump(prowler(a), a));
+    }
+
+    // ---------------------------------------------------------------- review of #244 (Astra, 2026-11-17): live-path regressions
+
+    /**
+     * The review's board: a's first main phase; a has an Island in play; each player holds an Island and a Mountain and has
+     * 20 Islands in the library. Callers add the Prowler and the card under test.
+     */
+    private Game reviewBoard() {
+        Game game = initAndCreateGame();
+        Player a = game.getPlayers().get(0);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
+        for (Player p : game.getPlayers()) {
+            for (int i = 0; i < 20; i++) {
+                addCardToZone("Island", p, ZoneType.Library);
+            }
+            addCardToZone("Island", p, ZoneType.Hand);
+            addCardToZone("Mountain", p, ZoneType.Hand);
+        }
+        addCard("Island", a);
+        return game;
+    }
+
+    /**
+     * The policy seat's live path (decideGiven, guardGiven) on [pass, {@code sa}] in {@code mode}: true when the activation
+     * was dropped (ON's counter and the searched set agree).
+     */
+    private static boolean droppedLive(Game g, Player a, SpellAbility sa, AiFixes.Mode mode) {
+        final List<SpellAbility> giv = new ArrayList<>(Arrays.asList(null, sa));
+        final LookaheadSearch s = search(mode);
+        try {
+            final String before = LookaheadSearch.fingerprint(g);
+            final LookaheadSearch.GivenResult r = s.decideGiven(g, a, giv, 4);
+            AssertJUnit.assertEquals(before, LookaheadSearch.fingerprint(g));
+            final boolean dropped = s.getStats().deadPumpDropped > 0;
+            AssertJUnit.assertEquals("the counter and the searched set agree", dropped, !searched(r, 1));
+            return dropped;
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    /** Review S1 1: an opponent's unrevealed hand card never changes the decision; the seat's own hand and revealed cards do. */
+    @Test
+    public void anOpponentsHiddenHandCardIsNotRead() {
+        Game g = reviewBoard();
+        Player a = g.getPlayers().get(0);
+        Player b = g.getPlayers().get(1);
+        addCard("Oona's Prowler", b).setSickness(false);
+        AssertJUnit.assertTrue("the plain board is dead", droppedLive(g, a, prowler(a), AiFixes.Mode.ON));
+        final Card island = b.getCardsIn(ZoneType.Hand).get(0);
+        b.getZone(ZoneType.Hand).remove(island);
+        final Card tactics = addCardToZone("Guerrilla Tactics", b, ZoneType.Hand);
+        AssertJUnit.assertTrue("the same public board and hand sizes: a hidden discard trigger is not read",
+                droppedLive(g, a, prowler(a), AiFixes.Mode.ON));
+        tactics.addMayLookAt(g.getNextTimestamp(), Arrays.asList(a));
+        AssertJUnit.assertTrue(tactics.getView().canBeShownTo(a.getView()));
+        AssertJUnit.assertFalse("revealed to the seat, the card's discard trigger is read", droppedLive(g, a, prowler(a), AiFixes.Mode.ON));
+
+        Game own = reviewBoard();
+        Player a2 = own.getPlayers().get(0);
+        addCard("Oona's Prowler", own.getPlayers().get(1)).setSickness(false);
+        addCardToZone("Guerrilla Tactics", a2, ZoneType.Hand);
+        AssertJUnit.assertFalse("a discard trigger in the seat's own hand is read", droppedLive(own, a2, prowler(a2), AiFixes.Mode.ON));
+    }
+
+    /** Review S1 2: under Ensnaring Bridge, -2/-0 can make the seat's own Prowler able to attack this turn. */
+    @Test
+    public void aPowerBasedAttackRestrictionKeepsIt() {
+        Game g = reviewBoard();
+        Player a = g.getPlayers().get(0);
+        Player b = g.getPlayers().get(1);
+        final Card c = addCard("Oona's Prowler", a);
+        c.setSickness(false);
+        addCard("Ensnaring Bridge", b);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertFalse("the fixture: power 3 > 2 cards in b's hand, so the Prowler cannot attack now", CombatUtil.canAttack(c));
+        AssertJUnit.assertFalse("OFF searches it", droppedLive(g, a, prowler(a), AiFixes.Mode.OFF));
+        AssertJUnit.assertFalse("ON keeps it: the changed power decides the attack", droppedLive(g, a, prowler(a), AiFixes.Mode.ON));
+    }
+
+    /** Review S1 3: under Zilortha, -2/-0 kills b's Prowler with one damage marked, outside combat. */
+    @Test
+    public void lethalDamageByPowerKeepsIt() {
+        Game g = reviewBoard();
+        Player a = g.getPlayers().get(0);
+        Player b = g.getPlayers().get(1);
+        final Card c = addCard("Oona's Prowler", b);
+        c.setSickness(false);
+        addCard("Zilortha, Strength Incarnate", b);
+        g.getAction().checkStateEffects(true);
+        c.setDamage(1);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertTrue("the fixture: the Prowler survives at power 3", c.isInPlay());
+        AssertJUnit.assertFalse("ON keeps it", droppedLive(g, a, prowler(a), AiFixes.Mode.ON));
+
+        Game plain = reviewBoard();
+        Player a2 = plain.getPlayers().get(0);
+        addCard("Oona's Prowler", plain.getPlayers().get(1)).setSickness(false); // undamaged: a 3/1 with one damage dies
+        plain.getAction().checkStateEffects(true);
+        AssertJUnit.assertTrue("without Zilortha the board is dead", droppedLive(plain, a2, prowler(a2), AiFixes.Mode.ON));
+    }
+
+    /** Review S1 4: the seat can animate Mutavault, attack, and be blocked by the Prowler; -2/-0 changes that combat. */
+    @Test
+    public void anAnimatableAttackerKeepsTheBlockerLive() {
+        Game g = reviewBoard();
+        Player a = g.getPlayers().get(0);
+        Player b = g.getPlayers().get(1);
+        addCard("Oona's Prowler", b).setSickness(false);
+        addCard("Mutavault", a).setSickness(false);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertTrue("the fixture: a controls no creature now", a.getCreaturesInPlay().isEmpty());
+        AssertJUnit.assertFalse("ON keeps it", droppedLive(g, a, prowler(a), AiFixes.Mode.ON));
+    }
+
+    /** A blocker already declared stays live until combat damage (kills the mutation that drops isBlocking). */
+    @Test
+    public void aDeclaredBlockerStays() {
+        Game g = reviewBoard();
+        Player a = g.getPlayers().get(0);
+        Player b = g.getPlayers().get(1);
+        final Card bears = addCard("Grizzly Bears", a);
+        bears.setSickness(false);
+        final Card c = addCard("Oona's Prowler", b);
+        c.setSickness(false);
+        g.getPhaseHandler().devModeSet(PhaseType.COMBAT_DECLARE_BLOCKERS, a);
+        final Combat combat = new Combat(a);
+        combat.addAttacker(bears, b);
+        combat.addBlocker(bears, c);
+        g.getPhaseHandler().setCombat(combat);
+        AssertJUnit.assertFalse("-2/-0 on a blocker before damage changes what the attacker takes", LookaheadSearch.deadPump(prowler(a), a));
+        AssertJUnit.assertFalse("ON keeps it on the live path", droppedLive(g, a, prowler(a), AiFixes.Mode.ON));
     }
 }
