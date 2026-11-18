@@ -45,7 +45,9 @@ public class OwnerLinesTest extends forge.ai.AITest {
         solverCfg.addProperty("act", "false");
         solverCfg.addProperty("defense", "false");
         final JsonArray ps = root.getAsJsonArray("positions");
-        final int[][] budgets = "true".equals(System.getProperty("owner.quick")) ? new int[][] {{12000, 48000}}
+        // value-run-1117 (opt-in -Downer.noSetup=true): PROPOSE only (the label teacher's verdict); no goldfish SETUP passes
+        final int[][] budgets = "true".equals(System.getProperty("owner.noSetup")) ? new int[0][]
+                : "true".equals(System.getProperty("owner.quick")) ? new int[][] {{12000, 48000}}
                 : new int[][] {{4000, 12000}, {12000, 48000}, {40000, 160000}};
         for (JsonElement e : ps) {
             final JsonObject o = e.getAsJsonObject();
