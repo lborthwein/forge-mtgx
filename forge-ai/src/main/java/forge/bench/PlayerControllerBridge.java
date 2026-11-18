@@ -497,6 +497,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
 
     /** As above; {@code menuObjects} reach an in-process answerer only (see BenchSession.LocalAnswerer). */
     private JsonObject ask(final String method, final String kind, final JsonObject body, final Object menuObjects) {
+        // nestfix-1118: no real-game decision inside a search over this game: neither a seat's DECIDE nor the plan line's
+        // Forge answer below (an Emerge / Offering pick there marks a real permanent usedToPay)
+        forge.ai.simulation.SearchGuard.check(getGame(), "bridge:" + method);
         if (planHook != null && !"priority".equals(kind) && !"attackers".equals(kind)
                 && !"blockers".equals(kind) && !"mulligan".equals(kind) && !"startingPlayer".equals(kind)
                 && planHook.forgeChoices()) {
@@ -514,8 +517,6 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             }
             return null;
         }
-        // nestfix-1118: a seat is asked (a DECIDE on the open decision) only outside a search over this game
-        forge.ai.simulation.SearchGuard.check(getGame(), "bridge:" + method);
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
         final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), method, kind, body, menuObjects)
                 : session.getChannel().ask(kind, body);
