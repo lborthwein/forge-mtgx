@@ -8906,7 +8906,7 @@ public final class LookaheadSearch {
         final Map<Integer, Integer> sources = new TreeMap<>();
         final int made = lbMana(opp, sources);
         if (made == -2) {
-            return LethalCheck.aside("a mana ability whose cost takes another permanent");
+            return LethalCheck.aside("a mana ability whose cost takes another permanent or a shared pool");
         }
         if (made < 0) {
             return LethalCheck.aside("a mana ability whose amount is not a number");
@@ -9044,8 +9044,9 @@ public final class LookaheadSearch {
      * "Combo R G" choice (3 mana for a land that makes 1). Each source's mana goes into {@code bySource} (card id -> mana)
      * when it makes any. -1 when a playable mana ability's Amount is not a number ({@link #lbLiteral}): its value may read
      * what the seat cannot see, so the bound does not use it. -2 when a playable mana ability has a cost part other than
-     * mana, its own tap, life, or a cost paid from the source itself (re-review S1: Springleaf Drum taps another
-     * creature, which a pump's cost may also tap; the per-source split cannot see that, so the guard stands aside).
+     * mana, its own tap or its own sacrifice (re-review S1: Springleaf Drum taps another creature, which a pump's cost
+     * may also tap; re-review 2 S1: Workhorse removes its own counter, which Power Conduit's cost may also remove; life
+     * likewise): the per-source split cannot see a shared permanent or pool, so the guard stands aside.
      */
     static int lbMana(Player p, Map<Integer, Integer> bySource) {
         int mana = p.getManaPool().totalMana();
@@ -9067,8 +9068,8 @@ public final class LookaheadSearch {
                         // re-review S1: a cost that takes another permanent (tap an untapped creature, sacrifice one) is
                         // not this source's alone, and a pump's cost may take the same permanent; not bounded jointly
                         if (!(part instanceof forge.game.cost.CostPartMana || part instanceof forge.game.cost.CostTap
-                                || part instanceof forge.game.cost.CostPayLife || part.payCostFromSource())) {
-                            return -2;
+                                || part instanceof forge.game.cost.CostSacrifice && part.payCostFromSource())) {
+                            return -2; // re-review 2 S1: life and the source's counters are pools a pump may share too
                         }
                     }
                 }
@@ -9245,6 +9246,13 @@ public final class LookaheadSearch {
      * when that ability taps or takes its host.
      */
     static String lbSharedCosts(List<LbAbility> counted, Map<Integer, Integer> sources) {
+        int pools = 0;
+        for (LbAbility t : counted) {
+            if (t.pool && ++pools > 1) {
+                // re-review 2: each was capped by the whole pool (life, energy, creatures to sacrifice) on its own
+                return "two abilities whose costs draw on the same pool";
+            }
+        }
         for (LbAbility t : counted) {
             if (t.taken == null) {
                 continue;
@@ -9419,6 +9427,8 @@ public final class LookaheadSearch {
         boolean hostTaken;
         /** The other permanents its cost may take ({@link #lbCostCards}), or null. */
         List<Card> taken;
+        /** Its cost draws on a pool counted for it alone (life, energy, other permanents): two such abilities stand aside. */
+        boolean pool;
         final List<LbPart> parts = new ArrayList<>();
         /** Per attacker: the ability may give it double strike / trample / deathtouch. */
         boolean[] ds, trample, deathtouch;
@@ -9638,6 +9648,12 @@ public final class LookaheadSearch {
                     if (amt <= 0) {
                         continue;
                     }
+                    // re-review 2 S1: counters are a pool a mana ability, another pump or an attacker's own +1/+1
+                    // counters may share; the bound does not split them
+                    if (part instanceof forge.game.cost.CostRemoveCounter
+                            || part instanceof forge.game.cost.CostRemoveAnyCounter) {
+                        return lbUnsure("a cost that removes counters");
+                    }
                     if (!lbPublicFilter(part.getType())) {
                         return lbUnsure("a cost filter that compares against a named amount");
                     }
@@ -9646,10 +9662,16 @@ public final class LookaheadSearch {
                         return lbUnsure("a cost it cannot count (" + part.getClass().getSimpleName() + ")");
                     }
                     cap = Math.min(cap, Math.max(0, m) / amt);
+                    ab.pool = true; // life, energy, permanents...: counted against this ability alone
                     final List<Card> cards = lbCostCards(part, sa, opp);
                     if (cards != null) {
                         takingParts++;
                         taken = new ArrayList<>(cards);
+                        if (!(part instanceof forge.game.cost.CostTapType)) {
+                            // an attacker sacrificed, returned or exiled leaves combat and deals nothing: never fodder
+                            // here (its damage stays counted), so the list caps the activations below
+                            taken.removeAll(atk);
+                        }
                         takenPer = amt;
                     }
                 }
@@ -9685,8 +9707,8 @@ public final class LookaheadSearch {
                 }
                 Arrays.sort(takenMana); // the cheapest choices first
                 cap = Math.min(cap, takenMana.length / Math.max(1, takenPer));
-                if (takingParts > 1 && takenMana.length > 0 && takenMana[takenMana.length - 1] > 0) {
-                    return lbUnsure("several costs that may take mana sources");
+                if (takingParts > 1) {
+                    return lbUnsure("several costs that may take the same permanents"); // each part was capped alone
                 }
                 ab.taken = taken;
             }
