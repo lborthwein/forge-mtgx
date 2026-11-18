@@ -139,7 +139,10 @@ public final class RlLiveSeat {
                 "lateEscalate",
                 // sdcc-planwall-1117 (absent = 0 = off): the offense planner passes end by this many ms into the decision
                 // (ForcedWinSolver.Config.planWallMs)
-                "planWallMs"));
+                "planWallMs",
+                // sdcc-late-escalate-1117 (absent = 0 = off): the late pass's own ms past the decision's wall
+                // (ForcedWinSolver.Config.lateEscalateMs)
+                "lateEscalateMs"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless

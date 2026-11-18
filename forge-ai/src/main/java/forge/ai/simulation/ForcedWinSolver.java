@@ -400,6 +400,13 @@ public final class ForcedWinSolver {
          */
         public int planWallMs = 0;
         /**
+         * sdcc-late-escalate-1117 (0 = off, the default: the late pass gets only what the decision left): with
+         * {@link #lateEscalate}, the late pass gets this many ms of its own past the decision's wall (and its lines the
+         * verification reserve after it). The base stages (planner at its cap, engine, verification) run exactly as without
+         * the key, so a proof they find is never lost; the extra time is spent only on decisions where they all failed.
+         */
+        public int lateEscalateMs = 0;
+        /**
          * sdcc-verify-1117 (0 = off, the default: the top {@link #top} distinct lines, as before): verify up to this many
          * distinct lines in rank order, stopping at the first proof or at the verification deadline, so a larger planner
          * pass whose first-ranked lines fail cannot hide a proven line further down.
@@ -1054,6 +1061,7 @@ public final class ForcedWinSolver {
             c.planEscalate = intOr(get.apply("planEscalate"), c.planEscalate); // sdcc-escalate-1117
             c.lateEscalate = intOr(get.apply("lateEscalate"), c.lateEscalate); // sdcc-late-escalate-1117
             c.planWallMs = intOr(get.apply("planWallMs"), c.planWallMs); // sdcc-planwall-1117
+            c.lateEscalateMs = intOr(get.apply("lateEscalateMs"), c.lateEscalateMs); // sdcc-late-escalate-1117
             c.verifyMax = intOr(get.apply("verifyMax"), c.verifyMax); // sdcc-verify-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
@@ -5000,6 +5008,26 @@ public final class ForcedWinSolver {
             return null;
         }
         final long now = forge.game.WorkClock.nanoTime();
+        final long hard0 = hardDeadline, wall0 = decisionWall;
+        if (cfg.lateEscalateMs > 0) {
+            // its own time past the decision's wall: the late pass, then its lines' verification reserve
+            final long ext = (cfg.lateEscalateMs + cfg.evalReserveMs) * 1_000_000L;
+            final long base = Math.max(now, decisionWall != 0L ? decisionWall : decisionStart + budgetMs() * 1_000_000L);
+            if (hardDeadline != 0L) {
+                hardDeadline = Math.max(hardDeadline, now) + ext;
+            }
+            decisionWall = base + ext;
+        }
+        try {
+            return lateEscalate0(live, pos, lim, before, index, now);
+        } finally {
+            hardDeadline = hard0;
+            decisionWall = wall0;
+        }
+    }
+
+    private Line lateEscalate0(final Game live, final Position pos, final ForcedWinPlanner.Limits lim, final ForcedWinPlanner.Result before,
+            final int index, final long now) {
         final long wall = decisionWall != 0L ? decisionWall : decisionStart + budgetMs() * 1_000_000L;
         final long left = (wall - now) / 1_000_000L - cfg.evalReserveMs;
         if (left <= 200L) {
