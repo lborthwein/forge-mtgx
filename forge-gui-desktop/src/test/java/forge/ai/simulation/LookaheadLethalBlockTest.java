@@ -2441,10 +2441,10 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         final Card wall = creature("Wall of Stone", ai);
         ready(g);
         attack(g, opp, ai, basher);
-        AssertJUnit.assertTrue(LookaheadSearch.lbProtected(venturer, basher));
         final LookaheadSearch.LethalCheck lc = check(g, plan(venturer, basher), plan(wall, basher));
         logWitness("lavabrink, chosen even", lc);
         assertNoRescore("lavabrink", lc, 2);
+        AssertJUnit.assertTrue(LookaheadSearch.lbProtected(venturer, basher));
         AssertJUnit.assertNull(witnessOf(lc), lc.aside);
         AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[0]);
         AssertJUnit.assertTrue(witnessOf(lc), lc.witnessVoid.containsKey("a public characteristic differs"));
