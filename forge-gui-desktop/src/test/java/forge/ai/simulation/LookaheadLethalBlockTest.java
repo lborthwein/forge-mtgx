@@ -2145,7 +2145,8 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         assertNoRescore("salvage slasher", lc, 2);
         AssertJUnit.assertNull(witnessOf(lc), lc.aside);
         AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[1]);
-        AssertJUnit.assertTrue(witnessOf(lc) + " " + lc.witnessVoid, lc.witnessVoid.containsKey("a placeholder moved"));
+        // round 9: any library change voids the run (the mill is one)
+        AssertJUnit.assertTrue(witnessOf(lc) + " " + lc.witnessVoid, lc.witnessVoid.containsKey("a library changed"));
         playLive(g, plan(), lc.lines.get(0));
         AssertJUnit.assertFalse("the line on the original board leaves ai alive: life " + ai.getLife(), ai.hasLost());
     }
@@ -2571,5 +2572,235 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
         AssertJUnit.assertEquals(1, ai.getLife());
         AssertJUnit.assertEquals(13, jace.getCurrentLoyalty());
+    }
+
+    // ------------------------------- round 9 (review/245/r8): chosen state, library changes, creature planeswalkers
+
+    /** A strict, fidelity-1 witness copy of {@code g} with static abilities recomputed, as {@code witnessRun} makes one. */
+    private static Game witnessCopy(LookaheadSearch s, Game g) {
+        final GameCopier copier = s.copierOf(g);
+        copier.setCopyFidelity(1);
+        copier.setCopyPending(true);
+        copier.setPendingStrict(true);
+        final Game copy = copier.makeCopy();
+        copy.getAction().checkStaticAbilities(false);
+        return copy;
+    }
+
+    /** {@link #check}, recording each lazily built trait of the live game {@code g} (the check must build none). */
+    @SafeVarargs
+    private static LookaheadSearch.LethalCheck checkNoLiveBuilds(Game g, List<String> builds, Map<Integer, List<Integer>>... plans) {
+        forge.game.card.LazyTraits.install(new forge.game.card.LazyTraits.Listener() {
+            @Override
+            public Object before(forge.game.card.CardState st, String kind) {
+                if (st.getCard().getGame() == g) {
+                    builds.add(st.getCard().getName() + "/" + kind);
+                }
+                return null;
+            }
+
+            @Override
+            public void after(Object token) {
+            }
+        });
+        try {
+            return check(g, plans);
+        } finally {
+            forge.game.card.LazyTraits.install(null);
+        }
+    }
+
+    /** The first difference of {@link LookaheadSearch#lbPublicKey} between {@code g} and its witness copy. */
+    private static String publicDiff(Game g) {
+        final LookaheadSearch s = new LookaheadSearch(config(AiFixes.Mode.ON));
+        try {
+            return LookaheadSearch.lbFirstDiff(LookaheadSearch.lbPublicKey(g), LookaheadSearch.lbPublicKey(witnessCopy(s, g)));
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    /**
+     * Review S1 1 (a command effect's choice, rated common): ai at 2, Grizzly Bears attacks, Wall of Stone could block;
+     * Prismatic Strands resolved choosing green (prevent all damage green sources would deal this turn). The copy's
+     * effect lost its color, the replacement prefilter (reading the copy) missed the shield, and no blocks was witnessed
+     * with no line. Now the prefilter also reads the live game, where the shield applies: the check stands aside, nothing
+     * re-scored. And the witness copy's public key differs on the effect's chosen color (the run would be void).
+     * Control: on the original board the damage is prevented and ai stays at 2.
+     */
+    @Test
+    public void r9ACommandEffectKeepsItsChoice() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(2, null);
+        final Card bear = creature("Grizzly Bears", opp);
+        final Card wall = creature("Wall of Stone", ai);
+        final Card strands = addCardToZone("Prismatic Strands", ai, ZoneType.Graveyard);
+        strands.setChosenColors(Arrays.asList("Green"));
+        final forge.game.spellability.SpellAbility sa = strands.getFirstSpellAbility();
+        sa.setActivatingPlayer(ai);
+        forge.game.ability.AbilityUtils.resolve(sa.getSubAbility());
+        ready(g);
+        attack(g, opp, ai, bear);
+        final Card effect = ai.getCardsIn(ZoneType.Command).get(0);
+        AssertJUnit.assertEquals("Green", String.join(",", effect.getChosenColors()));
+        final List<String> builds = new ArrayList<>();
+        final LookaheadSearch.LethalCheck lc = checkNoLiveBuilds(g, builds, plan(wall, bear), plan());
+        logWitness("prismatic strands, green", lc);
+        assertNoRescore("prismatic strands", lc, 2);
+        AssertJUnit.assertTrue("built on the live game: " + builds, builds.isEmpty());
+        AssertJUnit.assertNotNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertTrue(lc.aside, lc.aside.contains("damage replacement"));
+        final String diff = publicDiff(g);
+        AssertJUnit.assertTrue(diff, diff.contains("colors=Green") && diff.contains("copy["));
+        playLive(g, plan(), null);
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(2, ai.getLife());
+    }
+
+    /**
+     * Review S1 2 (a chosen mode and the trigger it grants): ai at 5 with Outpost Siege (Dragons: whenever a creature ai
+     * controls leaves the battlefield, 1 damage to any target), Llanowar Elves and Wall of Stone; Fencing Ace (double
+     * strike) wearing Rancor attacks. The copy dropped the mode and its trigger with equal public keys, and the Elves'
+     * block was witnessed with no line. Now the public key holds each public object's choices and its numbers of statics,
+     * triggers and replacements: the run is void, nothing witnessed or re-scored. Control: on the original board the
+     * Elves die to first-strike damage, the Siege kills the Ace, and ai ends at 3.
+     */
+    @Test
+    public void r9AChosenModeAndItsTriggerAreCompared() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card ace = creature("Fencing Ace", opp);
+        final Card elves = creature("Llanowar Elves", ai);
+        final Card wall = creature("Wall of Stone", ai);
+        final Card siege = addCard("Outpost Siege", ai);
+        siege.setChosenMode("Dragons");
+        addCard("Rancor", opp).attachToEntity(ace, null);
+        ready(g);
+        attack(g, opp, ai, ace);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(elves, ace), plan(wall, ace));
+        logWitness("outpost siege, dragons", lc);
+        assertNoRescore("outpost siege", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[0]);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessVoid.containsKey("a public characteristic differs"));
+        final String diff = publicDiff(g);
+        AssertJUnit.assertTrue(diff, diff.contains("mode=Dragons") && diff.contains("copy["));
+        playLive(g, plan(elves, ace), null);
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(3, ai.getLife());
+    }
+
+    /**
+     * Review S1 3 (a newly exposed library top): ai at 5; Mul Daya Channelers (its library's top revealed, +3/+3 while a
+     * creature) blocks Bolrac-Clan Basher with Firebreathing, Midnight Reaper blocks Thalia, Guardian of Thraben (first
+     * strike); ai's library is Grizzly Bears, only the top known; Wall of Stone the alternative. The Reaper died to first
+     * strike and drew the known top, the next card (a placeholder) shrank the Channelers, and one pump was witnessed.
+     * Now any library change during a run (a draw, a mill, a put, a shuffle) voids it: nothing is witnessed or
+     * re-scored. Control: the pump on the original board leaves ai at 1.
+     */
+    @Test
+    public void r9ALibraryChangeVoidsTheRun() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        for (int i = 0; i < 10; i++) {
+            addCardToZone("Grizzly Bears", ai, ZoneType.Library);
+        }
+        fillLibrary(opp, 20);
+        final Card basher = creature("Bolrac-Clan Basher", opp);
+        final Card thalia = creature("Thalia, Guardian of Thraben", opp);
+        final Card channelers = creature("Mul Daya Channelers", ai);
+        final Card reaper = creature("Midnight Reaper", ai);
+        final Card wall = creature("Wall of Stone", ai);
+        addCard("Firebreathing", opp).attachToEntity(basher, null);
+        addCard("Mountain", opp);
+        addCard("Forest", opp);
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, basher, thalia);
+        AssertJUnit.assertEquals(5, channelers.getNetToughness());
+        AssertJUnit.assertTrue(LookaheadSearch.pumpKnows(ai, ai.getCardsIn(ZoneType.Library).get(0)));
+        AssertJUnit.assertFalse(LookaheadSearch.pumpKnows(ai, ai.getCardsIn(ZoneType.Library).get(1)));
+        final LookaheadSearch.LethalCheck lc = check(g, plan(channelers, basher, reaper, thalia), plan(wall, basher, reaper, thalia));
+        logWitness("channelers and reaper, a newly exposed top", lc);
+        assertNoRescore("newly exposed top", lc, 2);
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[0]);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessVoid.containsKey("a library changed"));
+        playLive(g, plan(channelers, basher, reaper, thalia), lc.lines.get(0));
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(1, ai.getLife());
+    }
+
+    /**
+     * Review S1 4 (a creature planeswalker): round 8's Thrasta board, with Jace Beleren (loyalty 20) made a 3/3 artifact
+     * creature planeswalker by Liquimetal Coating and Karn, Silver Golem. Thrasta's assignment took the creature branch
+     * (3 to Jace, 4 to ai) and no blocks was witnessed. Now a planeswalker or battle in the order is found first, whatever
+     * its other types: the run is void, nothing witnessed or re-scored; called directly, Jace takes all 7. Control: the
+     * Dragon pumped once on the original board, ai ends at 1.
+     */
+    @Test
+    public void r9ACreaturePlaneswalkerIsStillAPlaneswalker() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(5, null);
+        final Card dragon = creature("Rakdos Pit Dragon", opp);
+        final Card thrasta = creature("Thrasta, Tempest's Roar", opp);
+        final Card air = creature("Wall of Air", ai);
+        final Card stone = creature("Wall of Stone", ai);
+        final Card jace = addCard("Jace Beleren", ai);
+        jace.setCounters(com.google.common.collect.HashMultiset.<forge.game.card.CounterType>create(
+                java.util.Collections.nCopies(20, forge.game.card.CounterEnumType.LOYALTY)));
+        for (Card host : Arrays.asList(addCard("Liquimetal Coating", ai), addCard("Karn, Silver Golem", ai))) {
+            forge.game.spellability.SpellAbility an = null;
+            for (forge.game.spellability.SpellAbility x : host.getSpellAbilities()) {
+                if (x.getApi() == forge.game.ability.ApiType.Animate) {
+                    an = x;
+                }
+            }
+            AssertJUnit.assertNotNull(host.getName(), an);
+            an.setActivatingPlayer(ai);
+            an.getTargets().add(jace);
+            forge.game.ability.AbilityUtils.resolve(an);
+            an.resetTargets();
+        }
+        addCard("Mountain", opp);
+        addCard("Forest", opp);
+        addCardToZone("Forest", opp, ZoneType.Hand);
+        ready(g);
+        attack(g, opp, ai, dragon);
+        thrasta.setTapped(true);
+        g.getCombat().addAttacker(thrasta, jace);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertTrue(jace.getType().toString(), jace.isPlaneswalker() && jace.isCreature());
+        AssertJUnit.assertEquals(20, jace.getCurrentLoyalty());
+        final List<String> builds = new ArrayList<>();
+        final LookaheadSearch.LethalCheck lc = checkNoLiveBuilds(g, builds, plan(air, dragon, stone, thrasta), plan());
+        logWitness("thrasta over a creature jace", lc);
+        assertNoRescore("creature planeswalker", lc, 2);
+        AssertJUnit.assertTrue("built on the live game: " + builds, builds.isEmpty());
+        AssertJUnit.assertNull(witnessOf(lc), lc.aside);
+        AssertJUnit.assertFalse(witnessOf(lc), lc.witnessed[1]);
+        AssertJUnit.assertTrue(witnessOf(lc), lc.witnessVoid.containsKey("trample over planeswalkers"));
+        final LookaheadSearch.WitnessAi wa = new LookaheadSearch.WitnessAi(g, opp, opp.getController().getLobbyPlayer(), null, -1,
+                Integer.MAX_VALUE);
+        final Map<Card, Integer> m = wa.assignCombatDamage(thrasta, new forge.game.card.CardCollection(jace),
+                new forge.game.card.CardCollection(), 7, ai, false);
+        AssertJUnit.assertEquals(m.toString(), 7, (int) m.get(jace));
+        AssertJUnit.assertFalse(m.toString(), m.containsKey(null));
+        AssertJUnit.assertEquals("trample over planeswalkers", wa.voided);
+        forge.game.spellability.SpellAbility pump = null;
+        for (forge.game.spellability.SpellAbility x : dragon.getSpellAbilities()) {
+            if (x.getApi() == forge.game.ability.ApiType.Pump && x.hasParam("NumAtt")) {
+                pump = x;
+            }
+        }
+        AssertJUnit.assertNotNull(pump);
+        pump.setActivatingPlayer(opp);
+        forge.game.ability.AbilityUtils.resolve(pump);
+        playLive(g, plan(), null);
+        AssertJUnit.assertFalse("the original board: life " + ai.getLife(), ai.hasLost());
+        AssertJUnit.assertEquals(1, ai.getLife());
     }
 }

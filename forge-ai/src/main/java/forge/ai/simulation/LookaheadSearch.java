@@ -8878,7 +8878,18 @@ public final class LookaheadSearch {
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
             }
-            lc = lethalBlocks(g, me, plans, known);
+            final LethalCheck bound = lethalBlocks(g, me, plans, known);
+            String liveRepl = null;
+            if (bound.aside == null && bound.lethal != null) {
+                // round 9: the replacement prefilter on the live game as well
+                synchronized (live) {
+                    final forge.game.combat.Combat lcmb = live.getPhaseHandler().getCombat();
+                    if (lcmb != null && !lcmb.getAttackersOf(liveMe).isEmpty()) {
+                        liveRepl = lbReplacement(live, liveMe, new ArrayList<>(lcmb.getAttackersOf(liveMe)), known, true);
+                    }
+                }
+            }
+            lc = liveRepl != null ? LethalCheck.aside(liveRepl) : bound;
         } finally {
             AiCache.installScope(prevCache);
             forge.util.IdScope.install(prevIds);
@@ -9134,6 +9145,7 @@ public final class LookaheadSearch {
             lbHideZone(g, p, ZoneType.Hand, known, w);
             lbHideZone(g, p, ZoneType.Library, known, w);
         }
+        w.snapLibraries(g);
         return w;
     }
 
@@ -9302,6 +9314,9 @@ public final class LookaheadSearch {
                     }
                     sb.append(" {").append(c.getId()).append(' ').append(c.getName()).append(' ').append(c.getCurrentStateName())
                             .append(" [").append(c.getType()).append("] c").append(ps.indexOf(c.getController()));
+                    if (z != ZoneType.Exile) {
+                        sb.append(lbChoiceKey(c, ps));
+                    }
                     if (z == ZoneType.Battlefield) {
                         sb.append(c.isTapped() ? " T" : " U").append(c.isFaceDown() ? " fd" : "").append(" pt").append(c.getNetPower())
                                 .append('/').append(c.getNetToughness()).append(" d").append(c.getDamage()).append('+')
@@ -9358,6 +9373,87 @@ public final class LookaheadSearch {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * lethalBlock round 9 (review S1 1-2): the choices announced for a public object (a permanent, a command-zone effect
+     * or emblem) and the counts of its abilities, for {@link #lbPublicKey}: chosen type(s), noted types, colors, marked
+     * colors, named cards, number, player, promised gift, protected player, even or odd, direction, mode, room, sectors,
+     * sprocket, chosen cards and per-player chosen cards, imprinted and remembered objects; for a command-zone object its
+     * source; and the number of its static abilities, triggers and replacement effects (static grants included). The
+     * replacement effects are counted only where reading them builds nothing ({@link #lbReplacementsReadable}); else
+     * {@code re?}, the same in every game.
+     */
+    static String lbChoiceKey(Card c, List<Player> ps) {
+        final StringBuilder sb = new StringBuilder();
+        lbKv(sb, "type", c.getChosenType());
+        lbKv(sb, "type2", c.getChosenType2());
+        lbKv(sb, "noted", String.join(",", c.getNotedTypes()));
+        lbKv(sb, "colors", String.join(",", c.getChosenColors()));
+        final forge.card.ColorSet marked = c.getMarkedColors();
+        lbKv(sb, "marked", marked == null || marked.isColorless() ? "" : marked.toString());
+        lbKv(sb, "named", String.join(",", c.getNamedCards()));
+        lbKv(sb, "number", c.getChosenNumber() == null ? "" : String.valueOf(c.getChosenNumber()));
+        lbKv(sb, "player", lbWho(c.getChosenPlayer(), ps));
+        lbKv(sb, "gift", lbWho(c.getPromisedGift(), ps));
+        lbKv(sb, "protecting", lbWho(c.getProtectingPlayer(), ps));
+        lbKv(sb, "evenodd", c.getChosenEvenOdd() == null ? "" : c.getChosenEvenOdd().toString());
+        lbKv(sb, "direction", c.getChosenDirection() == null ? "" : c.getChosenDirection().toString());
+        lbKv(sb, "mode", c.getChosenMode());
+        lbKv(sb, "room", c.getCurrentRoom());
+        lbKv(sb, "sector", c.getSector());
+        lbKv(sb, "chosenSector", c.getChosenSector());
+        lbKv(sb, "sprocket", c.getSprocket() == 0 ? "" : String.valueOf(c.getSprocket()));
+        lbKv(sb, "cards", lbObjects(c.getChosenCards(), ps));
+        if (!c.getChosenMap().isEmpty()) {
+            final Map<Integer, String> m = new TreeMap<>();
+            for (Map.Entry<Player, forge.game.card.CardCollection> e : c.getChosenMap().entrySet()) {
+                m.put(ps.indexOf(e.getKey()), lbObjects(e.getValue(), ps));
+            }
+            lbKv(sb, "map", m.toString());
+        }
+        lbKv(sb, "imprinted", lbObjects(c.getImprintedCards(), ps));
+        lbKv(sb, "remembered", lbObjects(c.getRemembered(), ps));
+        if (c.isInZone(ZoneType.Command)) {
+            final Card src = c.getEffectSource();
+            lbKv(sb, "source", src == null ? "" : src.getId() + " " + src.getName());
+        }
+        sb.append(" st").append(c.getStaticAbilities().size()).append(" tr").append(c.getTriggers().size()).append(" re")
+                .append(lbReplacementsReadable(c) ? String.valueOf(c.getCurrentState().getReplacementEffects(false).size()) : "?");
+        return sb.toString();
+    }
+
+    private static void lbKv(StringBuilder sb, String k, String v) {
+        if (v != null && !v.isEmpty()) {
+            sb.append(' ').append(k).append('=').append(v);
+        }
+    }
+
+    private static String lbWho(Player p, List<Player> ps) {
+        return p == null ? "" : "P" + ps.indexOf(p);
+    }
+
+    /** Objects as ids (cards), seat indexes (players) or kinds (anything else), sorted. */
+    private static String lbObjects(Iterable<?> objects, List<Player> ps) {
+        if (objects == null) {
+            return "";
+        }
+        final List<String> out = new ArrayList<>();
+        for (Object o : objects) {
+            out.add(o instanceof Card ? "C" + ((Card) o).getId() : o instanceof Player ? "P" + ps.indexOf(o)
+                    : o == null ? "null" : o.getClass().getSimpleName());
+        }
+        Collections.sort(out);
+        return String.join(",", out);
+    }
+
+    /**
+     * Reading {@code c}'s replacement effects without the rules-host ones builds nothing: it is not a planeswalker, a battle
+     * or a saga (whose loyalty, defense and lore replacements are built on first read).
+     */
+    static boolean lbReplacementsReadable(Card c) {
+        final forge.card.CardTypeView t = c.getCurrentState().getTypeWithChanges();
+        return !t.isPlaneswalker() && !t.isBattle() && !t.isSaga();
     }
 
     /** {@code c} has protection from {@code source}: one of its protection keywords prevents {@code source}'s damage. */
@@ -9546,6 +9642,8 @@ public final class LookaheadSearch {
      * real card there may differ.
      */
     public static final class WitnessWatch {
+        /** Round 9 (review S1 3): each library's size and top card at the start of the run. */
+        private final Map<forge.game.zone.Zone, String> libraries = new java.util.IdentityHashMap<>();
         private final Set<Integer> ids = new HashSet<>();
         private final Map<forge.game.zone.Zone, List<Card>> order = new java.util.IdentityHashMap<>();
         private final Map<forge.game.zone.Zone, Player> owners = new java.util.IdentityHashMap<>();
@@ -9561,6 +9659,19 @@ public final class LookaheadSearch {
 
         boolean isPlaceholder(int id) {
             return ids.contains(id);
+        }
+
+        /** Records each player's library (its size and top card) as the run starts. */
+        void snapLibraries(Game g) {
+            for (Player p : g.getPlayers()) {
+                final forge.game.zone.Zone z = p.getZone(ZoneType.Library);
+                libraries.put(z, libraryState(z));
+            }
+        }
+
+        private static String libraryState(forge.game.zone.Zone z) {
+            final CardCollectionView cards = z.getCards();
+            return cards.size() + ":" + (cards.isEmpty() ? -1 : cards.get(0).getId());
         }
 
         void touch(String why) {
@@ -9584,8 +9695,14 @@ public final class LookaheadSearch {
             }
         }
 
-        /** Each zone keeps its placeholders, in their order. */
+        /** Each library is as it was (its size and top card), and each zone keeps its placeholders, in their order. */
         void verifyZones() {
+            for (Map.Entry<forge.game.zone.Zone, String> e : libraries.entrySet()) {
+                if (!libraryState(e.getKey()).equals(e.getValue())) {
+                    touch("a library changed");
+                    return;
+                }
+            }
             for (Map.Entry<forge.game.zone.Zone, List<Card>> e : order.entrySet()) {
                 final List<Card> now = new ArrayList<>();
                 for (Card c : e.getKey().getCards()) {
@@ -9602,7 +9719,9 @@ public final class LookaheadSearch {
 
         @Subscribe
         public void on(forge.game.event.GameEventCardChangeZone e) {
-            if (e.card() != null && ids.contains(e.card().getId())) {
+            if (e.from() != null && e.from().zoneType() == ZoneType.Library || e.to() != null && e.to().zoneType() == ZoneType.Library) {
+                touch("a library changed"); // round 9: any card into or out of any library (a draw, a mill, a put)
+            } else if (e.card() != null && ids.contains(e.card().getId())) {
                 touch("a placeholder moved");
             }
         }
@@ -9865,15 +9984,20 @@ public final class LookaheadSearch {
             for (Card b : blockers) {
                 last = b;
                 int need;
-                if (b.isCreature()) {
+                if (b.isPlaneswalker() || b.isBattle()) {
+                    // round 9 (review S1 4): a planeswalker or battle in the order, whatever its other types (a creature
+                    // planeswalker too), voids the run; it takes its loyalty or defense
+                    voided = "trample over planeswalkers";
+                    need = Math.max(0, (b.isPlaneswalker() ? b.getCurrentLoyalty()
+                            : b.getCounters(forge.game.card.CounterEnumType.DEFENSE)) - b.getTotalAssignedDamage());
+                } else if (b.isCreature()) {
                     need = Math.max(0, b.getLethalDamage());
                     if (deathtouch) {
                         need = Math.min(1, need);
                     }
                 } else {
-                    voided = "trample over planeswalkers";
-                    need = Math.max(0, (b.isPlaneswalker() ? b.getCurrentLoyalty()
-                            : b.getCounters(forge.game.card.CounterEnumType.DEFENSE)) - b.getTotalAssignedDamage());
+                    voided = "trample over planeswalkers"; // neither: not modeled
+                    need = left;
                 }
                 final int give = Math.min(need, left);
                 if (give > 0) {
@@ -10484,6 +10608,15 @@ public final class LookaheadSearch {
      * the player (prevention, doubling, redirection), or a LifeReduced replacement.
      */
     static String lbReplacement(Game g, Player me, List<Card> atk, Set<Integer> known) {
+        return lbReplacement(g, me, atk, known, false);
+    }
+
+    /**
+     * {@link #lbReplacement}; {@code live}: {@code g} is the live game (round 9, review S1 1: a copy may have lost a choice
+     * a replacement reads), so only what reading builds nothing is read: no rules-host replacements, and none of a
+     * planeswalker, battle or saga ({@link #lbReplacementsReadable}; the copy's pass reads those).
+     */
+    static String lbReplacement(Game g, Player me, List<Card> atk, Set<Integer> known, boolean live) {
         for (Card c : g.getCardsInGame()) {
             if (!known.contains(c.getId())) {
                 continue;
@@ -10492,7 +10625,11 @@ public final class LookaheadSearch {
             if (z == null) {
                 continue;
             }
-            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+            if (live && !lbReplacementsReadable(c)) {
+                continue;
+            }
+            for (forge.game.replacement.ReplacementEffect re : live ? c.getCurrentState().getReplacementEffects(false)
+                    : c.getReplacementEffects()) {
                 final forge.game.replacement.ReplacementType m = re.getMode();
                 if (m != forge.game.replacement.ReplacementType.DamageDone && m != forge.game.replacement.ReplacementType.LifeReduced
                         || !re.zonesCheck(z)) {
