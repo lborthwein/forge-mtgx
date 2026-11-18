@@ -8827,6 +8827,14 @@ public final class LookaheadSearch {
      * mana and its other costs last (tap, a limit, a spell card: once); the mana is split among the abilities for the most
      * damage (a small knapsack, colors ignored: an upper bound). A grant of double strike, trample or deathtouch the
      * controller can pay for counts as given for free.</li>
+     * <li>Knowledge: every amount the bound uses (NumAtt, CounterNum and so Monstrosity / Adapt / Bolster, activation
+     * limits, target counts, mana abilities' Amount, poison Num) is read from its text alone ({@link #lbAmount}: an
+     * integer, or the X paid), never evaluated; filters that compare against a named amount are not evaluated either. So no
+     * hidden card (a library's top, a hidden hand) and no board count can change the bound: such an ability stands aside
+     * for the whole decision, as does an amount that reads power (which repeated boosts would compound).</li>
+     * <li>Joint mana: a cost that taps or takes a mana source (its host's {T} or sacrifice, or other permanents tapped,
+     * sacrificed, returned or exiled) gives up that source's mana in the same option ({@link LbAbility#extra}, the cheapest
+     * choices), so a source never both pays and is spent. The abilities that tap or take one host are one knapsack group.</li>
      * <li>Lethal: the life total at or below 0 when the player can lose from life, or the poison count at the rules'
      * limit when it can lose to poison. Damage to planeswalkers and battles is not life.</li>
      * </ul>
@@ -8834,7 +8842,10 @@ public final class LookaheadSearch {
      * declare-blockers step, an extra phase pending, an attacker the seat cannot see (face-down), an attacker that assigns
      * damage by toughness, a damage replacement or prevention that applies to the attackers' damage to the player, a
      * life-loss replacement, a playable ability that changes power another way (Animate, an Effect with a power static,
-     * ...) or puts a creature onto the battlefield attacking, a cost it cannot count, or a free unlimited pump.
+     * ...) or puts a creature onto the battlefield attacking, a cost it cannot count, a free unlimited pump, an amount /
+     * target count / filter not read from its text, a trigger a boost or block sets off that adds power (prowess, heroic,
+     * bushido, counter payoffs) or a counter replacement ({@link #lbReactive}), and costs of two abilities that may take the
+     * same mana sources ({@link #lbSharedCosts}).
      * <p>
      * Out of scope (they can only lower the true damage, or are not combat damage): the controller's hidden cards,
      * removal of blockers before damage, blockers' first strike, and life loss that is not combat damage.
@@ -8891,12 +8902,24 @@ public final class LookaheadSearch {
             opp.getZone(ZoneType.Hand).setCards(keepHand);
         }
         final int hiddenHand = oppHand - keepHand.size();
-        final int mana = Math.max(0, Math.min(LB_MANA_CAP, lbMana(opp)));
+        // each source's mana, kept per card: a cost that taps or takes a source spends that mana too (joint allocation)
+        final Map<Integer, Integer> sources = new TreeMap<>();
+        final int made = lbMana(opp, sources);
+        if (made < 0) {
+            return LethalCheck.aside("a mana ability whose amount is not a number");
+        }
+        final int mana = Math.max(0, Math.min(LB_MANA_CAP, made));
         out.mana = mana;
+        final String react = lbReactive(opp, known);
+        if (react != null) {
+            return LethalCheck.aside(react);
+        }
         final int na = atk.size();
         final boolean[] ds = new boolean[na], trample = new boolean[na], deathtouch = new boolean[na];
         final List<List<LbAbility>> items = new ArrayList<>();
         final Map<Integer, List<LbAbility>> byCard = new TreeMap<>();
+        final Map<Integer, List<LbAbility>> byHost = new TreeMap<>();
+        final List<LbAbility> counted = new ArrayList<>();
         for (Card c : new ArrayList<>(g.getCardsInGame())) {
             if (!known.contains(c.getId())) {
                 continue;
@@ -8915,7 +8938,7 @@ public final class LookaheadSearch {
                 if (sa.isManaAbility() || sa.isLandAbility()) {
                     continue;
                 }
-                final LbAbility ab = lbAbility(sa, opp, atk, mana, hiddenHand);
+                final LbAbility ab = lbAbility(sa, opp, atk, mana, hiddenHand, sources);
                 if (ab == null) {
                     continue;
                 }
@@ -8923,18 +8946,26 @@ public final class LookaheadSearch {
                     return LethalCheck.aside(ab.unsure);
                 }
                 out.abilities++;
+                counted.add(ab);
                 for (int i = 0; i < na; i++) {
                     ds[i] |= ab.ds[i];
                     trample[i] |= ab.trample[i];
                     deathtouch[i] |= ab.deathtouch[i];
                 }
-                if (field) {
+                if (field && ab.hostTaken) {
+                    byHost.computeIfAbsent(c.getId(), x -> new ArrayList<>()).add(ab); // one cost that taps or takes the host
+                } else if (field) {
                     items.add(Collections.singletonList(ab)); // each activated ability of a permanent on its own
                 } else {
                     byCard.computeIfAbsent(c.getId(), x -> new ArrayList<>()).add(ab); // one use of the card
                 }
             }
         }
+        final String shared = lbSharedCosts(counted, sources);
+        if (shared != null) {
+            return LethalCheck.aside(shared);
+        }
+        items.addAll(byHost.values());
         items.addAll(byCard.values());
         final boolean canLoseLife = me.canLoseLife() && !me.cantLoseForZeroOrLessLife();
         final boolean canPoison = me.canReceiveCounters(forge.game.card.CounterEnumType.POISON)
@@ -8988,7 +9019,11 @@ public final class LookaheadSearch {
                     life += base;
                     wLife[i] = w;
                 }
-                poison += strikes * lbExtraPoison(a, opp, known);
+                final int extraPoison = lbExtraPoison(a, opp, known);
+                if (extraPoison < 0) {
+                    return LethalCheck.aside("a combat-damage poison trigger whose amount is not a number");
+                }
+                poison += strikes * extraPoison;
             }
             life += lbBoost(items, wLife, mana);
             poison += lbBoost(items, wPoison, mana);
@@ -9003,9 +9038,11 @@ public final class LookaheadSearch {
      * lethalBlock: the mana {@code p} can make now, each source once: per untapped permanent it controls, the most one of
      * its playable mana abilities makes (Produced symbols x Amount, a "Combo" choice one symbol, less its own mana cost),
      * plus its mana pool. As {@code ComputerUtilMana.getAvailableManaEstimate}, except that one counts the words of a
-     * "Combo R G" choice (3 mana for a land that makes 1).
+     * "Combo R G" choice (3 mana for a land that makes 1). Each source's mana goes into {@code bySource} (card id -> mana)
+     * when it makes any. -1 when a playable mana ability's Amount is not a number ({@link #lbLiteral}): its value may read
+     * what the seat cannot see, so the bound does not use it.
      */
-    static int lbMana(Player p) {
+    static int lbMana(Player p, Map<Integer, Integer> bySource) {
         int mana = p.getManaPool().totalMana();
         for (Card src : p.getCardsIn(ZoneType.Battlefield)) {
             int best = 0;
@@ -9016,14 +9053,241 @@ public final class LookaheadSearch {
                 }
                 final String produced = ma.getParamOrDefault("Produced", "").trim();
                 final int symbols = produced.isEmpty() ? 1 : produced.startsWith("Combo") ? 1 : produced.split("\\s+").length;
-                final int amount = forge.game.ability.AbilityUtils.calculateAmount(src, ma.getParamOrDefault("Amount", "1"), ma);
+                final Integer amount = lbLiteral(ma.getParamOrDefault("Amount", "1"), ma);
+                if (amount == null) {
+                    return -1;
+                }
                 final forge.game.cost.CostPartMana cm = ma.getPayCosts() == null ? null : ma.getPayCosts().getCostMana();
                 final Integer pay = cm == null ? Integer.valueOf(0) : cm.convertAmount();
                 best = Math.max(best, symbols * Math.max(0, amount) - (pay == null ? 0 : pay));
             }
             mana += best;
+            if (best > 0 && bySource != null) {
+                bySource.put(src.getId(), best);
+            }
         }
         return mana;
+    }
+
+    /**
+     * lethalBlock: an amount read from its text alone, as {constant, per X}, or null when its text is not one the bound
+     * reads. Read: an integer ("3", "+3", "-1"); a name (or raw value) that is one ("Number$3"); or the X paid
+     * ("Count$xPaid": the root ability's X, as the engine reads it). Anything else is never evaluated: a count of the board,
+     * a card's power, the top of a library... may read what the seat cannot see, or change as boosts resolve (a power that
+     * doubles), so the guard stands aside instead.
+     */
+    static int[] lbAmount(String text, forge.game.CardTraitBase s) {
+        if (text == null) {
+            return null;
+        }
+        String t = text.trim();
+        int sign = 1;
+        if (t.startsWith("+") || t.startsWith("-")) {
+            sign = t.startsWith("-") ? -1 : 1;
+            t = t.substring(1);
+        }
+        if (lbDigits(t)) {
+            return new int[] {sign * Integer.parseInt(t), 0};
+        }
+        if (t.isEmpty()) {
+            return null;
+        }
+        String sv = t.indexOf('$') > 0 ? t : s == null ? "" : s.getSVar(t);
+        if ((sv == null || sv.isEmpty()) && s != null && s.getHostCard() != null && t.indexOf('$') < 0) {
+            sv = s.getHostCard().getSVar(t);
+        }
+        sv = sv == null ? "" : sv.trim();
+        if (lbDigits(sv)) {
+            return new int[] {sign * Integer.parseInt(sv), 0};
+        }
+        if (sv.startsWith("Number$") && lbDigits(sv.substring(7))) {
+            return new int[] {sign * Integer.parseInt(sv.substring(7)), 0};
+        }
+        if ("Count$xPaid".equals(sv)) {
+            return new int[] {0, sign};
+        }
+        return null;
+    }
+
+    /** lethalBlock: an amount {@link #lbAmount} reads as a plain number (no X), or null. */
+    static Integer lbLiteral(String text, forge.game.CardTraitBase s) {
+        final int[] a = lbAmount(text, s);
+        return a == null || a[1] != 0 ? null : a[0];
+    }
+
+    private static boolean lbDigits(String t) {
+        if (t.isEmpty() || t.length() > 6) {
+            return false;
+        }
+        for (int i = 0; i < t.length(); i++) {
+            if (!Character.isDigit(t.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** lethalBlock: a comparison in a valid-card filter against a name ("powerLEX", "cmcGEY"), not a number. */
+    private static final java.util.regex.Pattern LB_COMPARE_NAME = java.util.regex.Pattern.compile("(?:LT|LE|EQ|NE|GE|GT)[A-Za-z]");
+
+    /**
+     * lethalBlock: a valid-card filter (or Defined) the bound may evaluate: no comparison against a named amount, which
+     * the engine would evaluate as an SVar (it may read what the seat cannot see). Null and empty are fine.
+     */
+    static boolean lbPublicFilter(String valid) {
+        return valid == null || !LB_COMPARE_NAME.matcher(valid).find();
+    }
+
+    /**
+     * lethalBlock: a replacement's conditions are ones the bound may evaluate: no CheckSVar condition, and no Valid /
+     * Defined / IsPresent filter that compares against a named amount ({@link #lbPublicFilter}).
+     */
+    static boolean lbTextOnly(Map<String, String> params) {
+        for (Map.Entry<String, String> e : params.entrySet()) {
+            final String k = e.getKey();
+            if (k.startsWith("CheckSVar") || k.startsWith("CheckSecondSVar")) {
+                return false;
+            }
+            if ((k.startsWith("Valid") || k.startsWith("Defined") || k.startsWith("IsPresent") || k.startsWith("Present"))
+                    && !lbPublicFilter(e.getValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** lethalBlock: trigger modes a boost or the declaration itself may set off before combat damage. */
+    static final Set<TriggerType> LB_REACT_MODES = java.util.EnumSet.of(TriggerType.SpellCast, TriggerType.SpellCastOrCopy,
+            TriggerType.SpellAbilityCast, TriggerType.AbilityCast, TriggerType.SpellCopy, TriggerType.SpellAbilityCopy,
+            TriggerType.BecomesTarget, TriggerType.BecomesTargetOnce, TriggerType.CounterAdded, TriggerType.CounterAddedOnce,
+            TriggerType.CounterAddedAll, TriggerType.CounterTypeAddedAll, TriggerType.AttackerBlocked,
+            TriggerType.AttackerBlockedOnce, TriggerType.AttackerBlockedByCreature);
+
+    /**
+     * lethalBlock: why boosts would compose beyond the bound, or null. A known permanent (or command-zone card) of the
+     * attackers' controller with a trigger that a spell or ability, a target, a counter or a block sets off
+     * ({@link #LB_REACT_MODES}: prowess, heroic, bushido, a +1/+1-counter payoff...) whose resolution changes power or adds
+     * counters; or a known counter replacement (AddCounter: more or fewer counters than the text says), any controller.
+     */
+    static String lbReactive(Player opp, Set<Integer> known) {
+        final Game g = opp.getGame();
+        for (Card c : g.getCardsInGame()) {
+            if (!known.contains(c.getId())) {
+                continue;
+            }
+            final forge.game.zone.Zone z = g.getZoneOf(c);
+            if (z == null || z.getZoneType() != ZoneType.Battlefield && z.getZoneType() != ZoneType.Command) {
+                continue;
+            }
+            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                if (re.getMode() == forge.game.replacement.ReplacementType.AddCounter && re.zonesCheck(z)) {
+                    return "a counter replacement";
+                }
+            }
+            if (!opp.equals(c.getController())) {
+                continue;
+            }
+            for (Trigger t : c.getTriggers()) {
+                if (!LB_REACT_MODES.contains(t.getMode()) || !t.zonesCheck(z)) {
+                    continue;
+                }
+                final java.util.ArrayDeque<SpellAbility> todo = new java.util.ArrayDeque<>();
+                final Set<SpellAbility> seen = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                if (t.getOverridingAbility() != null) {
+                    todo.add(t.getOverridingAbility());
+                }
+                while (!todo.isEmpty()) {
+                    final SpellAbility s = todo.poll();
+                    if (s == null || !seen.add(s)) {
+                        continue;
+                    }
+                    final String api = s.getApi() == null ? "" : s.getApi().name();
+                    if ("Pump".equals(api) || "PumpAll".equals(api) || "PutCounter".equals(api) || "PutCounterAll".equals(api)
+                            || LB_POWER_APIS.contains(api)) {
+                        return "a trigger that adds power (" + t.getMode() + ")";
+                    }
+                    final List<SpellAbility> next = new ArrayList<>();
+                    next.add(s.getSubAbility());
+                    next.addAll(s.getAdditionalAbilities().values());
+                    for (List<? extends SpellAbility> l : s.getAdditionalAbilityLists().values()) {
+                        next.addAll(l);
+                    }
+                    for (SpellAbility a : next) {
+                        if (a != null) {
+                            todo.add(a); // ArrayDeque takes no null
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * lethalBlock: why the costs that take other permanents (tap, sacrifice, return or exile from the battlefield) cannot
+     * be charged one ability at a time, or null: two counted abilities with such costs when any permanent either may take
+     * makes mana (each was charged its cheapest choice alone), or one whose cost may take another counted ability's host
+     * when that ability taps or takes its host.
+     */
+    static String lbSharedCosts(List<LbAbility> counted, Map<Integer, Integer> sources) {
+        for (LbAbility t : counted) {
+            if (t.taken == null) {
+                continue;
+            }
+            for (LbAbility o : counted) {
+                if (o == t) {
+                    continue;
+                }
+                if (o.taken != null && (lbAnySource(t.taken, sources) || lbAnySource(o.taken, sources))) {
+                    return "two abilities whose costs may take the same mana sources";
+                }
+                if (o.hostTaken && o.host != null && t.taken.contains(o.host)) {
+                    return "a cost that may take another ability's host";
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean lbAnySource(List<Card> cards, Map<Integer, Integer> sources) {
+        for (Card c : cards) {
+            if (sources.getOrDefault(c.getId(), 0) > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * lethalBlock: the permanents a cost part may tap, sacrifice, return or exile from the battlefield besides its own
+     * host (whose part is counted apart), as the part's own {@code getMaxAmountX} lists them; null for a part that takes
+     * none.
+     */
+    static List<Card> lbCostCards(forge.game.cost.CostPart part, SpellAbility sa, Player payer) {
+        if (part.payCostFromSource()) {
+            return null;
+        }
+        final Card host = sa.getHostCard();
+        final CardCollectionView field = payer.getCardsIn(ZoneType.Battlefield);
+        if (part instanceof forge.game.cost.CostTapType) {
+            final CardCollection l = forge.game.card.CardLists.getValidCards(field, part.getType().split(";"), payer, host, sa);
+            if (!((forge.game.cost.CostTapType) part).canTapSource) {
+                l.remove(host);
+            }
+            return forge.game.card.CardLists.filter(l, forge.game.card.CardPredicates.CAN_TAP);
+        }
+        if (part instanceof forge.game.cost.CostSacrifice) {
+            final String type = part.getType().replace("+WithDifferentNames", "");
+            final CardCollectionView l = type.contains("X") ? field
+                    : forge.game.card.CardLists.getValidCards(field, type.split(";"), payer, host, sa);
+            return forge.game.card.CardLists.filter(l, forge.game.card.CardPredicates.canBeSacrificedBy(sa, false));
+        }
+        if (part instanceof forge.game.cost.CostReturn || part instanceof forge.game.cost.CostExile
+                && ((forge.game.cost.CostExile) part).getFrom() != null
+                && ((forge.game.cost.CostExile) part).getFrom().contains(ZoneType.Battlefield)) {
+            return forge.game.card.CardLists.getValidCards(field, part.getType().split(";"), payer, host, sa);
+        }
+        return null;
     }
 
     /** lethalBlock: a cost part paid with hand cards (discard, reveal, exile or put from the hand, or from anywhere). */
@@ -9061,7 +9325,13 @@ public final class LookaheadSearch {
             for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
                 final forge.game.replacement.ReplacementType m = re.getMode();
                 if (m != forge.game.replacement.ReplacementType.DamageDone && m != forge.game.replacement.ReplacementType.LifeReduced
-                        || !re.zonesCheck(z) || !re.requirementsCheck(g)) {
+                        || !re.zonesCheck(z)) {
+                    continue;
+                }
+                if (!lbTextOnly(re.getMapParams())) {
+                    return "a damage replacement it does not evaluate"; // its conditions may read what the seat cannot see
+                }
+                if (!re.requirementsCheck(g)) {
                     continue;
                 }
                 if (m == forge.game.replacement.ReplacementType.LifeReduced) {
@@ -9096,12 +9366,22 @@ public final class LookaheadSearch {
                 continue;
             }
             for (Trigger t : c.getTriggers()) {
-                if (t.getMode() == TriggerType.DamageDone && !"False".equals(t.getParam("CombatDamage"))
-                        && t.matchesValidParam("ValidSource", a)) {
-                    final SpellAbility ab = t.getOverridingAbility();
-                    if (ab != null && ab.getApi() == forge.game.ability.ApiType.Poison) {
-                        poison += Math.max(0, forge.game.ability.AbilityUtils.calculateAmount(a, ab.getParamOrDefault("Num", "1"), ab));
+                if (t.getMode() != TriggerType.DamageDone || "False".equals(t.getParam("CombatDamage"))) {
+                    continue;
+                }
+                final SpellAbility ab = t.getOverridingAbility();
+                if (ab == null || ab.getApi() != forge.game.ability.ApiType.Poison) {
+                    continue;
+                }
+                if (!lbPublicFilter(t.getParam("ValidSource"))) {
+                    return -1;
+                }
+                if (t.matchesValidParam("ValidSource", a)) {
+                    final Integer num = lbLiteral(ab.getParamOrDefault("Num", "1"), ab);
+                    if (num == null) {
+                        return -1; // read from the text only (lbAmount)
                     }
+                    poison += Math.max(0, num);
                 }
             }
         }
@@ -9114,9 +9394,23 @@ public final class LookaheadSearch {
         String unsure;
         /** Mana per activation at X = 0 (cost adjustments applied), mana per X, activations at most, largest X. */
         int cost, xPer, cap, xMax;
+        /**
+         * Mana given up by j activations' other costs (extra[j]): the mana of the sources they tap or take, the host's
+         * and the cheapest choices among the permanents a cost takes. Null: none.
+         */
+        int[] extra;
+        /** Its host, and whether its cost taps the host or takes it (sacrifice, exile, return...). */
+        Card host;
+        boolean hostTaken;
+        /** The other permanents its cost may take ({@link #lbCostCards}), or null. */
+        List<Card> taken;
         final List<LbPart> parts = new ArrayList<>();
         /** Per attacker: the ability may give it double strike / trample / deathtouch. */
         boolean[] ds, trample, deathtouch;
+
+        int extra(int j) {
+            return extra == null || j <= 0 ? 0 : extra[Math.min(j, extra.length - 1)];
+        }
     }
 
     /** lethalBlock: one part of an ability's resolution that adds power to attackers. */
@@ -9130,9 +9424,11 @@ public final class LookaheadSearch {
         boolean[] hit;
         /** Power added per attacker, by X: amount[x][attacker]. */
         int[][] amount;
-        /** The amount's text ("Double" / "Triple" read the attacker's power), and power per counter (0: a pump's NumAtt). */
+        /** The amount's text (read by {@link #lbAmount} only), and power per counter (0: a pump's NumAtt). */
         String num;
         int perUnit;
+        /** Why whom it may hit cannot be read (a filter or target count that is not a number), or null. */
+        String unsure;
     }
 
     /** lethalBlock: unsure marker for an ability. */
@@ -9145,15 +9441,19 @@ public final class LookaheadSearch {
     /**
      * lethalBlock: {@code sa} as {@code opp} may play it now, or null when it adds no power to an attacker or cannot be
      * paid for. Unsure (the guard stands aside) when a payable ability changes power another way or makes a new attacker,
-     * or has a cost this cannot count.
+     * has a cost this cannot count, or an amount, target count or filter that is not read from its text alone
+     * ({@link #lbAmount}). {@code sources}: each mana source's mana ({@link #lbMana}); a cost that taps or takes a source
+     * gives up that mana ({@link LbAbility#extra}), so a source never pays twice.
      */
-    static LbAbility lbAbility(SpellAbility sa, Player opp, List<Card> atk, int mana, int hiddenHand) {
+    static LbAbility lbAbility(SpellAbility sa, Player opp, List<Card> atk, int mana, int hiddenHand,
+            Map<Integer, Integer> sources) {
         final int na = atk.size();
         final LbAbility ab = new LbAbility();
         ab.ds = new boolean[na];
         ab.trample = new boolean[na];
         ab.deathtouch = new boolean[na];
         final Card host = sa.getHostCard();
+        ab.host = host;
         String unsure = null;
         final List<SpellAbility> chain = new ArrayList<>();
         final java.util.ArrayDeque<SpellAbility> todo = new java.util.ArrayDeque<>();
@@ -9193,6 +9493,10 @@ public final class LookaheadSearch {
                 if (part == null) {
                     continue;
                 }
+                if (part.unsure != null) {
+                    unsure = part.unsure;
+                    continue;
+                }
                 final String kw = s.getParamOrDefault("KW", "");
                 for (int i = 0; i < na; i++) {
                     if (part.hit[i]) {
@@ -9228,6 +9532,10 @@ public final class LookaheadSearch {
                 }
                 final LbPart part = lbHits(s, atk, api == forge.game.ability.ApiType.PutCounterAll ? "ValidCards" : null);
                 if (part == null) {
+                    continue;
+                }
+                if (part.unsure != null) {
+                    unsure = part.unsure;
                     continue;
                 }
                 for (int i = 0; i < na; i++) {
@@ -9278,6 +9586,9 @@ public final class LookaheadSearch {
             // the cost: mana at X = 0 with the engine's cost adjustments, mana per X, and how often the other parts allow it
             int cap = ab.cap > 0 ? ab.cap : sa.isSpell() ? 1 : LB_UNLIMITED;
             boolean selfGone = false;
+            // the other permanents a cost part takes (one part only), and how many per activation
+            List<Card> taken = null;
+            int takenPer = 0, takingParts = 0;
             if (cost != null) {
                 if (cost.hasManaCost()) {
                     ab.cost = Math.max(0, forge.ai.ComputerUtilMana.calculateManaCost(cost, sa, opp, true, 0, false)
@@ -9288,8 +9599,12 @@ public final class LookaheadSearch {
                     if (part instanceof forge.game.cost.CostPartMana) {
                         continue;
                     }
-                    if (part instanceof forge.game.cost.CostTap || part instanceof forge.game.cost.CostUntap
-                            || part instanceof forge.game.cost.CostExert) {
+                    if (part instanceof forge.game.cost.CostTap) {
+                        cap = Math.min(cap, 1);
+                        ab.hostTaken = true; // tapped: its own mana is spent (charged below)
+                        continue;
+                    }
+                    if (part instanceof forge.game.cost.CostUntap || part instanceof forge.game.cost.CostExert) {
                         cap = Math.min(cap, 1);
                         continue;
                     }
@@ -9298,6 +9613,7 @@ public final class LookaheadSearch {
                             || part instanceof forge.game.cost.CostDiscard || part instanceof forge.game.cost.CostPutCardToLib)) {
                         cap = Math.min(cap, 1); // the host leaves: once, and not a beneficiary
                         selfGone = true;
+                        ab.hostTaken = true; // and its mana is spent (charged below)
                         continue;
                     }
                     final Integer amt = part.convertAmount();
@@ -9307,28 +9623,73 @@ public final class LookaheadSearch {
                     if (amt <= 0) {
                         continue;
                     }
+                    if (!lbPublicFilter(part.getType())) {
+                        return lbUnsure("a cost filter that compares against a named amount");
+                    }
                     final Integer m = part.getMaxAmountX(sa, opp, false);
                     if (m == null) {
                         return lbUnsure("a cost it cannot count (" + part.getClass().getSimpleName() + ")");
                     }
                     cap = Math.min(cap, Math.max(0, m) / amt);
+                    final List<Card> cards = lbCostCards(part, sa, opp);
+                    if (cards != null) {
+                        takingParts++;
+                        taken = new ArrayList<>(cards);
+                        takenPer = amt;
+                    }
                 }
             }
             if (!sa.isSpell()) {
+                // activation limits: read from the text only (lbAmount)
                 final forge.game.spellability.SpellAbilityRestriction r = sa.getRestrictions();
                 if (r != null && r.getLimitToCheck() != null) {
-                    cap = Math.min(cap, Math.max(0, forge.game.ability.AbilityUtils.calculateAmount(host, r.getLimitToCheck(), sa)
-                            - sa.getActivationsThisTurn()));
+                    final Integer lim = lbLiteral(r.getLimitToCheck(), sa);
+                    if (lim == null) {
+                        return lbUnsure("an activation limit that is not a number");
+                    }
+                    cap = Math.min(cap, Math.max(0, lim - sa.getActivationsThisTurn()));
                 }
                 if (r != null && r.getGameLimitToCheck() != null) {
-                    cap = Math.min(cap, Math.max(0, forge.game.ability.AbilityUtils.calculateAmount(host,
-                            r.getGameLimitToCheck(), sa) - sa.getActivationsThisGame()));
+                    final Integer lim = lbLiteral(r.getGameLimitToCheck(), sa);
+                    if (lim == null) {
+                        return lbUnsure("an activation limit that is not a number");
+                    }
+                    cap = Math.min(cap, Math.max(0, lim - sa.getActivationsThisGame()));
                 }
+            }
+            // joint allocation: the mana of the sources the other costs tap or take is spent with them
+            final int hostMana = ab.hostTaken && host != null ? sources.getOrDefault(host.getId(), 0) : 0;
+            int[] takenMana = new int[0];
+            if (taken != null) {
+                if (ab.hostTaken) {
+                    taken.remove(host); // charged as the host
+                }
+                takenMana = new int[taken.size()];
+                for (int i = 0; i < takenMana.length; i++) {
+                    takenMana[i] = sources.getOrDefault(taken.get(i).getId(), 0);
+                }
+                Arrays.sort(takenMana); // the cheapest choices first
+                cap = Math.min(cap, takenMana.length / Math.max(1, takenPer));
+                if (takingParts > 1 && takenMana.length > 0 && takenMana[takenMana.length - 1] > 0) {
+                    return lbUnsure("several costs that may take mana sources");
+                }
+                ab.taken = taken;
             }
             if (cap <= 0) {
                 return null;
             }
             ab.cap = cap;
+            if (hostMana > 0 || takenMana.length > 0 && takenMana[takenMana.length - 1] > 0) {
+                final int top = Math.min(cap, Math.max(1, takenMana.length)); // cap is finite here (a host or a list)
+                ab.extra = new int[top + 1];
+                for (int j = 1; j <= top; j++) {
+                    int lost = hostMana;
+                    for (int u = 0; u < Math.min(takenMana.length, j * takenPer); u++) {
+                        lost += takenMana[u];
+                    }
+                    ab.extra[j] = lost;
+                }
+            }
             if (selfGone) {
                 // the cost takes the host itself: it is not there to be pumped
                 for (LbPart part : ab.parts) {
@@ -9342,30 +9703,21 @@ public final class LookaheadSearch {
                     }
                 }
             }
-            ab.xMax = ab.xPer > 0 ? Math.max(0, (mana - ab.cost) / ab.xPer) : 0;
-            // the power each part adds, for every X the mana allows (X is the root's paid X, as the engine reads it)
+            ab.xMax = ab.xPer > 0 ? Math.max(0, (mana - ab.cost - ab.extra(1)) / ab.xPer) : 0;
+            // the power each part adds, for every X the mana allows: from the amount's text only (an integer, or the X
+            // paid: the root's X, as the engine reads it); never an evaluated value
             for (LbPart part : ab.parts) {
+                final int[] coef = lbAmount(part.num, part.owner);
+                if (coef == null) {
+                    return lbUnsure("an amount that is not a number or X (" + part.num + ")");
+                }
                 part.amount = new int[ab.xMax + 1][na];
-            }
-            for (int x = 0; x <= ab.xMax; x++) {
-                root.setXManaCostPaid(x);
-                for (LbPart part : ab.parts) {
-                    final SpellAbility s = part.owner;
+                for (int x = 0; x <= ab.xMax; x++) {
+                    final long v = ((long) coef[0] + (long) coef[1] * x) * (part.perUnit == 0 ? 1 : part.perUnit);
                     for (int i = 0; i < na; i++) {
-                        if (!part.hit[i]) {
-                            continue;
+                        if (part.hit[i]) {
+                            part.amount[x][i] = (int) Math.max(0, Math.min(1 << 20, v));
                         }
-                        final int v;
-                        if ("Double".equals(part.num)) {
-                            v = Math.max(0, atk.get(i).getNetPower());
-                        } else if ("Triple".equals(part.num)) {
-                            v = 2 * Math.max(0, atk.get(i).getNetPower());
-                        } else if (part.perUnit == 0) {
-                            v = forge.game.ability.AbilityUtils.calculateAmount(s.getHostCard(), part.num, s, true);
-                        } else {
-                            v = forge.game.ability.AbilityUtils.calculateAmount(s.getHostCard(), part.num, s) * part.perUnit;
-                        }
-                        part.amount[x][i] = Math.max(0, v);
                     }
                 }
             }
@@ -9388,7 +9740,8 @@ public final class LookaheadSearch {
      * lethalBlock: which attackers part {@code s} may hit, or null for none. Targeted: every attacker it can target, up to
      * its most targets. All (ValidCards, or a Choices list): its current valid set (a choice picks one). Defined (default
      * Self): those cards; a Defined that names a parent's target picks among the attackers that parent can target, and one
-     * that names nothing yet (Remembered, Chosen...) picks any attacker.
+     * that names nothing yet (Remembered, Chosen...) picks any attacker. Its {@link LbPart#unsure} is set (whoever it
+     * hits) when a target count is not a number or a filter compares against a named amount ({@link #lbPublicFilter}).
      */
     static LbPart lbHits(SpellAbility s, List<Card> atk, String validKey) {
         final int na = atk.size();
@@ -9404,12 +9757,21 @@ public final class LookaheadSearch {
             }
         } else if (s.usesTargeting()) {
             part.pick = true;
-            part.maxTargets = Math.max(1, s.getMaxTargets());
+            final Integer most = lbTargets(s);
+            if (most == null) {
+                part.unsure = "a target count or target filter that is not read from its text";
+                return part;
+            }
+            part.maxTargets = Math.max(1, most);
             for (int i = 0; i < na; i++) {
                 part.hit[i] = s.canTarget(atk.get(i));
             }
         } else if (validKey != null && s.hasParam(validKey) || s.hasParam("Choices")) {
             final String valid = validKey != null && s.hasParam(validKey) ? s.getParam(validKey) : s.getParam("Choices");
+            if (!lbPublicFilter(valid)) {
+                part.unsure = "a filter that compares against a named amount";
+                return part;
+            }
             final CardCollectionView set = forge.game.ability.AbilityUtils.filterListByType(
                     host.getGame().getCardsIn(ZoneType.Battlefield), valid, s);
             part.pick = !(validKey != null && s.hasParam(validKey));
@@ -9418,13 +9780,22 @@ public final class LookaheadSearch {
             }
         } else {
             final String def = s.getParamOrDefault("Defined", "Self");
+            if (!lbPublicFilter(def)) {
+                part.unsure = "a filter that compares against a named amount";
+                return part;
+            }
             if (def.contains("Target")) {
                 SpellAbility t = s.getParent();
                 while (t != null && !t.usesTargeting()) {
                     t = t.getParent();
                 }
                 part.pick = true;
-                part.maxTargets = t == null ? 1 : Math.max(1, t.getMaxTargets());
+                final Integer most = t == null ? Integer.valueOf(1) : lbTargets(t);
+                if (most == null) {
+                    part.unsure = "a target count or target filter that is not read from its text";
+                    return part;
+                }
+                part.maxTargets = Math.max(1, most);
                 for (int i = 0; i < na; i++) {
                     part.hit[i] = t == null || t.canTarget(atk.get(i));
                 }
@@ -9449,6 +9820,25 @@ public final class LookaheadSearch {
             }
         }
         return null;
+    }
+
+    /**
+     * lethalBlock: the most targets of {@code s} read from its text (TargetMax, default 1), or null when that is not a
+     * number or a target filter compares against a named amount ({@link #lbPublicFilter}).
+     */
+    static Integer lbTargets(SpellAbility s) {
+        final forge.game.spellability.TargetRestrictions tr = s.getTargetRestrictions();
+        if (tr == null) {
+            return 1;
+        }
+        if (tr.getValidTgts() != null) {
+            for (String v : tr.getValidTgts()) {
+                if (!lbPublicFilter(v)) {
+                    return null;
+                }
+            }
+        }
+        return tr.getMaxTargets() == null ? Integer.valueOf(1) : lbLiteral(tr.getMaxTargets(), s);
     }
 
     /** lethalBlock: APIs that change power or characteristics other than Pump, PumpAll and counters. */
@@ -9518,9 +9908,10 @@ public final class LookaheadSearch {
                 if (ab.parts.isEmpty()) {
                     continue;
                 }
+                // an option's mana: its mana cost plus the mana its other costs give up (ab.extra: a source never pays twice)
                 if (ab.xPer > 0) {
                     for (int x = 0; x <= ab.xMax; x++) {
-                        final int c = ab.cost + x * ab.xPer;
+                        final int c = ab.cost + x * ab.xPer + ab.extra(1);
                         final int d = lbGain(ab, x, w);
                         if (c <= mana && d > 0) {
                             opts.add(new int[] {c, d});
@@ -9531,13 +9922,18 @@ public final class LookaheadSearch {
                     if (d <= 0) {
                         continue;
                     }
-                    final int most = ab.cost == 0 ? Math.min(ab.cap, 1 << 16) : Math.min(ab.cap, mana / ab.cost);
+                    if (ab.cost == 0 && ab.extra == null) {
+                        // free: all of its activations at once
+                        opts.add(new int[] {0, (int) Math.min(1 << 24, (long) Math.min(ab.cap, 1 << 16) * d)});
+                        continue;
+                    }
+                    final int most = Math.min(ab.cap, ab.cost == 0 ? 1 << 16 : mana / ab.cost);
                     for (int j = 1; j <= most; j++) {
-                        opts.add(new int[] {j * ab.cost, (int) Math.min(1 << 24, (long) j * d)});
-                        if (ab.cost == 0) {
-                            opts.set(opts.size() - 1, new int[] {0, (int) Math.min(1 << 24, (long) most * d)});
+                        final long c = (long) j * ab.cost + ab.extra(j);
+                        if (c > mana) {
                             break;
                         }
+                        opts.add(new int[] {(int) c, (int) Math.min(1 << 24, (long) j * d)});
                     }
                 }
             }
