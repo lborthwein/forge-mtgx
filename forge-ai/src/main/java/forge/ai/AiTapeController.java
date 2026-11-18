@@ -240,7 +240,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
      */
     private <T> T choice(final String m, final Object[] args, final int forcedOrd, final Runnable witness,
             final Supplier<T> live, final Function<T, JsonElement> enc, final Function<JsonElement, T> dec) {
-        forge.ai.simulation.SearchGuard.check(g(), "tape:" + m); // nestfix-1118: no real-seat decision inside a search
+        forge.ai.simulation.SearchGuard.note(g(), "tape:" + m); // nestfix-1118: counted only (the bridge refuses a DECIDE)
         tape.refuseAfterDivergence();
         if (!tape.controllerHere()) {
             return live.get();

@@ -1413,6 +1413,10 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     public long searchGuardRefusals;
 
     private void guardRefusals(final Game g, final RlWire.Decide frame, final PrioritySearch search) {
+        final long seen = forge.ai.simulation.SearchGuard.takeSeen(g);
+        if (seen > 0) {
+            forgeDecidedExtra.merge("searchGuardSeen", (int) seen, Integer::sum); // counted only, nothing refused
+        }
         final long n = forge.ai.simulation.SearchGuard.takeBlocked(g);
         if (n <= 0) {
             return;

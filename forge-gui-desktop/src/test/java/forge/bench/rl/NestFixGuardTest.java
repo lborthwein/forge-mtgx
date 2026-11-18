@@ -103,5 +103,16 @@ public class NestFixGuardTest extends AITest {
         Assert.assertEquals(SearchGuard.takeLast(real), "tape:choosePermanentsToSacrifice");
         Assert.assertEquals(SearchGuard.takeBlocked(real), 0L);
         Assert.assertEquals(SearchGuard.takeBlocked(copy), 0L);
+        // note(): counted inside a scope only, never refused
+        SearchGuard.note(real, "tape:chooseSingleStaticAbility");
+        SearchGuard.enter(real);
+        try {
+            SearchGuard.note(real, "tape:chooseSingleStaticAbility");
+            SearchGuard.note(copy, "tape:chooseSingleStaticAbility");
+        } finally {
+            SearchGuard.exit(real);
+        }
+        Assert.assertEquals(SearchGuard.takeSeen(real), 1L);
+        Assert.assertEquals(SearchGuard.takeSeen(copy), 0L);
     }
 }
