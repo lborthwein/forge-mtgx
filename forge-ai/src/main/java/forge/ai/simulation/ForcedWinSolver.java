@@ -381,6 +381,12 @@ public final class ForcedWinSolver {
          */
         public int planWiden = 0;
         /**
+         * sdcc-escalate-1117 (0 or 1 = off, the default, and then nothing changes): when every planner pass stopped at its
+         * node or time cap and found no line, or the lines found are below the proof bar, one more planner pass runs at
+         * this many times the node cap and plan time (once per decision), and its new lines are verified.
+         */
+        public int planEscalate = 0;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -1026,6 +1032,7 @@ public final class ForcedWinSolver {
             c.grantSacMana = "true".equals(get.apply("grantSacMana")); // sdcc-sacmana-1117
             c.pileTutorCast = "true".equals(get.apply("pileTutorCast")); // sdcc-piletc-1117
             c.planWiden = intOr(get.apply("planWiden"), c.planWiden); // sdcc-widen-1117
+            c.planEscalate = intOr(get.apply("planEscalate"), c.planEscalate); // sdcc-escalate-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1119,6 +1126,7 @@ public final class ForcedWinSolver {
                 + (grantSacMana ? " grantSacMana" : "") // sdcc-sacmana-1117
                 + (pileTutorCast ? " pileTutorCast" : "") // sdcc-piletc-1117
                 + (planWiden > 0 ? " planWiden=" + planWiden : "") // sdcc-widen-1117
+                + (planEscalate > 1 ? " planEscalate=" + planEscalate : "") // sdcc-escalate-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -2635,6 +2643,7 @@ public final class ForcedWinSolver {
     private Line offense0(Game live, String key) {
         decisions++;
         final int index = decisionIndex++;
+        escalated = false; // sdcc-escalate-1117
         final long t0 = forge.game.WorkClock.nanoTime();
         // bvw-step1-build-1024: budget=counter reads no wall clock (0 = no wall); unified-search-1106: else the hard deadline
         decisionWall = cfg.counter ? 0L
@@ -2746,6 +2755,11 @@ public final class ForcedWinSolver {
             }
             res.nodes += before;
         }
+        if (res.lines.isEmpty() && cfg.forced && cfg.planEscalate > 1 && res.exhausted) {
+            // sdcc-escalate-1117 (planEscalate): every pass ran out of nodes or time without exhausting the tree: one more
+            // pass with planEscalate x the node cap and plan time (only there: where a line may be just out of reach)
+            res = escalate(pos, lim, res);
+        }
         plannerNanos += forge.game.WorkClock.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
         if (res.exhausted) {
@@ -2812,6 +2826,32 @@ public final class ForcedWinSolver {
             // position too, and its verified line joins the proposals (the label judges them all)
             final Line engine = engineFallback(live, pos, index, t0, true);
             receipt("FORCED_WIN engine-after-plan-fail" + tag() + " turn=" + pos.turn + " found=" + (engine != null));
+        }
+        Eval bestEsc = null;
+        if ((best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0) && cfg.planEscalate > 1 && res.exhausted
+                && !escalated) {
+            // sdcc-escalate-1117: the lines found are below the proof bar and the planner stopped at its cap: escalate once
+            final java.util.Set<String> seen = new java.util.HashSet<>();
+            for (Line l : res.lines) {
+                seen.add(l.key());
+            }
+            final ForcedWinPlanner.Result more = escalate(pos, lim, res);
+            final List<Line> fresh = new ArrayList<>();
+            for (Line l : more.lines) {
+                if (!seen.contains(l.key())) {
+                    fresh.add(l);
+                }
+            }
+            if (!fresh.isEmpty()) {
+                bestEsc = evaluateTop(live, fresh, index, cfg.paySearch || hardDeadline != 0 ? t0 : forge.game.WorkClock.nanoTime());
+                if (bestEsc != null && bestEsc.pBelief >= cfg.threshold && bestEsc.pUnopposed >= 1.0
+                        && !(cfg.honestProbes && bestEsc.worldsRun < cfg.worlds)) {
+                    escalateTakes++;
+                    receipt("FORCED_WIN take-escalated" + tag() + " turn=" + pos.turn + " " + bestEsc);
+                    lastOutcome = "take";
+                    return bestEsc.line;
+                }
+            }
         }
         if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0
                 || cfg.honestProbes && best.worldsRun < cfg.worlds) {
@@ -4877,6 +4917,47 @@ public final class ForcedWinSolver {
             lim.ms = ms0;
         }
     }
+    /** sdcc-escalate-1117: whether this decision's planner already escalated; takes by an escalated pass (report only). */
+    private boolean escalated;
+    public int escalateTakes, escalations;
+
+    /**
+     * sdcc-escalate-1117 (planEscalate): one more planner pass at planEscalate x the node cap and plan time (this turn,
+     * then the configured horizon), with every capability key of the last pass; its nodes add to {@code before}'s.
+     */
+    private ForcedWinPlanner.Result escalate(final Position pos, final ForcedWinPlanner.Limits lim, final ForcedWinPlanner.Result before) {
+        escalated = true;
+        escalations++;
+        final int nodes0 = lim.nodes, horizon0 = lim.horizon, pay0 = lim.payPolicies;
+        final long ms0 = lim.ms;
+        final boolean gs0 = lim.grantSacMana, ptc0 = lim.pileTutorCast;
+        lim.nodes = cfg.nodes * cfg.planEscalate;
+        lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs * cfg.planEscalate);
+        lim.payPolicies = cfg.paySearch ? (cfg.payKeepUse ? ForcedWinPlanner.PAY_POLICIES_KEEP_USE : ForcedWinPlanner.PAY_POLICIES) : 1;
+        lim.grantSacMana = cfg.grantSacMana;
+        lim.pileTutorCast = cfg.pileTutorCast;
+        try {
+            lim.horizon = 1;
+            ForcedWinPlanner.Result r = planCapped(pos, lim);
+            if (r.lines.isEmpty() && cfg.horizon >= 2) {
+                final int first = r.nodes;
+                lim.horizon = cfg.horizon;
+                r = planCapped(pos, lim);
+                r.nodes += first;
+            }
+            r.nodes += before.nodes;
+            receipt("FORCED_WIN escalate" + tag() + " x" + cfg.planEscalate + " lines=" + r.lines.size() + " " + r.summary());
+            return r;
+        } finally {
+            lim.nodes = nodes0;
+            lim.ms = ms0;
+            lim.horizon = horizon0;
+            lim.payPolicies = pay0;
+            lim.grantSacMana = gs0;
+            lim.pileTutorCast = ptc0;
+        }
+    }
+
     /** deck-belief-1105: the current offense decision's start (for {@link Config#unprovenMs}). */
     private long decisionStart;
     public int unprovenStops;
