@@ -1811,6 +1811,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /** A search row, with the decision's work when workUnits is on (unchanged otherwise). */
+    @Override
+    public void guardRefused(final Game g, final RlWire.Decide frame, final long n, final String what) {
+        // nestfix-1118: one row a decision whose search asked a real seat (none on a clean game)
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("kind", "searchGuard");
+            row.addProperty("refused", n);
+            row.addProperty("last", what);
+            addRow(row);
+        }
+    }
+
     private void addRow(final JsonObject row) {
         final forge.game.WorkClock.Span sp = workSpan;
         if (sp != null) {
@@ -3050,7 +3064,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             err = String.valueOf(e);
         }
         // the deck-level verdict of the planner (once per game; null without reach): only read by the ender key
-        if (mullKeepEnder == null && cfg.reach != null) {
+        if (mullKeepEnder == null && cfg.reach != null && mullKeepFlag("ender")) { // nestfix-1118: probe only for the ender key
             try {
                 reachCfg();
                 final Object reader = reachReaders.computeIfAbsent(me.getId(), x -> forge.ai.simulation.ForcedWinSolver.newSharedReader());

@@ -5845,7 +5845,11 @@ public final class ForcedWinSolver {
      * library) end the game in the planner's model? {@link #potential}'s first question alone, with no planner search:
      * a property of the list, true from the first decision of a deck that holds a kill. Never throws (false).
      */
+    /** nestfix-1118 (tests only read it): how many times {@link #hasEnder} ran in this JVM. */
+    public static final java.util.concurrent.atomic.AtomicLong HAS_ENDER_CALLS = new java.util.concurrent.atomic.AtomicLong();
+
     public boolean hasEnder(final Game g) {
+        HAS_ENDER_CALLS.incrementAndGet();
         try {
             final java.util.Set<String> seen = new java.util.HashSet<>();
             for (ZoneType z : new ZoneType[] {ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Library}) {
