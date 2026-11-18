@@ -126,6 +126,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String deadEtb = "off", zeroX = "off", crewNoop = "off", departMedian = "off";
         /** evoke-empty-board-1111: the look-ahead's deadAltCost guard (off|shadow|on; written to JSON only when not off). */
         public String deadAltCost = "off";
+        /** temp-pump-wrong-turn-1117: the look-ahead's deadPump guard (off|shadow|on; written to JSON only when not off). */
+        public String deadPump = "off";
         public boolean stack = false;
         /** Also search pass (second, after the default), as K8's candidate set does, whatever its prior. */
         public boolean includePass = false;
@@ -449,7 +451,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
-                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "departMedian", "stack", "server", "readTimeoutMs",
+                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
@@ -514,6 +516,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("zeroX")) c.zeroX = o.get("zeroX").getAsString();
             if (o.has("crewNoop")) c.crewNoop = o.get("crewNoop").getAsString();
             if (o.has("deadAltCost")) c.deadAltCost = o.get("deadAltCost").getAsString();
+            if (o.has("deadPump")) c.deadPump = o.get("deadPump").getAsString();
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
             if (o.has("includePass")) c.includePass = o.get("includePass").getAsBoolean();
@@ -756,6 +759,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             AiFixes.Mode.parse(zeroX);
             AiFixes.Mode.parse(crewNoop);
             AiFixes.Mode.parse(deadAltCost);
+            AiFixes.Mode.parse(deadPump);
             AiFixes.Mode.parse(departMedian);
         }
 
@@ -777,6 +781,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("crewNoop", crewNoop);
             if (!"off".equals(deadAltCost)) {
                 o.addProperty("deadAltCost", deadAltCost);
+            }
+            if (!"off".equals(deadPump)) {
+                o.addProperty("deadPump", deadPump);
             }
             o.addProperty("departMedian", departMedian);
             o.addProperty("stack", stack);
@@ -1253,6 +1260,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.zeroX = AiFixes.Mode.parse(cfg.zeroX);
         lc.crewNoop = AiFixes.Mode.parse(cfg.crewNoop);
         lc.deadAltCost = AiFixes.Mode.parse(cfg.deadAltCost);
+        lc.deadPump = AiFixes.Mode.parse(cfg.deadPump);
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
         lc.budgetMs = cfg.budgetMs;

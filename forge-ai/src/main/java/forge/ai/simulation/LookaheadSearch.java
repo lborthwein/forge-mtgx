@@ -187,6 +187,17 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode deadAltCost = AiFixes.Mode.OFF;
         /**
+         * Dead pump guard (lane temp-pump-wrong-turn-1117, report 2026-11-18T01:55Z; off|shadow|on, OFF by default:
+         * candidates and decisions unchanged). A spell or activated ability whose whole resolution is a change to power until
+         * end of turn is not a departure candidate when no creature it changes can deal combat damage before this turn's
+         * cleanup and nothing can react to paying its cost or to playing it ({@link #deadPump}). On its own draw step, with
+         * no creatures, the policy seat discarded two lands to give the opponent's Oona's Prowler -2/-0: the play-outs end
+         * after the effect has expired and the value leaf priced the discarded excess lands at about 0, so departZ took it
+         * (+0.011 and +0.014 mean). ON drops it as deadEtb drops a dead-ETB permanent; SHADOW counts; Forge's own answer
+         * and the policy's default are never dropped.
+         */
+        public AiFixes.Mode deadPump = AiFixes.Mode.OFF;
+        /**
          * Dud-cast guard (lane live-ai-quality-1030, owner 2026-10-30; off|shadow|on, OFF by default: nothing runs and every
          * decision is unchanged). Before the live seat commits a non-permanent spell or a non-mana activated ability (Forge's
          * answer or a departure), {@link DudCast} resolves it in {@link #dudWorlds} belief-redrawn copies; when no copy's state
@@ -578,6 +589,9 @@ public final class LookaheadSearch {
             if (deadAltCost != AiFixes.Mode.OFF) {
                 o.addProperty("deadAltCost", deadAltCost.key());
             }
+            if (deadPump != AiFixes.Mode.OFF) {
+                o.addProperty("deadPump", deadPump.key());
+            }
             if (dudCast != AiFixes.Mode.OFF) {
                 o.addProperty("dudCast", dudCast.key());
                 o.addProperty("dudWorlds", dudWorlds);
@@ -734,6 +748,9 @@ public final class LookaheadSearch {
         /** deadAltCost guard (null = off): the same counters as deadEtb, for card-spending casts that buy nothing. */
         public String deadAltCostMode;
         public long deadAltCostCands, deadAltCostDecisions, deadAltCostDropped, deadAltCostShadowBest, deadAltCostForge;
+        /** deadPump guard (null = off): the same counters as deadEtb, for power-only pumps that cannot matter this turn. */
+        public String deadPumpMode;
+        public long deadPumpCands, deadPumpDecisions, deadPumpDropped, deadPumpShadowBest, deadPumpForge;
         /** dudCast guard (null = off): answers checked, duds found, vetoed (re-asked), passed, unknown; time; dud cards. */
         public String dudCastMode;
         public long dudChecks, dudFound, dudVetoed, dudPassed, dudUnknown, dudNanos;
@@ -984,6 +1001,16 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", deadAltCostShadowBest);
                 d.addProperty("forgeAnswer", deadAltCostForge);
                 o.add("deadAltCost", d);
+            }
+            if (deadPumpMode != null) {
+                final JsonObject d = new JsonObject();
+                d.addProperty("mode", deadPumpMode);
+                d.addProperty("cands", deadPumpCands);
+                d.addProperty("decisions", deadPumpDecisions);
+                d.addProperty("dropped", deadPumpDropped);
+                d.addProperty("shadowBest", deadPumpShadowBest);
+                d.addProperty("forgeAnswer", deadPumpForge);
+                o.add("deadPump", d);
             }
             if (dudCastMode != null) {
                 JsonObject d = new JsonObject();
@@ -1499,6 +1526,8 @@ public final class LookaheadSearch {
     final Set<String> crewNoopKeys = new HashSet<>();
     /** deadAltCost SHADOW: keys of the last enumeration's dead alternative-cost candidates (kept); tests read it. */
     final Set<String> deadAltCostKeys = new HashSet<>();
+    /** deadPump SHADOW: keys of the last enumeration's dead pump candidates (kept); tests read it. */
+    final Set<String> deadPumpKeys = new HashSet<>();
     private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
@@ -1900,6 +1929,9 @@ public final class LookaheadSearch {
         }
         if (cfg.deadAltCost != AiFixes.Mode.OFF) {
             stats.deadAltCostMode = cfg.deadAltCost.key();
+        }
+        if (cfg.deadPump != AiFixes.Mode.OFF) {
+            stats.deadPumpMode = cfg.deadPump.key();
         }
         if (cfg.dudCast != AiFixes.Mode.OFF) {
             stats.dudCastMode = cfg.dudCast.key();
@@ -2320,6 +2352,9 @@ public final class LookaheadSearch {
         if (cfg.deadAltCost == AiFixes.Mode.SHADOW && best != 0 && deadAltCostKeys.contains(cands.get(best).key())) {
             stats.deadAltCostShadowBest++;
         }
+        if (cfg.deadPump == AiFixes.Mode.SHADOW && best != 0 && deadPumpKeys.contains(cands.get(best).key())) {
+            stats.deadPumpShadowBest++;
+        }
         if (cfg.copyEot != AiFixes.Mode.OFF) {
             final int[] u;
             synchronized (live) {
@@ -2460,6 +2495,9 @@ public final class LookaheadSearch {
                 }
                 if (cfg.deadAltCost == AiFixes.Mode.SHADOW && deadAltCostKeys.contains(cands.get(c).key())) {
                     co.addProperty("deadAltCost", true);
+                }
+                if (cfg.deadPump == AiFixes.Mode.SHADOW && deadPumpKeys.contains(cands.get(c).key())) {
+                    co.addProperty("deadPump", true);
                 }
                 final JsonArray vs = new JsonArray();
                 final JsonArray ds = new JsonArray();
@@ -3482,6 +3520,9 @@ public final class LookaheadSearch {
         if (cfg.deadAltCost == AiFixes.Mode.SHADOW && best != 0 && deadAltCostKeys.contains(cands.get(best).key())) {
             stats.deadAltCostShadowBest++;
         }
+        if (cfg.deadPump == AiFixes.Mode.SHADOW && best != 0 && deadPumpKeys.contains(cands.get(best).key())) {
+            stats.deadPumpShadowBest++;
+        }
         final java.util.function.IntUnaryOperator to = testOverride;
         final java.util.function.IntSupplier lineOf = explainLine;
         if (to != null && lineOf != null) {
@@ -3631,7 +3672,8 @@ public final class LookaheadSearch {
         final boolean zguard = cfg.zeroX != AiFixes.Mode.OFF;
         final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
         final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
-        if (!guard && !zguard && !cguard && !aguard) {
+        final boolean pguard = cfg.deadPump != AiFixes.Mode.OFF;
+        if (!guard && !zguard && !cguard && !aguard && !pguard) {
             for (int i = 0; i < all.size() && out.size() < breadth; i++) {
                 out.add(all.get(i));
                 outAt.add(allAt.get(i));
@@ -3642,13 +3684,14 @@ public final class LookaheadSearch {
         zeroXKeys.clear();
         crewNoopKeys.clear();
         deadAltCostKeys.clear();
+        deadPumpKeys.clear();
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 7)));
         final Object prevAiCache1 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds = forge.util.IdScope.capture();
         forge.util.IdScope.open();
-        int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0;
+        int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0;
         final List<Cand> o = new ArrayList<>();
         final List<Integer> oAt = new ArrayList<>();
         try {
@@ -3666,6 +3709,7 @@ public final class LookaheadSearch {
                 final boolean zero = zguard && sa != null && zeroXSpell(sa, me);
                 final boolean crew = cguard && sa != null && crewNoop(sa, me);
                 final boolean alt = aguard && sa != null && deadAltCost(sa, me);
+                final boolean pump = pguard && sa != null && deadPump(sa, me);
                 if (i == 0) {
                     // the default is never dropped (as Forge's answer in enumerate)
                     if (dead) {
@@ -3679,6 +3723,9 @@ public final class LookaheadSearch {
                     }
                     if (alt) {
                         stats.deadAltCostForge++;
+                    }
+                    if (pump) {
+                        stats.deadPumpForge++;
                     }
                 } else {
                     if (dead) {
@@ -3717,6 +3764,15 @@ public final class LookaheadSearch {
                         }
                         deadAltCostKeys.add(c.key());
                     }
+                    if (pump) {
+                        pumpHere++;
+                        stats.deadPumpCands++;
+                        if (cfg.deadPump == AiFixes.Mode.ON) {
+                            stats.deadPumpDropped++;
+                            continue;
+                        }
+                        deadPumpKeys.add(c.key());
+                    }
                 }
                 o.add(c);
                 oAt.add(allAt.get(i));
@@ -3732,6 +3788,9 @@ public final class LookaheadSearch {
             }
             if (altHere > 0) {
                 stats.deadAltCostDecisions++;
+            }
+            if (pumpHere > 0) {
+                stats.deadPumpDecisions++;
             }
         } catch (RuntimeException e) {
             o.clear();
@@ -4067,6 +4126,9 @@ public final class LookaheadSearch {
                 }
                 if (cfg.deadAltCost == AiFixes.Mode.SHADOW && deadAltCostKeys.contains(cd.key())) {
                     co.addProperty("deadAltCost", true);
+                }
+                if (cfg.deadPump == AiFixes.Mode.SHADOW && deadPumpKeys.contains(cd.key())) {
+                    co.addProperty("deadPump", true);
                 }
                 ca.add(co);
             }
@@ -5316,7 +5378,17 @@ public final class LookaheadSearch {
             final boolean zguard = cfg.zeroX != AiFixes.Mode.OFF;
             final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
             final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
-            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0;
+            final boolean pguard = cfg.deadPump != AiFixes.Mode.OFF;
+            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0;
+            if (pguard) {
+                deadPumpKeys.clear();
+                if (defSa != null) {
+                    final SpellAbility d = locate(g, me, out.get(0));
+                    if (d != null && deadPump(d, me)) {
+                        stats.deadPumpForge++;
+                    }
+                }
+            }
             if (aguard) {
                 deadAltCostKeys.clear();
                 if (defSa != null) {
@@ -5404,6 +5476,16 @@ public final class LookaheadSearch {
                     }
                     deadAltCostKeys.add(c.key());
                 }
+                if (pguard && !seen.contains(c.key()) && deadPump(sa, me)) {
+                    pumpHere++;
+                    stats.deadPumpCands++;
+                    if (cfg.deadPump == AiFixes.Mode.ON) {
+                        seen.add(c.key());
+                        stats.deadPumpDropped++;
+                        continue;
+                    }
+                    deadPumpKeys.add(c.key());
+                }
                 if (seen.add(c.key())) {
                     out.add(c);
                 }
@@ -5419,6 +5501,9 @@ public final class LookaheadSearch {
             }
             if (altHere > 0) {
                 stats.deadAltCostDecisions++;
+            }
+            if (pumpHere > 0) {
+                stats.deadPumpDecisions++;
             }
             if (pv != null) {
                 priorView(pv, g, me, legal, seen);
@@ -6157,6 +6242,401 @@ public final class LookaheadSearch {
         }
         ab.setActivatingPlayer(me);
         return !forge.ai.SpellApiToAi.Converter.get(ab).doTriggerNoCostWithSubs(me, ab, false).willingToPlay();
+    }
+
+    /**
+     * deadPump guard: true for a spell or activated ability (never a mana ability) whose whole resolution changes only power
+     * until end of turn, when that change cannot matter: the window closes at this turn's cleanup, and a power change acts
+     * only through the damage the creature deals. All three must hold, and anything this check cannot read leaves the
+     * candidate to the search:
+     * <ol>
+     * <li>The ability and each sub-ability is Pump or PumpAll with a non-zero NumAtt and NumDef absent or 0, and carries
+     * only parameters that say whom it changes, how it targets, when it may be played and how it reads
+     * ({@link #DEAD_PUMP_PARAMS}): no keyword, no Duration (so until end of turn), no condition, no other effect. No optional
+     * cost, no additional ability, and a cost of mana, discard, life, sacrifice or exile from hand only ({@link #pumpCost}).
+     * </li>
+     * <li>No extra phase is pending, and no card it changes can still deal combat damage this turn ({@link #pumpLive}).
+     * The cards are its Defined cards, every legal target (the target is chosen only in the play-out), or PumpAll's current
+     * valid set.</li>
+     * <li>Nothing can react to paying its cost or to playing it ({@link #pumpReacts}).</li>
+     * </ol>
+     * Power-reading effects later in the turn (fight, fling) are out of scope: the policy's own choice and Forge's answer
+     * are never dropped, so a seat that wants such a line still plays it. Reads only: it asks a copy of the ability.
+     */
+    static boolean deadPump(SpellAbility sa, Player me) {
+        if (sa == null || me == null || sa.getHostCard() == null || sa.isManaAbility() || sa.isLandAbility()
+                || !(sa.isSpell() || sa.isActivatedAbility())
+                || sa.getApi() != forge.game.ability.ApiType.Pump && sa.getApi() != forge.game.ability.ApiType.PumpAll) {
+            return false;
+        }
+        try {
+            final SpellAbility x = sa.copy(sa.getHostCard(), me, false, true); // its parameters as they read now (text changes kept)
+            final List<SpellAbility> chain = new ArrayList<>();
+            for (SpellAbility s = x; s != null; s = s.getSubAbility()) {
+                if (!powerOnlyPump(s) || !s.getAdditionalAbilities().isEmpty() || !s.getAdditionalAbilityLists().isEmpty()) {
+                    return false;
+                }
+                chain.add(s);
+            }
+            if (x.getOptionalCosts().iterator().hasNext()) {
+                return false;
+            }
+            final PumpCost pay = pumpCost(x, me);
+            if (pay == null) {
+                return false;
+            }
+            final PhaseHandler ph = me.getGame().getPhaseHandler();
+            if (ph.getPhase() == null || ph.getPlayerTurn() == null || extraPhasePending(ph)) {
+                return false;
+            }
+            for (SpellAbility s : chain) {
+                final List<Card> changed = pumpAffected(s, me);
+                if (changed == null) {
+                    return false;
+                }
+                for (Card c : changed) {
+                    if (pumpLive(c, ph)) {
+                        return false;
+                    }
+                }
+            }
+            return !pumpReacts(x, chain, me, pay);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * deadPump: the parameters a power-only pump may carry. They say whom it changes, how it targets, when it may be played
+     * and how it reads. Any other parameter (KW, KWChoice, Duration, AtEOT, PumpZone, Radiance, a Condition, Optional,
+     * UnlessCost, RememberPumped, Planeswalker, ...) is an effect or a condition, and the pump is left to the search.
+     */
+    static final Set<String> DEAD_PUMP_PARAMS = new HashSet<>(Arrays.asList("AB", "SP", "DB", "Cost", "CostDesc",
+            "PrecostDesc", "NumAtt", "NumDef", "Defined", "ValidTgts", "TgtPrompt", "TargetMin", "TargetMax", "TargetUnique",
+            "ValidTgtsDesc", "AITgts", "ValidCards", "IsCurse", "AILogic", "SpellDescription", "StackDescription", "SubAbility",
+            "Activator", "ActivationLimit", "GameActivationLimit", "ActivationPhases", "SorcerySpeed", "PlayerTurn"));
+
+    /** deadPump: {@code s} is a Pump or PumpAll that changes only power (non-zero NumAtt, NumDef absent or 0), until end of turn. */
+    static boolean powerOnlyPump(SpellAbility s) {
+        if (s.getApi() != forge.game.ability.ApiType.Pump && s.getApi() != forge.game.ability.ApiType.PumpAll) {
+            return false;
+        }
+        for (String k : s.getMapParams().keySet()) {
+            if (!DEAD_PUMP_PARAMS.contains(k)) {
+                return false;
+            }
+        }
+        final String att = s.getParam("NumAtt");
+        final String def = s.getParam("NumDef");
+        if (att == null || "Double".equals(att) || "Triple".equals(att) || "Double".equals(def) || "Triple".equals(def)) {
+            return false;
+        }
+        final Card host = s.getHostCard();
+        return forge.game.ability.AbilityUtils.calculateAmount(host, att, s, true) != 0
+                && (def == null || forge.game.ability.AbilityUtils.calculateAmount(host, def, s, true) == 0);
+    }
+
+    /** deadPump: what paying a cost does: the zones it may take cards from, and the kinds of payment it makes. */
+    static final class PumpCost {
+        boolean mana, discard, sacrifice, life, exile;
+        final java.util.EnumSet<ZoneType> from = java.util.EnumSet.noneOf(ZoneType.class);
+    }
+
+    /**
+     * deadPump: the payment of {@code sa}'s cost, or null when a part of it may do something by itself (untapping,
+     * counters, returning, milling, tapping, revealing, exiling from a graveyard, ...). Mana may be paid by sacrificing or
+     * discarding (a Treasure, Lion's Eye Diamond) or with life (Phyrexian mana), so a mana part counts as all three. A spell
+     * also moves itself, from its zone to the stack and then to the graveyard.
+     */
+    static PumpCost pumpCost(SpellAbility sa, Player me) {
+        final PumpCost pay = new PumpCost();
+        final forge.game.cost.Cost cost = sa.getPayCosts();
+        if (cost != null) {
+            for (final forge.game.cost.CostPart p : cost.getCostParts()) {
+                if (p instanceof forge.game.cost.CostPartMana) {
+                    if (!((forge.game.cost.CostPartMana) p).getMana().isZero()) {
+                        pay.mana = true;
+                        pay.from.add(ZoneType.Battlefield);
+                        pay.from.add(ZoneType.Hand);
+                    }
+                } else if (p instanceof forge.game.cost.CostDiscard) {
+                    pay.discard = true;
+                    pay.from.add(ZoneType.Hand);
+                } else if (p instanceof forge.game.cost.CostPayLife) {
+                    pay.life = true;
+                } else if (p instanceof forge.game.cost.CostSacrifice) {
+                    pay.sacrifice = true;
+                    pay.from.add(ZoneType.Battlefield);
+                } else if (p.getClass() == forge.game.cost.CostExile.class
+                        && Collections.singletonList(ZoneType.Hand).equals(((forge.game.cost.CostExile) p).getFrom())) {
+                    pay.exile = true;
+                    pay.from.add(ZoneType.Hand);
+                } else {
+                    return null;
+                }
+            }
+        }
+        if (sa.isSpell()) {
+            final forge.game.zone.Zone z = me.getGame().getZoneOf(sa.getHostCard());
+            if (z == null) {
+                return null;
+            }
+            pay.from.add(z.getZoneType());
+            pay.from.add(ZoneType.Stack);
+        }
+        return pay;
+    }
+
+    /**
+     * deadPump: the cards {@code s} would change, or null when this check cannot read them. For PumpAll, its current valid
+     * set on the battlefield (whatever it targets: a superset). For a targeted Pump, every legal target, since the target is
+     * chosen only in the play-out (null if a player is a legal target or nothing is). Otherwise its Defined cards (default
+     * Self; null if there are none).
+     */
+    static List<Card> pumpAffected(SpellAbility s, Player me) {
+        if (s.getApi() == forge.game.ability.ApiType.PumpAll) {
+            final String valid = s.getParam("ValidCards");
+            if (valid == null) {
+                return null;
+            }
+            return new ArrayList<>(forge.game.ability.AbilityUtils.filterListByType(
+                    me.getGame().getCardsIn(ZoneType.Battlefield), valid, s));
+        }
+        final List<Card> out = new ArrayList<>();
+        if (s.usesTargeting()) {
+            final forge.game.spellability.TargetRestrictions tr = s.getTargetRestrictions();
+            if (tr == null) {
+                return null;
+            }
+            for (forge.game.GameEntity e : tr.getAllCandidates(s, false)) {
+                if (!(e instanceof Card)) {
+                    return null;
+                }
+                out.add((Card) e);
+            }
+        } else {
+            for (String d : s.getParamOrDefault("Defined", "Self").split(" & ")) {
+                out.addAll(forge.game.ability.AbilityUtils.getDefinedCards(s.getHostCard(), d, s));
+            }
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    /**
+     * deadPump: {@code c} may still deal combat damage this turn (the caller has checked that no extra phase is pending).
+     * Live if any of these hold:
+     * <ul>
+     * <li>it is attacking or blocking, before the combat damage step;</li>
+     * <li>its controller is the active player, attackers are not declared yet, and it can attack ({@code CombatUtil});</li>
+     * <li>it is another player's untapped creature, blockers are not declared yet, and the active player has a creature
+     * attacking or able to attack.</li>
+     * </ul>
+     * A card off the battlefield, phased out or not a creature is not read here (live).
+     */
+    static boolean pumpLive(Card c, PhaseHandler ph) {
+        if (c == null || !c.isInPlay() || c.isPhasedOut() || !c.isCreature()) {
+            return true;
+        }
+        final forge.game.phase.PhaseType phase = ph.getPhase();
+        final forge.game.combat.Combat combat = ph.getCombat();
+        if (combat != null && (combat.isAttacking(c) || combat.isBlocking(c))
+                && phase.isBefore(forge.game.phase.PhaseType.COMBAT_DAMAGE)) {
+            return true;
+        }
+        if (ph.isPlayerTurn(c.getController())) {
+            return phase.isBefore(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS) && forge.game.combat.CombatUtil.canAttack(c);
+        }
+        if (!phase.isBefore(forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS) || c.isTapped()) {
+            return false;
+        }
+        for (Card a : ph.getPlayerTurn().getCreaturesInPlay()) {
+            if (combat != null && combat.isAttacking(a)
+                    || phase.isBefore(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS) && forge.game.combat.CombatUtil.canAttack(a)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * deadPump: something may react to paying {@code sa}'s cost or to playing it, so the guard stands aside. Any of:
+     * <ul>
+     * <li>anything waiting on the stack (it may read what the payment changes: a hand size, a sacrificed target, a power);
+     * </li>
+     * <li>a madness card in the activator's hand, when the cost discards;</li>
+     * <li>a trigger of a mode this payment and play can fire ({@link #pumpModes}), on a card in any zone where it works
+     * ({@code zonesCheck}) or among the delayed triggers;</li>
+     * <li>a zone-change replacement (Moved, which covers discarding) that works where its card is, when the payment moves
+     * cards.</li>
+     * </ul>
+     * {@link #pumpSees} leaves out what this payment cannot reach.
+     */
+    static boolean pumpReacts(SpellAbility sa, List<SpellAbility> chain, Player me, PumpCost pay) {
+        final Game game = me.getGame();
+        if (!game.getStack().isEmpty()) {
+            return true;
+        }
+        if (pay.discard) {
+            for (Card c : me.getCardsIn(ZoneType.Hand)) {
+                if (c.hasKeyword(forge.game.keyword.Keyword.MADNESS)) {
+                    return true;
+                }
+            }
+        }
+        final Set<TriggerType> modes = pumpModes(sa, chain, pay);
+        final boolean moves = !pay.from.isEmpty();
+        for (Card c : game.getCardsInGame()) {
+            final forge.game.zone.Zone z = game.getZoneOf(c);
+            final ZoneType zt = z == null ? null : z.getZoneType();
+            for (Trigger t : c.getTriggers()) {
+                if (modes.contains(t.getMode()) && t.zonesCheck(z) && pumpSees(t, zt, pay)) {
+                    return true;
+                }
+            }
+            if (moves) {
+                for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                    if (re.getMode() == forge.game.replacement.ReplacementType.Moved && re.zonesCheck(z) && pumpSees(re, zt, pay)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        final forge.game.trigger.TriggerHandler th = game.getTriggerHandler();
+        for (Trigger t : th.getDelayedTriggersView()) {
+            if (modes.contains(t.getMode()) && pumpSees(t, null, pay)) {
+                return true;
+            }
+        }
+        for (Trigger t : th.getPlayerDefinedDelayedTriggersView().values()) {
+            if (modes.contains(t.getMode()) && pumpSees(t, null, pay)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * deadPump: the trigger modes that paying {@code sa}'s cost and playing it can fire. SpellAbilityCast always; SpellCast
+     * and SpellCastOrCopy for a spell, AbilityCast for an ability; BecomesTarget(Once) when it targets; Discarded(All),
+     * Sacrificed(Once), PayLife, LifeLost(All) and Exiled for those payments; the mana payment's own (Taps, TapAll,
+     * TapsForMana, ManaAdded, ManaExpend, and discard, sacrifice and life as above); ChangesZone(All) when a card moves.
+     */
+    static Set<TriggerType> pumpModes(SpellAbility sa, List<SpellAbility> chain, PumpCost pay) {
+        final Set<TriggerType> m = java.util.EnumSet.of(TriggerType.SpellAbilityCast);
+        if (sa.isSpell()) {
+            m.add(TriggerType.SpellCast);
+            m.add(TriggerType.SpellCastOrCopy);
+        } else {
+            m.add(TriggerType.AbilityCast);
+        }
+        for (SpellAbility s : chain) {
+            if (s.usesTargeting()) {
+                m.add(TriggerType.BecomesTarget);
+                m.add(TriggerType.BecomesTargetOnce);
+            }
+        }
+        if (pay.discard || pay.mana) {
+            m.add(TriggerType.Discarded);
+            m.add(TriggerType.DiscardedAll);
+        }
+        if (pay.sacrifice || pay.mana) {
+            m.add(TriggerType.Sacrificed);
+            m.add(TriggerType.SacrificedOnce);
+        }
+        if (pay.life || pay.mana) {
+            m.add(TriggerType.PayLife);
+            m.add(TriggerType.LifeLost);
+            m.add(TriggerType.LifeLostAll);
+        }
+        if (pay.exile) {
+            m.add(TriggerType.Exiled);
+        }
+        if (pay.mana) {
+            m.add(TriggerType.Taps);
+            m.add(TriggerType.TapAll);
+            m.add(TriggerType.TapsForMana);
+            m.add(TriggerType.ManaAdded);
+            m.add(TriggerType.ManaExpend);
+        }
+        if (!pay.from.isEmpty()) {
+            m.add(TriggerType.ChangesZone);
+            m.add(TriggerType.ChangesZoneAll);
+        }
+        return m;
+    }
+
+    /**
+     * deadPump: whether trigger or replacement {@code x}, on a card in zone {@code zt} (null = unknown or delayed), could see
+     * this payment. Two cases are left out, and only these:
+     * <ul>
+     * <li>one off the battlefield and the command zone that watches only its own card (ValidCard Self), unless the payment
+     * may take cards from that card's zone (a creature's dies or cast trigger in a library does not see a discard);</li>
+     * <li>a zone change (a ChangesZone(All) trigger or a Moved replacement) whose Destination is only the battlefield
+     * (nothing here enters it: an enters trigger, an enters-tapped replacement), or whose Origin is no zone the payment
+     * takes cards from.</li>
+     * </ul>
+     */
+    static boolean pumpSees(forge.game.TriggerReplacementBase x, ZoneType zt, PumpCost pay) {
+        if (zt != null && zt != ZoneType.Battlefield && zt != ZoneType.Command && !pay.from.contains(zt)
+                && selfOnly(x.getParam("ValidCard"))) {
+            return false;
+        }
+        final boolean zoneChange = x instanceof forge.game.replacement.ReplacementEffect
+                || x instanceof Trigger && (((Trigger) x).getMode() == TriggerType.ChangesZone
+                        || ((Trigger) x).getMode() == TriggerType.ChangesZoneAll);
+        if (!zoneChange) {
+            return true;
+        }
+        final String dest = x.getParam("Destination");
+        if (dest != null && onlyBattlefield(dest)) {
+            return false;
+        }
+        final String origin = x.getParam("Origin");
+        return origin == null || anyZone(origin, pay.from);
+    }
+
+    /** deadPump: a ValidCard that names only the card itself ("Card.Self", "Card.Self+evoked", ...; each comma part). */
+    static boolean selfOnly(String valid) {
+        if (valid == null || valid.isEmpty()) {
+            return false;
+        }
+        for (String p : valid.split(",")) {
+            final int dot = p.indexOf('.');
+            final String rest = dot < 0 ? "" : p.substring(dot + 1).trim();
+            if (!(rest.equals("Self") || rest.startsWith("Self+"))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** deadPump: a zone list that names only the battlefield. */
+    static boolean onlyBattlefield(String zones) {
+        for (String z : zones.split(",")) {
+            if (!"Battlefield".equals(z.trim())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** deadPump: a zone list that names any zone of {@code from} (Any, All or an unreadable name count as any zone). */
+    static boolean anyZone(String zones, Set<ZoneType> from) {
+        for (String z : zones.split(",")) {
+            final String n = z.trim();
+            if ("Any".equals(n) || "All".equals(n)) {
+                return true;
+            }
+            try {
+                final ZoneType t = ZoneType.smartValueOf(n);
+                if (t == null || from.contains(t)) {
+                    return true;
+                }
+            } catch (IllegalArgumentException e) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
