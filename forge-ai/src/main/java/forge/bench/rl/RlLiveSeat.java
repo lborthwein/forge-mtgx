@@ -322,6 +322,7 @@ public final class RlLiveSeat {
                     case "crewNoop": c.crewNoop = v; break;
                     case "deadAltCost": c.deadAltCost = v; break; // evoke-empty-board-1111 (live default off)
                     case "deadPump": c.deadPump = v; break; // temp-pump-wrong-turn-1117 (live default off)
+                    case "deadFaceUp": c.deadFaceUp = v; break; // turn-face-up-timing-1118 (live default off)
                     case "lethalBlock": c.lethalBlock = v; break; // block-vs-open-pump-1118 (block search; live default off)
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
@@ -854,6 +855,10 @@ public final class RlLiveSeat {
         d.addProperty("departed", r.chosen > 0);
         d.addProperty("failed", r.failed);
         d.addProperty("leafFallback", r.leafFallback);
+        if (r.deadFaceUp != null) {
+            // turn-face-up-timing-1118 (deadFaceUp on or shadow, a turn-up among the candidates; otherwise the line is unchanged)
+            d.add("deadFaceUp", r.deadFaceUp);
+        }
         d.addProperty("searched", st.searched);
         d.addProperty("departedTotal", st.departed);
         d.addProperty("cappedTotal", st.capped);
