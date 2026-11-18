@@ -474,12 +474,30 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * <p>On the delegate branch this also arms {@link #pendingEcho}. See the ECHO block
      * below for why the arming and the reading are two steps.
      */
+    /**
+     * nestfix-1118: the plan hook's priority search runs in a {@link forge.ai.simulation.SearchGuard} scope on the real
+     * game; a search that asks a real seat ends with no opinion (the policy / Forge path decides, as without a plan).
+     */
+    private List<SpellAbility> guardedPriority() {
+        final forge.game.Game g = getGame();
+        forge.ai.simulation.SearchGuard.enter(g);
+        try {
+            return planHook.priority(this);
+        } catch (forge.ai.simulation.SearchGuard.RealSeatAsk e) {
+            counters.instrument("searchGuard.planHook");
+            return NO_OPINION;
+        } finally {
+            forge.ai.simulation.SearchGuard.exit(g);
+        }
+    }
+
     private JsonObject ask(final String method, final String kind, final JsonObject body) {
         return ask(method, kind, body, null);
     }
 
     /** As above; {@code menuObjects} reach an in-process answerer only (see BenchSession.LocalAnswerer). */
     private JsonObject ask(final String method, final String kind, final JsonObject body, final Object menuObjects) {
+        forge.ai.simulation.SearchGuard.check(getGame(), "bridge:" + method); // nestfix-1118
         if (planHook != null && !"priority".equals(kind) && !"attackers".equals(kind)
                 && !"blockers".equals(kind) && !"mulligan".equals(kind) && !"startingPlayer".equals(kind)
                 && planHook.forgeChoices()) {
@@ -1269,7 +1287,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             // search-bones-1015: the plan follower first (its answer is played, never asked)
             final boolean rec = hookRows() != null; // sdcc-imit2-1111: the answerer records this line (census below)
             final Object[] shadow = hookShadow(); // sdcc-imit-1111: null unless the answerer records a line's priorities
-            final List<SpellAbility> p = planHook.priority(this);
+            final List<SpellAbility> p = guardedPriority();
             if (p != NO_OPINION) {
                 if (shadow != null) {
                     hookShadowAnswered((BenchSession.LocalAnswerer) shadow[0], (List<SpellAbility>) shadow[1], shadow[2], p);
@@ -1309,7 +1327,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body, menu);
         if (ans == null && planHook != null && planHook.handoff()) {
             // search-bones-1015: the seat's search handed this priority to the plan hook
-            final List<SpellAbility> p = planHook.priority(this);
+            final List<SpellAbility> p = guardedPriority();
             if (p != NO_OPINION) {
                 takeEcho();
                 final BenchSession.LocalAnswerer la = session.getLocalAnswerer();
