@@ -2763,6 +2763,38 @@ public final class ForcedWinSolver {
                 res.nodes += first;
             }
             res.nodes += before;
+        } else if (cfg.verifyMax > 0 && !res.lines.isEmpty() && !res.sameTurn && cfg.forced
+                && (cfg.grantSacMana || cfg.pileTutorCast)) {
+            // sdcc-verify-1117 (verifyMax with the late keys): the passes without them found only lines that pass the
+            // turn: the late keys' this-turn pass runs too, and its lines are verified first (the earlier ones keep their
+            // place after them, so a proven next-turn line is still reached within verifyMax)
+            final ForcedWinPlanner.Result prev = res;
+            lim.grantSacMana = cfg.grantSacMana;
+            lim.pileTutorCast = cfg.pileTutorCast;
+            lim.payPolicies = cfg.paySearch ? (cfg.payKeepUse ? ForcedWinPlanner.PAY_POLICIES_KEEP_USE : ForcedWinPlanner.PAY_POLICIES) : 1;
+            lim.horizon = 1;
+            final ForcedWinPlanner.Result late = planCapped(pos, lim);
+            if (!late.lines.isEmpty()) {
+                final java.util.Set<String> keys = new java.util.HashSet<>();
+                final List<Line> merged = new ArrayList<>();
+                for (Line l : late.lines) {
+                    if (keys.add(l.key())) {
+                        merged.add(l);
+                    }
+                }
+                for (Line l : prev.lines) {
+                    if (keys.add(l.key())) {
+                        merged.add(l);
+                    }
+                }
+                late.lines.clear();
+                late.lines.addAll(merged);
+                late.nodes += prev.nodes;
+                late.nextTurn |= prev.nextTurn;
+                res = late;
+            } else {
+                prev.nodes += late.nodes;
+            }
         }
         if (res.lines.isEmpty() && cfg.forced && cfg.planEscalate > 1 && res.exhausted) {
             // sdcc-escalate-1117 (planEscalate): every pass ran out of nodes or time without exhausting the tree: one more
