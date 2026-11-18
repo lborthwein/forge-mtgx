@@ -6330,7 +6330,7 @@ public final class ForcedWinSolver {
             pos.landEntry = reader.landEntry(live, me); // sdcc-etb-1110: asked when a plan from this position plays a land
         }
         if (cfg.costTax && pos != null) {
-            pos.tax = spellTaxes(live, me, pos); // sdcc-costtax-1117
+            pos.tax = taxesOffTheRealGame(live, me, pos); // sdcc-costtax-1117; nestfix-1118: never asks on the real game
         }
         return pos;
     }
@@ -6340,6 +6340,41 @@ public final class ForcedWinSolver {
      * its total mana under the engine's cost adjustment in this game state (test mode: nothing is paid or changed), keyed
      * "card id|cost text" as {@link ForcedWinModel.Abil#costKey}. Only nonzero changes are kept; a card that fails is skipped.
      */
+    /**
+     * nestfix-1118: the cost read must not touch the real game. Where the engine's adjustment would ask a controller (a
+     * ReduceCost static: the order of reductions) it runs on a plain copy (isolated: scratch random, ids and AI memory put
+     * back); with no such static the adjustment asks nobody and reads the real game as before. Sacrifice-choice costs
+     * (Emerge, Offering) are skipped in {@link #spellTaxes}.
+     */
+    static java.util.Map<String, Integer> taxesOffTheRealGame(final Game live, final Player me, final Position pos) {
+        if (!asksOnCostAdjust(live)) {
+            return spellTaxes(live, me, pos);
+        }
+        return forge.bench.PlayerControllerBridge.isolated(live, () -> forge.util.IdScope.detached(() -> {
+            synchronized (live) {
+                final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING);
+                copier.setCopyFidelity(1);
+                final Game g = copier.makeCopy();
+                return spellTaxes(g, (Player) copier.find(me), pos);
+            }
+        }));
+    }
+
+    /** Whether cost adjustment in {@code g} asks a controller: any ReduceCost static where the engine collects them. */
+    static boolean asksOnCostAdjust(final Game g) {
+        for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Stack, ZoneType.Command}) {
+            for (Card c : g.getCardsIn(z)) {
+                for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {
+                    if (st.checkMode(forge.game.staticability.StaticAbilityMode.ReduceCost)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     static java.util.Map<String, Integer> spellTaxes(final Game g, final Player me, final Position pos) {
         final java.util.Map<String, Integer> out = new java.util.HashMap<>();
         final java.util.Set<Integer> ids = new java.util.HashSet<>();
@@ -6366,8 +6401,8 @@ public final class ForcedWinSolver {
                         // none
                     }
                     for (SpellAbility sa : all) {
-                        if (sa.getPayCosts() == null) {
-                            continue;
+                        if (sa.getPayCosts() == null || sa.isEmerge() || sa.isOffering()) {
+                            continue; // nestfix-1118: a sacrifice-choice cost is a choice, not a tax (its read asks the seat)
                         }
                         sa.setActivatingPlayer(me);
                         final forge.card.mana.ManaCost base = sa.getPayCosts().getTotalMana();
