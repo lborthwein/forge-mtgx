@@ -110,7 +110,39 @@ public final class RlLiveSeat {
                 "planLoops",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // sdcc-fetchthin-1117 (absent = off): a land searched onto the battlefield thins the library in the
+                // width model (ForcedWinSolver.Config.fetchThin)
+                "fetchThin",
+                // sdcc-paykeep-1117 (absent = off): the payment search keeps sources with another use in play
+                // (ForcedWinSolver.Config.payKeepUse)
+                "payKeepUse",
+                // sdcc-protect-1117 (absent = off): player protection spares the next pass's damage; growing draws
+                // (ForcedWinSolver.Config.protectUntilNext / drawGrowth)
+                "protectUntilNext", "drawGrowth",
+                // sdcc-costtax-1117 (absent = off): spells cost what the engine's cost adjustment says
+                // (ForcedWinSolver.Config.costTax)
+                "costTax",
+                // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
+                "grantSacMana",
+                // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
+                "pileTutorCast",
+                // sdcc-widen-1117 (absent = 0 = off): narrow first planner pass (ForcedWinSolver.Config.planWiden)
+                "planWiden",
+                // sdcc-escalate-1117 (absent = 0 = off): one planner pass at k x the cap where the passes stopped at it
+                // (ForcedWinSolver.Config.planEscalate)
+                "planEscalate",
+                // sdcc-verify-1117 (absent = 0 = off): verify up to k distinct lines until a proof (ForcedWinSolver.Config.verifyMax)
+                "verifyMax",
+                // sdcc-late-escalate-1117 (absent = 0 = off): after the planner and the engine, one planner pass at k x the
+                // node cap in the decision's time left (ForcedWinSolver.Config.lateEscalate)
+                "lateEscalate",
+                // sdcc-planwall-1117 (absent = 0 = off): the offense planner passes end by this many ms into the decision
+                // (ForcedWinSolver.Config.planWallMs)
+                "planWallMs",
+                // sdcc-late-escalate-1117 (absent = 0 = off): the late pass's own ms past the decision's wall
+                // (ForcedWinSolver.Config.lateEscalateMs)
+                "lateEscalateMs"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -130,7 +162,23 @@ public final class RlLiveSeat {
                 "planLoops",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // sdcc-fetchthin-1117 (absent = off): a land searched onto the battlefield thins the library in the
+                // width model (ForcedWinSolver.Config.fetchThin)
+                "fetchThin",
+                // sdcc-paykeep-1117 (absent = off): the payment search keeps sources with another use in play
+                // (ForcedWinSolver.Config.payKeepUse)
+                "payKeepUse",
+                // sdcc-protect-1117 (absent = off): player protection spares the next pass's damage; growing draws
+                // (ForcedWinSolver.Config.protectUntilNext / drawGrowth)
+                "protectUntilNext", "drawGrowth",
+                // sdcc-costtax-1117 (absent = off): spells cost what the engine's cost adjustment says
+                // (ForcedWinSolver.Config.costTax)
+                "costTax",
+                // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
+                "grantSacMana",
+                // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
+                "pileTutorCast"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as

@@ -101,6 +101,19 @@ public final class HonestGenerator {
         defaults.putAll(ForcedWinSolver.Config.SOLVERGAPS_DEFAULTS); // solver-gaps-1104: off = unchanged
         defaults.putAll(ForcedWinSolver.Config.OPPBELIEF_DEFAULTS); // opp-belief-1104: off = unchanged
         defaults.put("tutorCast", false); // sdcc-tutorcast-1110: off = the recorded config unchanged
+        defaults.put("fetchThin", false); // sdcc-fetchthin-1117: off = the recorded config unchanged
+        defaults.put("payKeepUse", false); // sdcc-paykeep-1117: off = the recorded config unchanged
+        defaults.put("protectUntilNext", false); // sdcc-protect-1117: off = the recorded config unchanged
+        defaults.put("drawGrowth", false); // sdcc-protect-1117: off = the recorded config unchanged
+        defaults.put("costTax", false); // sdcc-costtax-1117: off = the recorded config unchanged
+        defaults.put("grantSacMana", false); // sdcc-sacmana-1117: off = the recorded config unchanged
+        defaults.put("pileTutorCast", false); // sdcc-piletc-1117: off = the recorded config unchanged
+        defaults.put("planWiden", 0); // sdcc-widen-1117: off = the recorded config unchanged
+        defaults.put("planEscalate", 0); // sdcc-escalate-1117: off = the recorded config unchanged
+        defaults.put("verifyMax", 0); // sdcc-verify-1117: off = the recorded config unchanged
+        defaults.put("lateEscalate", 0); // sdcc-late-escalate-1117: off = the recorded config unchanged
+        defaults.put("planWallMs", 0); // sdcc-planwall-1117: off = the recorded config unchanged
+        defaults.put("lateEscalateMs", 0); // sdcc-late-escalate-1117: off = the recorded config unchanged
         defaults.put("probeObjects", false); // sdcc-probeobj-1111: off = the recorded config unchanged
         defaults.put("engineModeChoice", false); // owner-misplays-1113: off = the recorded config unchanged
         for (java.util.Map.Entry<String, Object> e : defaults.entrySet()) {
