@@ -7153,8 +7153,8 @@ public final class LookaheadSearch {
      * morph, manifest, cloak or disguise; and no other battlefield or command-zone object, on either side, has a static or
      * triggered ability, a keyword or a replacement effect (but its own entering), and no delayed trigger is pending
      * ({@link #dfuOtherAbilities}: anything that could read the changed characteristics or the megamorph counter); and no
-     * card in a graveyard, exile, the command zone or the seat's own hand has a trigger, static or replacement active
-     * where it is ("offBattlefield", {@link #dfuActiveOffBattlefield}).</li>
+     * card in a graveyard, exile, the command zone or the seat's own hand has a trigger, static or replacement (but its own
+     * entering) active where it is ("offBattlefield", {@link #dfuActiveOffBattlefield}).</li>
      * <li><b>What the seat may know</b>: only its own face-down card (whose face it knows) and public state are read;
      * {@code known} (card ids, {@link #pumpKnownIds}, read in the live game) or {@link #pumpKnows} when null. An opponent's
      * hand or library, or an opponent's face-down card, is never read.</li>
@@ -7614,6 +7614,10 @@ public final class LookaheadSearch {
      * ({@code TriggerZones} / {@code ActiveZones}: {@link forge.game.TriggerReplacementBase#zonesCheck}, which counts one
      * without a zone list as active everywhere; {@code EffectZone}: {@link forge.game.staticability.StaticAbility#zonesCheck},
      * which counts a characteristic-defining one as active everywhere). An opponent's hand and the libraries are not read.
+     * Review round 3b: a replacement for the card's own entering the battlefield ({@link #dfuOwnEntry}) is exempt, as on
+     * the battlefield: it changes only how that card enters, and off the battlefield the card can enter before the seat's
+     * next priority only through a trigger (which stands aside) or a spell or ability on the stack (the seat gets priority
+     * first, and a non-empty stack stands aside).
      */
     static boolean dfuActiveOffBattlefield(Card host, Player me, Game game, Set<Integer> known) {
         for (Card c : game.getCardsInGame()) {
@@ -7647,7 +7651,8 @@ public final class LookaheadSearch {
                 }
             }
             for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
-                if (re.zonesCheck(z)) {
+                // review round 3b: a replacement for the card's own entering the battlefield is exempt here too
+                if (re.zonesCheck(z) && !dfuOwnEntry(re)) {
                     return true;
                 }
             }
@@ -7660,10 +7665,30 @@ public final class LookaheadSearch {
         return false;
     }
 
-    /** deadFaceUp: a replacement for its own card entering the battlefield only (Moved, ValidCard Card.Self, Destination Battlefield). */
+    /**
+     * deadFaceUp (review round 3b): the only parameters an exempt own-entry replacement may have. Any other parameter (a
+     * condition such as {@code CheckSVar}, {@code Origin}, {@code ValidCause}, {@code Optional}, {@code Layer},
+     * {@code ActiveZones}, ...) is not classified, so the replacement is not exempt.
+     */
+    static final Set<String> DFU_OWN_ENTRY_PARAMS = new HashSet<>(Arrays.asList(
+            "Event", "ValidCard", "Destination", "ReplaceWith", "ReplacementResult", "Description", "Secondary"));
+
+    /**
+     * deadFaceUp: a replacement for its own card entering the battlefield only: event Moved, {@code ValidCard$ Card.Self},
+     * {@code Destination$ Battlefield}, and since review round 3b no parameter outside {@link #DFU_OWN_ENTRY_PARAMS}. That
+     * includes the keyword-generated ones ({@code etbCounter}: loyalty, +1/+1 counters, ...) when they carry no condition.
+     */
     static boolean dfuOwnEntry(forge.game.replacement.ReplacementEffect re) {
-        return re.getMode() == forge.game.replacement.ReplacementType.Moved && "Card.Self".equals(re.getParam("ValidCard"))
-                && "Battlefield".equals(re.getParam("Destination"));
+        if (re.getMode() != forge.game.replacement.ReplacementType.Moved || !"Card.Self".equals(re.getParam("ValidCard"))
+                || !"Battlefield".equals(re.getParam("Destination"))) {
+            return false;
+        }
+        for (String k : re.getMapParams().keySet()) {
+            if (!DFU_OWN_ENTRY_PARAMS.contains(k)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** deadFaceUp: words that name face-down or face-up status, or a way to be face down. */

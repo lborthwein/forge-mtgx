@@ -42,10 +42,8 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
      * untapped Islands, and {@code faceDown} face down, cast this turn (summoning sick); Crush of Tentacles and Ruinous Path in
      * hand; Nightveil Specter, Silumgar's Command, Rewind, Desecration Demon and Hero's Downfall in the graveyard. b, the human
      * (14 life): Stomping Ground, Cinder Glade, Mountain and two Swamps, no creatures; {@code bHand} in hand; Bloodstained
-     * Mire, Brimstone Volley, Kolaghan, Courser of Kruphix, Dreadbore and Elvish Mystic in the graveyard. Libraries: 25 cards
-     * each ({@code bLibrary} for b). Since review round 3 the fixture leaves out the reported Xenagos, the Reveler in b's
-     * graveyard: its loyalty replacement is active in every zone by Forge's check and stands the guard aside
-     * ({@link #exactReported}).
+     * Mire, Brimstone Volley, Xenagos, Kolaghan, Courser of Kruphix, Dreadbore and Elvish Mystic in the graveyard. Libraries:
+     * 25 cards each ({@code bLibrary} for b).
      */
     private Game board(PhaseType phase, boolean aiActive, String faceDown, String[] bHand, String bLibrary) {
         Game game = initAndCreateGame();
@@ -79,7 +77,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         for (String n : bHand) {
             addCardToZone(n, b, ZoneType.Hand);
         }
-        for (String n : new String[] {"Bloodstained Mire", "Brimstone Volley", "Kolaghan, the Storm's Fury",
+        for (String n : new String[] {"Bloodstained Mire", "Brimstone Volley", "Xenagos, the Reveler", "Kolaghan, the Storm's Fury",
                 "Courser of Kruphix", "Dreadbore", "Elvish Mystic"}) {
             addCardToZone(n, b, ZoneType.Graveyard);
         }
@@ -93,17 +91,9 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         return board(phase, aiActive, faceDown, B_HAND, "Mountain");
     }
 
-    /** The reported decision (a's own end of combat, Stratus Dancer face down) less Xenagos in b's graveyard. */
-    private Game lessXenagos() {
+    /** The reported decision: a's own end of combat, Stratus Dancer face down. */
+    private Game reported() {
         return board(PhaseType.COMBAT_END, true, "Stratus Dancer");
-    }
-
-    /** The reported decision exactly as it was: {@link #lessXenagos} plus Xenagos, the Reveler in b's graveyard. */
-    private Game exactReported() {
-        Game game = lessXenagos();
-        addCardToZone("Xenagos, the Reveler", game.getPlayers().get(1), ZoneType.Graveyard);
-        game.getAction().checkStateEffects(true);
-        return game;
     }
 
     /** a's face-down permanent. */
@@ -251,27 +241,29 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
     // ---------------------------------------------------------------- the reported board
 
     /**
-     * Review round 3: the reported board exactly as it was stands aside. Xenagos, the Reveler in b's graveyard has the
-     * planeswalker loyalty replacement ("enters with three loyalty counters": Event Moved, ValidCard Card.Self, Destination
-     * Battlefield, no ActiveZones), which Forge's zone check ({@code zonesCheck}) counts active in every zone.
+     * Review round 3b: the reported board exactly as it was, with Xenagos, the Reveler in b's graveyard, is dead and drops.
+     * Xenagos's planeswalker loyalty replacement ("enters with three loyalty counters": Event Moved, ValidCard Card.Self,
+     * Destination Battlefield, no ActiveZones) is active in every zone by Forge's {@code zonesCheck}, and it is exempt: it
+     * is a replacement for its own entering the battlefield ({@code dfuOwnEntry}).
      */
     @Test
-    public void theReportedBoardExactlyStandsAsideOnXenagos() {
-        Game game = exactReported();
+    public void theReportedBoardExactlyDropsWithXenagos() {
+        Game game = reported();
         Player a = game.getPlayers().get(0);
-        AssertJUnit.assertEquals("offBattlefield", why(a));
-        AssertJUnit.assertFalse(droppedLive(game, a, AiFixes.Mode.ON));
         Card xenagos = game.getPlayers().get(1).getCardsIn(ZoneType.Graveyard).stream()
                 .filter(c -> c.getName().equals("Xenagos, the Reveler")).findFirst().get();
+        AssertJUnit.assertFalse(xenagos.getReplacementEffects().isEmpty());
         for (forge.game.replacement.ReplacementEffect re : xenagos.getReplacementEffects()) {
             AssertJUnit.assertTrue("Forge counts it active in the graveyard", re.zonesCheck(game.getZoneOf(xenagos)));
+            AssertJUnit.assertTrue("its own entering: exempt", LookaheadSearch.dfuOwnEntry(re));
         }
-        AssertJUnit.assertEquals("without it the board is dead", LookaheadSearch.DFU_DEAD, why(lessXenagos().getPlayers().get(0)));
+        AssertJUnit.assertEquals(LookaheadSearch.DFU_DEAD, why(a));
+        AssertJUnit.assertTrue("the live path drops it", droppedLive(game, a, AiFixes.Mode.ON));
     }
 
     @Test
-    public void theReportedBoardLessXenagosIsDead() {
-        Game game = lessXenagos();
+    public void theReportedBoardIsDead() {
+        Game game = reported();
         Player a = game.getPlayers().get(0);
         final Card dancer = faceDown(a);
         AssertJUnit.assertTrue("the fixture: a 2/2 face down, summoning sick", dancer.isFaceDown() && dancer.isSick());
@@ -285,7 +277,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
     /** The live path: the misplay came from the policy seat's given set (decideGiven, guardGiven). ON passes. */
     @Test
     public void onDropsTheTurnUpAndPasses() {
-        Game game = lessXenagos();
+        Game game = reported();
         Player a = game.getPlayers().get(0);
         List<SpellAbility> giv = given(a);
         AssertJUnit.assertEquals("the live menu at the reported step: pass and the turn-up", 2, giv.size());
@@ -321,7 +313,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
     /** OFF searches the turn-up as live did; SHADOW records it and decides exactly as OFF. */
     @Test
     public void offIsUnchangedAndShadowRecordsIt() {
-        Game game = lessXenagos();
+        Game game = reported();
         Player a = game.getPlayers().get(0);
         List<SpellAbility> giv = given(a);
         int at = turnUpAt(giv);
@@ -356,10 +348,10 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
     /** The K8 seat's site (enumerate), on the same board: the same class, the same rule. Breadth 10 holds every legal play. */
     @Test
     public void theK8EnumerationDropsItWhenOn() {
-        Game g1 = lessXenagos();
+        Game g1 = reported();
         Player a1 = g1.getPlayers().get(0);
         LookaheadSearch off = search(AiFixes.Mode.OFF, 10);
-        Game g2 = lessXenagos();
+        Game g2 = reported();
         Player a2 = g2.getPlayers().get(0);
         LookaheadSearch on = search(AiFixes.Mode.ON, 10);
         try {
@@ -378,13 +370,13 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
     /** The policy's own choice to turn up (the default), and Forge's own answer at the K8 site, are never dropped. */
     @Test
     public void theDefaultIsNeverDropped() {
-        Game g1 = lessXenagos();
+        Game g1 = reported();
         Player a1 = g1.getPlayers().get(0);
         List<SpellAbility> giv = given(a1);
         int at = turnUpAt(giv);
         giv.add(0, giv.remove(at)); // the policy's own answer is the turn-up
         LookaheadSearch s = search(AiFixes.Mode.ON);
-        Game g2 = lessXenagos();
+        Game g2 = reported();
         Player a2 = g2.getPlayers().get(0);
         LookaheadSearch k8 = search(AiFixes.Mode.ON, 10);
         try {
@@ -446,7 +438,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
     /** A spell on the stack the trigger can target; and with only a creature spell there, the top item resolves first. */
     @Test
     public void aSpellOnTheStackStandsAside() {
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0);
         Player b = g.getPlayers().get(1);
         final Card bolt = addCardToZone("Lightning Bolt", b, ZoneType.Hand);
@@ -458,7 +450,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         AssertJUnit.assertEquals("an instant to counter", "target", why(a));
         AssertJUnit.assertFalse("ON keeps it on the live path", droppedLive(g, a, AiFixes.Mode.ON));
 
-        Game g2 = lessXenagos();
+        Game g2 = reported();
         Player a2 = g2.getPlayers().get(0);
         Player b2 = g2.getPlayers().get(1);
         final Card bears = addCardToZone("Grizzly Bears", b2, ZoneType.Hand);
@@ -482,7 +474,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
      */
     @Test
     public void aStaticOrActivatedAbilityOnTheFaceUpSideStandsAside() {
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0);
         final Card dancer = faceDown(a);
         final forge.game.card.CardState up = dancer.getState(forge.card.CardStateName.Original);
@@ -554,7 +546,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
     /** The same turn-up with a cost that is not mana (this test game only). */
     @Test
     public void aNonManaTurnUpCostStandsAside() {
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0);
         final SpellAbility sa = turnUp(a);
         sa.setPayCosts(new Cost("PayLife<2>", true));
@@ -563,7 +555,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
 
     @Test
     public void floatingManaStandsAside() {
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0);
         final Card island = a.getCardsIn(ZoneType.Battlefield).get(3);
         a.getManaPool().addMana(new Mana((byte) ManaAtom.BLUE, island, null, a));
@@ -572,14 +564,14 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
 
     @Test
     public void anotherPermanentWithATurnFaceUpTriggerStandsAside() {
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0);
         addCard("Aven Farseer", g.getPlayers().get(1));
         g.getAction().checkStateEffects(true);
         AssertJUnit.assertEquals("b's Aven Farseer grows when any permanent turns face up", "watcher", why(a));
         AssertJUnit.assertFalse(droppedLive(g, a, AiFixes.Mode.ON));
 
-        Game g2 = lessXenagos();
+        Game g2 = reported();
         Player a2 = g2.getPlayers().get(0);
         addCard("Secret Plans", a2);
         g2.getAction().checkStateEffects(true);
@@ -663,7 +655,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
     /** Round 2: a delayed trigger in the live game (the copies leave it out) stands aside on the live path. */
     @Test
     public void aDelayedTriggerInTheLiveGameStandsAside() {
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0);
         AssertJUnit.assertFalse(LookaheadSearch.dfuLivePending(g));
         final Card island = a.getCardsIn(ZoneType.Battlefield).get(3);
@@ -779,7 +771,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
      */
     @Test
     public void otherCardsWithAnyStaticTriggerKeywordOrReplacementStandAside() {
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
         final Card dancer = faceDown(a);
         AssertJUnit.assertFalse("the reported board", LookaheadSearch.dfuOtherAbilities(dancer, g));
@@ -805,7 +797,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         final String[][] cases = {{"Urborg, Tomb of Yawgmoth", "b"}, {"Serra Angel", "b"}, {"Hardened Scales", "a"},
                 {"Drumhunter", "b"}, {"Masako the Humorless", "a"}};
         for (String[] k : cases) {
-            Game h = lessXenagos();
+            Game h = reported();
             Player ha = h.getPlayers().get(0);
             addCard(k[0], "a".equals(k[1]) ? ha : h.getPlayers().get(1));
             h.getAction().checkStateEffects(true);
@@ -813,7 +805,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
             AssertJUnit.assertFalse(k[0], droppedLive(h, ha, AiFixes.Mode.ON));
         }
         // a face-down disguise permanent of b's: ward:2 on its face-down state (public, as a disguise cast gives it) is a keyword
-        Game d = lessXenagos();
+        Game d = reported();
         Player da = d.getPlayers().get(0);
         final Card walker = addCard("Dog Walker", d.getPlayers().get(1));
         walker.turnFaceDown(true);
@@ -865,7 +857,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
      */
     @Test
     public void abilitiesActiveOffTheBattlefieldStandAsideByZone() {
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
         AssertJUnit.assertEquals(LookaheadSearch.DFU_DEAD, why(a));
         addCardToZone("Loxodon Smiter", b, ZoneType.Hand);
@@ -876,11 +868,11 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         addCardToZone("Loxodon Smiter", a, ZoneType.Hand);
         AssertJUnit.assertEquals("a's own hand", "offBattlefield", why(a));
         AssertJUnit.assertFalse(droppedLive(g, a, AiFixes.Mode.ON));
-        Game g2 = lessXenagos();
+        Game g2 = reported();
         Player a2 = g2.getPlayers().get(0);
         addCardToZone("Flamewake Phoenix", g2.getPlayers().get(1), ZoneType.Graveyard);
         AssertJUnit.assertEquals("b's graveyard", "offBattlefield", why(a2));
-        Game g3 = lessXenagos();
+        Game g3 = reported();
         Player a3 = g3.getPlayers().get(0);
         addCardToZone("Flamewake Phoenix", a3, ZoneType.Exile);
         AssertJUnit.assertEquals("Phoenix's trigger is active in a graveyard only", LookaheadSearch.DFU_DEAD, why(a3));
@@ -934,6 +926,46 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         AssertJUnit.assertFalse("Own end step passes the last chance to save the creature", wasDropped);
     }
 
+    /**
+     * Round 3b: only a replacement for the card's own entering the battlefield, with no parameter beyond
+     * {@code DFU_OWN_ENTRY_PARAMS}, is exempt off the battlefield. A graveyard card with a non-self replacement (New Master of
+     * Arms: prevent combat damage by tapped blockers, no ActiveZones), a self replacement for another event (Darksteel
+     * Colossus: moved to a graveyard) or an own-entry replacement with conditions (Fetching Garden: Origin, ValidCause) still
+     * stands aside. A keyword-generated own-entry replacement without a condition (Endless One's etbCounter) and a
+     * planeswalker's loyalty replacement in a's own hand are exempt.
+     */
+    @Test
+    public void aGraveyardCardWithANonSelfReplacementStandsAside() {
+        Game g = reported();
+        Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        Card master = addCardToZone("New Master of Arms", b, ZoneType.Graveyard);
+        for (forge.game.replacement.ReplacementEffect re : master.getReplacementEffects()) {
+            AssertJUnit.assertTrue(re.zonesCheck(g.getZoneOf(master)));
+            AssertJUnit.assertFalse(LookaheadSearch.dfuOwnEntry(re));
+        }
+        AssertJUnit.assertEquals("a non-self replacement in b's graveyard", "offBattlefield", why(a));
+        AssertJUnit.assertFalse(droppedLive(g, a, AiFixes.Mode.ON));
+        final String[][] cases = {{"Darksteel Colossus", "a self replacement for another event"},
+                {"Fetching Garden", "an own-entry replacement with conditions"}};
+        for (String[] c : cases) {
+            Game h = reported();
+            Player ha = h.getPlayers().get(0);
+            Card card = addCardToZone(c[0], ha, ZoneType.Graveyard);
+            for (forge.game.replacement.ReplacementEffect re : card.getReplacementEffects()) {
+                AssertJUnit.assertFalse(c[0], LookaheadSearch.dfuOwnEntry(re));
+            }
+            AssertJUnit.assertEquals(c[1], "offBattlefield", why(ha));
+        }
+        Game e = reported();
+        Player ea = e.getPlayers().get(0);
+        Card endless = addCardToZone("Endless One", ea, ZoneType.Graveyard);
+        AssertJUnit.assertFalse("the fixture: etbCounter makes a replacement", endless.getReplacementEffects().isEmpty());
+        AssertJUnit.assertEquals("a keyword-generated own-entry replacement", LookaheadSearch.DFU_DEAD, why(ea));
+        addCardToZone("Xenagos, the Reveler", ea, ZoneType.Hand);
+        AssertJUnit.assertEquals("a planeswalker in a's own hand", LookaheadSearch.DFU_DEAD, why(ea));
+        AssertJUnit.assertTrue(droppedLive(e, ea, AiFixes.Mode.ON));
+    }
+
     // ---------------------------------------------------------------- hidden information
 
     /**
@@ -953,7 +985,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
                         droppedLive(g, a, AiFixes.Mode.ON));
             }
         }
-        Game g = lessXenagos();
+        Game g = reported();
         Player a = g.getPlayers().get(0);
         final Card farseer = addCard("Aven Farseer", g.getPlayers().get(1));
         farseer.turnFaceDown(true);
