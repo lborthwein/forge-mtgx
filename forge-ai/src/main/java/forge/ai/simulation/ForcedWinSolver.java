@@ -331,6 +331,50 @@ public final class ForcedWinSolver {
          */
         public boolean tutorCast = false;
         /**
+         * sdcc-fetchthin-1117 (off by default, and then nothing changes): the width model knows an ability that searches
+         * our library for a land and puts it onto the battlefield (a fetch; {@link ForcedWinModel.EffKind#TUTOR_BF}):
+         * the land is ours in play and our library shrinks by one, so cracking a fetch after a pile thins the library
+         * for an empty-library or library-size win. A search may take a card the pile still holds (a lazy pile slot),
+         * a tutor too. Off, the probe dropped the land's move and a fetch read as "sacrifice it, shuffle".
+         */
+        public boolean fetchThin = false;
+        /**
+         * sdcc-paykeep-1117 (off by default, and then nothing changes): the planner's payment search (paySearch) also
+         * tries a payment order that taps last the sources with another use in play (a playable non-mana activated
+         * ability: a land that draws when the hand has a given size, a land that sacrifices itself for a card). Off,
+         * every order ranked sources by colours and sacrifice only, so a colourless land with a draw ability was always
+         * tapped first for generic mana and its draw was never in a line.
+         */
+        public boolean payKeepUse = false;
+        /**
+         * sdcc-protect-1117 (off by default, and then nothing changes): the probes note a spell or entering permanent of
+         * ours that gives our player protection from everything or from creatures (by keyword), and the planner then
+         * skips the opponent's creature damage at the next pass (until our next turn).
+         */
+        public boolean protectUntilNext = false;
+        /**
+         * sdcc-protect-1117 (off by default, and then nothing changes): an activated draw ability whose second activation
+         * draws more than its first (observed in one sandbox) draws that much more per earlier activation in the line.
+         */
+        public boolean drawGrowth = false;
+        /**
+         * sdcc-costtax-1117 (off by default, and then nothing changes): each of our spells' cost in the plan changes by
+         * the generic mana the engine's own cost adjustment adds or removes in this position (an opponent's tax on
+         * noncreature spells, a cost reducer of ours). Off, the planner paid printed costs and every line the engine
+         * then taxed failed its verification.
+         */
+        public boolean costTax = false;
+        /**
+         * sdcc-sacmana-1117 (off by default, and then nothing changes): a spell observed giving our permanents "sacrifice
+         * this: add mana" until end of turn lets the plan sacrifice them for that mana, after their own.
+         */
+        public boolean grantSacMana = false;
+        /**
+         * sdcc-piletc-1117 (off by default, and then nothing changes): a search-and-cast (tutorCast) may take a card the
+         * pile still holds, as a tutor may under fetchThin.
+         */
+        public boolean pileTutorCast = false;
+        /**
          * owner-misplays-1113 (engineModeChoice; false = off, nothing changes): the engine search branches over the modes
          * of our modal spells ({@link ForcedWinEngine.Limits#modeChoice}), the line records the set it won with, and the
          * line's follower answers the mode ask with it in every verification play-out and in the live game (through
@@ -968,6 +1012,13 @@ public final class ForcedWinSolver {
             c.planLoops = "true".equals(get.apply("planLoops")); // solver-distill-cc-1109
             c.passBlockers = "true".equals(get.apply("passBlockers")); // shipA-on-leakfix-1112 (blockers-1109, keyed here)
             c.tutorCast = "true".equals(get.apply("tutorCast")); // sdcc-tutorcast-1110
+            c.fetchThin = "true".equals(get.apply("fetchThin")); // sdcc-fetchthin-1117
+            c.payKeepUse = "true".equals(get.apply("payKeepUse")); // sdcc-paykeep-1117
+            c.protectUntilNext = "true".equals(get.apply("protectUntilNext")); // sdcc-protect-1117
+            c.drawGrowth = "true".equals(get.apply("drawGrowth")); // sdcc-protect-1117
+            c.costTax = "true".equals(get.apply("costTax")); // sdcc-costtax-1117
+            c.grantSacMana = "true".equals(get.apply("grantSacMana")); // sdcc-sacmana-1117
+            c.pileTutorCast = "true".equals(get.apply("pileTutorCast")); // sdcc-piletc-1117
             c.engineModeChoice = "true".equals(get.apply("engineModeChoice")); // owner-misplays-1113
             c.copyDungeon = "true".equals(get.apply("copyDungeon")); // sdcc-copycast-1114
             c.sourceLeaves = "true".equals(get.apply("sourceLeaves")); // sdcc-tutorcast-1110
@@ -1054,6 +1105,12 @@ public final class ForcedWinSolver {
                 + (probeSettle ? " probeSettle" : "")
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
+                + (fetchThin ? " fetchThin" : "") // sdcc-fetchthin-1117
+                + (payKeepUse ? " payKeepUse" : "") // sdcc-paykeep-1117
+                + (protectUntilNext ? " protectUntilNext" : "") + (drawGrowth ? " drawGrowth" : "") // sdcc-protect-1117
+                + (costTax ? " costTax" : "") // sdcc-costtax-1117
+                + (grantSacMana ? " grantSacMana" : "") // sdcc-sacmana-1117
+                + (pileTutorCast ? " pileTutorCast" : "") // sdcc-piletc-1117
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -1545,6 +1602,18 @@ public final class ForcedWinSolver {
         }
         if (cfg.tutorCast) {
             this.reader.tutorCast = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
+        }
+        if (cfg.fetchThin) {
+            this.reader.fetchThin = true; // sdcc-fetchthin-1117: our own cards only (its own template keys)
+        }
+        if (cfg.protectUntilNext) {
+            this.reader.protectPass = true; // sdcc-protect-1117: our own cards only (its own template keys)
+        }
+        if (cfg.drawGrowth) {
+            this.reader.drawGrowth = true; // sdcc-protect-1117
+        }
+        if (cfg.grantSacMana) {
+            this.reader.grantSacMana = true; // sdcc-sacmana-1117
         }
         if (cfg.sourceLeaves) {
             this.reader.sourceLeaves = true; // sdcc-tutorcast-1110: our own cards only (its own template keys)
@@ -2585,6 +2654,9 @@ public final class ForcedWinSolver {
         // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
         lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
+        // sdcc-sacmana-1117 / sdcc-piletc-1117: the late keys join only the last pass (below), when every other found none
+        lim.grantSacMana = false;
+        lim.pileTutorCast = false;
         // labeller-v2 (c), (e) (off = v1)
         lim.planScry = cfg.planScry;
         lim.planDiscard = cfg.planDiscard;
@@ -2615,7 +2687,7 @@ public final class ForcedWinSolver {
             // solver-gaps-1015 payment search: only where the greedy payment found no line, search the payment orders
             // (this turn, then by our next turn), within the planner's own node and time caps
             final int before = res.nodes;
-            lim.payPolicies = ForcedWinPlanner.PAY_POLICIES;
+            lim.payPolicies = cfg.payKeepUse ? ForcedWinPlanner.PAY_POLICIES_KEEP_USE : ForcedWinPlanner.PAY_POLICIES;
             lim.horizon = 1;
             res = planCapped(pos, lim);
             if (res.lines.isEmpty() && cfg.horizon >= 2) {
@@ -2629,6 +2701,23 @@ public final class ForcedWinSolver {
                 paySearchFound++;
                 payOnly = true;
             }
+        }
+        if (res.lines.isEmpty() && cfg.forced && (cfg.grantSacMana || cfg.pileTutorCast)) {
+            // sdcc-sacmana-1117 / sdcc-piletc-1117: only where every pass without them found no line, plan again with the
+            // granted sacrifice mana and the pile search-and-cast (the found lines elsewhere stay exactly as without them)
+            final int before = res.nodes;
+            lim.grantSacMana = cfg.grantSacMana;
+            lim.pileTutorCast = cfg.pileTutorCast;
+            lim.payPolicies = cfg.paySearch ? (cfg.payKeepUse ? ForcedWinPlanner.PAY_POLICIES_KEEP_USE : ForcedWinPlanner.PAY_POLICIES) : 1;
+            lim.horizon = 1;
+            res = planCapped(pos, lim);
+            if (res.lines.isEmpty() && cfg.horizon >= 2) {
+                final int first = res.nodes;
+                lim.horizon = cfg.horizon;
+                res = planCapped(pos, lim);
+                res.nodes += first;
+            }
+            res.nodes += before;
         }
         plannerNanos += forge.game.WorkClock.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
@@ -4447,6 +4536,12 @@ public final class ForcedWinSolver {
         lim.depth = cfg.planDepth; // solver-distill-cc-1109 (18 = the default)
         lim.order = cfg.planOrder; // planner-fixes-1110 (0 = off)
         lim.tutorCast = cfg.tutorCast; // sdcc-tutorcast-1110
+        lim.fetchThin = cfg.fetchThin; // sdcc-fetchthin-1117
+        lim.protectUntilNext = cfg.protectUntilNext; // sdcc-protect-1117
+        lim.drawGrowth = cfg.drawGrowth; // sdcc-protect-1117
+        lim.costTax = cfg.costTax; // sdcc-costtax-1117
+        lim.grantSacMana = cfg.grantSacMana; // sdcc-sacmana-1117
+        lim.pileTutorCast = cfg.pileTutorCast; // sdcc-piletc-1117
         lim.probeObjects = cfg.probeObjects; // sdcc-probeobj-1111
         return lim;
     }
@@ -6214,6 +6309,9 @@ public final class ForcedWinSolver {
                 if (cfg.landEntersProbe && hp != null) {
                     hp.landEntry = reader.landEntry(g, pg); // sdcc-etb-1110 (its sandboxes copy the probe root, as the reader's)
                 }
+                if (cfg.costTax && hp != null) {
+                    hp.tax = spellTaxes(g, pg, hp); // sdcc-costtax-1117
+                }
                 return hp;
             }));
         }
@@ -6227,7 +6325,64 @@ public final class ForcedWinSolver {
         if (cfg.landEntersProbe && pos != null) {
             pos.landEntry = reader.landEntry(live, me); // sdcc-etb-1110: asked when a plan from this position plays a land
         }
+        if (cfg.costTax && pos != null) {
+            pos.tax = spellTaxes(live, me, pos); // sdcc-costtax-1117
+        }
         return pos;
+    }
+
+    /**
+     * sdcc-costtax-1117 (costTax): for each spell (and alternative cost) of our cards the position models, the change of
+     * its total mana under the engine's cost adjustment in this game state (test mode: nothing is paid or changed), keyed
+     * "card id|cost text" as {@link ForcedWinModel.Abil#costKey}. Only nonzero changes are kept; a card that fails is skipped.
+     */
+    static java.util.Map<String, Integer> spellTaxes(final Game g, final Player me, final Position pos) {
+        final java.util.Map<String, Integer> out = new java.util.HashMap<>();
+        final java.util.Set<Integer> ids = new java.util.HashSet<>();
+        for (List<ForcedWinModel.ACard> zone : List.of(pos.hand, pos.library, pos.graveyard)) {
+            for (ForcedWinModel.ACard a : zone) {
+                ids.add(a.id);
+            }
+        }
+        for (int id : ids) {
+            final Card c = g.findById(id);
+            if (c == null || c.getOwner() != me) {
+                continue;
+            }
+            try {
+                for (SpellAbility original : c.getSpellAbilities()) {
+                    if (!original.isSpell()) {
+                        continue;
+                    }
+                    final List<SpellAbility> all = new ArrayList<>();
+                    all.add(original.copy(me));
+                    try {
+                        all.addAll(forge.game.GameActionUtil.getAlternativeCosts(all.get(0), me, false));
+                    } catch (RuntimeException e) {
+                        // none
+                    }
+                    for (SpellAbility sa : all) {
+                        if (sa.getPayCosts() == null) {
+                            continue;
+                        }
+                        sa.setActivatingPlayer(me);
+                        final forge.card.mana.ManaCost base = sa.getPayCosts().getTotalMana();
+                        // raises (static RaiseCost) first, as casting applies them, then reductions on the mana
+                        final forge.game.cost.Cost raised = forge.game.cost.CostAdjustment.adjust(sa.getPayCosts(), sa, false);
+                        final forge.game.mana.ManaCostBeingPaid m = new forge.game.mana.ManaCostBeingPaid(
+                                raised == null ? base : raised.getTotalMana());
+                        forge.game.cost.CostAdjustment.adjust(m, sa, me, null, true, false);
+                        final int d = m.toManaCost().getCMC() - base.getCMC();
+                        if (d != 0) {
+                            out.put(id + "|" + sa.getPayCosts().toString(), d);
+                        }
+                    }
+                }
+            } catch (RuntimeException e) {
+                // the card's cost cannot be adjusted here: printed cost, as before
+            }
+        }
+        return out;
     }
 
     /** The width model's probes copy this root, so no probe starts on the opponent's real hidden cards. */

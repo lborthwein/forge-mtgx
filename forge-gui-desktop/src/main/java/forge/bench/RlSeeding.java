@@ -56,6 +56,17 @@ public final class RlSeeding {
 
     private static final Set<String> KEYS = new TreeSet<>(java.util.Arrays.asList("schema", "p", "k", "window",
             "seats"));
+    /**
+     * exact-hand-1116 (research, offline; off unless -Dforge.bench.exactHand=<dir>): a GAME without "seeding" whose seed
+     * has {@code <dir>/<seed>.json} = {"schema": "mtgx-rl-exacthand/1", "deck": "<deck file basename>", "hand": [7 Forge
+     * card names], "first": true | false} gets the seeding spec p 1, k [7], window 0 for the seat playing that deck (its
+     * opening seven = that hand, the rest of its library in the game's shuffle order) plus "first_seat" (that seat goes
+     * first when "first", else the other; no roll). Allowed in eval mode (research). The spec as played is in the tape,
+     * so a forced replay (same property) re-applies it.
+     */
+    private static final String EXACT_HAND = System.getProperty("forge.bench.exactHand");
+    public static final String EXACT_HAND_SCHEMA = "mtgx-rl-exacthand/1";
+    private int firstSeat = -1;
     private static final Set<String> SEAT_KEYS = new TreeSet<>(java.util.Arrays.asList("route", "pieces"));
 
     private final JsonObject spec;
@@ -73,8 +84,14 @@ public final class RlSeeding {
         this.spec = spec.deepCopy();
         this.seed = seed;
         for (String k : spec.keySet()) {
-            if (!KEYS.contains(k)) {
+            if (!KEYS.contains(k) && !(EXACT_HAND != null && "first_seat".equals(k))) {
                 throw new IllegalArgumentException("unknown key '" + k + "' (allowed " + KEYS + ")");
+            }
+        }
+        if (spec.has("first_seat")) {
+            firstSeat = spec.get("first_seat").getAsInt();
+            if (firstSeat != 0 && firstSeat != 1) {
+                throw new IllegalArgumentException("first_seat " + firstSeat + " is not 0 or 1");
             }
         }
         for (String k : KEYS) {
@@ -148,7 +165,7 @@ public final class RlSeeding {
      */
     public static RlSeeding of(final JsonObject g, final long gameSeed) {
         if (!g.has("seeding") || g.get("seeding").isJsonNull()) {
-            return null;
+            return exactHand(g, gameSeed);
         }
         if (!g.get("seeding").isJsonObject()) {
             throw new IllegalArgumentException("seeding is not an object");
@@ -156,9 +173,69 @@ public final class RlSeeding {
         return new RlSeeding(g.getAsJsonObject("seeding"), gameSeed);
     }
 
+    /** exact-hand-1116: this seeding came from an exact-hand file (allowed in eval mode). */
+    public boolean exactHand() {
+        return EXACT_HAND != null && firstSeat >= 0;
+    }
+
+    private static RlSeeding exactHand(final JsonObject g, final long gameSeed) {
+        if (EXACT_HAND == null) {
+            return null;
+        }
+        final java.nio.file.Path f = java.nio.file.Paths.get(EXACT_HAND, Long.toString(gameSeed) + ".json");
+        if (!java.nio.file.Files.isRegularFile(f)) {
+            return null;
+        }
+        final JsonObject e;
+        try {
+            e = com.google.gson.JsonParser.parseString(new String(java.nio.file.Files.readAllBytes(f),
+                    java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+        } catch (java.io.IOException ex) {
+            throw new IllegalArgumentException("exact hand file " + f + ": " + ex);
+        }
+        if (!EXACT_HAND_SCHEMA.equals(e.get("schema").getAsString()) || e.keySet().size() != 4 || !e.has("deck")
+                || !e.has("hand") || !e.has("first")) {
+            throw new IllegalArgumentException("exact hand: schema " + EXACT_HAND_SCHEMA + ", keys deck, hand, first");
+        }
+        final JsonArray dj = g.getAsJsonArray("decks");
+        final String want = "/" + e.get("deck").getAsString();
+        final boolean d0 = dj.get(0).getAsString().endsWith(want), d1 = dj.get(1).getAsString().endsWith(want);
+        if (d0 == d1) {
+            throw new IllegalArgumentException("exact hand: deck " + want + " is not exactly one seat's");
+        }
+        final int seat = d0 ? 0 : 1;
+        if (e.getAsJsonArray("hand").size() != 7) {
+            throw new IllegalArgumentException("exact hand: hand is not 7 cards");
+        }
+        final JsonObject spec = new JsonObject();
+        spec.addProperty("schema", SCHEMA);
+        spec.addProperty("p", 1.0);
+        final JsonArray k = new JsonArray();
+        k.add(7);
+        spec.add("k", k);
+        spec.addProperty("window", 0);
+        final JsonArray seats = new JsonArray();
+        for (int s = 0; s < 2; s++) {
+            if (s == seat) {
+                final JsonObject o = new JsonObject();
+                o.addProperty("route", "exact-hand");
+                o.add("pieces", e.getAsJsonArray("hand").deepCopy());
+                seats.add(o);
+            } else {
+                seats.add(JsonNull.INSTANCE);
+            }
+        }
+        spec.add("seats", seats);
+        spec.addProperty("first_seat", e.get("first").getAsBoolean() ? seat : 1 - seat);
+        return new RlSeeding(spec, gameSeed);
+    }
+
     /** Subscribe to this game's events (before {@code Match.startGame}). */
     public void attach(final Game g) {
         this.game = g;
+        if (firstSeat >= 0) {
+            g.setForcedFirstPlayer(g.getRegisteredPlayers().get(firstSeat)); // exact-hand-1116
+        }
         g.subscribeToEvents(this);
     }
 

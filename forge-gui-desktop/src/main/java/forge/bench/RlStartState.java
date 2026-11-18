@@ -72,8 +72,135 @@ public final class RlStartState {
     final int[] lands, hand, gy, life, oppLands, oppHand, oppBoard, oppGy, oppLife;
     final double active;
     private JsonObject started;
+    /**
+     * exact-start-1116 (research, offline; refused unless -Dforge.bench.exactStart=true): GAME {@code "exact_start":
+     * {"schema": "mtgx-rl-exact/1", "seat": 0 | 1, "state": "<Forge GameState text>", "stop": n >= 1}} installs that
+     * exact position (as the route start installs its dealt one) and ends the game (a draw) after the named seat's
+     * n-th priority decision, so the full pilot's decision rows at a recorded position can be read. Null = off.
+     * The property's value may also name a directory: a GAME without the key then takes {@code <dir>/<game seed>.json}
+     * (that object) when the file exists, so a harness run needs no GAME change ("true" = the GAME key only).
+     */
+    private final String exactText;
+    private final int exactStop;
+    public static final String EXACT_SCHEMA = "mtgx-rl-exact/1";
+
+    private RlStartState(final JsonObject spec, final String text, final int seat, final int stop) {
+        this.spec = spec.deepCopy();
+        this.seed = 0;
+        this.seat = seat;
+        this.route = "exact";
+        this.missing = new int[0];
+        this.lands = this.hand = this.gy = this.life = this.oppLands = this.oppHand = this.oppBoard = this.oppGy
+                = this.oppLife = null;
+        this.active = 0;
+        this.exactText = text;
+        this.exactStop = stop;
+        started = new JsonObject();
+        started.addProperty("applied", false);
+        started.addProperty("reason", "not_reached");
+    }
+
+    /** exact-start-1116: an exact position start (allowed in eval mode, research only). */
+    public boolean exact() {
+        return exactText != null;
+    }
+
+    private static final String EXACT_PROP = System.getProperty("forge.bench.exactStart");
+
+    /** exact-start-1116: the seed file of the property's directory, or null (no directory, no file). */
+    private static JsonObject exactFile(final long seed) {
+        if (EXACT_PROP == null || "true".equals(EXACT_PROP)) {
+            return null;
+        }
+        final java.nio.file.Path f = java.nio.file.Paths.get(EXACT_PROP, Long.toString(seed) + ".json");
+        if (!java.nio.file.Files.isRegularFile(f)) {
+            return null;
+        }
+        try {
+            return com.google.gson.JsonParser.parseString(new String(java.nio.file.Files.readAllBytes(f),
+                    java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+        } catch (java.io.IOException ex) {
+            throw new IllegalArgumentException("exact_start file " + f + ": " + ex);
+        }
+    }
+
+    private static RlStartState exactOf(final JsonObject g, final JsonObject e) {
+        if (EXACT_PROP == null) {
+            throw new IllegalArgumentException("exact_start needs -Dforge.bench.exactStart (research only)");
+        }
+        if (g.has("start_state") && !g.get("start_state").isJsonNull()) {
+            throw new IllegalArgumentException("exact_start and start_state together");
+        }
+        if (!EXACT_SCHEMA.equals(e.get("schema").getAsString()) || e.keySet().size() != 4 || !e.has("state")
+                || !e.has("stop") || !(e.has("seat") || e.has("deck"))) {
+            throw new IllegalArgumentException("exact_start: schema " + EXACT_SCHEMA + ", keys schema, seat | deck, state, stop");
+        }
+        // "deck": the seat is the one playing that deck file (basename); the state names that seat "human", and the
+        // text is flipped (human <-> ai) when it sits second, so one seed file serves both seat orders of a pair
+        final int seat;
+        String text = e.get("state").getAsString();
+        if (e.has("deck")) {
+            final JsonArray dj = g.getAsJsonArray("decks");
+            final String want = "/" + e.get("deck").getAsString();
+            final boolean d0 = dj.get(0).getAsString().endsWith(want), d1 = dj.get(1).getAsString().endsWith(want);
+            if (d0 == d1) {
+                throw new IllegalArgumentException("exact_start: deck " + want + " is not exactly one seat's");
+            }
+            seat = d0 ? 0 : 1;
+            if (seat == 1) {
+                final StringBuilder sb = new StringBuilder();
+                for (String l : text.split("\\R")) {
+                    if (l.startsWith("activeplayer=")) {
+                        l = "activeplayer=" + ("human".equals(l.substring(13).trim()) ? "ai" : "human");
+                    } else if (l.startsWith("human")) {
+                        l = "ai" + l.substring(5);
+                    } else if (l.startsWith("ai")) {
+                        l = "human" + l.substring(2);
+                    }
+                    sb.append(l).append('\n');
+                }
+                text = sb.toString();
+            }
+        } else {
+            seat = e.get("seat").getAsInt();
+        }
+        final int stop = e.get("stop").getAsInt();
+        if ((seat != 0 && seat != 1) || stop < 1) {
+            throw new IllegalArgumentException("exact_start: seat 0 | 1, stop >= 1");
+        }
+        return new RlStartState(e, text, seat, stop);
+    }
+
+    private JsonObject installExact(final Game game) {
+        final Now gs = new Now();
+        gs.parse(Arrays.asList(exactText.split("\\R")));
+        gs.now(game);
+        final Player me = game.getRegisteredPlayers().get(seat);
+        final int[] n = {0};
+        game.addPriorityDecisionListener(new forge.game.PriorityDecisionListener() {
+            @Override
+            public void beforeDecision(final Player p) {
+            }
+
+            @Override
+            public void afterDecision(final Player p, final List<forge.game.spellability.SpellAbility> chosen) {
+                if (p == me && ++n[0] >= exactStop && !game.isGameOver()) {
+                    game.setGameOver(forge.game.GameEndReason.Draw);
+                }
+            }
+        });
+        final JsonObject out = new JsonObject();
+        out.addProperty("applied", true);
+        out.addProperty("seat", seat);
+        out.addProperty("route", "exact");
+        out.addProperty("turn", game.getPhaseHandler().getTurn());
+        out.addProperty("stop", exactStop);
+        return out;
+    }
 
     private RlStartState(final JsonObject spec, final long seed) {
+        this.exactText = null;
+        this.exactStop = 0;
         this.spec = spec.deepCopy();
         this.seed = seed;
         for (String k : spec.keySet()) {
@@ -150,6 +277,13 @@ public final class RlStartState {
 
     /** The GAME's start state, or null (off) when it has none. Throws IllegalArgumentException on a malformed spec. */
     public static RlStartState of(final JsonObject g, final long gameSeed) {
+        if (g.has("exact_start") && !g.get("exact_start").isJsonNull()) {
+            return exactOf(g, g.getAsJsonObject("exact_start"));
+        }
+        final JsonObject ef = exactFile(gameSeed);
+        if (ef != null) {
+            return exactOf(g, ef);
+        }
         if (!g.has("start_state") || g.get("start_state").isJsonNull()) {
             return null;
         }
@@ -271,6 +405,9 @@ public final class RlStartState {
      * {applied: false, reason: "missing", piece}.
      */
     JsonObject install(final Game game) {
+        if (exactText != null) {
+            return installExact(game);
+        }
         final Random r = new Random(RlSeeding.seatSeed(seed ^ SALT, 2));
         final List<Player> players = game.getRegisteredPlayers();
         final JsonObject out = new JsonObject();

@@ -63,6 +63,11 @@ public final class ForcedWinProbe {
         final List<String> trace = new ArrayList<>();
         final List<Eff> effects = new ArrayList<>();
         boolean won, lost, entered, played;
+        /** sdcc-protect-1117 (a PROTECT_PASS run only): our player gained protection from everything or from creatures. */
+        boolean gainedProtection;
+        /** sdcc-sacmana-1117 (a GRANT_SAC run only): permanents that gained a sacrifice-for-mana ability, its colours, all lands. */
+        int grantSac, grantSacColors;
+        boolean grantSacLands = true;
         String error;
         int lifeDelta, oppLifeDelta;
         final int[] produced = new int[6];
@@ -80,6 +85,12 @@ public final class ForcedWinProbe {
         boolean libraryEmptied;
         /** solver-gaps-1015: other cards moved in ways no effect kind expresses (onto the battlefield from a hand). */
         int unmapped;
+        /**
+         * sdcc-fetchthin-1117 (diagnostics; nothing decides on it): moves of a card out of our library that
+         * {@link #effectsFromTrace} gave no effect and did not count as unmapped. 0 with fetchThin on for every ability
+         * whose library moves the model knows; the regression check that no library move is dropped silently.
+         */
+        int silent;
         /** solver-gaps-1015: our hand (without the probed card) and graveyard sizes when it was played. */
         int handBefore, gyBefore;
         /** sdcc-draws-1110: the run was a {@link #PROBE_SETTLE} one; our library's size when it was played and after it. */
@@ -208,6 +219,21 @@ public final class ForcedWinProbe {
     static final ThreadLocal<Boolean> TUTOR_CAST = ThreadLocal.withInitial(() -> false);
     /** sdcc-tutorcast-1110: set by a sourceLeaves reader around its learning (false = off: every probe as before). */
     static final ThreadLocal<Boolean> SOURCE_LEAVES = ThreadLocal.withInitial(() -> false);
+    /**
+     * sdcc-fetchthin-1117: set by a fetchThin reader around its learning (false = off: every probe as before). On, a land
+     * that the probed ability moves from our library onto our battlefield is a {@link EffKind#TUTOR_BF} effect (off, the
+     * move was dropped with no effect and not counted as unmapped: a fetch read as "sacrifice it, shuffle").
+     */
+    static final ThreadLocal<Boolean> FETCH_THIN = ThreadLocal.withInitial(() -> false);
+    /** sdcc-protect-1117: set by a protectUntilNext reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> PROTECT_PASS = ThreadLocal.withInitial(() -> false);
+    /** sdcc-protect-1117: set by a drawGrowth reader around its learning (false = off: every probe as before). */
+    static final ThreadLocal<Boolean> DRAW_GROWTH = ThreadLocal.withInitial(() -> false);
+    /**
+     * sdcc-sacmana-1117: set by a grantSacMana reader around its learning (false = off). On, a run notes the permanents of
+     * ours that gained a "sacrifice this: add mana" ability while the probed thing resolved ({@link EffKind#GRANT_SAC_MANA}).
+     */
+    static final ThreadLocal<Boolean> GRANT_SAC = ThreadLocal.withInitial(() -> false);
     /** sdcc-tutorcast-1110: the most cards a search-and-cast spell is observed with (one sandbox each), and of those tried first. */
     static final int CAST_SWEEP = 48, CAST_DISCOVER = 4;
 
@@ -449,6 +475,9 @@ public final class ForcedWinProbe {
             this(trace, me, null);
         }
 
+        /** sdcc-fetchthin-1117: {@link #FETCH_THIN} when the recorder was made (the probe's thread). */
+        final boolean fetchThin = FETCH_THIN.get();
+
         ZoneRec(List<String> trace, int me, Player seat) {
             this.trace = trace;
             this.me = me;
@@ -485,7 +514,10 @@ public final class ForcedWinProbe {
                     }
                 }
             }
-            trace.add("MOVE " + e.card().getId() + " " + f + " " + t + (land ? " L" : ""));
+            // sdcc-fetchthin-1117 (a fetchThin probe only): a land entering our battlefield tapped (the event follows the
+            // ability's own "tapped" instruction)
+            final boolean tappedIn = fetchThin && land && t.equals("Battlefield@me") && e.card().isTapped();
+            trace.add("MOVE " + e.card().getId() + " " + f + " " + t + (land ? " L" : "") + (tappedIn ? " T" : ""));
         }
     }
 
@@ -590,6 +622,7 @@ public final class ForcedWinProbe {
                 opp = p;
             }
             final int life0 = me.getLife(), opp0 = opp == null ? 0 : opp.getLife();
+            final int prot0 = PROTECT_PASS.get() ? passProtection(me) : 0; // sdcc-protect-1117
             o.lifeBefore = life0;
             o.stormBefore = g.getStack().getSpellsCastThisTurn().size();
             g.subscribeToEvents(new ZoneRec(o.trace, me.getId(), o.settle ? me : null));
@@ -597,6 +630,7 @@ public final class ForcedWinProbe {
             o.handBefore = me.getCardsIn(ZoneType.Hand).size() - (card.isInZone(ZoneType.Hand) ? 1 : 0);
             o.gyBefore = me.getCardsIn(ZoneType.Graveyard).size();
             o.libBefore = me.getCardsIn(ZoneType.Library).size();
+            final Map<Integer, Integer> sacBefore = GRANT_SAC.get() ? sacMana(me) : null; // sdcc-sacmana-1117
             o.played = act.apply(g, me, card);
             if (!o.played) {
                 o.error = o.error == null ? "not played" : o.error;
@@ -631,6 +665,25 @@ public final class ForcedWinProbe {
                 dev += ForcedWinModel.bluePips(c);
             }
             o.devotionAfter = dev;
+            if (PROTECT_PASS.get()) {
+                o.gainedProtection = passProtection(me) > prot0; // sdcc-protect-1117
+            }
+            if (sacBefore != null) {
+                // sdcc-sacmana-1117: permanents (other than the probed card) with more sacrifice-for-mana abilities now
+                for (Map.Entry<Integer, Integer> e : sacMana(me).entrySet()) {
+                    if (e.getKey() == cardId) {
+                        continue;
+                    }
+                    final int sb = sacBefore.getOrDefault(e.getKey(), 0);
+                    final int sa2 = e.getValue();
+                    if ((sa2 >>> 8) > (sb >>> 8)) {
+                        o.grantSac++;
+                        o.grantSacColors |= sa2 & 0x3F;
+                        final Card gc = g.findById(e.getKey());
+                        o.grantSacLands &= gc != null && gc.isLand();
+                    }
+                }
+            }
         } catch (RuntimeException | StackOverflowError e) {
             o.error = String.valueOf(e);
         } finally {
@@ -873,6 +926,7 @@ public final class ForcedWinProbe {
         int posId = -1, posIndex = -1, posSize = -1; // sdcc-draws-1110: the last LIBPOS line (a settle run only)
         // sdcc-tutorcast-1110 (a tutorCast probe only): the card a search of our library exiled, and what became of it
         final boolean tc = TUTOR_CAST.get();
+        final boolean fetchThin = FETCH_THIN.get(); // sdcc-fetchthin-1117
         int exilePick = -1, castAt = -1;
         java.util.Set<String> exileNames = null;
         final List<Eff> viaExile = new ArrayList<>();
@@ -1028,13 +1082,32 @@ public final class ForcedWinProbe {
                 exiled++;
                 continue;
             }
+            final boolean landMove = p.length > 4 && "L".equals(p[4]);
+            if (k == null && fetchThin && landMove && from.equals("Library@me") && to.equals("Battlefield@me")) {
+                // sdcc-fetchthin-1117: a land searched from our library onto our battlefield (a fetch): the library shrinks
+                // by one and the land is ours in play. The search's offered names are its filter, as for a tutor.
+                if (last != null) {
+                    out.add(new Eff(last, run, 0));
+                    last = null;
+                    run = 0;
+                }
+                java.util.Set<String> bfNames = null;
+                if (pendingAsk != null && pendingAsk.startsWith("ASK pick Battlefield [Library")) {
+                    final int ni = pendingAsk.indexOf(" names=");
+                    bfNames = ni < 0 ? null : new java.util.HashSet<>(java.util.Arrays.asList(pendingAsk.substring(ni + 7).split("\\|")));
+                }
+                pendingAsk = null;
+                out.add(new Eff(EffKind.TUTOR_BF, 1, p.length > 5 && "T".equals(p[5]) ? 1 : 0, 0, bfNames));
+                continue;
+            }
             pendingAsk = null;
             if (k == null) {
                 // solver-gaps-1015: a move the width model has no effect for (a creature put onto the battlefield from
                 // our hand or library, a token): the engine search must handle this card
-                final boolean landMove = p.length > 4 && "L".equals(p[4]);
                 if (!landMove && (to.startsWith("Battlefield") || from.startsWith("Hand@me") && !to.startsWith("Stack"))) {
                     o.unmapped++;
+                } else if (from.equals("Library@me")) {
+                    o.silent++; // sdcc-fetchthin-1117: a library move with no effect and not counted (diagnostics)
                 }
                 continue;
             }
@@ -1288,6 +1361,7 @@ public final class ForcedWinProbe {
                     a2.desc = alt.getDescription();
                     a2.targetVariant = v;
                     a2.effects.addAll(ab.effects);
+                    a2.protectsPass = ab.protectsPass; // sdcc-protect-1117
                     a2.unplayable = ab.unplayable;
                     a2.cardTargets = ab.cardTargets;
                     a2.alt = tutorCast; // sdcc-tutorcast-1110: never the spell an effect casts for free
@@ -1410,6 +1484,30 @@ public final class ForcedWinProbe {
                                     run(live, me, id, onBattlefield, activate, runSeed, st), card.getName());
                     final Abil ab = objRun != null ? objAbil(objRun.seen.abil) : withEffects(base, o, id, sa0, v);
                     objAttach(t, ab, objs, objRun);
+                    if (DRAW_GROWTH.get() && objRun == null && sacCost == null && !ab.unplayable && ab.tapSelf && !ab.sacSelf
+                            && ab.has(EffKind.DRAW)) {
+                        // sdcc-protect-1117: does a second activation draw more than the first? (a count that grows with
+                        // what the first left on its source); the host is untapped between the two, in one sandbox
+                        final Act twice = (g, m, c) -> {
+                            if (!activate.apply(g, m, c)) {
+                                return false;
+                            }
+                            resolveAll(g);
+                            final Card again = g.findById(c.getId());
+                            if (again == null || !again.isInPlay()) {
+                                return false;
+                            }
+                            again.setTapped(false);
+                            return activate.apply(g, m, again);
+                        };
+                        final Obs o2 = run(live, me, id, onBattlefield, twice, ForcedWinSolver.mix(runSeed, 0x475257L), st);
+                        if (o2.error == null && o2.played) {
+                            final int d1 = libraryToHand(o.trace), d2 = libraryToHand(o2.trace);
+                            if (d1 > 0 && d2 > 2 * d1) {
+                                ab.drawGrowth = d2 - 2 * d1;
+                            }
+                        }
+                    }
                     if (sacCost != null) {
                         t.unmodeled = true; // as before the key (its cost was outside the model)
                     }
@@ -2931,6 +3029,67 @@ public final class ForcedWinProbe {
         return null;
     }
 
+    /**
+     * sdcc-sacmana-1117: per battlefield permanent of ours, (number of its mana abilities whose cost sacrifices it) << 8
+     * | the colours they make; permanents with none are left out.
+     */
+    static Map<Integer, Integer> sacMana(Player me) {
+        final Map<Integer, Integer> out = new java.util.HashMap<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            int n = 0, colors = 0;
+            for (SpellAbility m : c.getManaAbilities()) {
+                if (m.getManaPart() == null || m.getPayCosts() == null) {
+                    continue;
+                }
+                boolean self = false;
+                for (forge.game.cost.CostPart p : m.getPayCosts().getCostParts()) {
+                    self |= p instanceof forge.game.cost.CostSacrifice s && s.payCostFromSource();
+                }
+                if (!self) {
+                    continue;
+                }
+                n++;
+                for (int i = 0; i < 6; i++) {
+                    if (m.canProduce(ForcedWinModel.SHORT[i])) {
+                        colors |= 1 << i;
+                    }
+                }
+            }
+            if (n > 0) {
+                out.put(c.getId(), n << 8 | colors);
+            }
+        }
+        return out;
+    }
+
+    /** sdcc-protect-1117: the moves of a card from our library to our hand in a run's trace. */
+    static int libraryToHand(List<String> trace) {
+        int n = 0;
+        for (String l : trace) {
+            if (l.startsWith("MOVE ") && l.contains(" Library@me Hand@me")) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * sdcc-protect-1117: how many protection keywords our player has that stop an opponent's creature from dealing it
+     * damage (protection from everything, or from creatures), by keyword kind and its text.
+     */
+    static int passProtection(Player me) {
+        int n = 0;
+        for (forge.game.keyword.KeywordInterface k : me.getKeywords()) {
+            if (k.getKeyword() == forge.game.keyword.Keyword.PROTECTION) {
+                final String t = k.getOriginal().toLowerCase(java.util.Locale.ROOT);
+                if (t.contains("everything") || t.contains("creature")) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
     private static Abil withEffects(Abil base, Obs o, int hostId, SpellAbility sa, String variant) {
         final Abil ab = base.copyCost();
         ab.targetVariant = variant;
@@ -2944,6 +3103,10 @@ public final class ForcedWinProbe {
         effectsFromTrace(o, hostId, ab, sa);
         ab.effects.addAll(o.effects);
         ab.counter = sa.getApi() == forge.game.ability.ApiType.Counter;
+        ab.protectsPass = o.gainedProtection; // sdcc-protect-1117 (false unless a PROTECT_PASS run saw it)
+        if (o.grantSac > 0 && o.grantSacColors != 0) {
+            ab.effects.add(new Eff(EffKind.GRANT_SAC_MANA, o.grantSacLands ? 1 : 2, o.grantSacColors)); // sdcc-sacmana-1117
+        }
         netReceipt(sa.getHostCard() == null ? "?" : sa.getHostCard().getName(), ab.kind + (variant == null ? "" : "@" + variant),
                 ab.effects, o); // sdcc-draws-1110 (a probeSettle run with receipts only)
         return ab;
