@@ -77,6 +77,32 @@ public final class SearchGuard {
         throw new RealSeatAsk(what);
     }
 
+    private static final Map<Game, long[]> SEEN = new IdentityHashMap<>();
+
+    /**
+     * Counted, never refused: a controller call about the real game inside a search that does not ask a seat (the tape
+     * controller's inner answerer decides it). Reported with the refusals ({@link #takeSeen}).
+     */
+    public static void note(final Game g, final String what) {
+        if (!active(g)) {
+            return;
+        }
+        synchronized (ACTIVE) {
+            SEEN.computeIfAbsent(g, k -> new long[1])[0]++;
+        }
+    }
+
+    /** The counted (not refused) real-game calls on {@code g} since the last take, and resets them. */
+    public static long takeSeen(final Game g) {
+        if (g == null) {
+            return 0;
+        }
+        synchronized (ACTIVE) {
+            final long[] b = SEEN.remove(g);
+            return b == null ? 0 : b[0];
+        }
+    }
+
     /** The refusals on {@code g} since the last take, and resets them (0 = none). */
     public static long takeBlocked(final Game g) {
         if (g == null) {
