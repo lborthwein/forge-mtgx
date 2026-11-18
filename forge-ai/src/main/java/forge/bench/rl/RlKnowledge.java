@@ -50,6 +50,10 @@ import forge.game.zone.ZoneView;
  * once Forge has finished the move: Forge exiles a foretold card (and a card exiled "face down") face up, then turns it
  * face down. Such moves wait in {@link #pending} until the next query or resolution, and a card that is face down by
  * then was not seen: it does not enter the seen-cards set (NAME) either.
+ *
+ * <p><b>Same-name exits (knowledge-same-name-1118; {@link #sameName}, off by default).</b> When the seat sees a card
+ * leave another player's hand but did not know that card, it cannot tell it from a card of that hand it knew with the
+ * same name, so it forgets one of those (see {@link #sameName}).
  */
 public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     public static final int TAIL = 16;
@@ -110,6 +114,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         /** v2: the seen-ids entry the move added (removed again if the card was not seen). */
         boolean idAdded;
 
+        /**
+         * knowledge-same-name-1118 ({@link #sameName} on; null otherwise): the identity of the card that left
+         * {@link #handOwner}'s hand, which the seat did not know. If the move settles as seen, the seat forgets one card of
+         * that hand with this identity that it knew before the move.
+         */
+        String exitName;
+
         Pending(final int seat, final int cardId, final String name, final Player handOwner, final long at) {
             this.seat = seat;
             this.cardId = cardId;
@@ -123,6 +134,17 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
 
     /** Observation v2 (lane rl-obs-v2-1006): keep the v2 extras (seen ids, tail facts and targets). Off for v1. */
     public boolean v2 = false;
+    /**
+     * knowledge-same-name-1118 (the live policy seat's {@code knowledgeSameName=on},
+     * {@link RlSearch.Config#knowledgeSameName}; false = off, the default, and then every path is unchanged): count another
+     * player's hand by name. When the seat sees a card leave that hand (face up where the seat can see it: at once for the
+     * graveyard, and at {@link #settle} for a zone where Forge may still turn it face down) and the seat did not know that
+     * card, the seat cannot tell it from a card of that hand it knew with the same name (rules name). So it forgets one of
+     * those: the lowest id among the cards it knew before the move. If it knew two and saw one leave, it still knows one. A
+     * known card that leaves is forgotten as before. An exit the seat does not see is the F1 blur ({@link #blurHand}), as
+     * before. The seat's own hand is unchanged. {@link #forkFor} and {@link #snapshot}/{@link #restore} carry it.
+     */
+    public boolean sameName = false;
     /** v2: per seat, the opponent cards it has seen face up, by id, with {name, full name} as seen (zone o_seen). */
     @SuppressWarnings("unchecked")
     private final java.util.LinkedHashMap<Integer, String[]>[] seenIds = new java.util.LinkedHashMap[] {
@@ -230,6 +252,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     public RlKnowledge forkFor(final Game copy) {
         final RlKnowledge k = new RlKnowledge(copy);
         k.v2 = v2;
+        k.sameName = sameName;
         k.clock = clock;
         k.searchedTopSeats = searchedTopSeats;
         k.searchedTop = searchedTop;
@@ -272,6 +295,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             }
             final Pending q = new Pending(p.seat, p.cardId, p.name, owner, p.at);
             q.idAdded = p.idAdded;
+            q.exitName = p.exitName;
             k.pending.add(q);
         }
         return k;
@@ -292,6 +316,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         o.addProperty("v2", v2);
         o.addProperty("clock", clock);
         o.addProperty("fixed_settle", fixedSettle);
+        if (sameName) {
+            o.addProperty("same_name", true); // knowledge-same-name-1118: only when on
+        }
         final com.google.gson.JsonArray kn = new com.google.gson.JsonArray(), si = new com.google.gson.JsonArray(),
                 so = new com.google.gson.JsonArray();
         for (int s = 0; s < 2; s++) {
@@ -365,6 +392,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             x.addProperty("hand_owner", p.handOwner == null ? -1 : seatOf(p.handOwner));
             x.addProperty("at", p.at);
             x.addProperty("id_added", p.idAdded);
+            if (p.exitName != null) {
+                x.addProperty("exit_name", p.exitName); // knowledge-same-name-1118: only with the key on
+            }
             pe.add(x);
         }
         o.add("pending", pe);
@@ -383,6 +413,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         }
         final RlKnowledge k = new RlKnowledge(g);
         k.v2 = o.get("v2").getAsBoolean();
+        k.sameName = o.has("same_name") && o.get("same_name").getAsBoolean(); // knowledge-same-name-1118
         k.clock = o.get("clock").getAsLong();
         for (int s = 0; s < 2; s++) {
             for (com.google.gson.JsonElement e : o.getAsJsonArray("known").get(s).getAsJsonArray()) {
@@ -425,6 +456,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             final Pending p = new Pending(x.get("seat").getAsInt(), idOf.applyAsInt(x.get("card").getAsString()),
                     str(x.get("name")), ho < 0 ? null : k.seatPlayer(ho), x.get("at").getAsLong());
             p.idAdded = x.get("id_added").getAsBoolean();
+            if (x.has("exit_name")) {
+                p.exitName = str(x.get("exit_name")); // knowledge-same-name-1118
+            }
             k.pending.add(p);
         }
         return k;
@@ -516,6 +550,33 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         }
     }
 
+    /**
+     * knowledge-same-name-1118: seat {@code s} saw a card with identity {@code name} that it did not know leave {@code p}'s
+     * hand at event {@code at}. It forgets one card of that hand with that identity that it knew before the move (the
+     * lowest id), if there is one.
+     */
+    private void forgetSameName(final int s, final Player p, final String name, final long at) {
+        Card pick = null;
+        for (Card h : p.getCardsIn(ZoneType.Hand)) {
+            final Long t = known[s].get(h.getId());
+            if (t != null && t < at && name.equals(identity(h)) && (pick == null || h.getId() < pick.getId())) {
+                pick = h;
+            }
+        }
+        if (pick != null) {
+            forget(s, pick.getId(), "an unknown card with its name left that hand");
+        }
+    }
+
+    /**
+     * knowledge-same-name-1118: what a seat tells two cards apart by, the card's rules name (one name for every face and
+     * state). This is InfoStates' identity.
+     */
+    private static String identity(final Card c) {
+        final forge.card.CardRules r = c.getRules();
+        return r != null && r.getName() != null ? r.getName() : String.valueOf(c.getName());
+    }
+
     /** Settles the pending moves: a card that is not face up where the seat can see it now was not seen. */
     private void settle() {
         if (pending.isEmpty()) {
@@ -528,6 +589,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             final Card c = game.findById(p.cardId);
             final boolean seen = me != null && c != null && !c.isFaceDown() && c.getView().canBeShownTo(me.getView());
             if (seen) {
+                if (p.exitName != null && p.handOwner != null) {
+                    forgetSameName(p.seat, p.handOwner, p.exitName, p.at); // knowledge-same-name-1118 (key on only)
+                }
                 continue;
             }
             if (p.name != null && seenOpp[p.seat].remove(p.name) && log != null) {
@@ -668,10 +732,16 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             if (visibleNow) {
                 final String added = see(s, c);
                 final boolean idAdded = seeId(s, c);
+                // knowledge-same-name-1118 (key on only): this seat did not know the card that left the other hand
+                final String exitName = sameName && otherHand != null && !known[s].containsKey(c.getId()) ? identity(c)
+                        : null;
                 if ((added != null || idAdded || otherHand != null) && mayTurnFaceDown(tz)) {
                     final Pending p = new Pending(s, c.getId(), added, otherHand, clock);
                     p.idAdded = idAdded;
+                    p.exitName = exitName; // forgets a same-name card if the move settles as seen
                     pending.add(p);
+                } else if (exitName != null) {
+                    forgetSameName(s, otherHand, exitName, clock); // seen and settled (the graveyard): at once
                 }
             } else if (otherHand != null) {
                 blurHand(s, otherHand, clock);

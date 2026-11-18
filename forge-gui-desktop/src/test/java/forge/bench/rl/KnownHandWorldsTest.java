@@ -336,6 +336,67 @@ public class KnownHandWorldsTest extends SimulationTest {
         System.err.println("[knownhand-tracker] kept of " + n + " worlds: " + rows);
     }
 
+    /**
+     * knowledge-same-name-1118: the same position with knownHand off, so the uniform and deck-belief dealers (and their
+     * re-draws) read the live tracker. Key off, the tracker still knows the remaining Angel and both dealers keep it in
+     * every world (today's leak). With the tracker's same-name key on ({@link RlKnowledge#sameName}), it forgets that
+     * Angel: neither dealer keeps it in any world, nor does either re-draw remember it. Kolaghan stays in every world.
+     */
+    @Test
+    public void theSameNameKeyDealsTheUnknowableAngelAway() throws Exception {
+        final int n = 8;
+        final List<String> rows = new ArrayList<>();
+        for (boolean same : new boolean[] {false, true}) {
+            final Game g = initAndCreateGame();
+            final Player me = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+            g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+            fillLibrary(opp, 30);
+            fillLibrary(me, 30);
+            final Card other = addCardToZone("Serra Angel", opp, ZoneType.Hand);
+            final RlKnowledge k = new RlKnowledge(g);
+            k.v2 = true;
+            if (same) {
+                k.sameName = true; // never touched with the key off: a base jar runs that half
+            }
+            k.attach();
+            InfoStates.attach(g).trackHands();
+            final Card angel = g.getAction().moveToHand(addCard("Serra Angel", opp), null);
+            final Card dragon = g.getAction().moveToHand(addCard(DRAGON, opp), null);
+            assertTrue(k.knows(k.seatOf(me), angel));
+            g.getAction().moveToGraveyard(other, null); // a public discard of the other Angel
+            assertTrue(angel.isInZone(ZoneType.Hand));
+            assertEquals(k.knows(k.seatOf(me), angel), !same, "the tracker knows the remaining Angel only with the key off");
+            assertTrue(k.knows(k.seatOf(me), dragon));
+            final RlSearch s = new RlSearch(RlSearch.Config.parse(knownSpec(true, false)), 1, 2, null, k, "jar", "same", 2);
+            final RlSearch r = new RlSearch(RlSearch.Config.parse(knownSpec(false, false)), 1, 2, null, k, "jar", "same", 2);
+            try {
+                assertFalse(s.ls().getConfig().knownHand, "knownHand off: the dealers read the live tracker");
+                for (Map.Entry<String, Dealer> e : dealers(s, r).entrySet()) {
+                    final int ka = kept(g, me, angel.getId(), n, e.getValue());
+                    final int kd = kept(g, me, dragon.getId(), n, e.getValue());
+                    rows.add("sameName=" + same + " " + e.getKey() + ": angel " + ka + " dragon " + kd);
+                    if ("uniform".equals(e.getKey()) || "deckBelief".equals(e.getKey())) {
+                        assertEquals(ka, same ? 0 : n, e.getKey() + " keeps the remaining Angel (sameName=" + same + ")");
+                        assertEquals(kd, n, e.getKey() + " keeps Kolaghan in every world");
+                    }
+                }
+                for (Map.Entry<String, forge.ai.simulation.ForcedWinSolver.Redraw> e : solverRedraws(s).entrySet()) {
+                    rows.add("sameName=" + same + " re-draw " + e.getKey() + ": remembers angel "
+                            + e.getValue().remembersHandCard(g, me, angel) + " dragon " + e.getValue().remembersHandCard(g, me, dragon));
+                    if ("uniform".equals(e.getKey()) || "deckBelief".equals(e.getKey())) {
+                        assertEquals(e.getValue().remembersHandCard(g, me, angel), !same, e.getKey() + " remembers the Angel");
+                        assertTrue(e.getValue().remembersHandCard(g, me, dragon), e.getKey() + " remembers Kolaghan");
+                    }
+                }
+            } finally {
+                s.close();
+                r.close();
+            }
+            System.err.println("[same-name-dealers] knownHand off, kept of " + n + " worlds: " + rows);
+            rows.clear();
+        }
+    }
+
     /** The hand shuffled into the library (each card leaves the hand, the library is shuffled, a new hand drawn). */
     @Test
     public void aHandShuffledIntoTheLibraryIsForgotten() throws Exception {

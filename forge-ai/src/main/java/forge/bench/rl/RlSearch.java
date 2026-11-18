@@ -268,6 +268,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          */
         public boolean knownHand = false;
         /**
+         * knowledge-same-name-1118 (false = off, the default, and then absent from the JSON and nothing changes): the live
+         * policy seat's tracker counts the opponent's hand by name ({@link RlKnowledge#sameName}): seeing an unknown card
+         * leave that hand forgets one known card of it with the same name. Read by {@link RlLiveSeat#newKnowledge} only (a
+         * bench or review seat's tracker does not read it).
+         */
+        public boolean knowledgeSameName = false;
+        /**
          * honest-belief-1020 ("off" = the default, and then nothing changes): "uniform" = every world, solver line check and
          * engine root draws the opponent's hidden hand and library from an observation-only pool
          * ({@link LookaheadSearch.Config#belief}): the cube list ({@link #beliefCube}, or the event's pool
@@ -477,7 +484,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit",
-                "attacks", "knownHand")); // attack-holdback-1118
+                "attacks", "knownHand", // attack-holdback-1118
+                "knowledgeSameName")); // knowledge-same-name-1118
 
         /** explore.families as trimmed names (empty when absent). */
         static List<String> exploreFamilyNames(final JsonObject ex) {
@@ -614,6 +622,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
             if (o.has("attacks")) c.attacks = o.get("attacks").getAsInt(); // attack-holdback-1118
             if (o.has("knownHand")) c.knownHand = o.get("knownHand").getAsBoolean(); // attack-holdback-1118
+            if (o.has("knowledgeSameName")) c.knowledgeSameName = o.get("knowledgeSameName").getAsBoolean(); // knowledge-same-name-1118
             if (o.has("belief")) c.belief = o.get("belief").getAsString();
             if (o.has("infoState")) c.infoState = o.get("infoState").getAsBoolean();
             if (o.has("infoAttach")) c.infoAttach = o.get("infoAttach").getAsBoolean();
@@ -930,6 +939,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (knownHand) {
                 o.addProperty("knownHand", true); // attack-holdback-1118: only when on
+            }
+            if (knowledgeSameName) {
+                o.addProperty("knowledgeSameName", true); // knowledge-same-name-1118: only when on
             }
             if (!"off".equals(belief)) {
                 // honest-belief-1020: only when on, so every other spec's JSON is unchanged
