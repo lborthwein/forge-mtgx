@@ -965,4 +965,68 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertEquals(ln.toString(), "none", ln.get("chosen").getAsString());
         AssertJUnit.assertTrue("no blocks, as off: " + ln, on.combat.getAllBlockers().isEmpty());
     }
+
+    /** The Springleaf Drum board: ai at 6 with a Centaur Courser; opp's attacking Root-Kin Ally, Llanowar Elves, Grizzly Bears, Springleaf Drum, Captive Flame. */
+    private Card[] drumBoard(Game g, Player ai, Player opp) {
+        ai.setLife(6, null);
+        final Card attacker = addCard("Root-Kin Ally", opp);
+        attacker.setSickness(false);
+        addCard("Llanowar Elves", opp).setSickness(false);
+        addCard("Grizzly Bears", opp).setSickness(false);
+        addCard("Springleaf Drum", opp);
+        addCard("Captive Flame", opp);
+        final Card blocker = addCard("Centaur Courser", ai);
+        blocker.setSickness(false);
+        fillLibrary(ai, 20);
+        fillLibrary(opp, 20);
+        g.getAction().checkStateEffects(true);
+        return new Card[] {attacker, blocker};
+    }
+
+    /**
+     * Re-review S1: Springleaf Drum's mana ability taps another creature, which the Ally's "tap two untapped creatures"
+     * may also tap. The real most is 5 at 6 life; 6c45 credited the Drum's mana on its own (6, lethal) and ON re-scored
+     * no blocks to a loss. A mana ability whose cost takes another permanent now stands aside: nothing re-scored, and the
+     * live seat keeps off's no blocks.
+     */
+    @Test
+    public void aManaAbilityThatTapsAnotherCreatureStandsAside() throws Exception {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = drumBoard(g, ai, opp);
+        attack(g, opp, ai, b[0]);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(b[1], b[0]), plan());
+        AssertJUnit.assertNotNull(flags(lc), lc.aside);
+        AssertJUnit.assertTrue(flags(lc), lc.aside.contains("takes another permanent"));
+        final double[][] v = {{0.55, 0.55}, {0.70, 0.70}};
+        final LookaheadSearch.GivenResult r = apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true});
+        AssertJUnit.assertFalse(r.lethalRescored);
+        AssertJUnit.assertTrue(Arrays.deepEquals(new double[][] {{0.55, 0.55}, {0.70, 0.70}}, v));
+        final JsonObject lo = live(this::drumBoard, "").line();
+        AssertJUnit.assertEquals(lo.toString(), "none", lo.get("chosen").getAsString());
+        final JsonObject ln = live(this::drumBoard, "lethalBlock=on").line();
+        final JsonObject gn = ln.getAsJsonObject("lethalBlock");
+        AssertJUnit.assertNotNull(ln.toString(), gn);
+        AssertJUnit.assertFalse(ln.toString(), gn.has("rescored") && gn.get("rescored").getAsBoolean());
+        AssertJUnit.assertEquals(ln.toString(), "none", ln.get("chosen").getAsString());
+    }
+
+    /**
+     * The stand-aside is narrow: a source whose cost is only its own tap and its own sacrifice (Lotus Petal) still counts.
+     * The Wolf Run board with a Petal for the second Forest: 4 mana, X = 1, no blocks takes 3, lethal at 3.
+     */
+    @Test
+    public void aSelfSacrificeManaSourceStillCounts() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = wolfRun(g, ai, opp, 3, 1);
+        addCard("Lotus Petal", opp);
+        g.getAction().checkStateEffects(true);
+        attack(g, opp, ai, b[0]);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(b[1], b[0]), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 4, lc.mana);
+        AssertJUnit.assertEquals(flags(lc), 3, lc.life[1]);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, true}, lc.lethal));
+    }
 }
