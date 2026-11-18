@@ -120,6 +120,14 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         return null;
     }
 
+    /** A target restriction from a ValidTgts string (battlefield), as a script's would be. */
+    private static forge.game.spellability.TargetRestrictions tgts(String valid) {
+        final java.util.Map<String, String> m = new java.util.HashMap<>();
+        m.put("ValidTgts", valid);
+        m.put("TgtPrompt", "test");
+        return new forge.game.spellability.TargetRestrictions(m);
+    }
+
     private static String why(Player a) {
         return LookaheadSearch.deadFaceUpWhy(turnUp(a), a, null);
     }
@@ -365,17 +373,43 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         }
     }
 
-    /** The class beyond the reported card: Hidden Dragonslayer (lifelink) with no opposing creature of power 4 or more. */
+    /**
+     * The class beyond the reported card: Ainok Survivalist ("destroy target artifact or enchantment an opponent controls")
+     * with no artifact or enchantment anywhere. Review round 2: the count ignores every restriction but the card type, so
+     * the seat's own Mox Ruby (an artifact it does not control as an opponent) is already a possible target.
+     */
     @Test
     public void anotherCardOfTheClassIsDeadUntilItHasATarget() {
-        Game g = board(PhaseType.COMBAT_END, true, "Hidden Dragonslayer");
+        Game g = board(PhaseType.COMBAT_END, true, "Ainok Survivalist");
         Player a = g.getPlayers().get(0);
+        addCard("Forest", a);
+        g.getAction().checkStateEffects(true);
         AssertJUnit.assertEquals(LookaheadSearch.DFU_DEAD, why(a));
         AssertJUnit.assertTrue("ON drops it on the live path", droppedLive(g, a, AiFixes.Mode.ON));
-        addCard("Polukranos, World Eater", g.getPlayers().get(1));
+        addCard("Mox Ruby", a);
         g.getAction().checkStateEffects(true);
-        AssertJUnit.assertEquals("a 5/5 to destroy", "target", why(a));
+        AssertJUnit.assertEquals("an artifact, though not an opponent's", "target", why(a));
         AssertJUnit.assertFalse(droppedLive(g, a, AiFixes.Mode.ON));
+    }
+
+    /**
+     * Review round 2: a creature-targeting trigger always has a possible target once the card type alone counts (the
+     * face-down creature itself is one); a filter that is not card types (a player) stands aside.
+     */
+    @Test
+    public void theTargetCountIgnoresEverythingButTheCardType() {
+        Game g = board(PhaseType.COMBAT_END, true, "Hidden Dragonslayer");
+        Player a = g.getPlayers().get(0);
+        AssertJUnit.assertEquals("no power-4 creature an opponent controls, but a creature: its own body", "target", why(a));
+        AssertJUnit.assertFalse(droppedLive(g, a, AiFixes.Mode.ON));
+        Game s2 = board(PhaseType.COMBAT_END, true, "Silumgar Assassin");
+        AssertJUnit.assertEquals("target", why(s2.getPlayers().get(0)));
+        for (String valid : new String[] {"Player", "Opponent", "Any", "Creature,Player", "Emblem", "Card.YouOwn,Player"}) {
+            AssertJUnit.assertEquals(valid, -1, LookaheadSearch.dfuTypeCandidates(tgts(valid), g));
+        }
+        AssertJUnit.assertEquals("the reported board: no artifact or enchantment anywhere", 0,
+                LookaheadSearch.dfuTypeCandidates(tgts("Artifact.OppCtrl,Enchantment.OppCtrl"), g));
+        AssertJUnit.assertTrue(LookaheadSearch.dfuTypeCandidates(tgts("Land.nonBasic+OppCtrl"), g) > 0);
     }
 
     // ---------------------------------------------------------------- stand-asides
@@ -403,7 +437,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         bearsSa.setActivatingPlayer(b2);
         g2.getStackZone().add(bears);
         g2.getStack().add(bearsSa);
-        AssertJUnit.assertEquals("no target, but the top item resolves before the seat's next priority", "stack", why(a2));
+        AssertJUnit.assertEquals("review round 2: any object on the stack counts as a possible target", "target", why(a2));
     }
 
     @Test
@@ -413,11 +447,20 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         AssertJUnit.assertEquals("two Dogs whenever it turns up", "untargeted", why(a));
     }
 
+    /**
+     * A static ability on the face-up side (added to this test game's Stratus Dancer: no card of the class has one whose
+     * trigger can lack a target now), and an activated one (Mischievous Quanar).
+     */
     @Test
     public void aStaticOrActivatedAbilityOnTheFaceUpSideStandsAside() {
-        Game g = board(PhaseType.COMBAT_END, true, "Silumgar Assassin");
+        Game g = reported();
         Player a = g.getPlayers().get(0);
-        AssertJUnit.assertEquals("its trigger has no target (b has no creature), its blocking static still reads its power", "ability", why(a));
+        final Card dancer = faceDown(a);
+        final forge.game.card.CardState up = dancer.getState(forge.card.CardStateName.Original);
+        up.addStaticAbility(forge.game.staticability.StaticAbility.create(
+                "Mode$ Continuous | Affected$ Creature.YouCtrl+Other | AddPower$ 1 | Description$ Other creatures you control get +1/+0.",
+                dancer, up, true));
+        AssertJUnit.assertEquals("its counter trigger has no target, its anthem is a static ability", "ability", why(a));
         Game q = board(PhaseType.COMBAT_END, true, "Mischievous Quanar");
         Player a2 = q.getPlayers().get(0);
         AssertJUnit.assertEquals("its copy trigger has no target, its turn-face-down ability is an activated ability", "ability", why(a2));
@@ -451,7 +494,7 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
         AssertJUnit.assertEquals("a face-up flyer could block the Specter", "timing", why(a));
         AssertJUnit.assertFalse(droppedLive(g, a, AiFixes.Mode.ON));
         faceDown(a).setTapped(true);
-        AssertJUnit.assertEquals("tapped: it cannot block", LookaheadSearch.DFU_DEAD, why(a));
+        AssertJUnit.assertEquals("review round 2: tapped does not prove it cannot block (Masako)", "timing", why(a));
     }
 
     @Test
@@ -530,16 +573,217 @@ public class LookaheadDeadFaceUpTest extends SimulationTest {
             AssertJUnit.assertEquals("own " + p, LookaheadSearch.DFU_DEAD, why(a));
         }
         for (PhaseType p : new PhaseType[] {PhaseType.UPKEEP, PhaseType.DRAW, PhaseType.MAIN1, PhaseType.COMBAT_BEGIN,
-                PhaseType.COMBAT_DECLARE_BLOCKERS, PhaseType.COMBAT_END, PhaseType.MAIN2, PhaseType.END_OF_TURN}) {
+                PhaseType.COMBAT_DECLARE_BLOCKERS, PhaseType.COMBAT_END, PhaseType.MAIN2}) {
             Game g = board(p, false, "Stratus Dancer");
             Player a = g.getPlayers().get(0);
             faceDown(a).setSickness(false);
             AssertJUnit.assertEquals("b's " + p, LookaheadSearch.DFU_DEAD, why(a));
         }
+        // review round 2: b's declare attackers always stands aside; b's end step comes just before a's untap step
+        for (boolean tapped : new boolean[] {false, true}) {
+            Game g = board(PhaseType.COMBAT_DECLARE_ATTACKERS, false, "Stratus Dancer");
+            Player a = g.getPlayers().get(0);
+            faceDown(a).setSickness(false);
+            faceDown(a).setTapped(tapped);
+            AssertJUnit.assertEquals("b's declare attackers, no attacker, tapped " + tapped, "timing", why(a));
+        }
+        Game eot = board(PhaseType.END_OF_TURN, false, "Stratus Dancer");
+        AssertJUnit.assertEquals("b's end step", "untap", why(eot.getPlayers().get(0)));
         for (boolean own : new boolean[] {true, false}) {
             Game g = board(PhaseType.CLEANUP, own, "Stratus Dancer");
             AssertJUnit.assertEquals("cleanup: not classified", "phase", why(g.getPlayers().get(0)));
         }
+    }
+
+    // ---------------------------------------------------------------- review round 2 (Astra, HOLD at cd940f48a01)
+    // Each repro (review/247/ReviewScratchDeadFaceUpTest.java) copied in as a test that must not drop; the reason is the
+    // stand-aside round 2 gives it.
+
+    /** S1 1: b's end step. Turning up now spends mana that untaps before a's next priority; waiting spends next turn's. */
+    @Test
+    public void opponentEndStepManaWillUntap() {
+        Game g = board(PhaseType.END_OF_TURN, false, "Stratus Dancer");
+        Player a = g.getPlayers().get(0);
+        AssertJUnit.assertTrue(a.getManaPool().isEmpty());
+        AssertJUnit.assertEquals("untap", why(a));
+        AssertJUnit.assertFalse("Spend 1U now, untap all lands; waiting spends next turn's mana", droppedLive(g, a, AiFixes.Mode.ON));
+    }
+
+    /** Round 2, rule 1 on a's own turn: an extra turn of a's own is pending, so its untap step comes before its next priority. */
+    @Test
+    public void ownEndStepBeforeAnExtraTurnStandsAside() {
+        Game g = board(PhaseType.END_OF_TURN, true, "Stratus Dancer");
+        Player a = g.getPlayers().get(0);
+        AssertJUnit.assertEquals("a's own end step, b's turn next", LookaheadSearch.DFU_DEAD, why(a));
+        g.getPhaseHandler().addExtraTurn(a);
+        AssertJUnit.assertEquals(a, g.getPhaseHandler().getNextTurn());
+        AssertJUnit.assertEquals("an extra turn pending", "phase", why(a));
+        // the look-ahead's copies leave extra turns out: the sites read them in the live game ("pending")
+        AssertJUnit.assertFalse(droppedLive(g, a, AiFixes.Mode.ON));
+        AssertJUnit.assertTrue(LookaheadSearch.dfuLivePending(g));
+    }
+
+    /** Round 2: a delayed trigger in the live game (the copies leave it out) stands aside on the live path. */
+    @Test
+    public void aDelayedTriggerInTheLiveGameStandsAside() {
+        Game g = reported();
+        Player a = g.getPlayers().get(0);
+        AssertJUnit.assertFalse(LookaheadSearch.dfuLivePending(g));
+        final Card island = a.getCardsIn(ZoneType.Battlefield).get(3);
+        final forge.game.trigger.Trigger t = forge.game.trigger.TriggerHandler.parseTrigger(
+                "Mode$ Phase | Phase$ End of Turn | TriggerDescription$ At the beginning of the next end step, test.", island, false);
+        g.getTriggerHandler().registerDelayedTrigger(t);
+        AssertJUnit.assertTrue(LookaheadSearch.dfuLivePending(g));
+        AssertJUnit.assertEquals("other", why(a));
+        AssertJUnit.assertFalse(droppedLive(g, a, AiFixes.Mode.ON));
+    }
+
+    /** S1 2: protection from colorless counted with the face-down source; the white face-up Dragonslayer can target it. */
+    @Test
+    public void colorlessProtectionIsNotProtectionFromFaceUpSource() {
+        Game g = board(PhaseType.COMBAT_END, true, "Hidden Dragonslayer");
+        Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        addCard("Plains", a);
+        addCard("Plains", a);
+        Card target = addCard("Polukranos, World Eater", b);
+        Card giver = addCard("Giver of Runes", b);
+        giver.setTapped(true);
+        target.addChangedCardKeywords(Arrays.asList("Protection from colorless"), null, false, g.getNextTimestamp(), null);
+        g.getAction().checkStateEffects(true);
+        SpellAbility turn = turnUp(a);
+        Card host = turn.getHostCard();
+        AssertJUnit.assertEquals("a creature of the filter's type is a possible target", "target", LookaheadSearch.deadFaceUpWhy(turn, a, null));
+        boolean wasDropped = droppedLive(g, a, AiFixes.Mode.ON);
+        host.turnFaceUp(false, turn);
+        g.getAction().checkStateEffects(true);
+        forge.game.trigger.Trigger t = host.getState(forge.card.CardStateName.Original).getTriggers().iterator().next();
+        SpellAbility trigger = t.ensureAbility().copy(a);
+        trigger.setActivatingPlayer(a);
+        AssertJUnit.assertTrue("White Dragonslayer can destroy the protected 5/5", trigger.canTarget(target));
+        AssertJUnit.assertFalse("A legal turned-up trigger is dropped", wasDropped);
+    }
+
+    /** S1 3a: a's own declare blockers; turning up makes another Monk, and Coat of Arms grows the attacking Mentor before damage. */
+    @Test
+    public void typeChangeBuffsAnAttackerBeforeDamage() {
+        Game g = board(PhaseType.COMBAT_DECLARE_BLOCKERS, true, "Stratus Dancer");
+        Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        Card bird = addCard("Monastery Mentor", a);
+        bird.setSickness(false);
+        addCard("Coat of Arms", a);
+        Combat combat = new Combat(a);
+        combat.addAttacker(bird, b);
+        g.getPhaseHandler().setCombat(combat);
+        g.getAction().checkStateEffects(true);
+        SpellAbility turn = turnUp(a);
+        AssertJUnit.assertEquals(2, bird.getNetPower());
+        AssertJUnit.assertEquals("other", LookaheadSearch.deadFaceUpWhy(turn, a, null));
+        boolean wasDropped = droppedLive(g, a, AiFixes.Mode.ON);
+        turn.getHostCard().turnFaceUp(false, turn);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("Another Monk increases this combat's damage", 3, bird.getNetPower());
+        AssertJUnit.assertFalse("Host is not attacking, but turning up changes an attacker's damage", wasDropped);
+    }
+
+    /** S1 4: the megamorph counter triggers Shalai and Hallar for lethal damage now. */
+    @Test
+    public void megamorphCounterHasImmediateDamagePayoff() {
+        Game g = board(PhaseType.COMBAT_END, true, "Stratus Dancer");
+        Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        addCard("Shalai and Hallar", a);
+        b.setLife(1, null);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("other", why(a));
+        AssertJUnit.assertFalse("Megamorph's counter triggers Shalai and Hallar for lethal damage now", droppedLive(g, a, AiFixes.Mode.ON));
+    }
+
+    /** S1 3b: a's own main phase 2; the 5/5 face up turns on Drumhunter's end-step draw before a's next priority. */
+    @Test
+    public void phaseTriggerNeedsPowerBeforeEndStep() {
+        Game g = board(PhaseType.MAIN2, true, "Vengeful Creeper");
+        Player a = g.getPlayers().get(0);
+        for (int i = 0; i < 5; i++) {
+            addCard("Forest", a);
+        }
+        addCard("Drumhunter", a);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("other", why(a));
+        AssertJUnit.assertFalse("Turning up the 5/5 now enables Drumhunter's end-step draw before next priority",
+                droppedLive(g, a, AiFixes.Mode.ON));
+    }
+
+    /** S1 5: b's declare attackers; Masako lets the tapped face-up Dancer block the flyer, only if turned up before blocks. */
+    @Test
+    public void tappedCreatureCanStillBlockWithMasako() {
+        Game g = board(PhaseType.COMBAT_DECLARE_ATTACKERS, false, "Stratus Dancer");
+        Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        addCard("Masako the Humorless", a);
+        Card attacker = addCard("Nightveil Specter", b);
+        attacker.setSickness(false);
+        Combat combat = new Combat(b);
+        combat.addAttacker(attacker, a);
+        g.getPhaseHandler().setCombat(combat);
+        SpellAbility turn = turnUp(a);
+        turn.getHostCard().setTapped(true);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("timing", LookaheadSearch.deadFaceUpWhy(turn, a, null));
+        boolean wasDropped = droppedLive(g, a, AiFixes.Mode.ON);
+        turn.getHostCard().turnFaceUp(false, turn);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertTrue(forge.game.combat.CombatUtil.canBlock(attacker, turn.getHostCard(), combat));
+        AssertJUnit.assertFalse("Masako lets tapped Dancer block the flyer only if turned up before blocks", wasDropped);
+    }
+
+    /**
+     * Round 2, rule 3: any other battlefield object, on either side, with a static or triggered ability, a keyword or a
+     * replacement effect stands aside; one with only activated or mana abilities, or none, does not. The reported board's
+     * lands pass: basic lands have no abilities but mana, and Stomping Ground's and Cinder Glade's only other trait is a
+     * replacement for their own entering the battlefield.
+     */
+    @Test
+    public void otherCardsWithAnyStaticTriggerKeywordOrReplacementStandAside() {
+        Game g = reported();
+        Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        final Card dancer = faceDown(a);
+        AssertJUnit.assertFalse("the reported board", LookaheadSearch.dfuOtherAbilities(dancer, g));
+        int ownEntry = 0;
+        for (Card c : g.getCardsIn(ZoneType.Battlefield)) {
+            if (c == dancer) {
+                continue;
+            }
+            AssertJUnit.assertTrue(c.getName(), c.isLand());
+            AssertJUnit.assertTrue(c.getName(), c.getStaticAbilities().isEmpty() && c.getTriggers().isEmpty() && c.getKeywords().isEmpty());
+            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                AssertJUnit.assertTrue(c.getName(), LookaheadSearch.dfuOwnEntry(re));
+                ownEntry++;
+            }
+        }
+        AssertJUnit.assertEquals("Stomping Ground's and Cinder Glade's own-entry replacements", 2, ownEntry);
+        addCard("Grizzly Bears", b);
+        addCard("Llanowar Elves", a);
+        addCard("Mox Ruby", b);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("a vanilla creature, mana abilities", LookaheadSearch.DFU_DEAD, why(a));
+        AssertJUnit.assertTrue(droppedLive(g, a, AiFixes.Mode.ON));
+        final String[][] cases = {{"Urborg, Tomb of Yawgmoth", "b"}, {"Serra Angel", "b"}, {"Hardened Scales", "a"},
+                {"Drumhunter", "b"}, {"Masako the Humorless", "a"}};
+        for (String[] k : cases) {
+            Game h = reported();
+            Player ha = h.getPlayers().get(0);
+            addCard(k[0], "a".equals(k[1]) ? ha : h.getPlayers().get(1));
+            h.getAction().checkStateEffects(true);
+            AssertJUnit.assertEquals(k[0], "other", why(ha));
+            AssertJUnit.assertFalse(k[0], droppedLive(h, ha, AiFixes.Mode.ON));
+        }
+        // a face-down disguise permanent of b's: ward:2 on its face-down state (public, as a disguise cast gives it) is a keyword
+        Game d = reported();
+        Player da = d.getPlayers().get(0);
+        final Card walker = addCard("Dog Walker", d.getPlayers().get(1));
+        walker.turnFaceDown(true);
+        walker.getFaceDownState().addIntrinsicKeyword("Ward:2", true);
+        walker.updateKeywordsCache();
+        d.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("other", why(da));
     }
 
     // ---------------------------------------------------------------- hidden information
