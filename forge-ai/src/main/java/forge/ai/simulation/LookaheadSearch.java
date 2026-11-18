@@ -3695,6 +3695,7 @@ public final class LookaheadSearch {
         final List<Cand> o = new ArrayList<>();
         final List<Integer> oAt = new ArrayList<>();
         try {
+            final Set<Integer> pumpKnown = pguard ? pumpKnownIds(live, liveMe) : null; // the seat's knowledge, from the live game
             final GameCopier copier = copierOf(live);
             copier.setCopyStack(cfg.stack);
             final Game g = copier.makeCopy();
@@ -3709,7 +3710,7 @@ public final class LookaheadSearch {
                 final boolean zero = zguard && sa != null && zeroXSpell(sa, me);
                 final boolean crew = cguard && sa != null && crewNoop(sa, me);
                 final boolean alt = aguard && sa != null && deadAltCost(sa, me);
-                final boolean pump = pguard && sa != null && deadPump(sa, me);
+                final boolean pump = pguard && sa != null && deadPump(sa, me, pumpKnown);
                 if (i == 0) {
                     // the default is never dropped (as Forge's answer in enumerate)
                     if (dead) {
@@ -5380,11 +5381,12 @@ public final class LookaheadSearch {
             final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
             final boolean pguard = cfg.deadPump != AiFixes.Mode.OFF;
             int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0;
+            final Set<Integer> pumpKnown = pguard ? pumpKnownIds(live, liveMe) : null; // the seat's knowledge, from the live game
             if (pguard) {
                 deadPumpKeys.clear();
                 if (defSa != null) {
                     final SpellAbility d = locate(g, me, out.get(0));
-                    if (d != null && deadPump(d, me)) {
+                    if (d != null && deadPump(d, me, pumpKnown)) {
                         stats.deadPumpForge++;
                     }
                 }
@@ -5476,7 +5478,7 @@ public final class LookaheadSearch {
                     }
                     deadAltCostKeys.add(c.key());
                 }
-                if (pguard && !seen.contains(c.key()) && deadPump(sa, me)) {
+                if (pguard && !seen.contains(c.key()) && deadPump(sa, me, pumpKnown)) {
                     pumpHere++;
                     stats.deadPumpCands++;
                     if (cfg.deadPump == AiFixes.Mode.ON) {
@@ -6259,11 +6261,32 @@ public final class LookaheadSearch {
      * The cards are its Defined cards, every legal target (the target is chosen only in the play-out), or PumpAll's current
      * valid set.</li>
      * <li>Nothing can react to paying its cost or to playing it ({@link #pumpReacts}).</li>
+     * <li>Nothing the seat can see reads power (review S1 2, 3: {@link #pumpReadsPower}): no static, trigger or replacement
+     * working where its card is, no activated ability on the battlefield, no spell in a hand it sees, whose parameters (or the
+     * SVars they name) read power. An Ensnaring Bridge makes the changed power decide an attack; a Zilortha makes it decide
+     * lethal damage now.</li>
+     * <li>The active player can get no new attacker this turn (review S1 4: {@link #pumpAttackersMayAppear}): an animation
+     * (Mutavault), a Vehicle, a haste or untap source among its permanents, or in the seat's own hand when it is the active
+     * player, keeps every changed creature live while attackers are not declared.</li>
      * </ol>
-     * Power-reading effects later in the turn (fight, fling) are out of scope: the policy's own choice and Forge's answer
-     * are never dropped, so a seat that wants such a line still plays it. Reads only: it asks a copy of the ability.
+     * <b>What the seat may know</b> (review S1 1): every read above goes through the activating seat's information: public
+     * zones, its own hand, and cards revealed to it ({@code known}; {@link #pumpKnows} when null). The guard runs on an exact
+     * copy of the live game (the enumeration copy), before determinization, where a hidden card still holds its true
+     * identity: an opponent's unrevealed hand or library card, or a face-down card, is never read.
+     * <p>
+     * Out of scope: power readers the seat cannot see (an opponent's hidden hand), spells cast from a graveyard or exile, and
+     * the seat's later choices; an instant-speed pump stays available later in the turn, and the policy's own choice and
+     * Forge's answer are never dropped. Reads only: it asks a copy of the ability.
      */
     static boolean deadPump(SpellAbility sa, Player me) {
+        return deadPump(sa, me, null);
+    }
+
+    /**
+     * deadPump with the seat's knowledge given as card ids ({@link #pumpKnownIds}, read in the live game: the enumeration
+     * copy keeps card ids but not who may look at what); null reads it from {@code me}'s own game ({@link #pumpKnows}).
+     */
+    static boolean deadPump(SpellAbility sa, Player me, Set<Integer> known) {
         if (sa == null || me == null || sa.getHostCard() == null || sa.isManaAbility() || sa.isLandAbility()
                 || !(sa.isSpell() || sa.isActivatedAbility())
                 || sa.getApi() != forge.game.ability.ApiType.Pump && sa.getApi() != forge.game.ability.ApiType.PumpAll) {
@@ -6289,18 +6312,29 @@ public final class LookaheadSearch {
             if (ph.getPhase() == null || ph.getPlayerTurn() == null || extraPhasePending(ph)) {
                 return false;
             }
+            // the cards the seat may know of; nothing below reads any other card (review S1 1)
+            final List<Card> seen = new ArrayList<>();
+            for (Card c : me.getGame().getCardsInGame()) {
+                if (known == null ? pumpKnows(me, c) : known.contains(c.getId())) {
+                    seen.add(c);
+                }
+            }
+            if (pumpReadsPower(seen, me)) {
+                return false;
+            }
+            final boolean newAttackers = pumpAttackersMayAppear(seen, ph.getPlayerTurn(), me);
             for (SpellAbility s : chain) {
                 final List<Card> changed = pumpAffected(s, me);
                 if (changed == null) {
                     return false;
                 }
                 for (Card c : changed) {
-                    if (pumpLive(c, ph)) {
+                    if (pumpLive(c, ph, newAttackers)) {
                         return false;
                     }
                 }
             }
-            return !pumpReacts(x, chain, me, pay);
+            return !pumpReacts(x, chain, me, pay, seen);
         } catch (RuntimeException e) {
             return false;
         }
@@ -6431,9 +6465,11 @@ public final class LookaheadSearch {
      * <li>it is another player's untapped creature, blockers are not declared yet, and the active player has a creature
      * attacking or able to attack.</li>
      * </ul>
-     * A card off the battlefield, phased out or not a creature is not read here (live).
+     * A card off the battlefield, phased out or not a creature is not read here (live). {@code newAttackers}
+     * ({@link #pumpAttackersMayAppear}): the active player may get an attacker that cannot attack now, so before attackers
+     * are declared every changed creature is live, its own and the other side's.
      */
-    static boolean pumpLive(Card c, PhaseHandler ph) {
+    static boolean pumpLive(Card c, PhaseHandler ph, boolean newAttackers) {
         if (c == null || !c.isInPlay() || c.isPhasedOut() || !c.isCreature()) {
             return true;
         }
@@ -6443,11 +6479,15 @@ public final class LookaheadSearch {
                 && phase.isBefore(forge.game.phase.PhaseType.COMBAT_DAMAGE)) {
             return true;
         }
+        final boolean beforeAttackers = phase.isBefore(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS);
         if (ph.isPlayerTurn(c.getController())) {
-            return phase.isBefore(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS) && forge.game.combat.CombatUtil.canAttack(c);
+            return beforeAttackers && (newAttackers || forge.game.combat.CombatUtil.canAttack(c));
         }
         if (!phase.isBefore(forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS) || c.isTapped()) {
             return false;
+        }
+        if (beforeAttackers && newAttackers) {
+            return true;
         }
         for (Card a : ph.getPlayerTurn().getCreaturesInPlay()) {
             if (combat != null && combat.isAttacking(a)
@@ -6469,9 +6509,10 @@ public final class LookaheadSearch {
      * <li>a zone-change replacement (Moved, which covers discarding) that works where its card is, when the payment moves
      * cards.</li>
      * </ul>
-     * {@link #pumpSees} leaves out what this payment cannot reach.
+     * {@link #pumpSees} leaves out what this payment cannot reach. Only the cards in {@code seen} are read (the seat's
+     * knowledge, review S1 1): an opponent's hidden discard trigger is not, so it cannot change the decision.
      */
-    static boolean pumpReacts(SpellAbility sa, List<SpellAbility> chain, Player me, PumpCost pay) {
+    static boolean pumpReacts(SpellAbility sa, List<SpellAbility> chain, Player me, PumpCost pay, List<Card> seen) {
         final Game game = me.getGame();
         if (!game.getStack().isEmpty()) {
             return true;
@@ -6485,7 +6526,7 @@ public final class LookaheadSearch {
         }
         final Set<TriggerType> modes = pumpModes(sa, chain, pay);
         final boolean moves = !pay.from.isEmpty();
-        for (Card c : game.getCardsInGame()) {
+        for (Card c : seen) {
             final forge.game.zone.Zone z = game.getZoneOf(c);
             final ZoneType zt = z == null ? null : z.getZoneType();
             for (Trigger t : c.getTriggers()) {
@@ -6637,6 +6678,205 @@ public final class LookaheadSearch {
             }
         }
         return false;
+    }
+
+    /**
+     * deadPump (review S1 1): {@code c} is a card {@code me} may know of in its own game: a face-up card in a public zone,
+     * its own hand, or a card it may look at ({@code CardView.canBeShownTo}); a face-down card only if its face may be shown
+     * to it. Used where the predicate runs on the game it was given (tests); the live sites pass {@link #pumpKnownIds}.
+     */
+    static boolean pumpKnows(Player me, Card c) {
+        final forge.game.player.PlayerView v = me.getView();
+        return c.getView().canBeShownTo(v) && (!c.isFaceDown() || c.getView().canFaceDownBeShownTo(v));
+    }
+
+    /**
+     * deadPump (review S1 1): the ids of the cards the seat may know of, read in the live game ({@link #pumpKnows}, plus an
+     * opponent's hand card it saw and remembers, as the belief does). The enumeration copy keeps card ids but not the
+     * look permissions, so the sites read this before copying.
+     */
+    private Set<Integer> pumpKnownIds(Game live, Player liveMe) {
+        final Set<Integer> ids = new HashSet<>();
+        for (Card c : live.getCardsInGame()) {
+            if (pumpKnows(liveMe, c) || rememberedHand(live, liveMe, c)) {
+                ids.add(c.getId());
+            }
+        }
+        return ids;
+    }
+
+    /**
+     * deadPump (review S1 2, 3): some card the seat sees reads power, so a power change may matter outside combat damage
+     * (an attack restriction by power, lethal damage by power, an end-step trigger counting power, a fling on the
+     * battlefield). Read: each static ability, trigger and replacement effect that works where its card is, each non-mana
+     * activated ability on the battlefield or in the command zone, each spell in a hand the seat sees, and each keyword's
+     * text. Any of their parameters, or the SVars those name (an Execute, a SubAbility, an X), counts.
+     */
+    static boolean pumpReadsPower(List<Card> seen, Player me) {
+        final Game game = me.getGame();
+        for (Card c : seen) {
+            final forge.game.zone.Zone z = game.getZoneOf(c);
+            final ZoneType zt = z == null ? null : z.getZoneType();
+            for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {
+                if (st.zonesCheck() && readsPower(st)) {
+                    return true;
+                }
+            }
+            for (Trigger t : c.getTriggers()) {
+                if (t.zonesCheck(z) && readsPower(t)) {
+                    return true;
+                }
+            }
+            for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                if (re.zonesCheck(z) && readsPower(re)) {
+                    return true;
+                }
+            }
+            if (zt == ZoneType.Battlefield || zt == ZoneType.Command || zt == ZoneType.Hand) {
+                for (SpellAbility sa : c.getSpellAbilities()) {
+                    if (!sa.isManaAbility() && readsPower(sa)) {
+                        return true;
+                    }
+                }
+            }
+            for (forge.game.keyword.KeywordInterface k : c.getKeywords()) {
+                final String o = k.getOriginal();
+                if (o != null && o.toLowerCase(java.util.Locale.ROOT).contains("power")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** deadPump: parameters that set or change power and do not read it; their values are still read. */
+    static final Set<String> POWER_SETTERS = new HashSet<>(Arrays.asList("AddPower", "SetPower", "Power", "TokenPower",
+            "FaceDownPower", "BasePower"));
+
+    /** deadPump: a parameter that only describes or hints (its text is never read). */
+    static boolean descriptiveParam(String k) {
+        return k.endsWith("Description") || k.endsWith("Desc") || k.startsWith("AI") || "TgtPrompt".equals(k);
+    }
+
+    /**
+     * deadPump: {@code t} reads power: a parameter key names power other than a setter (LethalDamageByPower), or a value or a
+     * named SVar does (Creature.powerGTX, Count$CardPower, greatestPower, ...). Unreadably deep SVar chains count.
+     */
+    static boolean readsPower(forge.game.CardTraitBase t) {
+        return paramsMatch(t.getMapParams(), t, new HashSet<>(), LookaheadSearch::powerKey, LookaheadSearch::powerText);
+    }
+
+    static boolean powerKey(String k, String v) {
+        return !POWER_SETTERS.contains(k) && k.toLowerCase(java.util.Locale.ROOT).contains("power");
+    }
+
+    static boolean powerText(String v) {
+        return v.toLowerCase(java.util.Locale.ROOT).contains("power");
+    }
+
+    /**
+     * deadPump: a parameter map (or an SVar's pieces) matches {@code keyTest} on a key and its value, or {@code textTest} on a
+     * value; each SVar a value names (a word that is an SVar of {@code t} or its card) is read the same way, once. More than
+     * 64 SVars counts as a match.
+     */
+    static boolean paramsMatch(Map<String, String> params, forge.game.CardTraitBase t, Set<String> svars,
+            java.util.function.BiPredicate<String, String> keyTest, java.util.function.Predicate<String> textTest) {
+        for (Map.Entry<String, String> e : params.entrySet()) {
+            final String k = e.getKey();
+            final String v = e.getValue() == null ? "" : e.getValue();
+            if (descriptiveParam(k)) {
+                continue;
+            }
+            if (keyTest.test(k, v) || textMatch(v, t, svars, keyTest, textTest)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean textMatch(String v, forge.game.CardTraitBase t, Set<String> svars,
+            java.util.function.BiPredicate<String, String> keyTest, java.util.function.Predicate<String> textTest) {
+        if (v.isEmpty()) {
+            return false;
+        }
+        if (textTest.test(v)) {
+            return true;
+        }
+        for (String w : v.split("[^A-Za-z0-9_]+")) {
+            if (w.isEmpty() || svars.contains(w) || !t.hasSVar(w)) {
+                continue;
+            }
+            if (svars.size() >= 64) {
+                return true;
+            }
+            svars.add(w);
+            final Map<String, String> m = new java.util.LinkedHashMap<>();
+            for (String piece : t.getSVar(w).split("\\|")) {
+                final int d = piece.indexOf('$');
+                if (d < 0) {
+                    if (textMatch(piece.trim(), t, svars, keyTest, textTest)) {
+                        return true;
+                    }
+                } else {
+                    m.put(piece.substring(0, d).trim(), piece.substring(d + 1).trim());
+                }
+            }
+            if (paramsMatch(m, t, svars, keyTest, textTest)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** deadPump: the APIs that can make an attacker this turn (a creature from a permanent, or a tapped creature untapped). */
+    static final Set<String> ATTACKER_APIS = new HashSet<>(Arrays.asList("Animate", "AnimateAll", "Untap", "UntapAll"));
+
+    /**
+     * deadPump (review S1 4): the active player may get an attacker this turn that cannot attack now. Among its
+     * permanents, and in the seat's own hand when the seat is the active player (an opponent's hidden hand is not read): a
+     * Vehicle or Spacecraft, a card with Crew or Station, a creature card with haste in that hand, or any ability (spell,
+     * activated, static, trigger, replacement, with the SVars it names) that animates (Animate, AnimateAll, an added
+     * Creature type), untaps (Untap, UntapAll) or grants haste.
+     */
+    static boolean pumpAttackersMayAppear(List<Card> seen, Player active, Player me) {
+        if (active == null) {
+            return true;
+        }
+        final Game game = me.getGame();
+        for (Card c : seen) {
+            final forge.game.zone.Zone z = game.getZoneOf(c);
+            final ZoneType zt = z == null ? null : z.getZoneType();
+            final boolean field = zt == ZoneType.Battlefield && active.equals(c.getController());
+            final boolean hand = zt == ZoneType.Hand && active.equals(me) && me.equals(c.getOwner());
+            if (!field && !hand) {
+                continue;
+            }
+            if (c.getType().hasSubtype("Vehicle") || c.getType().hasSubtype("Spacecraft")
+                    || c.hasKeyword(forge.game.keyword.Keyword.CREW) || c.hasKeyword(forge.game.keyword.Keyword.STATION)
+                    || hand && c.isCreature() && c.hasKeyword(forge.game.keyword.Keyword.HASTE)) {
+                return true;
+            }
+            final List<forge.game.CardTraitBase> traits = new ArrayList<>();
+            traits.addAll(c.getSpellAbilities());
+            traits.addAll(c.getStaticAbilities());
+            traits.addAll(c.getTriggers());
+            traits.addAll(c.getReplacementEffects());
+            for (forge.game.CardTraitBase t : traits) {
+                if (paramsMatch(t.getMapParams(), t, new HashSet<>(), LookaheadSearch::attackerKey, LookaheadSearch::hasteText)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static boolean attackerKey(String k, String v) {
+        return ("AB".equals(k) || "SP".equals(k) || "DB".equals(k)) && ATTACKER_APIS.contains(v.trim())
+                || ("Types".equals(k) || "AddType".equals(k)) && v.contains("Creature");
+    }
+
+    static boolean hasteText(String v) {
+        return v.contains("Haste");
     }
 
     /**
