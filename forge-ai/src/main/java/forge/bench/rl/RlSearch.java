@@ -3550,6 +3550,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (r.lethalAside != null) {
                     row.addProperty("lethal_aside", r.lethalAside);
                 }
+                if (r.witnessed != null) {
+                    // round 6: per candidate, the engine witnessed it lethal, by which line; the witness's time
+                    final JsonArray wa = new JsonArray();
+                    final JsonArray wl = new JsonArray();
+                    for (int i = 0; i < r.witnessed.length; i++) {
+                        wa.add(r.witnessed[i]);
+                        wl.add(r.witnessLine != null && i < r.witnessLine.length ? r.witnessLine[i] : null);
+                    }
+                    row.add("lethal_witnessed", wa);
+                    row.add("lethal_line", wl);
+                    row.addProperty("lethal_witness_ms", Math.round(r.witnessMs * 10) / 10.0);
+                }
                 row.addProperty("lethal_rescored", r.lethalRescored);
             }
             row.addProperty("prep_ms", Math.round(prepMs * 10) / 10.0);

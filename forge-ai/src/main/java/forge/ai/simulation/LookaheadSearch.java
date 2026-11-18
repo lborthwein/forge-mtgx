@@ -766,13 +766,16 @@ public final class LookaheadSearch {
         public String deadPumpMode;
         public long deadPumpCands, deadPumpDecisions, deadPumpDropped, deadPumpShadowBest, deadPumpForge;
         /**
-         * lethalBlock guard (null = off): block decisions checked; stood aside (the bound was not trusted); with a lethal
-         * candidate; re-scored (ON); with every candidate lethal (unchanged); whose played declaration was lethal; the
-         * lethal candidates; the default among them; failed checks (stood aside).
+         * lethalBlock guard (null = off): block decisions checked; stood aside (the bound was not trusted); with a candidate
+         * the bound flags; re-scored (ON); with every searched candidate witnessed (unchanged); whose played declaration
+         * was witnessed lethal; the candidates the bound flagged; the default among the witnessed; failed checks (stood
+         * aside). Round 6: the candidates the engine witnessed lethal, the witness lines played, their time, and the
+         * decisions whose witness ran out of budget (the rest not witnessed).
          */
         public String lethalBlockMode;
         public long lethalBlockChecked, lethalBlockAside, lethalBlockFlagged, lethalBlockRescored, lethalBlockAllLethal,
                 lethalBlockPlayedLethal, lethalBlockCands, lethalBlockDefault, lethalBlockErrors;
+        public long lethalBlockWitnessed, lethalBlockWitnessRuns, lethalBlockWitnessNanos, lethalBlockWitnessCapped;
         public final Map<String, Long> lethalBlockWhy = new TreeMap<>();
         /** dudCast guard (null = off): answers checked, duds found, vetoed (re-asked), passed, unknown; time; dud cards. */
         public String dudCastMode;
@@ -1047,6 +1050,10 @@ public final class LookaheadSearch {
                 d.addProperty("cands", lethalBlockCands);
                 d.addProperty("default", lethalBlockDefault);
                 d.addProperty("errors", lethalBlockErrors);
+                d.addProperty("witnessed", lethalBlockWitnessed);
+                d.addProperty("witnessRuns", lethalBlockWitnessRuns);
+                d.addProperty("witnessMs", lethalBlockWitnessNanos / 1_000_000L);
+                d.addProperty("witnessCapped", lethalBlockWitnessCapped);
                 final JsonObject why = new JsonObject();
                 lethalBlockWhy.forEach(why::addProperty);
                 d.add("why", why);
@@ -2699,8 +2706,15 @@ public final class LookaheadSearch {
         public boolean[] lethal;
         /** lethalBlock: why the guard stood aside (null = it checked, or it is off). */
         public String lethalAside;
-        /** lethalBlock ON: the lethal candidates were re-scored as lost play-outs. */
+        /** lethalBlock ON: the witnessed candidates were re-scored as lost play-outs. */
         public boolean lethalRescored;
+        /**
+         * lethalBlock round 6 (with {@link #lethal}, null otherwise): per candidate, the engine witnessed it lethal, and
+         * the witnessing line (null = none); the witness's time in ms.
+         */
+        public boolean[] witnessed;
+        public String[] witnessLine;
+        public double witnessMs;
     }
 
     /**
@@ -8602,8 +8616,8 @@ public final class LookaheadSearch {
             res.forced = res.played.equals(want);
             res.forcedMiss = !res.forced;
         }
-        if (res.lethal != null && res.lethal.length == n && res.lethal["departed".equals(outcome) ? best : 0]) {
-            stats.lethalBlockPlayedLethal++; // lethalBlock: the declaration played is worst-case lethal
+        if (res.witnessed != null && res.witnessed.length == n && res.witnessed["departed".equals(outcome) ? best : 0]) {
+            stats.lethalBlockPlayedLethal++; // lethalBlock: the declaration played was witnessed lethal
         }
         res.worlds = k;
         res.ev = ev;
@@ -8641,6 +8655,9 @@ public final class LookaheadSearch {
                 // lethalBlock (guard on or shadow only): checked (re-scored or not) or why it stood aside
                 x.addProperty("lethalBlock", res.lethalAside != null ? "aside: " + res.lethalAside
                         : res.lethalRescored ? "rescored" : "checked");
+                if (res.witnessed != null) {
+                    x.addProperty("lethalWitnessMs", res.witnessMs);
+                }
             }
             final JsonArray ca = new JsonArray();
             for (int c = 0; c < n; c++) {
@@ -8649,7 +8666,12 @@ public final class LookaheadSearch {
                 co.addProperty("ok", ok[c]);
                 co.addProperty("ev", ok[c] ? ev[c] : null);
                 if (res.lethal != null && res.lethal.length == n && res.lethal[c]) {
-                    co.addProperty("lethalBlock", true);
+                    co.addProperty("lethalBlock", true); // the bound flags it (round 6: a prefilter)
+                    final boolean w = res.witnessed != null && c < res.witnessed.length && res.witnessed[c];
+                    co.addProperty("lethalWitnessed", w);
+                    if (w && res.witnessLine != null && c < res.witnessLine.length) {
+                        co.addProperty("lethalLine", res.witnessLine[c]);
+                    }
                 }
                 final JsonArray vs = new JsonArray();
                 for (int w = 0; w < k; w++) {
@@ -8667,17 +8689,19 @@ public final class LookaheadSearch {
     // ------------------------------------------------------------------ lethalBlock guard (block-vs-open-pump-1118)
 
     /**
-     * lethalBlock guard at the block search: flags every candidate whose worst-case combat damage is lethal
-     * ({@link #lethalBlocks}) and, ON, when at least one searched candidate is not lethal, gives each lethal one the value
-     * of a lost play-out ({@code loss}) in every world, before the argmax. With every candidate lethal, or none, the values
-     * are unchanged; SHADOW only counts and flags; a check that fails or is not trusted stands aside (nothing changes).
+     * lethalBlock guard at the block search. Round 6: the bound ({@link #lethalBlocks}) is a prefilter only; a candidate
+     * counts as lethal when the engine witnesses it ({@link #lethalWitness}: a single-ability line played in a sandboxed
+     * copy kills the seat through combat damage). ON, when at least one searched candidate is not witnessed, each
+     * witnessed one gets the value of a lost play-out ({@code loss}) in every world, before the argmax. With every
+     * searched candidate witnessed, or none, the values are unchanged; SHADOW only counts and flags; a check that fails or
+     * is not trusted stands aside (nothing changes).
      */
     private void lethalBlockGuard(Game live, Player me, List<Cand> cands, double[][] values, boolean[] ok, int k, double loss,
             GivenResult res) {
         stats.lethalBlockChecked++;
         LethalCheck lc;
         try {
-            lc = lethalBlocks(live, me, cands);
+            lc = lethalBlocks(live, me, cands, ok);
         } catch (RuntimeException | StackOverflowError e) {
             stats.lethalBlockErrors++;
             lc = LethalCheck.aside("error: " + e);
@@ -8693,9 +8717,11 @@ public final class LookaheadSearch {
 
     /**
      * lethalBlock: apply a check to the candidates' values (the guard's decision, apart from the check itself; tests drive
-     * it directly). Stood aside: nothing changes, {@code res.lethal} is empty. Otherwise {@code res.lethal} holds the flags;
-     * ON, with some searched candidate not lethal, each searched lethal candidate's values become {@code loss} in all
-     * {@code k} worlds. No candidate is removed (the default included: it keeps its place and its {@code ok}).
+     * it directly). Stood aside: nothing changes, {@code res.lethal} is empty. Otherwise {@code res.lethal} holds the
+     * bound's flags and {@code res.witnessed} the engine's witnesses; ON, with some searched candidate not witnessed, each
+     * searched witnessed candidate's values become {@code loss} in all {@code k} worlds. Only a witnessed candidate is ever
+     * re-scored (a check without witnesses re-scores nothing). No candidate is removed (the default included: it keeps
+     * its place and its {@code ok}).
      */
     void lethalBlockApply(LethalCheck lc, double[][] values, boolean[] ok, int k, double loss, GivenResult res) {
         if (lc.aside != null) {
@@ -8707,11 +8733,28 @@ public final class LookaheadSearch {
         }
         final int n = lc.lethal.length;
         res.lethal = lc.lethal.clone();
-        int lethalN = 0;
+        final boolean[] wit = new boolean[n];
+        if (lc.witnessed != null) {
+            for (int c = 0; c < n && c < lc.witnessed.length; c++) {
+                wit[c] = lc.witnessed[c] && lc.lethal[c];
+            }
+        }
+        res.witnessed = wit;
+        res.witnessLine = lc.witnessLine == null ? new String[n] : Arrays.copyOf(lc.witnessLine, n);
+        res.witnessMs = lc.witnessNanos / 1e6;
+        stats.lethalBlockWitnessRuns += lc.witnessRuns;
+        stats.lethalBlockWitnessNanos += lc.witnessNanos;
+        if (lc.witnessCapped) {
+            stats.lethalBlockWitnessCapped++;
+        }
+        int lethalN = 0, witN = 0;
         boolean safeOk = false;
         for (int c = 0; c < n; c++) {
             if (lc.lethal[c]) {
                 lethalN++;
+            }
+            if (wit[c]) {
+                witN++;
             } else if (ok[c]) {
                 safeOk = true;
             }
@@ -8721,7 +8764,11 @@ public final class LookaheadSearch {
         }
         stats.lethalBlockFlagged++;
         stats.lethalBlockCands += lethalN;
-        if (lc.lethal[0]) {
+        stats.lethalBlockWitnessed += witN;
+        if (witN == 0) {
+            return;
+        }
+        if (wit[0]) {
             stats.lethalBlockDefault++;
         }
         if (!safeOk) {
@@ -8732,7 +8779,7 @@ public final class LookaheadSearch {
             return;
         }
         for (int c = 0; c < n; c++) {
-            if (lc.lethal[c] && ok[c]) {
+            if (wit[c] && ok[c]) {
                 Arrays.fill(values[c], 0, k, loss);
             }
         }
@@ -8744,12 +8791,24 @@ public final class LookaheadSearch {
     static final class LethalCheck {
         /** Why the guard stands aside (null = the bound is trusted and {@link #lethal} holds). */
         String aside;
-        /** Per candidate: its worst case is lethal. */
+        /** Per candidate: the bound (the prefilter) flags its worst case lethal. */
         boolean[] lethal;
         /** Per candidate: the worst-case life the player loses, and the poison counters it ends with (diagnostics, tests). */
         int[] life, poison;
         /** The mana the attackers' controller has, and the abilities counted for its boost (diagnostics, tests). */
         int mana, abilities;
+        /** Round 6: the abilities the bound counted, as lines the witness can play in its copies. */
+        final List<LbLine> lines = new ArrayList<>();
+        /**
+         * Round 6: per candidate, the engine witnessed it lethal ({@link #lethalWitness}), and the line that did (null =
+         * not witnessed); null arrays = no witness ran (nothing flagged). The witness's time, lines played, and whether it
+         * ran out of budget (the candidates left are not witnessed).
+         */
+        boolean[] witnessed;
+        String[] witnessLine;
+        long witnessNanos;
+        int witnessRuns;
+        boolean witnessCapped;
 
         static LethalCheck aside(String why) {
             final LethalCheck c = new LethalCheck();
@@ -8759,11 +8818,12 @@ public final class LookaheadSearch {
     }
 
     /**
-     * lethalBlock: the check made in a copy of the live game (the live game is only read). The seat's knowledge is read
-     * in the live game first ({@link #pumpKnownIds}: the copy keeps card ids but not who may look at what); the copy's
-     * random, id and AI-cache scopes are its own, as for {@link #forgeBlocks}.
+     * lethalBlock: the check made in copies of the live game (the live game is only read). The seat's knowledge is read
+     * in the live game first ({@link #pumpKnownIds}: the copy keeps card ids but not who may look at what); the copies'
+     * random, id and AI-cache scopes are their own, as for {@link #forgeBlocks}. {@code ok}: the searched candidates (only
+     * those are witnessed; null = all).
      */
-    LethalCheck lethalBlocks(Game live, Player liveMe, List<Cand> cands) {
+    LethalCheck lethalBlocks(Game live, Player liveMe, List<Cand> cands, boolean[] ok) {
         final List<Map<Integer, List<Integer>>> plans = new ArrayList<>(cands.size());
         for (Cand c : cands) {
             if (c.block == null) {
@@ -8771,12 +8831,18 @@ public final class LookaheadSearch {
             }
             plans.add(c.block.blocks);
         }
-        return lethalBlocksOf(live, liveMe, plans);
+        return lethalBlocksOf(live, liveMe, plans, ok);
     }
 
     /** lethalBlock: {@link #lethalBlocks} for declarations given as blocker card id -> attacker card ids (tests). */
     LethalCheck lethalBlocksOf(Game live, Player liveMe, List<Map<Integer, List<Integer>>> plans) {
+        return lethalBlocksOf(live, liveMe, plans, null);
+    }
+
+    /** lethalBlock: the bound in a copy, then the engine's witness for each searched candidate it flags. */
+    LethalCheck lethalBlocksOf(Game live, Player liveMe, List<Map<Integer, List<Integer>>> plans, boolean[] ok) {
         final Set<Integer> known = pumpKnownIds(live, liveMe);
+        final LethalCheck lc;
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
@@ -8791,12 +8857,436 @@ public final class LookaheadSearch {
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
             }
-            return lethalBlocks(g, me, plans, known);
+            lc = lethalBlocks(g, me, plans, known);
         } finally {
             AiCache.installScope(prevCache);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
         }
+        if (lc.aside == null && lc.lethal != null) {
+            boolean any = false;
+            for (int p = 0; p < lc.lethal.length; p++) {
+                any |= lc.lethal[p] && (ok == null || p < ok.length && ok[p]);
+            }
+            if (any) {
+                lethalWitness(live, liveMe, plans, known, lc, ok);
+            } else {
+                lc.witnessed = new boolean[lc.lethal.length];
+                lc.witnessLine = new String[lc.lethal.length];
+            }
+        }
+        return lc;
+    }
+
+    /**
+     * lethalBlock (tests): the witness alone, for {@code lines} given by the test (as if the bound had counted them), on
+     * every candidate (as if the bound had flagged each). The live game is only read.
+     */
+    LethalCheck lethalWitnessOf(Game live, Player liveMe, List<Map<Integer, List<Integer>>> plans, List<LbLine> lines) {
+        final LethalCheck lc = new LethalCheck();
+        lc.lethal = new boolean[plans.size()];
+        Arrays.fill(lc.lethal, true);
+        lc.lines.addAll(lines);
+        lethalWitness(live, liveMe, plans, pumpKnownIds(live, liveMe), lc, null);
+        return lc;
+    }
+
+    // ------------------------------------------------------------------ lethalBlock round 6: the engine's witness
+
+    /** lethalBlock witness: the most lines played per decision, its wall time (ms), and an ability's most repeats. */
+    static final int WITNESS_LINES = 32;
+    static final long WITNESS_MS = 300;
+    static final int WITNESS_REPEATS = 30;
+    /** This search's witness budget (the defaults above; tests that try every ability may raise it, never the guard). */
+    int witnessLineCap = WITNESS_LINES;
+    long witnessWallMs = WITNESS_MS;
+
+    /**
+     * lethalBlock: one ability the bound counted, as the witness plays it in a copy: its host (card id, which the copies
+     * keep), its place among {@code getAllPossibleAbilities} of the attackers' controller and its description (checked
+     * when it is found again), whether it has X, how often it may repeat, and the attackers it may target (one line per
+     * target; none = it does not target).
+     */
+    static final class LbLine {
+        int hostId, ordinal, cap = 1;
+        String host, desc;
+        boolean x, targeted;
+        final List<Integer> targets = new ArrayList<>();
+
+        String label(int target, Game g, int xv, int times) {
+            final Card t = target < 0 || g == null ? null : g.findById(target);
+            return host + ": " + desc + (x ? " [X=" + xv + "]" : "") + (times > 1 ? " x" + times : "")
+                    + (t != null ? " -> " + t.getName() + " (" + target + ")" : "");
+        }
+    }
+
+    /** lethalBlock: {@code sa} of {@code host} (at {@code ordinal} of its possible abilities) as a witness line. */
+    static LbLine lbLine(Card host, int ordinal, SpellAbility sa, LbAbility ab, List<Card> atk) {
+        final LbLine l = new LbLine();
+        l.hostId = host.getId();
+        l.ordinal = ordinal;
+        l.host = host.getName();
+        l.desc = String.valueOf(sa.getDescription());
+        l.x = ab.xPer > 0;
+        l.cap = Math.max(1, Math.min(ab.cap, WITNESS_REPEATS));
+        l.targeted = singleTargetSlot(sa) != null;
+        if (l.targeted) {
+            for (int i = 0; i < atk.size(); i++) {
+                boolean hit = ab.ds[i] || ab.trample[i] || ab.deathtouch[i];
+                for (LbPart part : ab.parts) {
+                    hit |= part.hit != null && i < part.hit.length && part.hit[i];
+                }
+                if (hit) {
+                    l.targets.add(atk.get(i).getId());
+                }
+            }
+        }
+        return l;
+    }
+
+    /**
+     * lethalBlock (tests): every non-mana ability of {@code host} that {@code opp} may play now, as lines that may target
+     * {@code targets} (none: untargeted), each repeated up to {@code cap} times while payable (X: once, the most the engine
+     * can pay).
+     */
+    static List<LbLine> lbLinesFor(Card host, Player opp, List<Card> targets, int cap) {
+        final List<LbLine> out = new ArrayList<>();
+        final List<SpellAbility> all = host.getAllPossibleAbilities(opp, true);
+        for (int j = 0; j < all.size(); j++) {
+            final SpellAbility sa = all.get(j);
+            if (sa.isManaAbility() || sa.isLandAbility()) {
+                continue;
+            }
+            final LbLine l = new LbLine();
+            l.hostId = host.getId();
+            l.ordinal = j;
+            l.host = host.getName();
+            l.desc = String.valueOf(sa.getDescription());
+            l.cap = Math.max(1, cap);
+            l.x = sa.getPayCosts() != null && sa.getPayCosts().hasManaCost() && sa.getPayCosts().getTotalMana().countX() > 0;
+            l.targeted = singleTargetSlot(sa) != null;
+            if (l.targeted) {
+                for (Card t : targets) {
+                    l.targets.add(t.getId());
+                }
+            }
+            out.add(l);
+        }
+        return out;
+    }
+
+    /** lethalBlock (tests): the first of {@link #lbLinesFor} for {@code host}, played once. */
+    static LbLine lbLineFor(Card host, Player opp, List<Card> targets) {
+        final List<LbLine> all = lbLinesFor(host, opp, targets, 1);
+        if (all.isEmpty()) {
+            throw new IllegalArgumentException("no ability on " + host);
+        }
+        return all.get(0);
+    }
+
+    /**
+     * lethalBlock round 6: for each candidate the bound flags (and {@code ok} searched), search sandboxed copies of the
+     * live game for a line that kills the seat: (a) nothing; (b) each ability the bound counted ({@link LethalCheck#lines})
+     * alone, once per attacker it may target (or once), X at the most the engine can pay (one less again if the payment
+     * fails), a repeatable one repeated while payable up to the bound's cap. Single abilities only: a combo the bound
+     * needed is not witnessed (an undercount, never a false lethal). At most {@link #WITNESS_LINES} lines and about
+     * {@link #WITNESS_MS} ms per decision; a candidate not witnessed in budget is not lethal. Each line runs in its own
+     * copy ({@link #witnessRun}).
+     */
+    void lethalWitness(Game live, Player liveMe, List<Map<Integer, List<Integer>>> plans, Set<Integer> known, LethalCheck lc,
+            boolean[] ok) {
+        final int n = plans.size();
+        lc.witnessed = new boolean[n];
+        lc.witnessLine = new String[n];
+        final long t0 = System.nanoTime();
+        final long wall = witnessWallMs * 1_000_000L;
+        int runs = 0;
+        for (int p = 0; p < n && !lc.witnessCapped; p++) {
+            if (!lc.lethal[p] || ok != null && (p >= ok.length || !ok[p])) {
+                continue;
+            }
+            final List<Object[]> lines = new ArrayList<>(); // {LbLine or null, target id}
+            lines.add(new Object[] {null, -1});
+            for (LbLine l : lc.lines) {
+                if (l.targeted) {
+                    for (int t : l.targets) {
+                        lines.add(new Object[] {l, t});
+                    }
+                } else {
+                    lines.add(new Object[] {l, -1});
+                }
+            }
+            for (Object[] line : lines) {
+                if (lc.witnessed[p]) {
+                    break;
+                }
+                int xCap = Integer.MAX_VALUE;
+                while (true) {
+                    if (runs >= witnessLineCap || System.nanoTime() - t0 > wall) {
+                        lc.witnessCapped = true;
+                        break;
+                    }
+                    final WitnessRun r = witnessRun(live, liveMe, plans.get(p), known, (LbLine) line[0], (Integer) line[1], xCap,
+                            mix(cfg.seed, 0x5717e55L + 1009L * decisionIndex + runs));
+                    runs++;
+                    if (r.witnessed) {
+                        lc.witnessed[p] = true;
+                        lc.witnessLine[p] = r.label;
+                        break;
+                    }
+                    if (!r.payFailed || r.x <= 0) {
+                        break;
+                    }
+                    xCap = r.x - 1; // the engine could not pay this X after all: one less, in a fresh copy
+                }
+                if (lc.witnessCapped) {
+                    break;
+                }
+            }
+        }
+        lc.witnessRuns = runs;
+        lc.witnessNanos = System.nanoTime() - t0;
+    }
+
+    /** lethalBlock: one witness line's outcome. */
+    static final class WitnessRun {
+        boolean witnessed, payFailed;
+        int x = -1, played;
+        String label, error;
+    }
+
+    /**
+     * lethalBlock: the neutral card the witness puts in every library ("hidden", an artifact with no abilities, as
+     * GameCopier's hidden-information card); built on first use (nothing is built while the guard is off).
+     */
+    private static final class LbPlaceholder {
+        static final forge.item.PaperCard CARD = new forge.item.PaperCard(forge.card.CardRules.fromScript(
+                java.util.Arrays.asList("Name:hidden", "Types:Artifact", "Oracle:")), "", forge.card.CardRarity.Common);
+    }
+
+    /**
+     * lethalBlock: the copy {@code g} forgets what the seat cannot know before anything is played in it: the attackers'
+     * controller keeps only the hand cards the seat knows ({@code known}), and both libraries become as many neutral
+     * placeholders ({@link LbPlaceholder}), so nothing the line executes can read an unseen card (a library's top
+     * included). The public counts stay.
+     */
+    static void lbHide(Game g, Player opp, Set<Integer> known) {
+        final List<Card> keep = new ArrayList<>();
+        for (Card c : opp.getCardsIn(ZoneType.Hand)) {
+            if (known.contains(c.getId())) {
+                keep.add(c);
+            }
+        }
+        if (keep.size() != opp.getCardsIn(ZoneType.Hand).size()) {
+            opp.getZone(ZoneType.Hand).setCards(keep);
+        }
+        for (Player p : g.getPlayers()) {
+            final int size = p.getCardsIn(ZoneType.Library).size();
+            final List<Card> blank = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                blank.add(forge.game.card.CardFactory.getCard(LbPlaceholder.CARD, p, g.nextCardId(), g));
+            }
+            p.getZone(ZoneType.Library).setCards(blank);
+        }
+    }
+
+    /**
+     * lethalBlock: one witness line in its own copy of {@code live} (own id scope, AI-cache scope and random stream, all
+     * restored; the live game is only read, under its lock). The copy forgets what the seat cannot know ({@link #lbHide}),
+     * is rewound to the end of declare attackers (as a block play-out), and advances into declare blockers, where the
+     * seat declares {@code plan}. Assumption: the seat then only passes (it does not respond). The attackers' controller
+     * plays {@code line} with its first priority there (Forge AI pays the costs and makes the choices on resolution),
+     * then passes; combat damage is Forge AI's assignment (any assignment it makes is achievable). The engine runs through
+     * combat damage. Witnessed: the seat has lost, by life or poison, and the attackers' controller has not.
+     */
+    WitnessRun witnessRun(Game live, Player liveMe, Map<Integer, List<Integer>> plan, Set<Integer> known, LbLine line,
+            int target, int xCap, long seed) {
+        final WitnessRun r = new WitnessRun();
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new Random(seed));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                final GameCopier copier = copierOf(live);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            final forge.game.combat.Combat c = ph.getCombat();
+            if (c == null || me == null) {
+                r.error = "no combat in the copy";
+                return r;
+            }
+            final Player opp = c.getAttackingPlayer();
+            lbHide(g, opp, known);
+            final BlockPlan bp = new BlockPlan("witness");
+            bp.blocks.putAll(plan);
+            BlockPlan.clear(c, me);
+            final Player active = ph.getPlayerTurn();
+            final Player other = g.getNextPlayerAfter(active);
+            ph.devModeSet(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS, active, false, ph.getTurn());
+            setPriorityState(ph, other, active, false);
+            final WitnessSeat seat = new WitnessSeat(g, me, me.getController().getLobbyPlayer(), bp);
+            me.dangerouslySetController(seat);
+            final WitnessAi wa = new WitnessAi(g, opp, opp.getController().getLobbyPlayer(), line, target, xCap);
+            opp.dangerouslySetController(wa);
+            for (Player o : g.getPlayers()) {
+                if (o != me && o != opp) {
+                    o.dangerouslySetController(new ForcedWinProbe.PassAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
+            final int turn = ph.getTurn();
+            for (int steps = 0; steps < 400 && !g.isGameOver(); steps++) {
+                if (ph.getTurn() != turn || ph.getPhase() == null
+                        || ph.getPhase().ordinal() > forge.game.phase.PhaseType.COMBAT_DAMAGE.ordinal()) {
+                    break;
+                }
+                ph.mainLoopStep();
+            }
+            if (!g.isGameOver()) {
+                g.getAction().checkStateEffects(true);
+            }
+            r.played = wa.played;
+            r.x = wa.x;
+            r.payFailed = wa.failed;
+            final forge.game.player.PlayerOutcome mo = me.getOutcome();
+            final boolean byDamage = mo != null && (mo.lossState == forge.game.player.GameLossReason.LifeReachedZero
+                    || mo.lossState == forge.game.player.GameLossReason.Poisoned);
+            r.witnessed = seat.applied && me.hasLost() && byDamage && !opp.hasLost() && (line == null || wa.played > 0);
+            r.label = line == null ? "nothing" : line.label(target, g, wa.x, wa.played);
+        } catch (RuntimeException | StackOverflowError e) {
+            r.error = String.valueOf(e);
+            r.witnessed = false;
+            final StackTraceElement[] at = e.getStackTrace();
+            System.err.println("[lookahead] lethalBlock witness line failed, not witnessed: " + e + (at.length > 0 ? " at " + at[0] : ""));
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+        return r;
+    }
+
+    /** lethalBlock witness: the seat in a copy declares the candidate's blocks, then only passes. */
+    static final class WitnessSeat extends PlayerControllerAi {
+        private final BlockPlan block;
+        private boolean used;
+        /**
+         * The candidate's blocks were declared as given (else nothing is witnessed). No blocks needs no declaration (Forge
+         * does not ask a seat that cannot block).
+         */
+        boolean applied;
+
+        WitnessSeat(Game g, Player p, forge.LobbyPlayer lp, BlockPlan block) {
+            super(g, p, lp);
+            this.block = block;
+            this.applied = block.blocks.isEmpty();
+        }
+
+        @Override
+        public void declareBlockers(Player defender, forge.game.combat.Combat combat) {
+            if (!used) {
+                used = true;
+                applied = block.applyTo(getGame(), combat, defender);
+            }
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            return null;
+        }
+    }
+
+    /**
+     * lethalBlock witness: the attackers' controller in a copy. At its priority in declare blockers with an empty stack it
+     * plays its line (found again in the copy; the target set; X at the most the engine can pay, at most {@code xCap};
+     * repeated while payable up to the line's cap; X once), and otherwise passes. Forge AI makes its other choices.
+     */
+    static final class WitnessAi extends PlayerControllerAi {
+        private final LbLine line;
+        private final int target, xCap;
+        int played, x = -1;
+        boolean failed, done;
+
+        WitnessAi(Game g, Player p, forge.LobbyPlayer lp, LbLine line, int target, int xCap) {
+            super(g, p, lp);
+            this.line = line;
+            this.target = target;
+            this.xCap = xCap;
+            this.done = line == null;
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            final Game g = getGame();
+            if (done || !g.getPhaseHandler().is(forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS) || !g.getStack().isEmpty()) {
+                return null;
+            }
+            if (played >= line.cap || line.x && played > 0) {
+                done = true;
+                return null;
+            }
+            final Player me = getPlayer();
+            final SpellAbility sa = lbLocate(g, me, line);
+            if (sa == null) {
+                done = true;
+                return null;
+            }
+            sa.setActivatingPlayer(me);
+            if (line.x) {
+                int xv = Math.min(xCap, forge.ai.ComputerUtilMana.determineLeftoverMana(sa, me, false));
+                xv = Math.max(0, xv);
+                sa.getRootAbility().setXManaCostPaid(xv);
+                while (xv > 0 && !forge.ai.ComputerUtilCost.canPayCost(sa, me, false)) {
+                    xv--;
+                    sa.getRootAbility().setXManaCostPaid(xv);
+                }
+                x = xv;
+            }
+            if (target >= 0 && !applyTarget(sa, "C" + target, g)) {
+                done = true;
+                return null;
+            }
+            if (!sa.canPlay() || !forge.ai.ComputerUtilCost.canPayCost(sa, me, false)) {
+                done = true;
+                return null;
+            }
+            return Collections.singletonList(sa);
+        }
+
+        @Override
+        public boolean playChosenSpellAbility(SpellAbility sa) {
+            if (forge.ai.ComputerUtil.handlePlayingSpellAbility(getPlayer(), sa, null)) {
+                played++;
+            } else {
+                failed = true;
+                done = true;
+            }
+            return true;
+        }
+    }
+
+    /** lethalBlock: {@code line}'s ability in game {@code g} (its place first, else by description), or null. */
+    static SpellAbility lbLocate(Game g, Player opp, LbLine line) {
+        final Card host = g.findById(line.hostId);
+        if (host == null || host.getZone() == null) {
+            return null;
+        }
+        final List<SpellAbility> all = host.getAllPossibleAbilities(opp, true);
+        if (line.ordinal >= 0 && line.ordinal < all.size() && line.desc.equals(String.valueOf(all.get(line.ordinal).getDescription()))) {
+            return all.get(line.ordinal);
+        }
+        for (SpellAbility sa : all) {
+            if (!sa.isManaAbility() && line.desc.equals(String.valueOf(sa.getDescription()))) {
+                return sa;
+            }
+        }
+        return null;
     }
 
     /** lethalBlock: the mana budget is capped here (the knapsack's size); more mana only makes the bound larger. */
@@ -8937,7 +9427,9 @@ public final class LookaheadSearch {
                     && (zt == ZoneType.Hand || zt == ZoneType.Graveyard || zt == ZoneType.Exile || zt == ZoneType.Command))) {
                 continue;
             }
-            for (SpellAbility sa : c.getAllPossibleAbilities(opp, true)) {
+            final List<SpellAbility> possible = c.getAllPossibleAbilities(opp, true);
+            for (int j = 0; j < possible.size(); j++) {
+                final SpellAbility sa = possible.get(j);
                 if (sa.isManaAbility() || sa.isLandAbility()) {
                     continue;
                 }
@@ -8950,6 +9442,7 @@ public final class LookaheadSearch {
                 }
                 out.abilities++;
                 counted.add(ab);
+                out.lines.add(lbLine(c, j, sa, ab, atk)); // round 6: the witness plays it alone
                 for (int i = 0; i < na; i++) {
                     ds[i] |= ab.ds[i];
                     trample[i] |= ab.trample[i];

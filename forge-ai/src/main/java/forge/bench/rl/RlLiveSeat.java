@@ -962,7 +962,7 @@ public final class RlLiveSeat {
         d.addProperty("leafFallback", r.leafFallback);
         if (r.lethal != null) {
             // block-vs-open-pump-1118 (lethalBlock on or shadow only; a line without the guard is unchanged): per searched
-            // candidate, worst-case lethal, and whether the guard re-scored; or why it stood aside
+            // candidate, the bound's lethal, the engine's witness, and whether the guard re-scored; or why it stood aside
             final JsonObject lg = new JsonObject();
             if (r.lethalAside != null) {
                 lg.addProperty("aside", r.lethalAside);
@@ -972,6 +972,18 @@ public final class RlLiveSeat {
                     la.add(x);
                 }
                 lg.add("lethal", la);
+                if (r.witnessed != null) {
+                    // round 6: the bound is a prefilter; per candidate, the engine witnessed it, by which line; its time
+                    final com.google.gson.JsonArray wa = new com.google.gson.JsonArray();
+                    final com.google.gson.JsonArray wl = new com.google.gson.JsonArray();
+                    for (int i = 0; i < r.witnessed.length; i++) {
+                        wa.add(r.witnessed[i]);
+                        wl.add(r.witnessLine != null && i < r.witnessLine.length ? r.witnessLine[i] : null);
+                    }
+                    lg.add("witnessed", wa);
+                    lg.add("line", wl);
+                    lg.addProperty("witnessMs", Math.round(r.witnessMs * 10) / 10.0);
+                }
                 lg.addProperty("rescored", r.lethalRescored);
             }
             d.add("lethalBlock", lg);
