@@ -322,6 +322,7 @@ public final class RlLiveSeat {
                     case "crewNoop": c.crewNoop = v; break;
                     case "deadAltCost": c.deadAltCost = v; break; // evoke-empty-board-1111 (live default off)
                     case "deadPump": c.deadPump = v; break; // temp-pump-wrong-turn-1117 (live default off)
+                    case "lethalBlock": c.lethalBlock = v; break; // block-vs-open-pump-1118 (block search; live default off)
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
                     case "connectTimeoutMs": c.connectTimeoutMs = Integer.parseInt(v); break;
@@ -959,6 +960,34 @@ public final class RlLiveSeat {
         d.add("ev", ev);
         d.addProperty("failed", r.failed);
         d.addProperty("leafFallback", r.leafFallback);
+        if (r.lethal != null) {
+            // block-vs-open-pump-1118 (lethalBlock on or shadow only; a line without the guard is unchanged): per searched
+            // candidate, the bound's lethal, the engine's witness, and whether the guard re-scored; or why it stood aside
+            final JsonObject lg = new JsonObject();
+            if (r.lethalAside != null) {
+                lg.addProperty("aside", r.lethalAside);
+            } else {
+                final com.google.gson.JsonArray la = new com.google.gson.JsonArray();
+                for (boolean x : r.lethal) {
+                    la.add(x);
+                }
+                lg.add("lethal", la);
+                if (r.witnessed != null) {
+                    // round 6: the bound is a prefilter; per candidate, the engine witnessed it, by which line; its time
+                    final com.google.gson.JsonArray wa = new com.google.gson.JsonArray();
+                    final com.google.gson.JsonArray wl = new com.google.gson.JsonArray();
+                    for (int i = 0; i < r.witnessed.length; i++) {
+                        wa.add(r.witnessed[i]);
+                        wl.add(r.witnessLine != null && i < r.witnessLine.length ? r.witnessLine[i] : null);
+                    }
+                    lg.add("witnessed", wa);
+                    lg.add("line", wl);
+                    lg.addProperty("witnessMs", Math.round(r.witnessMs * 10) / 10.0);
+                }
+                lg.addProperty("rescored", r.lethalRescored);
+            }
+            d.add("lethalBlock", lg);
+        }
         d.addProperty("searched", st.searched);
         d.addProperty("departedTotal", st.departed);
         d.addProperty("cappedTotal", st.capped);
