@@ -408,6 +408,240 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertNotNull(flags(lc), lc.aside);
     }
 
+    // ---------------------------------------------------------------------------- review round 2 (Astra HOLD @ c60bd487c13)
+
+    /**
+     * S1, knowledge: Stormchaser Chimera's "+X/+0, where X is the revealed top card's mana value" reads opp's library top,
+     * which ai has not seen. The guard decides from the ability's text: X is not a number or X paid, so it stands aside the
+     * same way whether the top is a Forest or Emrakul, the Aeons Torn (c60 read the top: bound 2 against 17, and re-scored
+     * only with Emrakul on top).
+     */
+    @Test
+    public void aHiddenLibraryTopNeverChangesTheDecision() {
+        final String[] tops = {"Forest", "Emrakul, the Aeons Torn"};
+        final String[] asides = new String[2];
+        for (int j = 0; j < 2; j++) {
+            final Game g = game();
+            final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+            ai.setLife(8, null);
+            final Card chimera = addCard("Stormchaser Chimera", opp);
+            chimera.setSickness(false);
+            final Card drake = addCard("Wind Drake", ai);
+            drake.setSickness(false);
+            for (String land : new String[] {"Island", "Mountain", "Forest", "Forest"}) {
+                addCard(land, opp);
+            }
+            final Card top = addCardToZone(tops[j], opp, ZoneType.Library);
+            AssertJUnit.assertFalse(LookaheadSearch.pumpKnows(ai, top));
+            fillLibrary(ai, 20);
+            attack(g, opp, ai, chimera);
+            final LookaheadSearch.LethalCheck lc = check(g, plan(drake, chimera), plan());
+            AssertJUnit.assertNotNull(tops[j] + ": " + flags(lc), lc.aside);
+            AssertJUnit.assertTrue(flags(lc), lc.aside.contains("amount"));
+            asides[j] = lc.aside;
+            final double[][] v = {{0.25, 0.25}, {0.40, 0.40}};
+            final LookaheadSearch.GivenResult r = apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true});
+            AssertJUnit.assertFalse(tops[j] + ": " + flags(lc), r.lethalRescored);
+            AssertJUnit.assertTrue(tops[j], Arrays.deepEquals(new double[][] {{0.25, 0.25}, {0.40, 0.40}}, v));
+        }
+        AssertJUnit.assertEquals("the same decision whatever the hidden top", asides[0], asides[1]);
+    }
+
+    /** The Kessig Wolf Run board: ai at {@code life} with a Grizzly Bears; opp's attacking Grizzly Bears, Wolf Run, a Mountain, {@code forests} Forests. */
+    private Card[] wolfRun(Game g, Player ai, Player opp, int life, int forests) {
+        ai.setLife(life, null);
+        final Card blocker = addCard("Grizzly Bears", ai);
+        blocker.setSickness(false);
+        final Card attacker = addCard("Grizzly Bears", opp);
+        attacker.setSickness(false);
+        addCard("Kessig Wolf Run", opp);
+        addCard("Mountain", opp);
+        for (int i = 0; i < forests; i++) {
+            addCard("Forest", opp);
+        }
+        fillLibrary(ai, 20);
+        fillLibrary(opp, 20);
+        g.getAction().checkStateEffects(true);
+        return new Card[] {attacker, blocker};
+    }
+
+    /**
+     * S1, joint mana: Kessig Wolf Run ({X}{R}{G}, {T}: +X/+0 and trample) cannot also tap for its own {C}. With Wolf Run,
+     * a Mountain and a Forest the most is X = 0: no blocks takes 2 at 3 life, not lethal, and nothing is re-scored (c60
+     * counted Wolf Run's mana for X: 3, lethal, and re-scored no blocks to a loss).
+     */
+    @Test
+    public void wolfRunsTapPaysOnlyOnce() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = wolfRun(g, ai, opp, 3, 1);
+        attack(g, opp, ai, b[0]);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(b[1], b[0]), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 3, lc.mana);
+        AssertJUnit.assertEquals(flags(lc), 0, lc.life[0]);
+        AssertJUnit.assertEquals("X = 0 at most: " + flags(lc), 2, lc.life[1]);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, false}, lc.lethal));
+        final double[][] v = {{0.25, 0.25}, {0.40, 0.40}};
+        final LookaheadSearch.GivenResult r = apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true});
+        AssertJUnit.assertFalse(r.lethalRescored);
+        AssertJUnit.assertTrue(Arrays.deepEquals(new double[][] {{0.25, 0.25}, {0.40, 0.40}}, v));
+    }
+
+    /**
+     * Joint mana, positive: with a second Forest the most is X = 1 (Wolf Run's tap still pays nothing): no blocks takes 3,
+     * lethal at 3 while the block (trample: 2 - 2 + 1) is not; at 4 life nothing is lethal (c60: X = 2, 4).
+     */
+    @Test
+    public void wolfRunStillFindsLethalWithASpareSource() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card[] b = wolfRun(g, ai, opp, 3, 2);
+        attack(g, opp, ai, b[0]);
+        LookaheadSearch.LethalCheck lc = check(g, plan(b[1], b[0]), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 4, lc.mana);
+        AssertJUnit.assertEquals(flags(lc), 1, lc.life[0]);
+        AssertJUnit.assertEquals(flags(lc), 3, lc.life[1]);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, true}, lc.lethal));
+        ai.setLife(4, null);
+        lc = check(g, plan(b[1], b[0]), plan());
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, false}, lc.lethal));
+    }
+
+    /**
+     * Joint mana, other permanents: Root-Kin Ally's "tap two untapped creatures you control: +2/+2" taps mana creatures.
+     * With two Llanowar Elves and a revealed Giant Growth, either the Ally's +2 (both Elves) or Giant Growth's +3 (one Elf):
+     * 3 + 3 = 6, not lethal at 8 (c60 counted both: 8). A Grizzly Bears to tap instead of one Elf allows both: 8, lethal.
+     */
+    @Test
+    public void tappingManaCreaturesForACostSpendsTheirMana() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(8, null);
+        final Card ally = addCard("Root-Kin Ally", opp);
+        ally.setSickness(false);
+        for (int i = 0; i < 2; i++) {
+            addCard("Llanowar Elves", opp).setSickness(false);
+        }
+        final Card growth = addCardToZone("Giant Growth", opp, ZoneType.Hand);
+        growth.addMayLookAt(g.getNextTimestamp(), Arrays.asList(ai));
+        fillLibrary(ai, 20);
+        attack(g, opp, ai, ally);
+        LookaheadSearch.LethalCheck lc = check(g, plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 2, lc.mana);
+        AssertJUnit.assertEquals(flags(lc), 6, lc.life[0]);
+        AssertJUnit.assertFalse(flags(lc), lc.lethal[0]);
+        addCard("Grizzly Bears", opp).setSickness(false);
+        g.getAction().checkStateEffects(true);
+        lc = check(g, plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertEquals(flags(lc), 8, lc.life[0]);
+        AssertJUnit.assertTrue(flags(lc), lc.lethal[0]);
+    }
+
+    /**
+     * S2, compounding: Chameleon Colossus's "+X/+X, where X is its power" doubles on each activation (4 -> 8 -> 16 with
+     * eight Forests: lethal at 16). An amount that reads power is not a number or X: the guard stands aside (c60 counted
+     * 4 + 2 x 4 = 12, not lethal).
+     */
+    @Test
+    public void aPowerReadingPumpStandsAside() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(16, null);
+        final Card colossus = addCard("Chameleon Colossus", opp);
+        colossus.setSickness(false);
+        for (int i = 0; i < 8; i++) {
+            addCard("Forest", opp);
+        }
+        final Card bear = addCard("Grizzly Bears", ai);
+        bear.setSickness(false);
+        attack(g, opp, ai, colossus);
+        final LookaheadSearch.LethalCheck lc = check(g, plan(bear, colossus), plan());
+        AssertJUnit.assertNotNull(flags(lc), lc.aside);
+        AssertJUnit.assertTrue(flags(lc), lc.aside.contains("amount"));
+        final double[][] v = {{0.25, 0.25}, {0.40, 0.40}};
+        AssertJUnit.assertFalse(apply(AiFixes.Mode.ON, lc, v, new boolean[] {true, true}).lethalRescored);
+    }
+
+    /** Composition: a prowess attacker gets +1/+1 from each spell its controller casts, which the bound does not count: aside. */
+    @Test
+    public void aProwessAttackerStandsAside() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(3, null);
+        final Card spear = addCard("Monastery Swiftspear", opp);
+        attack(g, opp, ai, spear);
+        final LookaheadSearch.LethalCheck lc = check(g, plan());
+        AssertJUnit.assertNotNull(flags(lc), lc.aside);
+        AssertJUnit.assertTrue(flags(lc), lc.aside.contains("trigger"));
+    }
+
+    /** S3, double strike unblocked: Fencing Ace (1/1) deals 2, lethal at 2 and not at 3; blocked (no trample) 0. */
+    @Test
+    public void anUnblockedDoubleStrikerDealsTwice() {
+        final Game g = game();
+        final Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(2, null);
+        final Card ace = addCard("Fencing Ace", opp);
+        ace.setSickness(false);
+        final Card bear = addCard("Grizzly Bears", ai);
+        bear.setSickness(false);
+        attack(g, opp, ai, ace);
+        LookaheadSearch.LethalCheck lc = check(g, plan(bear, ace), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new int[] {0, 2}, lc.life));
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, true}, lc.lethal));
+        ai.setLife(3, null);
+        lc = check(g, plan(bear, ace), plan());
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, false}, lc.lethal));
+    }
+
+    /**
+     * S3, double strike with trample, blocked: Bolrac-Clan Basher (3/2) over a Grizzly Bears deals 2 x 3 - 2 = 4 (lethal
+     * at 4, not 5), 6 unblocked. Dragon Tyrant (6/6) with two Mountains for its "{R}: +1/+0": 12 - 2 + 2 x 2 = 14 blocked,
+     * 16 unblocked (the boost lands twice).
+     */
+    @Test
+    public void aBlockedDoubleStrikingTramplerDealsTwicePowerLessLethal() {
+        Game g = game();
+        Player ai = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        ai.setLife(4, null);
+        final Card basher = addCard("Bolrac-Clan Basher", opp);
+        basher.setSickness(false);
+        Card bear = addCard("Grizzly Bears", ai);
+        bear.setSickness(false);
+        attack(g, opp, ai, basher);
+        LookaheadSearch.LethalCheck lc = check(g, plan(bear, basher), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new int[] {4, 6}, lc.life));
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {true, true}, lc.lethal));
+        ai.setLife(5, null);
+        lc = check(g, plan(bear, basher), plan());
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new boolean[] {false, true}, lc.lethal));
+
+        g = game();
+        ai = g.getPlayers().get(0);
+        opp = g.getPlayers().get(1);
+        ai.setLife(14, null);
+        final Card tyrant = addCard("Dragon Tyrant", opp);
+        tyrant.setSickness(false);
+        addCard("Mountain", opp);
+        addCard("Mountain", opp);
+        bear = addCard("Grizzly Bears", ai);
+        bear.setSickness(false);
+        attack(g, opp, ai, tyrant);
+        lc = check(g, plan(bear, tyrant), plan());
+        AssertJUnit.assertNull(flags(lc), lc.aside);
+        AssertJUnit.assertTrue(flags(lc), Arrays.equals(new int[] {14, 16}, lc.life));
+        AssertJUnit.assertTrue(flags(lc), lc.lethal[0]);
+        ai.setLife(15, null);
+        lc = check(g, plan(bear, tyrant), plan());
+        AssertJUnit.assertFalse(flags(lc), lc.lethal[0]);
+    }
+
     // ------------------------------------------------------------------------------------------------ the modes
 
     private static double[][] values() {
@@ -598,8 +832,18 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         }
     }
 
+    /** A board for the live seat: builds it (ai = seat 0, opp = seat 1) and returns {attacker, ...}. */
+    interface Board {
+        Card[] build(Game g, Player ai, Player opp);
+    }
+
     /** The reported board through the live seat: blocks=1, both play-out seats the scripted policy, plus {@code extra}. */
     private Run reportedLive(final String extra) throws Exception {
+        return live((g, ai, opp) -> reported(g, ai, opp, 7), extra);
+    }
+
+    /** {@code board} through the live seat, as {@link #reportedLive}: its first card attacks seat 0. */
+    private Run live(final Board board, final String extra) throws Exception {
         final Run r = new Run();
         final PrintStream was = System.err;
         final ByteArrayOutputStream buf = new ByteArrayOutputStream();
@@ -622,7 +866,7 @@ public class LookaheadLethalBlockTest extends SimulationTest {
             final Player p1 = game.getRegisteredPlayers().get(1);
             game.setAge(GameStage.Play);
             game.getPhaseHandler().devModeSet(PhaseType.MAIN1, p1, 22);
-            final Card[] b = reported(game, p0, p1, 7);
+            final Card[] b = board.build(game, p0, p1);
             game.getPhaseHandler().devModeSet(PhaseType.COMBAT_DECLARE_BLOCKERS, p1, false, 22);
             final Combat combat = new Combat(p1);
             combat.addAttacker(b[0], p0);
@@ -697,5 +941,28 @@ public class LookaheadLethalBlockTest extends SimulationTest {
         AssertJUnit.assertTrue(ln.toString(), ln.getAsJsonObject("lethalBlock").get("rescored").getAsBoolean());
         AssertJUnit.assertFalse(ln.toString(), ln.get("chosen").getAsString().equals("none"));
         AssertJUnit.assertFalse("a block is kept: " + ln, on.combat.getAllBlockers().isEmpty());
+    }
+
+    /**
+     * S1 on the played path: the Kessig Wolf Run board through the live seat. The policy blocks; the search departs to no
+     * blocks (0.40 against 0.25) and ON keeps that declaration: X = 0 at most, so nothing is lethal and nothing is
+     * re-scored (c60 re-scored no blocks to a loss and kept the policy's block).
+     */
+    @Test
+    public void theWolfRunBoardIsNotRescoredWhenOn() throws Exception {
+        final Board board = (g, ai, opp) -> wolfRun(g, ai, opp, 3, 1);
+        final JsonObject lo = live(board, "").line();
+        AssertJUnit.assertEquals(lo.toString(), "none", lo.get("chosen").getAsString());
+        final Run on = live(board, "lethalBlock=on");
+        final JsonObject ln = on.line();
+        final JsonObject gn = ln.getAsJsonObject("lethalBlock");
+        AssertJUnit.assertNotNull(ln.toString(), gn);
+        AssertJUnit.assertFalse(ln.toString(), gn.has("aside"));
+        AssertJUnit.assertFalse(ln.toString(), gn.get("rescored").getAsBoolean());
+        for (com.google.gson.JsonElement e : gn.getAsJsonArray("lethal")) {
+            AssertJUnit.assertFalse(ln.toString(), e.getAsBoolean());
+        }
+        AssertJUnit.assertEquals(ln.toString(), "none", ln.get("chosen").getAsString());
+        AssertJUnit.assertTrue("no blocks, as off: " + ln, on.combat.getAllBlockers().isEmpty());
     }
 }
