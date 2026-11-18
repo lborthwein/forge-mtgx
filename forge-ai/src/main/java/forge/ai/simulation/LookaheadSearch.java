@@ -2335,6 +2335,7 @@ public final class LookaheadSearch {
         // Label dump: the root ForgeState comes from the same enumeration copy (never the live game).
         final JsonObject[] labelRoot = labelSink != null || ranker != null ? new JsonObject[1] : null;
         final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv, beliefRoot, labelRoot);
+        final JsonObject faceUpNote = cfg.deadFaceUp != AiFixes.Mode.OFF ? deadFaceUpLast : null; // this decision's (null = none)
         if (check) {
             checkLive("enumerate", before, live, defSa, index);
         }
@@ -2585,6 +2586,9 @@ public final class LookaheadSearch {
             x.addProperty("outcome", outcome);
             x.addProperty("line", index); // J1: the K8 decision line's own index (its "decision")
             x.addProperty("played", played);
+            if (faceUpNote != null) {
+                x.add("deadFaceUp", faceUpNote); // deadFaceUp on or shadow, with a turn-up among the candidates
+            }
             final JsonArray ca = new JsonArray();
             for (int c = 0; c < n; c++) {
                 final JsonObject co = new JsonObject();
