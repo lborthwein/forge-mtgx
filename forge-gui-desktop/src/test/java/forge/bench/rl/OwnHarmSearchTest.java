@@ -67,6 +67,14 @@ public class OwnHarmSearchTest extends SimulationTest {
 
     private static Path indexFile;
     private static final Map<Integer, String> NAMES = new HashMap<>();
+    /** Review 4: the fake service's leaf calls fail (the seat's static fallback). */
+    private boolean failLeaves;
+    /** Review 4: priority asks per run (the same priority each time unless {@link #cycle} changes the game). */
+    private int repeats = 1;
+    /** Review 4: run after each ask on its answer (null = nothing). */
+    private java.util.function.BiConsumer<Player, List<SpellAbility>> cycle;
+    /** Review 4: keep the search's decision rows ({@link Run#rows}). */
+    private boolean wantRows;
 
     private static synchronized Path index() throws Exception {
         if (indexFile == null) {
@@ -74,7 +82,7 @@ public class OwnHarmSearchTest extends SimulationTest {
                     "Abrade", "Sol Ring", "Grizzly Bears", "Ephemerate", "Runeclaw Bear", "Disfigure", "Blood Artist", SWORDS,
                     GUTTERSNIPE, "Forest", "Flame Slash", "Light Up the Stage", PIA, "Shirei, Shizo's Caretaker",
                     "Out of Time", "Tear Asunder", "Soulfire Grand Master", "Darksteel Myr", "Adarkar Valkyrie", "Doom Blade",
-                    "Banishing Light", GARRUK, "Wandertale Mentor"));
+                    "Banishing Light", GARRUK, "Wandertale Mentor", "Seeker of Skybreak"));
             final StringBuilder sb = new StringBuilder("<pad>\t0\n<unk>\t1\n");
             int i = 2;
             for (String n : names) {
@@ -124,6 +132,10 @@ public class OwnHarmSearchTest extends SimulationTest {
 
     static final class Run {
         String answer;
+        /** Each ask's answer, in order ({@link #repeats} asks). */
+        final List<String> answers = new ArrayList<>();
+        /** The search's decision rows ({@link #wantRows}). */
+        final List<JsonObject> rows = new ArrayList<>();
         final List<JsonObject> decisions = new ArrayList<>();
         final List<String> ownHarmLines = new ArrayList<>();
         String err;
@@ -160,6 +172,11 @@ public class OwnHarmSearchTest extends SimulationTest {
         final ByteArrayOutputStream buf = new ByteArrayOutputStream();
         System.setErr(new PrintStream(buf, true, StandardCharsets.UTF_8));
         try (FakeSearchService svc = new FakeSearchService(SHA)) {
+            if (failLeaves) {
+                svc.leafValue = x -> {
+                    throw new IllegalStateException("test: the leaf call fails");
+                };
+            }
             final RlLiveSeat live = RlLiveSeat.connect(spec(svc.address(), extra), "own-harm-test");
             Assert.assertNotNull(live, "the seat binds the fake service");
             final LobbyPlayerAi ai = new LobbyPlayerAi("Seat1", null);
@@ -179,10 +196,29 @@ public class OwnHarmSearchTest extends SimulationTest {
             game.getAction().checkStateEffects(true);
             svc.script = new Script(RlSearch.splitmix(SEED ^ 0x6c697665L), pick);
             live.bind(game, 0, SEED, null, AiFixes.Mode.OFF);
+            final RlSearch rs;
+            if (wantRows) {
+                final java.lang.reflect.Field f = RlLiveSeat.class.getDeclaredField("search");
+                f.setAccessible(true);
+                rs = (RlSearch) f.get(live);
+                rs.rowsWanted = true;
+            } else {
+                rs = null;
+            }
             r.before = probe == null ? null : probe.apply(game);
-            final List<SpellAbility> a;
+            List<SpellAbility> a = null;
             try {
-                a = p0.getController().chooseSpellAbilityToPlay();
+                for (int rep = 0; rep < repeats; rep++) {
+                    a = p0.getController().chooseSpellAbilityToPlay();
+                    r.answers.add(a == null || a.isEmpty() || a.get(0) == null ? "pass"
+                            : a.get(0).getHostCard() == null ? "?" : a.get(0).getHostCard().getName());
+                    if (cycle != null) {
+                        cycle.accept(p0, a);
+                    }
+                }
+                if (rs != null) {
+                    r.rows.addAll(rs.takeRows());
+                }
             } finally {
                 live.finish();
             }
@@ -868,6 +904,116 @@ public class OwnHarmSearchTest extends SimulationTest {
             Assert.assertEquals(better.answer, "Abrade", pick + ": " + better.summary());
             Assert.assertTrue(refusedAndDemotion(better, "Abrade").getAsJsonObject("test").get("better").getAsBoolean(),
                     better.summary());
+        }
+    }
+
+    // ------------------------------------------------------------------ review 4
+
+    /**
+     * Review 4 of #251, S1 2: the floor and the departZ test read win probabilities, so over a static leaf ({@code
+     * leaf=static}) ownHarm takes no action: the policy's own refused Snuff Out is played as with the key off (the large
+     * margin keeps the policy's entry before the demotion), no test runs, nothing is vetoed, and the decision row and the
+     * [own-harm] line say why ({@link LookaheadSearch.Config#OWN_HARM_NO_SCALE}).
+     */
+    @Test
+    public void aStaticLeafMeansNoOwnHarmAction() throws Exception {
+        wantRows = true;
+        try {
+            final Run r = run("ownHarm=on,leaf=static,margin=1000000", snuff(false), SNUFF);
+            noScale(r, false);
+            final Run off = run("leaf=static,margin=1000000", snuff(false), SNUFF);
+            Assert.assertEquals(r.answer, off.answer, "as the key off: " + off.summary());
+        } finally {
+            wantRows = false;
+        }
+    }
+
+    /**
+     * Review 4 of #251, S1 2: a failed leaf call keeps the play-outs' static scores (the reviewer's repro: 1073 vs 1089.5
+     * read against the 0.01 floor), so ownHarm takes no action in that decision either.
+     */
+    @Test
+    public void aLeafFallbackMeansNoOwnHarmAction() throws Exception {
+        failLeaves = true;
+        wantRows = true;
+        try {
+            final Run r = run("ownHarm=on,readTimeoutMs=1000,margin=1000000", snuff(false), SNUFF);
+            Assert.assertTrue(r.err.contains("static fallback"), "the leaf fell back: " + r.summary());
+            noScale(r, true);
+        } finally {
+            failLeaves = false;
+            wantRows = false;
+        }
+    }
+
+    private static void noScale(final Run r, final boolean fallback) {
+        Assert.assertEquals(r.answer, SNUFF, "no action: the policy's own choice stands: " + r.summary());
+        Assert.assertFalse(r.ownHarmLines.isEmpty(), r.summary());
+        final JsonObject n = note(r.ownHarmLines.get(0));
+        final JsonObject dm = n.getAsJsonObject("demotion");
+        Assert.assertNotNull(dm, n.toString());
+        Assert.assertEquals(dm.get("reason").getAsString(), LookaheadSearch.Config.OWN_HARM_NO_SCALE, dm.toString());
+        Assert.assertEquals(dm.get("leafFallback").getAsBoolean(), fallback, dm.toString());
+        Assert.assertFalse(dm.has("test"), "no floor test over static scores: " + dm);
+        Assert.assertFalse(dm.get("changed").getAsBoolean(), dm.toString());
+        Assert.assertFalse(n.has("fallback"), "no stand-in: " + n);
+        Assert.assertEquals(r.rows.size(), 1, "one decision row");
+        Assert.assertEquals(r.rows.get(0).get("reason").getAsString(), LookaheadSearch.Config.OWN_HARM_NO_SCALE,
+                r.rows.get(0).toString());
+        Assert.assertFalse(r.rows.get(0).has("own_harm"), r.rows.get(0).toString());
+    }
+
+    /**
+     * Review 4 of #251, S1 1 (the reviewer's repro): our refused Abrade (its damage mode aimed only at our own untapped
+     * Seeker of Skybreak) is the policy's choice each time; better by only 0.005, it is demoted, and Seeker's untap (worth
+     * 0.05 over pass) stands in. Each stand-in is played, tapping Seeker to untap itself, and the same priority is asked
+     * again. On e5fedae620f all 14 asks departed. Now the stand-in is a departure for the loop guard: it departs twice
+     * (the identical-departure limit), then the guard blocks it, and with pass legal the seat passes (never the blocked
+     * stand-in, never the refused Abrade) for every further ask.
+     */
+    @Test
+    public void aStandInLoopIsBoundedAndEndsInPass() throws Exception {
+        repeats = 14;
+        cycle = (p0, a) -> {
+            if (a == null || a.isEmpty() || a.get(0) == null) {
+                return;
+            }
+            final SpellAbility untap = a.get(0);
+            final Card seeker = untap.getHostCard();
+            Assert.assertEquals(seeker.getName(), "Seeker of Skybreak", "the only stand-in");
+            Assert.assertFalse(seeker.isTapped());
+            untap.setActivatingPlayer(p0);
+            untap.resetTargets();
+            untap.getTargets().add(seeker);
+            seeker.setTapped(true);
+            AbilityUtils.resolve(untap);
+            Assert.assertFalse(seeker.isTapped());
+        };
+        try {
+            final Run r = runStub("ownHarm=on", (g, p0, p1) -> {
+                addCard("Mountain", p0);
+                addCard("Mountain", p0);
+                addCard("Seeker of Skybreak", p0).setSickness(false);
+                addCardToZone("Abrade", p0, ZoneType.Hand);
+                addCard("Plains", p1);
+            }, "Abrade", gains("Abrade", 0.005, "Seeker of Skybreak", 0.0, "pass", -0.05));
+            Assert.assertEquals(r.answers.size(), 14, r.answers.toString());
+            Assert.assertEquals(r.answers.subList(0, 2), Arrays.asList("Seeker of Skybreak", "Seeker of Skybreak"),
+                    "two stand-ins within the identical-departure limit: " + r.answers);
+            for (int i = 2; i < 14; i++) {
+                Assert.assertEquals(r.answers.get(i), "pass", "ask " + i + ": the guard blocked the stand-in: " + r.answers);
+            }
+            Assert.assertEquals(r.decisions.size(), 14, r.summary());
+            long guard = r.decisions.stream().filter(d -> "loop-guard".equals(d.get("outcome").getAsString())).count();
+            Assert.assertEquals(guard, 12, "every ask after the limit hits the loop guard: " + r.decisions);
+            Assert.assertEquals(r.ownHarmLines.size(), 14, r.summary());
+            final JsonObject last = note(r.ownHarmLines.get(13));
+            Assert.assertEquals(last.get("guard").getAsString(), "loop-guard", last.toString());
+            Assert.assertTrue(last.getAsJsonObject("demotion").get("guardBlocked").getAsString().startsWith("Seeker of Skybreak"),
+                    last.toString());
+        } finally {
+            repeats = 1;
+            cycle = null;
         }
     }
 }

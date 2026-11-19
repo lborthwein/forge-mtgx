@@ -248,10 +248,17 @@ public final class LookaheadSearch {
          * if its value is higher by at least this much (absolute, on the win-probability scale of the value leaf), on top
          * of the departZ test. In a saturated position (value near 1) no real payoff can show a 0.01 gain, and none
          * matters; in a contested one a real payoff the play-outs see (lifelink at 2 life, a return, a death trigger) shows
-         * a gap far above it. So the demotion only overrides noise. (Forge's static score, K8's leaf without a model, is
-         * not a probability: there the floor is far below one score point.)
+         * a gap far above it. So the demotion only overrides noise. Review 4: it acts only when every value it compares is
+         * on that scale (the policy seat's value leaf, or K8's model leaf, with no fallback); over Forge's static score (a
+         * static leaf, K8 without a model, or any leaf fallback) ownHarm takes no action in the decision
+         * ({@link #OWN_HARM_NO_SCALE}).
          */
         public static final double OWN_HARM_FLOOR = 0.01;
+        /**
+         * Review 4: the reason recorded when ownHarm takes no action because the decision's values are not all on the
+         * win-probability scale (a static leaf or a leaf fallback): key-off behavior, no demotion and no veto.
+         */
+        public static final String OWN_HARM_NO_SCALE = "ownHarm-noverdict-scale";
         /**
          * The ownHarm key's value: exactly off|shadow|on (the host validator takes no aliases), else an error naming
          * {@code k}.
@@ -876,7 +883,7 @@ public final class LookaheadSearch {
          */
         public String ownHarmMode;
         public long ownHarmCands, ownHarmDecisions, ownHarmDropped, ownHarmForge, ownHarmFallback, ownHarmPass,
-                ownHarmPlanRefused, ownHarmPlanBreaks, ownHarmTests, ownHarmPassed;
+                ownHarmPlanRefused, ownHarmPlanBreaks, ownHarmTests, ownHarmPassed, ownHarmNoScale, ownHarmGuard;
         public final Map<String, Long> ownHarmCards = new TreeMap<>();
         /**
          * lethalBlock guard (null = off): block decisions checked; stood aside (the bound was not trusted); with a candidate
@@ -1182,6 +1189,8 @@ public final class LookaheadSearch {
                 d.addProperty("planBreaks", ownHarmPlanBreaks);
                 d.addProperty("tests", ownHarmTests);
                 d.addProperty("passed", ownHarmPassed);
+                d.addProperty("noScale", ownHarmNoScale); // review 4: no action, the values not win probabilities
+                d.addProperty("guard", ownHarmGuard); // review 4: stand-ins the loop guard blocked
                 final JsonObject by = new JsonObject();
                 ownHarmCards.forEach(by::addProperty);
                 d.add("cards", by);
@@ -2426,6 +2435,38 @@ public final class LookaheadSearch {
     }
 
     /**
+     * ownHarm (review 4): the stand-in the policy seat plays for its refused own choice when the search gave no verdict
+     * (RlSearch) is a departure for the loop guard, with the same per-turn and identical-departure limits as any
+     * departure ({@link Config#maxDeparturesPerTurn}, {@link Config#maxSameDepartures}). True = admitted and counted;
+     * false = the guard blocks it (counted as a loop-guard hit).
+     */
+    public boolean ownHarmStandInAdmit(final Game live, final String label) {
+        final PhaseHandler ph = live.getPhaseHandler();
+        if (ph.getTurn() != departuresTurn) {
+            departuresTurn = ph.getTurn();
+            departuresThisTurn = 0;
+            departureCounts.clear();
+        }
+        final String key = "standIn|" + label + "@" + ph.getPhase() + "#" + live.getStack().size();
+        final int seen = departureCounts.getOrDefault(key, 0);
+        if (departuresThisTurn >= cfg.maxDeparturesPerTurn || seen >= cfg.maxSameDepartures) {
+            stats.loopGuard++;
+            stats.ownHarmGuard++;
+            return false;
+        }
+        departuresThisTurn++;
+        departureCounts.put(key, seen + 1);
+        return true;
+    }
+
+    /**
+     * Tests only (null = none; never set outside tests): overrides whether this decision's values count as being on the
+     * win-probability scale for ownHarm (review 4), so a test with stubbed values ({@link #testValues}) can drive the
+     * demotion in a seat whose leaf is static.
+     */
+    public static volatile Boolean testScale = null;
+
+    /**
      * ownHarm's test (review 3): is candidate {@code a} (refused) better than candidate {@code b} (not refused)? Over the
      * worlds both finished ({@code f} null = every world; a non-finite value never counts), the mean paired difference
      * a - b must pass the departZ test (above zero and above z standard errors; with z off, above zero; with one world
@@ -2500,6 +2541,22 @@ public final class LookaheadSearch {
             final boolean[][] finished, final double[] ev, final boolean[] okArg, final boolean[] dem, final int n, final int k,
             final int best, final int provenPick, final boolean[] provenWin, final double[][] rpArg, final double rootP) {
         if (!dem[best] && !dem[0]) {
+            return best;
+        }
+        // review 4: the floor and the test read win probabilities: with a static leaf or any leaf fallback in this
+        // decision, ownHarm takes no action (key-off behavior: no demotion, and RlSearch vetoes nothing either)
+        final boolean scale = testScale != null ? testScale : hookLeaf && !res.leafFallback;
+        if (!scale) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("natural", at.get(best));
+            o.addProperty("reason", Config.OWN_HARM_NO_SCALE);
+            o.addProperty("leafFallback", res.leafFallback);
+            o.addProperty("decision", at.get(best));
+            o.addProperty("decisionLabel", cands.get(best).label);
+            o.addProperty("changed", false);
+            o.addProperty("applied", decisionDemoteApply);
+            stats.ownHarmNoScale++;
+            res.ownHarmDemotion = o;
             return best;
         }
         final boolean[] okNr = okArg.clone();
@@ -2851,7 +2908,23 @@ public final class LookaheadSearch {
         // line-own-target-1119 (ownHarm's demotion, review 3; off: nothing runs): a refused departure stays only if it is
         // better than the normal rule's choice among the candidates not refused (Forge's own answer, never demoted, the baseline)
         JsonObject ownHarmNote = null;
-        if (cfg.ownHarm != AiFixes.Mode.OFF && !overBudget && best != 0 && ownHarmKeys.contains(cands.get(best).key())) {
+        // review 4: K8's values are win probabilities only with its model leaf and no fallback; over Forge's static score
+        // (the live K8) ownHarm takes no action here
+        final boolean ownHarmScale = testScale != null ? testScale : model != null && !leafFallback;
+        if (cfg.ownHarm != AiFixes.Mode.OFF && !overBudget && best != 0 && ownHarmKeys.contains(cands.get(best).key())
+                && !ownHarmScale) {
+            stats.ownHarmNoScale++;
+            final JsonObject o = new JsonObject();
+            o.addProperty("mode", cfg.ownHarm.key());
+            o.addProperty("seat", "k8");
+            o.addProperty("turn", turn);
+            o.addProperty("phase", String.valueOf(ph.getPhase()));
+            o.addProperty("natural", cands.get(best).label);
+            o.addProperty("reason", Config.OWN_HARM_NO_SCALE);
+            o.addProperty("leafFallback", leafFallback);
+            o.addProperty("changed", false);
+            System.err.println("[own-harm] " + o);
+        } else if (cfg.ownHarm != AiFixes.Mode.OFF && !overBudget && best != 0 && ownHarmKeys.contains(cands.get(best).key())) {
             final boolean[] okNr = ok.clone();
             for (int c = 1; c < n; c++) {
                 if (ownHarmKeys.contains(cands.get(c).key())) {
@@ -4148,7 +4221,7 @@ public final class LookaheadSearch {
         // goldfish tie-break, so a refused candidate it picks is demoted as well
         final Set<Integer> demote = decisionDemote;
         decisionDemote = null;
-        boolean demoteBase = false;
+        boolean standIn = false;
         if (demote != null && !overBudget) {
             final boolean[] dem = new boolean[n];
             for (int c = 0; c < n; c++) {
@@ -4157,7 +4230,8 @@ public final class LookaheadSearch {
             final int dec = ownHarmDemotion(res, cands, at, values, finished, ev, okArg, dem, n, k, best, provenPick,
                     provenWin, rpArg, rootP);
             if (decisionDemoteApply && dec != best) {
-                demoteBase = dem[0] && dec != 0; // the default was refused: its stand-in is no departure for the loop guard
+                // the policy's own entry was refused: its stand-in is a departure for the loop guard like any (review 4)
+                standIn = dem[0] && dec != 0;
                 best = dec;
             }
         }
@@ -4212,10 +4286,15 @@ public final class LookaheadSearch {
             final Cand chosen = cands.get(best);
             final String key = chosen.key() + "@" + ph.getPhase() + "#" + live.getStack().size();
             final int seenN = departureCounts.getOrDefault(key, 0);
-            if (provenPick < 0 && !demoteBase
-                    && (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= cfg.maxSameDepartures)) {
+            if (provenPick < 0 && (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= cfg.maxSameDepartures)) {
                 stats.loopGuard++;
                 outcome = "loop-guard";
+                if (standIn) {
+                    // line-own-target-1119 (review 4): the guard blocked ownHarm's stand-in. Never the stand-in again
+                    // here: RlSearch plays pass in a priority decision with pass legal, else the policy's own choice
+                    stats.ownHarmGuard++;
+                    res.ownHarmDemotion.addProperty("guardBlocked", chosen.label);
+                }
             } else {
                 res.chosen = at.get(best);
                 res.proven = provenPick >= 0 && best == provenPick;
@@ -4228,11 +4307,8 @@ public final class LookaheadSearch {
                     res.chosenMacro = macroOf[best];
                     stats.givenMacroDepartures++;
                 }
-                if (!demoteBase) {
-                    // line-own-target-1119: the stand-in for a refused default does not count toward the loop guard
-                    departuresThisTurn++;
-                    departureCounts.put(key, seenN + 1);
-                }
+                departuresThisTurn++;
+                departureCounts.put(key, seenN + 1);
                 outcome = "departed";
             }
         } else if (best != 0) {
