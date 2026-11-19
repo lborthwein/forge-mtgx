@@ -683,4 +683,64 @@ public class LineOwnTargetReviewTest extends SimulationTest {
         Assert.assertEquals(s.ownTargetUnchecked, 2);
         Assert.assertNull(forge.ai.AiWork.current(), "the caller's budget scope is restored");
     }
+
+    /**
+     * architect-o, review 2 (option A): a trigger Forge flags static ({@code Static$ True}, rules bookkeeping) is not a
+     * payoff. Tear Asunder at our own Chrome Mox (its imprint-cleanup leaves trigger is static), imprinted or not, is
+     * refused by both keys, as at Mox Jet. The leaves, cast and death keeps above (Reveillark, Guttersnipe, Bridge from
+     * Below) are ordinary triggers and still hold.
+     */
+    @Test
+    public void r2TearAsunderAtOurChromeMoxIsRefused() {
+        for (boolean imprinted : new boolean[] {false, true}) {
+            board();
+            final Card mox = ours("Chrome Mox");
+            if (imprinted) {
+                mox.addImprintedCard(addCardToZone("Lightning Bolt", me, ZoneType.Exile));
+                Assert.assertEquals(mox.getImprintedCards().size(), 1);
+            }
+            for (String n : new String[] {"Swamp", "Swamp", "Forest", "Forest"}) {
+                ours(n);
+            }
+            boolean staticLeaves = false;
+            for (forge.game.trigger.Trigger t : mox.getTriggers()) {
+                staticLeaves |= t.isStatic() && t.getMode() == forge.game.trigger.TriggerType.ChangesZone
+                        && "Battlefield".equals(t.getParam("Origin"));
+            }
+            Assert.assertTrue(staticLeaves, "Chrome Mox has its static leaves (cleanup) trigger");
+            final String why = refusedTarget("Tear Asunder at our Chrome Mox, imprinted=" + imprinted,
+                    ability("Tear Asunder", ApiType.ChangeZone), mox);
+            Assert.assertTrue(why.startsWith("remove with only our own to target: [Chrome Mox"), why);
+        }
+    }
+
+    /**
+     * Serra Paragon's own trigger is static (skipped), but the rider it grants a permanent cast through it ("When this
+     * permanent is put into a graveyard from the battlefield, exile it and you gain 2 life", as its Animate adds it) is an
+     * ordinary trigger of that permanent: Doom Blade at our Bears carrying it is kept by both keys; without it, refused.
+     */
+    @Test
+    public void r2SerraParagonsGrantedRiderIsAnOrdinaryTrigger() {
+        board();
+        final Card paragon = ours("Serra Paragon");
+        boolean staticCast = false;
+        for (forge.game.trigger.Trigger t : paragon.getTriggers()) {
+            staticCast |= t.isStatic() && t.getMode() == forge.game.trigger.TriggerType.SpellCast;
+        }
+        Assert.assertTrue(staticCast, "Serra Paragon's cast trigger is static");
+        final Card bears = ours("Grizzly Bears");
+        final String why = refusedTarget("Doom Blade with Serra Paragon and plain Bears", ability("Doom Blade", ApiType.Destroy),
+                bears);
+        Assert.assertTrue(why.startsWith("destroy with only our own to target"), why);
+        // the rider, from Serra Paragon's script (SVar TrigDieExile), granted to the Bears
+        bears.setSVar("TrigExile", "DB$ ChangeZone | Defined$ TriggeredNewCardLKICopy | Origin$ Graveyard | Destination$ Exile"
+                + " | SubAbility$ DBGainLife");
+        bears.setSVar("DBGainLife", "DB$ GainLife | LifeAmount$ 2");
+        final forge.game.trigger.Trigger rider = bears.addTrigger(forge.game.trigger.TriggerHandler.parseTrigger(
+                "Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigExile"
+                        + " | TriggerDescription$ When this permanent is put into a graveyard from the battlefield, exile it and"
+                        + " you gain 2 life.", bears, false));
+        Assert.assertFalse(rider.isStatic());
+        keptTarget("Doom Blade at our Bears with Serra Paragon's rider", ability("Doom Blade", ApiType.Destroy), bears);
+    }
 }

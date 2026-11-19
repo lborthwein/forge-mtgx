@@ -498,7 +498,10 @@ final class LineOwnTarget {
      * trigger in the family is a payoff unless a filter it states surely fails. {@code harm} null: nothing happens to
      * {@code target} (a destroy that cannot destroy it); only the cast and target family is read. Static abilities are
      * not read on their own: one that grants a trigger shows it on the card it grants it to, and those that scale or stop
-     * triggers (Panharmonicon, Torpor Orb) set off nothing by themselves. Read-only; never throws (an error = true).
+     * triggers (Panharmonicon, Torpor Orb) set off nothing by themselves. Triggers Forge flags static ({@code Static$
+     * True}: rules bookkeeping, not triggered abilities, such as Chrome Mox's and Animate Dead's imprint and attach
+     * cleanup) are skipped (architect-o, review 2); Serra Paragon's grants its "exile it and you gain 2 life" rider as an
+     * ordinary trigger of the permanent, which is read. Read-only; never throws (an error = true).
      */
     static boolean couldFire(final Player me, final SpellAbility p, final Card target, final Harm harm) {
         try {
@@ -515,7 +518,8 @@ final class LineOwnTarget {
                 final boolean stack = z != null && z.is(ZoneType.Stack);
                 if (!stack) {
                     for (Trigger t : c.getTriggers()) {
-                        if (!t.isSuppressed() && t.zonesCheck(z) && fires(t, me, p, root, source, target, harm, dest)) {
+                        if (!t.isStatic() && !t.isSuppressed() && t.zonesCheck(z)
+                                && fires(t, me, p, root, source, target, harm, dest)) {
                             return true;
                         }
                     }
@@ -530,7 +534,8 @@ final class LineOwnTarget {
                 // the spell's own card (in hand): its cast triggers fire from the stack
                 for (Trigger t : source.getTriggers()) {
                     final Set<ZoneType> zs = t.getActiveZone();
-                    if (!t.isSuppressed() && CAST.contains(t.getMode()) && (zs == null || zs.isEmpty() || zs.contains(ZoneType.Stack))
+                    if (!t.isStatic() && !t.isSuppressed() && CAST.contains(t.getMode())
+                            && (zs == null || zs.isEmpty() || zs.contains(ZoneType.Stack))
                             && fires(t, me, p, root, source, target, null, null)) {
                         return true;
                     }
