@@ -126,6 +126,9 @@ public class LoopLethalFirstTest extends forge.ai.AITest {
         frames.put("life4", with("ailife=18", "ailife=4"));
         frames.put("life20", with("ailife=18", "ailife=20"));
         frames.put("blocker", with("Paradise Druid|Tapped", "Paradise Druid"));
+        // an untapped opposing creature with no mana ability (the creature above also gives the opponent open mana)
+        frames.put("blockerNoMana", with("Oath of Druids", "Oath of Druids;Thragtusk")
+                .replace("aihand=Misty Rainforest;Mishra's Workshop;Thragtusk;", "aihand=Misty Rainforest;Mishra's Workshop;"));
         frames.put("nosick", with("Deceiver Exarch|SummonSick", "Deceiver Exarch"));
         frames.put("pestermite", with("Ancient Tomb;Pestermite;", "Ancient Tomb;Deceiver Exarch;")
                 .replace("Deceiver Exarch|SummonSick", "Pestermite|SummonSick"));

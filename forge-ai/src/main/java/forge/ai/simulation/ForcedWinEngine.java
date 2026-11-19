@@ -94,6 +94,11 @@ final class ForcedWinEngine {
          * search reached, moves left out for the allowance, and moves the search found productive / not.
          */
         int focusDepth, focusSkips, focusGains, focusInert;
+        /**
+         * sdcc-multitarget-loop-1119 (loopLethalFirst; report only, printed when non-zero): attacks tried at a loop's lethal
+         * count ({@link ForcedWinEngine#lethalAttack}), and those that won.
+         */
+        int lethalAttacks, lethalWins;
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
@@ -105,7 +110,8 @@ final class ForcedWinEngine {
                             + " loopWins=" + loopWins : "")
                     + (ordered > 0 || orderFails > 0 ? " ordered=" + ordered + " orderFails=" + orderFails : "")
                     + (focusSkips > 0 || focusGains > 0 || focusInert > 0 ? " focusDepth=" + focusDepth + " focusSkips="
-                            + focusSkips + " focusGains=" + focusGains + " focusInert=" + focusInert : "");
+                            + focusSkips + " focusGains=" + focusGains + " focusInert=" + focusInert : "")
+                    + (lethalAttacks > 0 ? " lethalAttacks=" + lethalAttacks + " lethalWins=" + lethalWins : "");
         }
     }
 
@@ -1528,6 +1534,42 @@ final class ForcedWinEngine {
         }
     }
 
+    /**
+     * sdcc-multitarget-loop-1119 ({@link Limits#loopLethalFirst}): at a loop's lethal count ({@link #lethalPastBlockers}),
+     * the attack alone (the node and the one after it), tried even when the root pass move's node share or the search's
+     * node cap is spent: two nodes at most, still inside the wall and the decision's Forge AI work. The outlet searches at
+     * the earlier doublings could spend the share just before the count that wins. The win is verified as every win.
+     */
+    private List<Step> lethalAttack(Node n) {
+        final long shareN = shareNodes, shareS = shareSteps;
+        final int nodes = lim.nodes;
+        final boolean pass = lim.passTurn, outlet = inOutlet;
+        final java.util.Map<String, List<long[]>> keep = new java.util.HashMap<>(table);
+        shareNodes = Long.MAX_VALUE;
+        shareSteps = Long.MAX_VALUE;
+        lim.nodes = st.nodes + 2;
+        lim.passTurn = false;
+        inOutlet = true;
+        attackPly = true;
+        st.lethalAttacks++;
+        try {
+            final List<Step> w = dfs(n, 0);
+            if (w != null) {
+                st.lethalWins++;
+            }
+            return w;
+        } finally {
+            attackPly = false;
+            inOutlet = outlet;
+            lim.passTurn = pass;
+            lim.nodes = nodes;
+            shareNodes = shareN;
+            shareSteps = shareS;
+            table.clear();
+            table.putAll(keep);
+        }
+    }
+
     /** sdcc-loops-1111: our creatures' power, less the strongest one per creature of the opponent's, covers their life. */
     private static boolean lethalNextTurn(Node n) {
         Player opp = null;
@@ -1807,6 +1849,13 @@ final class ForcedWinEngine {
             }
             if (manaOnly) {
                 continue;
+            }
+            if (lim.loopLethalFirst && reps == cap && lethalPastBlockers(cur)) {
+                // sdcc-multitarget-loop-1119: at the lethal count the attack first (its count is the first lethal one)
+                final List<Step> now = lethalAttack(loopNode(cur, a, prefix, body, reps));
+                if (now != null) {
+                    return now;
+                }
             }
             List<Step> win = outletSearch(cur, a, prefix, body, reps);
             if (win != null) {
@@ -3659,6 +3708,13 @@ final class ForcedWinEngine {
                     forge.util.IdScope.install(cloneScope(node.ids));
                     if (hw != null) {
                         return hw;
+                    }
+                }
+                if (lethalFirst) {
+                    final List<Step> now = lethalAttack(fw.node); // sdcc-multitarget-loop-1119: the attack at the count first
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                    if (now != null) {
+                        return now;
                     }
                 }
                 if (fw.node != null && !seenDominated(fw.node)) {
