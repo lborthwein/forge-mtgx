@@ -406,6 +406,16 @@ public final class ForcedWinSolver {
         /** sdcc-counterworlds-1118 (1 = no effect): odds multiplier when a counter of theirs is known this match. */
         public double counterSeenGain = 1.0;
         /**
+         * sdcc-counterlines-1118 (false = off, the default, and then nothing changes; read only with counterWorlds): when the
+         * best verified line wins unopposed but loses counter worlds, the planner's lines not yet verified are re-ranked by
+         * what a single counter cannot break (protection at the win, mana left, then the earliest win and fewest steps) and
+         * up to {@link #counterLinesMax} more distinct ones are verified in the same counter worlds; the best is the line
+         * with the strictly highest P(belief) (ties keep the first). No card names: robustness is the verification's.
+         */
+        public boolean counterLines = false;
+        /** sdcc-counterlines-1118: the robust pass's extra verifications (counterLines only). */
+        public int counterLinesMax = 6;
+        /**
          * sdcc-planwall-1117 (0 = off, the default, and then nothing changes): every planner pass of an offense decision
          * ends by this many ms after the decision's start, so a larger node cap cannot take the engine fallback's time
          * (each pass keeps its own planMs too).
@@ -1076,6 +1086,8 @@ public final class ForcedWinSolver {
             c.counterSearch = "true".equals(get.apply("counterSearch")); // sdcc-counterworlds-1118
             if (get.apply("counterTable") != null) c.counterTable = get.apply("counterTable"); // sdcc-counterworlds-1118
             c.counterSeenGain = dblOr(get.apply("counterSeenGain"), c.counterSeenGain); // sdcc-counterworlds-1118
+            c.counterLines = "true".equals(get.apply("counterLines")); // sdcc-counterlines-1118
+            c.counterLinesMax = intOr(get.apply("counterLinesMax"), c.counterLinesMax); // sdcc-counterlines-1118
             c.planWallMs = intOr(get.apply("planWallMs"), c.planWallMs); // sdcc-planwall-1117
             c.lateEscalateMs = intOr(get.apply("lateEscalateMs"), c.lateEscalateMs); // sdcc-late-escalate-1117
             c.verifyMax = intOr(get.apply("verifyMax"), c.verifyMax); // sdcc-verify-1117
@@ -6805,6 +6817,10 @@ public final class ForcedWinSolver {
         /** sdcc-counterworlds-1118: the counter prior and the counter worlds of this evaluation (-1: off). */
         double counterP = -1;
         int counterWorlds = -1;
+        /** sdcc-counterlines-1118: counter worlds (1..counterWorlds) this line lost (-1: counter worlds off). */
+        int counterLost = -1;
+        /** sdcc-counterlines-1118: set on the line the robust pass chose ("" = no pass ran). */
+        String counterLinesNote = "";
         int respChecked, respRefuted, respNodes, respResponses;
         String refutedBy;
 
@@ -6823,6 +6839,7 @@ public final class ForcedWinSolver {
                     + " " + line + (protection.isEmpty() ? "" : " protectedBy=" + protection)
                     + (failures.isEmpty() ? "" : " fails=" + failures)
                     + (counterWorlds < 0 ? "" : " counterP=" + String.format("%.3f", counterP) + " counterWorlds=" + counterWorlds)
+                    + (counterLost < 0 ? "" : " counterLost=" + counterLost) + counterLinesNote // sdcc-counterlines-1118
                     + (Double.isNaN(pBefore) ? "" : " resp=" + String.format("%.2f", pBefore) + "->" + String.format("%.2f", pBelief)
                             + " checked=" + respChecked + " refuted=" + respRefuted + " nodes=" + respNodes + " responses=" + respResponses
                             + (refutedBy == null ? "" : " by=" + refutedBy)); // opp-response-1108
@@ -6852,6 +6869,7 @@ public final class ForcedWinSolver {
             }
         }
         Eval best = null;
+        final Set<String> evaluated = cfg.counterLines ? new HashSet<>() : null; // sdcc-counterlines-1118
         for (int i = 0; i < picked.size(); i++) {
             if (best != null && forge.game.WorkClock.nanoTime() > deadline) {
                 meter.evalDeadlineStops++;
@@ -6868,6 +6886,9 @@ public final class ForcedWinSolver {
                 break; // rollout-budget-1101: the decision's Forge AI work is spent (a cap hit; offense drops the result)
             }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
+            if (evaluated != null) {
+                evaluated.add(shapeOf(picked.get(i))); // sdcc-counterlines-1118
+            }
             if (e.pUnopposed >= 1.0 && e.pBelief > (best == null ? 0 : best.pBelief + 1e-9)) {
                 respond(live, e); // opp-response-1108 (no-op when off)
             }
@@ -6885,6 +6906,81 @@ public final class ForcedWinSolver {
                 break;
             }
         }
+        if (evaluated != null && best != null && best.pBelief < 1.0 && best.counterLost > 0 && cfg.counterLinesMax > 0) {
+            best = counterLinesPass(live, lines, evaluated, index, deadline, best); // sdcc-counterlines-1118
+        }
+        return best;
+    }
+
+    /** sdcc-counterlines-1118: the verification's distinct-line key, as {@link #evaluateTop} builds it. */
+    static String shapeOf(Line l) {
+        return l.pileNames + "|" + l.steps.size() + "|" + l.winTurn + "|" + l.protectionNames;
+    }
+
+    /** sdcc-counterlines-1118 ({@link Config#counterLines}, report only): robust passes run, their verifications, passes that found a better line. */
+    public int counterLinesPasses, counterLinesEvals, counterLinesBetter;
+
+    /**
+     * sdcc-counterlines-1118 ({@link Config#counterLines}): {@code best} wins unopposed but lost counter worlds. The planner's
+     * lines not yet verified, re-ranked by what one counter cannot break (protection at the win, mana left, then the earliest
+     * win, fewest steps, the planner's rank), are verified in the same counter worlds, at most {@link Config#counterLinesMax}
+     * of them; the line with the strictly highest P(belief) replaces {@code best} (ties keep the first).
+     */
+    private Eval counterLinesPass(Game live, List<Line> lines, Set<String> evaluated, int index, long deadline, Eval best) {
+        final Eval before = best;
+        final Set<String> seen = new HashSet<>(evaluated);
+        final List<Line> rest = new ArrayList<>();
+        for (Line l : lines) {
+            if (seen.add(shapeOf(l))) {
+                rest.add(l);
+            }
+        }
+        rest.sort(java.util.Comparator.comparingInt((Line l) -> -l.protection)
+                .thenComparingInt(l -> -l.manaLeft)
+                .thenComparingInt(l -> l.winTurn)
+                .thenComparingInt(l -> l.steps.size())
+                .thenComparingInt(l -> l.rank));
+        int n = 0;
+        for (Line l : rest) {
+            if (n >= cfg.counterLinesMax) {
+                break;
+            }
+            if (forge.game.WorkClock.nanoTime() > deadline) {
+                meter.evalDeadlineStops++;
+                break;
+            }
+            if (evalStepsSpent()) {
+                meter.evalCapStops++;
+                break;
+            }
+            if (forge.ai.AiWork.spent()) {
+                break;
+            }
+            final Eval e = evaluate(live, l, mix(cfg.seed, index * 1000L + 500 + n), deadline);
+            n++;
+            counterLinesEvals++;
+            if (e.pUnopposed >= 1.0 && e.pBelief > best.pBelief + 1e-9) {
+                respond(live, e); // opp-response-1108 (no-op when off)
+            }
+            receipt("FORCED_WIN counterLines eval #" + n + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e);
+            if (evalSink != null) {
+                evalSink.add(e);
+            }
+            if (e.pUnopposed >= 1.0 && e.pBelief > best.pBelief + 1e-9) {
+                best = e;
+            }
+            if (best.pBelief >= 1.0) {
+                break;
+            }
+        }
+        counterLinesPasses++;
+        if (best != before) {
+            counterLinesBetter++;
+            best.counterLinesNote = " counterLines=" + String.format("%.2f", before.pBelief) + "->"
+                    + String.format("%.2f", best.pBelief);
+        }
+        receipt("FORCED_WIN counterLines" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " candidates=" + rest.size()
+                + " verified=" + n + " P " + String.format("%.2f", before.pBelief) + "->" + String.format("%.2f", best.pBelief));
         return best;
     }
 
@@ -7061,6 +7157,9 @@ public final class ForcedWinSolver {
             e.counterP = counter.prior(live, me, line.winTurn);
             counterM = CounterWorlds.worlds(nWorlds, e.counterP);
             e.counterWorlds = counterM;
+            if (cfg.counterLines && counterM > 0) {
+                e.counterLost = 0; // sdcc-counterlines-1118 (off: -1, nothing printed)
+            }
         }
         if (cfg.oppResponse && !cfg.oppMin) {
             e.seed = seed; // opp-response-1108
@@ -7113,6 +7212,9 @@ public final class ForcedWinSolver {
             }
             if (!worst.won) {
                 fails.merge(worst.why, 1, Integer::sum);
+                if (e.counterLost >= 0 && w <= counterM) {
+                    e.counterLost++; // sdcc-counterlines-1118
+                }
             }
         }
         counterM = 0;
