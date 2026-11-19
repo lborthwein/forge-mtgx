@@ -146,8 +146,8 @@ public final class RlLiveSeat {
                 // line-own-target-1119 (absent = off): the live follower breaks a line before a step whose harmful effect
                 // would land on our own permanent unplanned, or whose destroy cannot destroy (ForcedWinSolver.Config.lineOwnTarget)
                 "lineOwnTarget",
-                // sdcc-multitarget-loop-1119 (absent = off): a loop forwarded to a lethal attack count is searched there before
-                // it is hoisted (ForcedWinSolver.Config.engineLoopLethalFirst)
+                // sdcc-multitarget-loop-1119 (absent = off): at a loop's lethal attack count the attack alone is tried first
+                // (ForcedWinSolver.Config.engineLoopLethalFirst)
                 "engineLoopLethalFirst"));
 
         /**
@@ -188,8 +188,8 @@ public final class RlLiveSeat {
                 // line-own-target-1119 (absent = off): the live follower breaks a line before a step whose harmful effect
                 // would land on our own permanent unplanned, or whose destroy cannot destroy (ForcedWinSolver.Config.lineOwnTarget)
                 "lineOwnTarget",
-                // sdcc-multitarget-loop-1119 (absent = off): a loop forwarded to a lethal attack count is searched there before
-                // it is hoisted (ForcedWinSolver.Config.engineLoopLethalFirst)
+                // sdcc-multitarget-loop-1119 (absent = off): at a loop's lethal attack count the attack alone is tried first
+                // (ForcedWinSolver.Config.engineLoopLethalFirst)
                 "engineLoopLethalFirst"));
 
         /**
