@@ -173,6 +173,17 @@ public final class ChoiceScorer {
          */
         public double departFloor = 0.0;
         /**
+         * sdcc-overbudget-1119 (false = off, the default, and then nothing changes; needs reachAlpha): a departure that
+         * {@link #departScored} would hold because an option went unscored stands when the reach part separates it: the
+         * option the scorer plays was scored, its reach part (planner screen / goldfish) is above the policy answer's, and
+         * its blended value beats the policy's by more than {@link #margin} (the floor still applies). The options left
+         * unscored are not guessed at: the policy's answer is always scored first, and only a scored option with a
+         * higher reach replaces it. The guard was written for value-only departures among partly scored menus; a reach
+         * difference is not that noise. The seat's own discards ({@link #reachDiscards}) keep the guard. No extra
+         * scoring: the rule reads the options already scored. The ask's row says {@code stood=reach}.
+         */
+        public boolean departBudgetReach = false;
+        /**
          * sdcc-scorerleak-1115 (false = off, the default, and then nothing changes): every copy the scorer makes (its
          * options, the hidden guard's probes, the re-deals) re-deals what the seat cannot see of each opponent before the
          * answer is replayed: the opponent's hand cards the seat does not know and their library cards it does not know
@@ -199,6 +210,8 @@ public final class ChoiceScorer {
                 "redealOwn", "discardTail",
                 // discard-guard-1113, off by default
                 "departScored", "departFloor",
+                // sdcc-overbudget-1119, off by default
+                "departBudgetReach",
                 // sdcc-scorerleak-1115, off by default
                 "redealOpp", "redealOwnOrder"));
 
@@ -314,6 +327,11 @@ public final class ChoiceScorer {
             if (c.departScored < 0 || c.departScored > 2 || !(c.departFloor >= 0 && c.departFloor <= 1)) {
                 throw new IllegalArgumentException("choiceScorer: departScored must be 0..2, departFloor 0..1");
             }
+            if (o.has("departBudgetReach")) c.departBudgetReach = strictBool(o, "departBudgetReach");
+            if (c.departBudgetReach && !(c.reachAlpha > 0)) {
+                // sdcc-overbudget-1119: the rule reads the reach part, which only the blend computes
+                throw new IllegalArgumentException("choiceScorer: departBudgetReach needs reachAlpha");
+            }
             if (c.reachDiscards) {
                 // integrate-1110: the blend's own keys must be on; the two families are asked without naming them
                 if (!(c.reachAlpha > 0) || c.screenNodes <= 0) {
@@ -410,6 +428,9 @@ public final class ChoiceScorer {
             if (departFloor > 0) {
                 o.addProperty("departFloor", departFloor);
             }
+            if (departBudgetReach) {
+                o.addProperty("departBudgetReach", true); // sdcc-overbudget-1119: only when on
+            }
             if (relax > 0) {
                 // choice-search-1109 pass 3: written only when on
                 o.addProperty("relax", relax);
@@ -466,6 +487,8 @@ public final class ChoiceScorer {
         public boolean reachDiscards;
         /** owner-misplays-1113: re-deals each option was replayed on (0 = the ask was answered on the real order). */
         public int redeal;
+        /** sdcc-overbudget-1119: why a departure the guard would hold stood ({@code reach}), null = none did. */
+        public String stood;
         /** discard-guard-1113: why a departure was held back ({@code unscored}, {@code floor}), null = none was. */
         public String held;
     }
@@ -2023,16 +2046,33 @@ public final class ChoiceScorer {
                 budget |= "budget".equals(o.fail);
             }
         }
-        if (cfg.departScored >= 2 ? budget || unscored : cfg.departScored == 1 && budget) {
+        boolean hold = cfg.departScored >= 2 ? budget || unscored : cfg.departScored == 1 && budget;
+        if (hold && cfg.departBudgetReach && reachStands(s, own)) {
+            hold = false; // sdcc-overbudget-1119
+            s.stood = "reach";
+        }
+        if (hold) {
             s.held = "unscored";
         } else if (cfg.departFloor > 0 && s.chosen != null && !(s.chosen.value >= cfg.departFloor)) {
             s.held = "floor";
+            s.stood = null;
         }
         if (s.held == null) {
             return alt;
         }
         s.chosen = own;
         return null;
+    }
+
+    /**
+     * sdcc-overbudget-1119 ({@link Config#departBudgetReach}): the option the scorer plays was scored and its reach part
+     * is above the policy answer's (also scored), and it beats that answer's blended value by more than the margin. Not
+     * for the seat's own discards. Reads only the options already scored.
+     */
+    boolean reachStands(final Scored s, final Option own) {
+        final Option c = s.chosen;
+        return cfg.reachAlpha > 0 && !s.reachDiscards && own != null && c != null && c != own && !Double.isNaN(own.value)
+                && !Double.isNaN(c.value) && reachOf(c) > reachOf(own) && c.value > own.value + cfg.margin;
     }
 
     private short[] choose0(final Scored s, final double[] v, final short[] greedy) {
@@ -2197,6 +2237,9 @@ public final class ChoiceScorer {
         r.addProperty("over_budget", s.overBudget);
         if (s.held != null) {
             r.addProperty("held", s.held); // discard-guard-1113
+        }
+        if (s.stood != null) {
+            r.addProperty("stood", s.stood); // sdcc-overbudget-1119: only when the rule let a departure stand
         }
         if (s.unsupported != null) {
             r.addProperty("unsupported", s.unsupported);
