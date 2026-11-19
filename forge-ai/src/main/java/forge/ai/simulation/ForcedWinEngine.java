@@ -58,6 +58,8 @@ final class ForcedWinEngine {
         int refutedWins;
         /** loop-exec-1107 (report only, printed when non-zero): hoisted fast-forwards tried and won, bisections run. */
         int hoists, hoistWins, bisects;
+        /** loopmacro-1118 (report only, printed when non-zero): sinks {@link ForcedWinEngine#sinkSwing} played. */
+        int sinkSwings;
         String lastMoveError = "";
         /**
          * bvw-step1-build-1024 (read-only): move steps played (mainLoopStep calls inside moves), searches stopped by the
@@ -103,6 +105,7 @@ final class ForcedWinEngine {
                     + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "")
                     + (loops > 0 || pruned > 0 ? " pruned=" + pruned + " loops=" + loops + " loopReps=" + loopReps
                             + " loopWins=" + loopWins : "")
+                    + (sinkSwings > 0 ? " sinkSwings=" + sinkSwings : "")
                     + (ordered > 0 || orderFails > 0 ? " ordered=" + ordered + " orderFails=" + orderFails : "")
                     + (focusSkips > 0 || focusGains > 0 || focusInert > 0 ? " focusDepth=" + focusDepth + " focusSkips="
                             + focusSkips + " focusGains=" + focusGains + " focusInert=" + focusInert : "");
@@ -1472,7 +1475,8 @@ final class ForcedWinEngine {
      * position at the loop's start), our floats, land plays, the pass and the attack aside; the largest mana value
      * first, at most {@link #SINKS}. Each is played; then, up to loopSink - 1 times, the pass and, at our next turn, the
      * attack with everything. Every step is a real move on a copy (the opponent's turns are its Forge AI's in this
-     * world, with its blockers and its life). The first win, verified as any line; else null.
+     * world, with its blockers and its life). A sink this search already swung is skipped: the cap on this extra work.
+     * The first win, verified as any line; else null.
      */
     private List<Step> sinkSwing(Node n, Node base) {
         final Set<String> before = new HashSet<>();
@@ -1487,7 +1491,7 @@ final class ForcedWinEngine {
         final java.util.Map<Step, Integer> mv = new java.util.IdentityHashMap<>();
         for (Step m : moves(n)) {
             if (m.pass || m.kind == AbilKind.ATTACK || m.kind == AbilKind.FLOAT || m.kind == AbilKind.LAND
-                    || m.kind == AbilKind.REPEAT || before.contains(sinkKey(m))) {
+                    || m.kind == AbilKind.REPEAT || before.contains(sinkKey(m)) || swung.contains(sinkKey(m))) {
                 continue;
             }
             final Card host = n.g.findById(m.hostId);
@@ -1503,6 +1507,8 @@ final class ForcedWinEngine {
             if (tried++ >= SINKS || out()) {
                 break;
             }
+            swung.add(sinkKey(m));
+            st.sinkSwings++;
             final List<Step> path = new ArrayList<>(n.path);
             Applied a = apply(n, m);
             path.add(m);
@@ -1970,6 +1976,8 @@ final class ForcedWinEngine {
     private final long deadline;
     private final long seed;
     private final Set<String> seen = new HashSet<>();
+    /** loopmacro-1118: the sinks this search has swung; each at most once (a credited loop recurs across the tree). */
+    private final Set<String> swung = new HashSet<>();
     private int startTurn;
     /** bvw-step1-build-1024: the move steps when this search began, and which budget stopped it (diagnostics). */
     private long stepBase, cardBase, pathCards;
