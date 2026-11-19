@@ -462,6 +462,12 @@ public final class ForcedWinSolver {
          */
         public boolean sourceColorsLive = false;
         /**
+         * relearn-1119 (off by default): this solver's own affordance reader is renewed at its first offense of each game
+         * turn, so our cards' templates are learned again in that turn's context (life, graveyard, library, the opponents'
+         * permanents) instead of once per game at first sight. A shared reader is never renewed.
+         */
+        public boolean relearnTurn = false;
+        /**
          * sdcc-etb-1110 (false = off, the default, and then nothing changes): how a land of ours enters (tapped or not, and
          * the life that costs) is asked of the position a plan starts at, not of the template learned at the card's first
          * sight in the game: when a plan plays a land, that land is played as our land drop in a sandbox copy of the
@@ -1071,6 +1077,7 @@ public final class ForcedWinSolver {
             c.planBridgeMax = intOr(get.apply("planBridgeMax"), c.planBridgeMax);
             c.planBridgeMs = intOr(get.apply("planBridgeMs"), (int) c.planBridgeMs);
             c.sourceColorsLive = "true".equals(get.apply("sourceColorsLive")); // ledger-sweep2-1107
+            c.relearnTurn = "true".equals(get.apply("relearnTurn")); // relearn-1119
             c.landEntersProbe = "true".equals(get.apply("landEntersProbe")); // sdcc-etb-1110
             if (get.apply("engineFocus") != null) {
                 c.engineFocus = "true".equals(get.apply("engineFocus")); // sdcc-order-1111
@@ -1262,7 +1269,11 @@ public final class ForcedWinSolver {
     private long budgetMs() {
         return forge.ai.WallClock.budgetMs(cfg.budgetMs);
     }
-    final ForcedWinModel.Reader reader;
+    ForcedWinModel.Reader reader;
+    /** relearn-1119: the reader is this solver's own (not shared), and the game turn of its last renewal. */
+    private final boolean ownReader;
+    private int readerTurn = Integer.MIN_VALUE;
+    public int renewals;
     private Follower active;
     private String noLineKey;
     private int decisionIndex;
@@ -1631,6 +1642,7 @@ public final class ForcedWinSolver {
         this.me = me;
         this.cfg = cfg;
         this.reader = shared != null ? shared : new ForcedWinModel.Reader();
+        this.ownReader = shared == null;
         this.reader.seed = cfg.seed;
         if (cfg.planLoops && this.reader.loopProbe == null) {
             this.reader.loopProbe = (live, pm, c, t) -> fillLoops(cfg, live, pm, c, t); // solver-distill-cc-1109
@@ -2540,6 +2552,17 @@ public final class ForcedWinSolver {
     /** Evaluate the position; the chosen line, or null. */
     Line offense(Game live) {
         lastCap = null; // rollout-budget-1101
+        if (cfg.relearnTurn && ownReader) {
+            final int turn = live.getPhaseHandler().getTurn();
+            if (turn != readerTurn) {
+                if (readerTurn != Integer.MIN_VALUE) {
+                    reader = reader.renewed(); // relearn-1119: our cards are learned again in this turn's context
+                    renewals++;
+                    receipt("FORCED_WIN relearn" + tag() + " turn=" + turn + " renewals=" + renewals);
+                }
+                readerTurn = turn;
+            }
+        }
         final String key = positionKey(live, me);
         if (key.equals(noLineKey)) {
             if (key.equals(capKey)) {
@@ -9363,6 +9386,7 @@ public final class ForcedWinSolver {
                 + (plannerExhausted == 0 ? "" : " plannerExhausted=" + plannerExhausted)
                 + (planFailEngineTakes == 0 ? "" : " planFailEngineTakes=" + planFailEngineTakes)
                 + (verifyReplans == 0 ? "" : " verifyReplans=" + verifyReplans + "/" + verifyReplanLines)
+                + (renewals == 0 ? "" : " relearns=" + renewals) // relearn-1119 (only when used)
                 + " copies=" + copies + " " + reader.probeStats.summary()
                 // sdcc-etb-1110 (only when used): land-entry sandboxes and those whose answer was not the template's; sandboxes
                 // on a battlefield a plan had changed and those whose answer was not the position's
