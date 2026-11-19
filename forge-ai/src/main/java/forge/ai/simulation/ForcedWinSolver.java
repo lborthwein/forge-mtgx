@@ -438,6 +438,16 @@ public final class ForcedWinSolver {
          * ({@link #liveSeat}); the search's play-out copies keep the old follower.
          */
         public boolean breakOnCounter = false;
+        /**
+         * line-own-target-1119 (owner reports 2026-11-19T01-05-37 and 01-14-57; false = off, and then nothing changes): a
+         * followed line's step whose harmful effect (damage, destroy, -N/-N, exile, a bounce, sacrifice by effect) would
+         * land on a permanent we CONTROL that the line did not plan (an ENGINE step's recorded target with no death payoff,
+         * or a target Forge AI picks as the spell is cast with only ours to pick: a modal spell's mode; a probeObjects
+         * step's object is planned), or whose destroy cannot destroy its target (indestructible, whoever controls it),
+         * breaks the line before it is cast, so the seat searches the position as it does after any broken line
+         * ({@link LineOwnTarget}). Live seat only ({@link #liveSeat}); the search's play-out copies keep the old follower.
+         */
+        public boolean lineOwnTarget = false;
         /** BVW opt-in generator: affordance probes also start from a belief-redrawn, own-library-shuffled root. */
         public boolean honestProbes = false;
         /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
@@ -984,6 +994,7 @@ public final class ForcedWinSolver {
             c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.breakOnCounter = "true".equals(get.apply("breakOnCounter")); // sdcc-leak-1111
+            c.lineOwnTarget = "true".equals(get.apply("lineOwnTarget")); // line-own-target-1119
             c.hiddenOrderLegacy = "true".equals(get.apply("hiddenOrderLegacy")); // sdcc-leak-1111
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
@@ -1055,6 +1066,7 @@ public final class ForcedWinSolver {
                 + (planOrder != 0 ? " planOrder=" + planOrder : "")
                 + (tutorCast ? " tutorCast" : "") // sdcc-tutorcast-1110
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
+                + (lineOwnTarget ? " lineOwnTarget" : "") // line-own-target-1119
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
                 + (sourceLeaves ? " sourceLeaves" : "")
@@ -1653,6 +1665,7 @@ public final class ForcedWinSolver {
             return Decision.NONE;
         }
         active = follower(line);
+        active.ownTarget = cfg.lineOwnTarget && liveSeat; // line-own-target-1119
         liveAnswers(); // sdcc-tutorcast-1110 (off: nothing)
         taken++;
         final Follower.Next n = active.next(live, me);
@@ -2930,6 +2943,7 @@ public final class ForcedWinSolver {
         if (cfg.breakOnCounter && liveSeat) {
             active.resolved = resolvedHosts; // breakOnCounter
         }
+        active.ownTarget = cfg.lineOwnTarget && liveSeat; // line-own-target-1119
         liveAnswers(); // sdcc-tutorcast-1110 (off: nothing)
         taken++;
     }
@@ -7805,6 +7819,55 @@ public final class ForcedWinSolver {
             }
         }
 
+        /**
+         * line-own-target-1119 ({@link Config#lineOwnTarget}, the live seat's follower only; false = off): a step whose
+         * harmful effect would land on a permanent we control that the line did not plan, or whose destroy cannot destroy
+         * its target, breaks the line before it is cast ({@link LineOwnTarget}).
+         */
+        boolean ownTarget;
+
+        /** line-own-target-1119: break at step {@code st} (located as {@code sa}) when {@link LineOwnTarget} refuses it. */
+        private boolean ownTargetBreak(final Player me, final SpellAbility sa, final Step st, final Next n) {
+            if (!ownTarget) {
+                return false;
+            }
+            final String refused = LineOwnTarget.refuse(me, sa, modeLine ? modeTok(st) : null, planned(st));
+            if (refused == null) {
+                return false;
+            }
+            broken = true;
+            missingHost = -1;
+            why = "own-target:" + st + " {" + refused + "}";
+            n.broken = true;
+            n.why = why;
+            return true;
+        }
+
+        /** The permanents the line planned step {@code st} on (probeObjects: its object; tutorCast: its sacrifices), or null. */
+        private static Set<Integer> planned(final Step st) {
+            if (st.objTarget < 0 && st.sacIds.isEmpty()) {
+                return null;
+            }
+            final Set<Integer> out = new HashSet<>(st.sacIds);
+            if (st.objTarget >= 0) {
+                out.add(st.objTarget);
+            }
+            return out;
+        }
+
+        /** engineModeChoice: the step's recorded mode set (the token {@link #modes} replays first), or null. */
+        private static String modeTok(final Step st) {
+            final List<String> toks = st.cacPlayed != null ? st.cacPlayed : st.cac;
+            if (toks != null) {
+                for (String t : toks) {
+                    if (ForcedWinChoices.MODE.equals(ForcedWinChoices.kindOf(t))) {
+                        return t;
+                    }
+                }
+            }
+            return null;
+        }
+
         Set<Integer> reserved() {
             final Set<Integer> out = new HashSet<>();
             for (int i = cursor; i < line.steps.size(); i++) {
@@ -7835,6 +7898,9 @@ public final class ForcedWinSolver {
                 n.broken = true;
                 n.why = why;
                 return n;
+            }
+            if (ownTargetBreak(me, sa, st, n)) {
+                return n; // line-own-target-1119
             }
             cursor++;
             executed.put(st.hostId, st);
@@ -7977,6 +8043,9 @@ public final class ForcedWinSolver {
                 n.broken = true;
                 n.why = why;
                 return n;
+            }
+            if (ownTargetBreak(me, sa, st, n)) {
+                return n; // line-own-target-1119
             }
             if (inRepeat) {
                 repPos++;

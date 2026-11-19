@@ -110,7 +110,10 @@ public final class RlLiveSeat {
                 "planLoops",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // line-own-target-1119 (absent = off): the live follower breaks a line before a step whose harmful effect
+                // would land on our own permanent unplanned, or whose destroy cannot destroy (ForcedWinSolver.Config.lineOwnTarget)
+                "lineOwnTarget"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -130,7 +133,10 @@ public final class RlLiveSeat {
                 "planLoops",
                 // owner-misplays-1113 (absent = off): a modal spell's modes are a choice point of the engine search, recorded
                 // in the line and answered by its follower (ForcedWinSolver.Config.engineModeChoice)
-                "engineModeChoice"));
+                "engineModeChoice",
+                // line-own-target-1119 (absent = off): the live follower breaks a line before a step whose harmful effect
+                // would land on our own permanent unplanned, or whose destroy cannot destroy (ForcedWinSolver.Config.lineOwnTarget)
+                "lineOwnTarget"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
