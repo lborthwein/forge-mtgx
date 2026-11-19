@@ -321,6 +321,14 @@ final class ForcedWinEngine {
         int sinkNodes = 24;
         /** sdcc-loops-1111: the most second targets tried after one forced trigger target (our tapped engines first). */
         int chainVariants = 2;
+        /**
+         * loopmacro-1118 (engineLoopSink; 0 = off, nothing changes; read only with loopCredit): our own turns a kill through
+         * an unbounded mana loop may take. After a mana-only loop's fast-forward whose X-sink search found no kill
+         * ({@link #sinkSwing}): the moves the loop made legal, largest mana value first, at most {@link #SINKS}; each is
+         * played, then up to loopSink - 1 times the pass and, at our next turn, the attack. Such a line's turn count is its
+         * passes ({@link #passTurns}).
+         */
+        int loopSink = 0;
         // M3 engine-reach-1107: frontier
         /**
          * engine-reach-1107 (0 = off): the share of the time, in percent, the depth-first search keeps; the rest goes to a frontier
@@ -1455,6 +1463,99 @@ final class ForcedWinEngine {
         }
     }
 
+    /** loopmacro-1118: the most sinks {@link #sinkSwing} plays after one mana loop. */
+    static final int SINKS = 3;
+
+    /**
+     * loopmacro-1118 ({@link Limits#loopSink}): after a mana loop whose X sinks found no kill, from {@code n} (the
+     * position its fast-forward reached): the moves the loop made legal (legal at {@code n}, not at {@code base}, the
+     * position at the loop's start), our floats, land plays, the pass and the attack aside; the largest mana value
+     * first, at most {@link #SINKS}. Each is played; then, up to loopSink - 1 times, the pass and, at our next turn, the
+     * attack with everything. Every step is a real move on a copy (the opponent's turns are its Forge AI's in this
+     * world, with its blockers and its life). The first win, verified as any line; else null.
+     */
+    private List<Step> sinkSwing(Node n, Node base) {
+        final Set<String> before = new HashSet<>();
+        forge.util.IdScope.install(cloneScope(base.ids));
+        LookaheadSearch.givePriority(base.g.getPhaseHandler(), base.me);
+        for (Step m : moves(base)) {
+            before.add(sinkKey(m));
+        }
+        forge.util.IdScope.install(cloneScope(n.ids));
+        LookaheadSearch.givePriority(n.g.getPhaseHandler(), n.me);
+        final List<Step> cands = new ArrayList<>();
+        final java.util.Map<Step, Integer> mv = new java.util.IdentityHashMap<>();
+        for (Step m : moves(n)) {
+            if (m.pass || m.kind == AbilKind.ATTACK || m.kind == AbilKind.FLOAT || m.kind == AbilKind.LAND
+                    || m.kind == AbilKind.REPEAT || before.contains(sinkKey(m))) {
+                continue;
+            }
+            final Card host = n.g.findById(m.hostId);
+            mv.put(m, host == null ? 0 : Math.max(0, host.getCMC()));
+            cands.add(m);
+        }
+        cands.sort((x, y) -> Integer.compare(mv.get(y), mv.get(x)));
+        if (TRACE) {
+            ForcedWinSolver.receipt("FW_ENGINE sinkSwing from=" + n.path.size() + " cands=" + cands + " before=" + before.size());
+        }
+        int tried = 0;
+        for (Step m : cands) {
+            if (tried++ >= SINKS || out()) {
+                break;
+            }
+            final List<Step> path = new ArrayList<>(n.path);
+            Applied a = apply(n, m);
+            path.add(m);
+            for (int k = 0; a != null && !out(); k++) {
+                if (TRACE) {
+                    ForcedWinSolver.receipt("FW_ENGINE sinkSwing step " + path.get(path.size() - 1) + " -> "
+                            + (a.won ? "WON" : a.child == null ? "no-rest(" + a.why + ")" : "rest"));
+                }
+                if (a.won) {
+                    final List<Step> w = wonVerified(path, n);
+                    if (w != null) {
+                        st.loopWins++;
+                        return w;
+                    }
+                    break;
+                }
+                if (a.child == null || k >= 2 * (lim.loopSink - 1)) {
+                    break;
+                }
+                final Node c = a.child;
+                c.passed = true; // no PASS move is offered from here: the chain plays its own
+                final Step next = k % 2 == 0 ? Step.PASS
+                        : Step.engine(AbilKind.ATTACK, -1, "attack", "attack", "", false);
+                a = apply(c, next);
+                path.add(next);
+            }
+            forge.util.IdScope.install(cloneScope(n.ids));
+        }
+        return null;
+    }
+
+    /** loopmacro-1118: a move's identity across copies (by name: the cards a loop moves around are fungible). */
+    private static String sinkKey(Step m) {
+        return m.kind + "|" + m.hostName + "|" + m.desc + "|" + m.floatColor;
+    }
+
+    /**
+     * loopmacro-1118: a line's turn count. {@code dflt} is the count as before (1 when it passes the turn); with
+     * {@code multi} (engineLoopSink on) a line of more than one plain PASS counts them, so its play-out watch covers it.
+     */
+    static int passTurns(List<Step> path, boolean multi, int dflt) {
+        if (!multi) {
+            return dflt;
+        }
+        int passes = 0;
+        for (Step s : path) {
+            if (s.pass && !s.toEnd) {
+                passes++;
+            }
+        }
+        return passes > 1 ? passes : dflt;
+    }
+
     /** sdcc-loops-1111: the next node's moves are a sink search's first ply (X above zero only). */
     private boolean sinkPly;
     /** sdcc-loops-1111: the next node's only move is PASS ({@link #passSwing}). */
@@ -1813,6 +1914,10 @@ final class ForcedWinEngine {
             if (win == null && cur.pv[MANA] > start[MANA] && !out()) {
                 win = sinkSearch(n);
             }
+            if (win == null && lim.loopSink > 0 && cur.pv[MANA] > start[MANA] && !out()) {
+                win = sinkSwing(n, a); // loopmacro-1118 (off: never)
+                forge.util.IdScope.install(cloneScope(a.ids));
+            }
             return win;
         }
         return null;
@@ -2159,11 +2264,12 @@ final class ForcedWinEngine {
             if (win == null) {
                 return null;
             }
-            final Line out = new Line(win, List.of(), win.stream().anyMatch(x -> x.pass) ? 1 : 0, root.me.getLife(), 0, 0,
-                    List.of(), "engine");
+            final boolean multi = lim.loopSink > 0; // loopmacro-1118 (off: the count as before)
+            final Line out = new Line(win, List.of(), passTurns(win, multi, win.stream().anyMatch(x -> x.pass) ? 1 : 0),
+                    root.me.getLife(), 0, 0, List.of(), "engine");
             for (List<Step> alt : e.alts) {
                 if (alt != win) {
-                    out.alternates.add(new Line(alt, List.of(), alt.stream().anyMatch(x -> x.pass) ? 1 : 0,
+                    out.alternates.add(new Line(alt, List.of(), passTurns(alt, multi, alt.stream().anyMatch(x -> x.pass) ? 1 : 0),
                             root.me.getLife(), 0, 0, List.of(), "engine")); // solver-gaps-1104
                 }
             }
@@ -3628,7 +3734,10 @@ final class ForcedWinEngine {
                         && fw.node.pv[MANA] > a.child.pv[MANA]) {
                     // sdcc-loops-1111: the loop left more mana in our pool: its sinks (an X above zero) first; then, as
                     // before, the loop from earlier nodes and the search from here
-                    final List<Step> r = sinkSearch(fw.node);
+                    List<Step> r = sinkSearch(fw.node);
+                    if (r == null && lim.loopSink > 0 && !out()) {
+                        r = sinkSwing(fw.node, a.child); // loopmacro-1118 (off: never)
+                    }
                     forge.util.IdScope.install(cloneScope(node.ids));
                     if (r != null) {
                         return r;

@@ -231,6 +231,12 @@ public final class ForcedWinSolver {
         public boolean engineLoopCredit = false;
         /** sdcc-loops-1111: the most repetitions of such a loop ({@link ForcedWinEngine.Limits#creditCap}). */
         public int engineLoopCreditCap = 96;
+        /**
+         * loopmacro-1118 (0 = off, the default: nothing changes; read only with engineLoopCredit): our own turns a kill
+         * through an unbounded mana loop may take ({@link ForcedWinEngine.Limits#loopSink}): the moves the loop made legal
+         * are played, then the pass and the attack up to this many turns; such a line's turn count is its passes.
+         */
+        public int engineLoopSink = 0;
         /** engine-reach-1107 (0 = off): {@link ForcedWinEngine.Limits#frontierAfterPct}. */
         public int engineFrontierPct = 0;
         /**
@@ -1026,6 +1032,7 @@ public final class ForcedWinSolver {
             c.engineLoopBisect = "true".equals(get.apply("engineLoopBisect")); // loop-exec-1107
             c.engineLoopCredit = "true".equals(get.apply("engineLoopCredit")); // sdcc-loops-1111
             c.engineLoopCreditCap = intOr(get.apply("engineLoopCreditCap"), c.engineLoopCreditCap);
+            c.engineLoopSink = Math.max(0, intOr(get.apply("engineLoopSink"), c.engineLoopSink)); // loopmacro-1118
             c.engineFrontierPct = intOr(get.apply("engineFrontierPct"), c.engineFrontierPct); // engine-reach-1107
             c.followPay = "true".equals(get.apply("followPay")); // kill-line-1106
             c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail")); // kill-line-1106
@@ -1158,6 +1165,7 @@ public final class ForcedWinSolver {
                 + (planWiden > 0 ? " planWiden=" + planWiden : "") // sdcc-widen-1117
                 + (planEscalate > 1 ? " planEscalate=" + planEscalate : "") // sdcc-escalate-1117
                 + (verifyMax > 0 ? " verifyMax=" + verifyMax : "") // sdcc-verify-1117
+                + (engineLoopCredit && engineLoopSink > 0 ? " engineLoopSink=" + engineLoopSink : "") // loopmacro-1118
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
                 + (engineFocus ? " engineFocus" : "") // sdcc-order-1111
@@ -4155,12 +4163,14 @@ public final class ForcedWinSolver {
         }
         el.loopCredit = cfg.engineLoopCredit; // sdcc-loops-1111
         el.creditCap = cfg.engineLoopCreditCap;
+        el.loopSink = cfg.engineLoopCredit ? cfg.engineLoopSink : 0; // loopmacro-1118
         el.frontierAfterPct = cfg.engineFrontierPct; // engine-reach-1107
         if (cfg.engineVerify) {
             final int[] tries = {0};
             el.verify = path -> {
                 final Line l = prefix == null
-                        ? new Line(path, List.of(), path.contains(Step.PASS) ? 1 : 0, me.getLife(), 0, 0, List.of(), "engine")
+                        ? new Line(path, List.of(), ForcedWinEngine.passTurns(path, el.loopSink > 0, path.contains(Step.PASS) ? 1 : 0),
+                                me.getLife(), 0, 0, List.of(), "engine") // loopmacro-1118 (off: the count as before)
                         : joined(prefix, path); // sdcc-bridge-1111
                 // evaluate's own unopposed world first: a line that fails it would be dropped after the search had stopped
                 return playout(live, l, mix(mix(cfg.seed, index * 1000L + 999), 0), 0, -1, decisionWall).won
@@ -4873,6 +4883,7 @@ public final class ForcedWinSolver {
         }
         el.loopCredit = cfg.engineLoopCredit; // sdcc-loops-1111
         el.creditCap = cfg.engineLoopCreditCap;
+        el.loopSink = cfg.engineLoopCredit ? cfg.engineLoopSink : 0; // loopmacro-1118
         el.stalePlayerStatics = cfg.stalePlayerStatics;
         el.offBattlefieldLimits = cfg.offBattlefieldLimits;
         el.historyLki = cfg.historyLki;
