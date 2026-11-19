@@ -154,7 +154,10 @@ public final class RlLiveSeat {
                 "lineOwnTarget",
                 // sdcc-multitarget-loop-1119 (absent = off): at a loop's lethal attack count the attack alone is tried first
                 // (ForcedWinSolver.Config.engineLoopLethalFirst)
-                "engineLoopLethalFirst"));
+                "engineLoopLethalFirst",
+                // sdcc-loopclose-1119 (absent = off): a trigger variant aimed at the move's own host first, unless harmful
+                // (ForcedWinSolver.Config.engineLoopCloseFirst)
+                "engineLoopCloseFirst"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -196,7 +199,10 @@ public final class RlLiveSeat {
                 "lineOwnTarget",
                 // sdcc-multitarget-loop-1119 (absent = off): at a loop's lethal attack count the attack alone is tried first
                 // (ForcedWinSolver.Config.engineLoopLethalFirst)
-                "engineLoopLethalFirst"));
+                "engineLoopLethalFirst",
+                // sdcc-loopclose-1119 (absent = off): a trigger variant aimed at the move's own host first, unless harmful
+                // (ForcedWinSolver.Config.engineLoopCloseFirst)
+                "engineLoopCloseFirst"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as

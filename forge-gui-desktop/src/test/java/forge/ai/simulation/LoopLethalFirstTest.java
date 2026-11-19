@@ -23,8 +23,9 @@ import forge.game.player.Player;
  * source, the copies are hasty) and a second creature the copier could target. The engine's root lists both targets and
  * its loop detector finds the right body; the chunked fast-forward stops at the count whose attackers are lethal past
  * blockers. With engineLoopHoist on, the search hoisted the loop from the root BEFORE searching that node, and the hoist's
- * doubling outlet searches spent the budget first: 0 lines. With the key, the lethal node is searched first (the hoist
- * runs after if that finds nothing), and a hoisted fast-forward stops at the lethal count too.</p>
+ * doubling outlet searches spent the budget first: 0 lines. With the key, the attack alone is tried at that count first
+ * (two nodes, past the root pass move's share); no win leaves the search as with the key off (e7a0fbdf252: the earlier
+ * reordering, which searched the lethal node before the hoist, cost a found line on a step (i) frame and was removed).</p>
  *
  * <p>Frames: the recorded one (key on: proven; off: no line), the second target removed (proven either way), the
  * opponent at 4 life (proven either way), at 20 life (proven with the key: the count is sized to the kill, not capped),
