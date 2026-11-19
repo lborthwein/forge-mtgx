@@ -34,12 +34,12 @@ import forge.player.HumanManaAffordability.Proof;
  * sick); {C}{C}{C} floating. Lurrus of the Dream-Den ({1}{W/B}{W/B}) glowed with no white or black mana to be had.
  *
  * <p>Why: Zirda makes Basalt Monolith's untap cost {1}, so the amount of mana is unbounded, and a cost static in play
- * refuses the untap bound ({@link HumanManaAffordability#untapWidening}). Only the colour screen was left, and it counted
- * the colours of every permanent the player controls, tapped or not, on the ground that "an untap can reach it". These
+ * refuses the untap bound ({@link HumanManaAffordability#untapWidening}). Only the color screen was left, and it counted
+ * the colors of every permanent the player controls, tapped or not, on the ground that "an untap can reach it". These
  * untaps reach only their own Monoliths: the tapped Scrubland and Plains can be untapped by nothing, so they make no mana.</p>
  *
  * <p>Now the payable proof works out which permanents an untap usable now can reach. Each untapped source still counts
- * once, each reachable permanent's colours count without limit, and a tapped source nothing can untap counts not at all.
+ * once, each reachable permanent's colors count without limit, and a tapped source nothing can untap counts not at all.
  * When some untap (or a trigger, a replacement, a copy, a spell) could reach more, the old reading stands.</p>
  *
  * <p>As in {@link HumanManaAffordabilityReflectedUntapTest}, each card that must not glow also asserts that Forge's own
@@ -180,7 +180,7 @@ public class HumanManaAffordabilityUntapReachTest extends AITest {
     }
 
     /**
-     * The cause, on either jar. Zirda's cost static refuses the untap bound, so only the colour screen was left; and the same
+     * The cause, on either jar. Zirda's cost static refuses the untap bound, so only the color screen was left; and the same
      * board without the tapped Scrubland and Plains was already proved unpayable. Those two tapped lands, which no untap on
      * the board can reach, were all that kept Lurrus lit.
      */
@@ -228,7 +228,7 @@ public class HumanManaAffordabilityUntapReachTest extends AITest {
     }
 
     /**
-     * One untapped Plains makes one white mana and nothing can untap it: the unbounded mana is colourless, so the second
+     * One untapped Plains makes one white mana and nothing can untap it: the unbounded mana is colorless, so the second
      * {W/B} has nothing to pay it. Forge's payer agrees.
      */
     @Test
@@ -241,9 +241,9 @@ public class HumanManaAffordabilityUntapReachTest extends AITest {
         noGlow(lurrus);
     }
 
-    /** A colour-changing hook: Mycosynth Lattice lets the colourless mana pay {W/B}. The proof stays unknown; Forge pays. */
+    /** A color-changing hook: Mycosynth Lattice lets the colorless mana pay {W/B}. The proof stays unknown; Forge pays. */
     @Test
-    public void colourChangingHookKeepsTheProofUnknown() {
+    public void colorChangingHookKeepsTheProofUnknown() {
         reportedBoard();
         mine("Mycosynth Lattice", false);
         final Card lurrus = hand("Lurrus of the Dream-Den");
@@ -251,7 +251,7 @@ public class HumanManaAffordabilityUntapReachTest extends AITest {
 
         notUnaffordable(lurrus);
         assertEquals(HumanManaAffordability.proof(me, spell(lurrus)), Proof.UNKNOWN);
-        assertTrue(forgePays(spell(lurrus)), "Forge's payer spends the colourless mana as white or black");
+        assertTrue(forgePays(spell(lurrus)), "Forge's payer spends the colorless mana as white or black");
     }
 
     /** A tapped source that a self-untap CAN reach still counts: Scrubland given "{1}: Untap this land" keeps Lurrus lit. */
@@ -271,9 +271,9 @@ public class HumanManaAffordabilityUntapReachTest extends AITest {
         notUnaffordable(lurrus);
     }
 
-    /** A reachable permanent's colours count without limit: Basalt Monolith given "{T}: Add {W}" keeps Lurrus lit. */
+    /** A reachable permanent's colors count without limit: Basalt Monolith given "{T}: Add {W}" keeps Lurrus lit. */
     @Test
-    public void aReachablePermanentsColoursCountWithoutLimit() {
+    public void aReachablePermanentsColorsCountWithoutLimit() {
         reportedBoard();
         Card basalt = null;
         for (Card c : me.getCardsIn(ZoneType.Battlefield)) {

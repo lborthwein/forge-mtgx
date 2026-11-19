@@ -161,7 +161,7 @@ public final class HumanManaAffordability {
      * <p>afford-colour-unbounded-1119 (owner report 2026-11-19T01-31-38: Lurrus of the Dream-Den, {1}{W/B}{W/B}, glowing
      * with Scrubland and Plains tapped and Zirda making Basalt Monolith's untap cost {1}): "an untap can reach it" held
      * only when the untap could. With {@code reach} known ({@link #untapReach}), a {T} ability of a tapped permanent no
-     * untap can reach makes no colour. Null keeps the old reading: every permanent may be untapped.</p>
+     * untap can reach makes no color. Null keeps the old reading: every permanent may be untapped.</p>
      */
     static boolean colourImpossible(final Player player, final SpellAbility ability, final List<ManaCostShard> shards,
                                     final int hooks, final int extraColours, final Set<Card> reach) {
@@ -196,7 +196,7 @@ public final class HumanManaAffordability {
 
     /** The colours a mana ability can make, as a mask; every colour when the proof cannot read them. */
     private static int producibleColours(final Player player, final SpellAbility source) {
-        // afford-colour-unbounded-1119: a sub-ability that makes more mana makes colours the top's Produced does not name.
+        // afford-colour-unbounded-1119: a sub-ability that makes more mana makes colors the top's Produced does not name.
         for (SpellAbility tail = source.getSubAbility(); tail != null; tail = tail.getSubAbility()) {
             if (tail.getApi() == ApiType.Mana || tail.getApi() == ApiType.ManaReflected) return ManaAtom.ALL_MANA_TYPES;
         }
@@ -299,7 +299,7 @@ public final class HumanManaAffordability {
     /**
      * Review S1 (Astra, #240): has the player a mana ability, activatable where its card is, whose cost taps other
      * permanents ({@code CostTapType}: Urza, Lord High Artificer; Grand Architect)? Such an ability can make mana from a
-     * permanent each time an untap brings it back, in colours of its own.
+     * permanent each time an untap brings it back, in colors of its own.
      */
     static boolean tapsOthersForMana(final Player player) {
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
@@ -453,17 +453,17 @@ public final class HumanManaAffordability {
     }
 
     /**
-     * afford-colour-unbounded-1119: the colours an untap can bring back without limit, the colours of every mana ability
-     * of every permanent in {@code reach} ({@link #producibleColours}: every colour when unreadable); with improvise, an
+     * afford-colour-unbounded-1119: the colors an untap can bring back without limit, the colors of every mana ability
+     * of every permanent in {@code reach} ({@link #producibleColours}: every color when unreadable); with improvise, an
      * artifact brought back also pays {1}.
      */
-    static int reachColours(final Player player, final Set<Card> reach, final boolean improvise) {
-        int colours = 0;
+    static int reachColors(final Player player, final Set<Card> reach, final boolean improvise) {
+        int colors = 0;
         for (Card card : reach) {
-            for (SpellAbility source : card.getManaAbilities()) colours |= producibleColours(player, source);
-            if (improvise && card.isArtifact()) colours |= ManaAtom.COLORLESS;
+            for (SpellAbility source : card.getManaAbilities()) colors |= producibleColours(player, source);
+            if (improvise && card.isArtifact()) colors |= ManaAtom.COLORLESS;
         }
-        return colours;
+        return colors;
     }
 
     /**
@@ -1387,23 +1387,23 @@ public final class HumanManaAffordability {
                 }
                 if (!payableWith(shards, wideBase, wideUnits, cap)) return Assessment.PROVEN_UNAFFORDABLE;
             }
-            // afford-colour-unbounded-1119: an unknown AMOUNT must never hide a missing COLOUR. When the untaps' reach is
+            // afford-colour-unbounded-1119: an unknown AMOUNT must never hide a missing COLOR. When the untaps' reach is
             // known (untapReach), every source no untap reaches is counted as before: the pool, each untapped source once
             // (a tapped one not at all), the costed sources in order. Each reachable permanent may be untapped again and
-            // again, so its colours come without limit: cap tokens of them, as many as any payment can use. A payment
+            // again, so its colors come without limit: cap tokens of them, as many as any payment can use. A payment
             // that fails even so is impossible, whatever untaps cost (Zirda, which refuses the bound above, changes no
-            // colour). Not with a mana conversion (any mana may pay any pip), harmonize (a creature brought back lowers
-            // the price), or a mana ability that taps other permanents (it makes its own colours from each one brought
-            // back); the colour screen below still uses the reach.
+            // color). Not with a mana conversion (any mana may pay any pip), harmonize (a creature brought back lowers
+            // the price), or a mana ability that taps other permanents (it makes its own colors from each one brought
+            // back); the color screen below still uses the reach.
             final boolean improvise = spell && host.hasKeyword(Keyword.IMPROVISE);
             final Set<Card> reach = untapReach(player);
             if (reach != null && (hooks & HOOK_CONVERT) == 0 && !(spell && ability.isHarmonize()) && !tapsOthersForMana(player)) {
-                final int colours = reachColours(player, reach, improvise);
+                final int colors = reachColors(player, reach, improvise);
                 final List<Token> reachBase = new ArrayList<>(base);
-                if (colours != 0) for (int i = 0; i < cap; i++) reachBase.add(new Token(colours, -1, false));
+                if (colors != 0) for (int i = 0; i < cap; i++) reachBase.add(new Token(colors, -1, false));
                 if (!payableWith(shards, reachBase, units, cap)) return Assessment.PROVEN_UNAFFORDABLE;
             }
-            // Improvise and delve pay with colourless. An artifact an untap brings back can improvise too.
+            // Improvise and delve pay with colorless. An artifact an untap brings back can improvise too.
             int extra = 0;
             for (Token t : base) {
                 if (t.spellOnly() && t.colors() != LIFE_PAYMENT) extra |= t.colors();
