@@ -45,7 +45,26 @@ public class OwnerLinesTest extends forge.ai.AITest {
         solverCfg.addProperty("act", "false");
         solverCfg.addProperty("defense", "false");
         final JsonArray ps = root.getAsJsonArray("positions");
-        final int[][] budgets = "true".equals(System.getProperty("owner.quick")) ? new int[][] {{12000, 48000}}
+        // value-run-1117 (opt-in -Downer.beliefCube=PATH -Downer.beliefCubeSha256=SHA [-Downer.beliefSingleton=true|false]
+        // [-Downer.beliefBasics=8]): the opponent's hidden cards in the solver's worlds are re-dealt from the seat's belief
+        // pool exactly as the live seat does (RlSearch: d.solver().redraw = ls.solverRedraw(cfg); belief=uniform), never
+        // from the position's real opponent list. Absent: unchanged (the solver samples from the position's own zones).
+        LookaheadSearch beliefRedraw = null;
+        final String bc = System.getProperty("owner.beliefCube");
+        if (bc != null && !bc.isEmpty()) {
+            final LookaheadSearch.Config bcfg = new LookaheadSearch.Config();
+            bcfg.belief = "uniform";
+            bcfg.beliefCube = bc;
+            bcfg.beliefCubeSha256 = System.getProperty("owner.beliefCubeSha256");
+            bcfg.beliefBasics = Integer.getInteger("owner.beliefBasics", 8);
+            bcfg.beliefSingleton = Boolean.parseBoolean(System.getProperty("owner.beliefSingleton", "true"));
+            bcfg.threads = 1;
+            beliefRedraw = new LookaheadSearch(bcfg);
+            System.out.println("OWNERLINES belief redraw: cube=" + bc + " singleton=" + bcfg.beliefSingleton + " basics=" + bcfg.beliefBasics);
+        }
+        // value-run-1117 (opt-in -Downer.noSetup=true): PROPOSE only (the label teacher's verdict); no goldfish SETUP passes
+        final int[][] budgets = "true".equals(System.getProperty("owner.noSetup")) ? new int[0][]
+                : "true".equals(System.getProperty("owner.quick")) ? new int[][] {{12000, 48000}}
                 : new int[][] {{4000, 12000}, {12000, 48000}, {40000, 160000}};
         for (JsonElement e : ps) {
             final JsonObject o = e.getAsJsonObject();
@@ -58,6 +77,12 @@ public class OwnerLinesTest extends forge.ai.AITest {
                 final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
                 final Player me = g.getPlayers().get(0);
                 final ForcedWinSolver s = new ForcedWinSolver(me, SolverDriver.config(solverCfg));
+                if (beliefRedraw != null) {
+                    s.redraw = beliefRedraw.solverRedraw(s.config()); // value-run-1117: the live seat's re-draw (RlSearch:1100)
+                    if (s.redraw == null) {
+                        throw new IllegalStateException("owner.beliefCube set but no belief redraw");
+                    }
+                }
                 final long t0 = System.nanoTime();
                 final List<ForcedWinSolver.Proposal> props = s.propose(g);
                 ForcedWinSolver.Proposal best = null;
