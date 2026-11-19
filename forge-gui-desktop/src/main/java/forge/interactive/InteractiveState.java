@@ -24,6 +24,7 @@ import forge.game.card.CardView;
 import forge.game.card.CounterType;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
+import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.zone.ZoneType;
 
@@ -608,8 +609,61 @@ final class InteractiveState {
             }
             if (!renderedTextSafe) {
                 entry.addProperty("description", "Hidden spell or ability");
+            } else if (si != null && entry.has("description") && entry.get("description").isJsonPrimitive()) {
+                // lane trigger-label-1119: a trigger's entry reads as its own text, without Forge's stack context.
+                final String description = entry.get("description").getAsString();
+                final String clean = withoutRepeatedRemembered(withoutTriggerContext(description, si.getSpellAbility()),
+                        si.getSpellAbility());
+                if (!clean.equals(description)) entry.addProperty("description", clean);
             }
         }
+    }
+
+    /**
+     * lane trigger-label-1119 (owner report 2026-11-19T05-23-42: the monarch's draw to order read "At the beginning of
+     * your end step, draw a card. [Phase: You]"). Forge's {@code WrappedAbility.getStackDescription} appends a trigger's
+     * "important stack objects" to its text as {@code " [" + Trigger.getImportantStackObjects + "]"}: the phase's player,
+     * the card that changed zones, and the like. It is the engine's context, not the card's words; Forge's own order memory
+     * cuts it too ({@code PlayerControllerHuman.trimStackContext}). This cuts exactly that suffix, computed from the
+     * trigger, when {@code text} ends with it; any other text, and any ability but a trigger, is returned unchanged. The
+     * stored text of a stack entry ends with it as well, after its targets.
+     */
+    static String withoutTriggerContext(final String text, final SpellAbility ability) {
+        if (text == null || !(ability instanceof forge.game.trigger.WrappedAbility wrapped) || wrapped.getTrigger() == null) {
+            return text;
+        }
+        final String important;
+        try {
+            important = wrapped.getTrigger().getImportantStackObjects(wrapped);
+        } catch (RuntimeException unreadable) {
+            return text;
+        }
+        if (important == null || important.isEmpty()) return text;
+        final String context = " [" + important + "]";
+        return text.endsWith(context) ? text.substring(0, text.length() - context.length()) : text;
+    }
+
+    /**
+     * lane trigger-label-1119: a triggered ability's text without the list of objects its trigger remembers, which
+     * {@code WrappedAbility.getStackDescription} appends as {@code " (" + Trigger.getTriggerRemembered + ")"} (dash's
+     * return: "Return Ragavan, Nimble Pilferer (100) to your hand at the beginning of the next end step.
+     * ([Ragavan, Nimble Pilferer (100)])"), cut only when the text ends with exactly that list, every remembered object is
+     * a card, and the rest of the text already names each of them as the list does. Anything else is returned unchanged,
+     * so the list never hides an object the text does not name.
+     */
+    static String withoutRepeatedRemembered(final String text, final SpellAbility ability) {
+        if (text == null || !(ability instanceof forge.game.trigger.WrappedAbility wrapped) || wrapped.getTrigger() == null) {
+            return text;
+        }
+        final List<Object> remembered = wrapped.getTrigger().getTriggerRemembered();
+        if (remembered == null || remembered.isEmpty()) return text;
+        final String list = " (" + remembered + ")";
+        if (!text.endsWith(list)) return text;
+        final String body = text.substring(0, text.length() - list.length());
+        for (Object object : remembered) {
+            if (!(object instanceof Card card) || !body.contains(card.toString())) return text;
+        }
+        return body;
     }
 
     private static void sanitizeCombat(final JsonObject view, final Game game,

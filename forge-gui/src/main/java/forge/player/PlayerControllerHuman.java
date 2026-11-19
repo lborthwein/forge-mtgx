@@ -126,6 +126,19 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         return targetingAbility;
     }
 
+    /** The abilities {@link #orderSimultaneousSa} is asking the GUI to order right now, by view, or null (mtgx, 2026-11-19). */
+    private volatile Map<SpellAbilityView, SpellAbility> orderingAbilities;
+
+    /**
+     * The ability behind {@code view} while the GUI is asked to order simultaneous abilities, or null. Read by a GUI to
+     * label each item from the ability itself (lane trigger-label-1119: a trigger's own text, without Forge's stack
+     * context, and the card behind a delayed trigger's or an effect's host).
+     */
+    public SpellAbility getOrderingAbility(final SpellAbilityView view) {
+        final Map<SpellAbilityView, SpellAbility> abilities = orderingAbilities;
+        return abilities == null || view == null ? null : abilities.get(view);
+    }
+
     void setTargetingAbility(final SpellAbility ability) {
         targetingAbility = ability;
     }
@@ -2389,14 +2402,19 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         }
 
         final IGuiGame.OrderResult<SpellAbilityView> orderResult;
-        if (savedOrder != null) {
-            orderResult = getGui().order(localizer.getMessage("lblReorderSimultaneousAbilities"),
-                    localizer.getMessage("lblResolveFirst"), 0, 0,
-                    Lists.newArrayList(), orderedSAVs, null, false, true);
-        } else {
-            orderResult = getGui().order(localizer.getMessage("lblSelectOrderForSimultaneousAbilities"),
-                    localizer.getMessage("lblResolveFirst"), 0, 0,
-                    orderedSAVs, Lists.newArrayList(), null, false, true);
+        orderingAbilities = spellViewCache;
+        try {
+            if (savedOrder != null) {
+                orderResult = getGui().order(localizer.getMessage("lblReorderSimultaneousAbilities"),
+                        localizer.getMessage("lblResolveFirst"), 0, 0,
+                        Lists.newArrayList(), orderedSAVs, null, false, true);
+            } else {
+                orderResult = getGui().order(localizer.getMessage("lblSelectOrderForSimultaneousAbilities"),
+                        localizer.getMessage("lblResolveFirst"), 0, 0,
+                        orderedSAVs, Lists.newArrayList(), null, false, true);
+            }
+        } finally {
+            orderingAbilities = null;
         }
         final List<SpellAbilityView> chosen = orderResult.ordered();
         if (chosen == null) {
