@@ -983,7 +983,7 @@ public final class LookaheadSearch {
         public final Map<String, Long> rankerDepartKinds = new TreeMap<>();
         public boolean beliefOn;
         public long beliefDecisions, beliefSkipped, beliefCalls, beliefFailures, beliefNanos, beliefMaxNanos;
-        public long beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
+        public long counterWorlds, beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
         public long beliefStaticRefreshes;
         public String beliefDigest, beliefCheckpoint, beliefLastError;
         public final JsonArray beliefCoverage = new JsonArray();
@@ -13689,6 +13689,84 @@ public final class LookaheadSearch {
         } else {
             resample(live, liveMe, g, me, rng);
         }
+        final ForcedWinSolver.Counter sc = searchCounter;
+        if (sc != null && beliefCube != null && !cfg.beliefShadow) {
+            // sdcc-counterworlds-1118 (solver key counterSearch; null = off, nothing drawn): a counter in this world's
+            // hidden hand with the graded prior's probability (public features only)
+            if (rng.nextDouble() < sc.prior(live, liveMe, 0)) {
+                sc.inject(live, liveMe, g, me, rng, false);
+            }
+        }
+    }
+
+    /** sdcc-counterworlds-1118: the search worlds' counter prior (null = off: the worlds as before). Set by PlanSearch. */
+    public volatile ForcedWinSolver.Counter searchCounter;
+
+    /**
+     * sdcc-counterworlds-1118: the counter-world hook for the solver key {@code counterWorlds}: the graded prior from
+     * public features ({@link CounterWorlds#prior}) and the deal of one castable counter from the seat's belief pool
+     * into a hidden hand slot of a world copy. Null when no belief is on (the solver then has no honest worlds to add to).
+     */
+    public ForcedWinSolver.Counter counterHook(final ForcedWinSolver.Config sc) {
+        if (beliefCube == null || cfg.beliefShadow || sc == null) {
+            return null;
+        }
+        final CounterWorlds.Table t = CounterWorlds.table(sc.counterTable);
+        final double seenGain = sc.counterSeenGain;
+        return new ForcedWinSolver.Counter() {
+            @Override public double prior(Game live, Player liveMe, int winTurn) {
+                double p = 0;
+                for (Player liveOpp : liveMe.getOpponents()) {
+                    final boolean known = seenGain != 1.0
+                            && CounterWorlds.counterShown(liveOpp, beliefSeenOf(live), beliefCube.paper);
+                    p = Math.max(p, CounterWorlds.prior(t, liveOpp, winTurn, known, seenGain));
+                }
+                return p;
+            }
+            @Override public void inject(Game live, Player liveMe, Game g, Player me, Random rng, boolean allSources) {
+                counterInject(live, liveMe, g, me, rng, allSources);
+            }
+            @Override public String table() {
+                return t.id;
+            }
+        };
+    }
+
+    /** sdcc-counterworlds-1118: one castable counter from the belief pool replaces one hidden hand card of each opponent. */
+    private void counterInject(Game live, Player liveMe, Game g, Player me, Random rng, boolean allSources) {
+        boolean changed = false;
+        for (Player opp : me.getOpponents()) {
+            final Player liveOpp = (Player) live.getPlayer(opp.getId());
+            if (liveOpp == null) {
+                continue;
+            }
+            final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            final List<Integer> hidden = new ArrayList<>();
+            for (int i = 0; i < hand.size(); i++) {
+                final Card lc = live.findById(hand.get(i).getId());
+                // a dealt card has a fresh id: an id the live game also uses is the same card only by name and zone
+                if (lc == null || lc.getOwner() != liveOpp || !lc.isInZone(ZoneType.Hand)
+                        || !lc.getName().equals(hand.get(i).getName()) || !handKnown(live, liveMe, lc)) {
+                    hidden.add(i);
+                }
+            }
+            if (hidden.isEmpty()) {
+                continue;
+            }
+            final int slot = hidden.get(rng.nextInt(hidden.size()));
+            final List<String> cands = CounterWorlds.counters(beliefPoolFor(live, liveMe, liveOpp), beliefCube.paper);
+            final String name = CounterWorlds.pick(cands, beliefCube.paper, opp, allSources, hand.get(slot), rng);
+            if (name == null) {
+                continue;
+            }
+            hand.set(slot, beliefCard(name, opp, g));
+            opp.getZone(ZoneType.Hand).setCards(hand);
+            changed = true;
+            synchronized (stats) {
+                stats.counterWorlds++;
+            }
+        }
+        if (changed) refreshBeliefStatics(g);
     }
 
     /**

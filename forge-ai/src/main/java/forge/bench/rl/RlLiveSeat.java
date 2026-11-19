@@ -142,7 +142,11 @@ public final class RlLiveSeat {
                 "planWallMs",
                 // sdcc-late-escalate-1117 (absent = 0 = off): the late pass's own ms past the decision's wall
                 // (ForcedWinSolver.Config.lateEscalateMs)
-                "lateEscalateMs"));
+                "lateEscalateMs",
+                // sdcc-counterworlds-1118 (absent = off): the graded counterspell prior in the solver's verification worlds
+                // and (counterSearch) the search's worlds (ForcedWinSolver.Config.counterWorlds / counterSearch /
+                // counterSeenGain; counterTable is not a live key: the resource's default, "drafted")
+                "counterWorlds", "counterSearch", "counterSeenGain"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -178,7 +182,9 @@ public final class RlLiveSeat {
                 // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
                 "grantSacMana",
                 // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
-                "pileTutorCast"));
+                "pileTutorCast",
+                // sdcc-counterworlds-1118 (absent = off): ForcedWinSolver.Config.counterWorlds / counterSearch
+                "counterWorlds", "counterSearch"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as

@@ -394,6 +394,18 @@ public final class ForcedWinSolver {
          */
         public int lateEscalate = 0;
         /**
+         * sdcc-counterworlds-1118 (false = off, the default, and then nothing changes): a graded counterspell prior in
+         * the verification worlds ({@link CounterWorlds}): round(K * P) of the K belief worlds get one counter the
+         * opponent could cast dealt into a hidden hand slot, P from public features only. Needs a belief redraw.
+         */
+        public boolean counterWorlds = false;
+        /** sdcc-counterworlds-1118 (false = off): the search's worlds get a counter with probability P too. */
+        public boolean counterSearch = false;
+        /** sdcc-counterworlds-1118: the prior table ("drafted", the default, or "pooled"; counter-prior-1118.json). */
+        public String counterTable = "drafted";
+        /** sdcc-counterworlds-1118 (1 = no effect): odds multiplier when a counter of theirs is known this match. */
+        public double counterSeenGain = 1.0;
+        /**
          * sdcc-planwall-1117 (0 = off, the default, and then nothing changes): every planner pass of an offense decision
          * ends by this many ms after the decision's start, so a larger node cap cannot take the engine fallback's time
          * (each pass keeps its own planMs too).
@@ -1060,6 +1072,10 @@ public final class ForcedWinSolver {
             c.planWiden = intOr(get.apply("planWiden"), c.planWiden); // sdcc-widen-1117
             c.planEscalate = intOr(get.apply("planEscalate"), c.planEscalate); // sdcc-escalate-1117
             c.lateEscalate = intOr(get.apply("lateEscalate"), c.lateEscalate); // sdcc-late-escalate-1117
+            c.counterWorlds = "true".equals(get.apply("counterWorlds")); // sdcc-counterworlds-1118
+            c.counterSearch = "true".equals(get.apply("counterSearch")); // sdcc-counterworlds-1118
+            if (get.apply("counterTable") != null) c.counterTable = get.apply("counterTable"); // sdcc-counterworlds-1118
+            c.counterSeenGain = dblOr(get.apply("counterSeenGain"), c.counterSeenGain); // sdcc-counterworlds-1118
             c.planWallMs = intOr(get.apply("planWallMs"), c.planWallMs); // sdcc-planwall-1117
             c.lateEscalateMs = intOr(get.apply("lateEscalateMs"), c.lateEscalateMs); // sdcc-late-escalate-1117
             c.verifyMax = intOr(get.apply("verifyMax"), c.verifyMax); // sdcc-verify-1117
@@ -1244,6 +1260,19 @@ public final class ForcedWinSolver {
     }
 
     /** honest-belief-1020: re-draws the opponents' hidden cards of copy {@code g} (called inside {@code synchronized (live)}). */
+    /** sdcc-counterworlds-1118: the graded counter prior and its world deal ({@link LookaheadSearch#counterHook}). */
+    public interface Counter {
+        double prior(Game live, Player liveMe, int winTurn);
+        void inject(Game live, Player liveMe, Game g, Player me, Random rng, boolean allSources);
+        default String table() { return ""; }
+    }
+
+    /** sdcc-counterworlds-1118: set with {@link Config#counterWorlds} (null = off, the worlds as before). */
+    public Counter counter;
+    /** sdcc-counterworlds-1118: counter worlds of the evaluation in progress (worlds 1..counterM; 0 = none). */
+    private int counterM;
+    private boolean counterAllSources;
+
     @FunctionalInterface
     public interface Redraw {
         void apply(Game live, Player liveMe, Game g, Player me, Random rng);
@@ -2991,6 +3020,9 @@ public final class ForcedWinSolver {
          */
         public final boolean libDependent;
         public final int hiddenTakes;
+        /** sdcc-counterworlds-1118 (read-only): the evaluation's counter prior and counter worlds (-1 / -1: off). */
+        public double counterP = -1;
+        public int counterWorlds = -1;
 
         /**
          * solver-distill-cc-1109 (SETUP; false for every offense line): the planner's play for this turn towards a kill
@@ -3030,6 +3062,8 @@ public final class ForcedWinSolver {
             this.winTurn = e.line.winTurn;
             this.engine = "engine".equals(e.line.how);
             this.text = String.valueOf(e);
+            this.counterP = e.counterP; // sdcc-counterworlds-1118
+            this.counterWorlds = e.counterWorlds;
             this.knownTop = e.line.knownTop;
             this.endReason = e.endReason;
             this.endTurn = e.endTurn;
@@ -6768,6 +6802,9 @@ public final class ForcedWinSolver {
         List<Integer> wonWorlds;
         /** opp-response-1108: P(belief) before the response check (NaN: not checked), worlds checked and refuted, the refutation. */
         double pBefore = Double.NaN;
+        /** sdcc-counterworlds-1118: the counter prior and the counter worlds of this evaluation (-1: off). */
+        double counterP = -1;
+        int counterWorlds = -1;
         int respChecked, respRefuted, respNodes, respResponses;
         String refutedBy;
 
@@ -6785,6 +6822,7 @@ public final class ForcedWinSolver {
             return "P(unopposed)=" + pUnopposed + " P(belief)=" + String.format("%.2f", pBelief) + " worlds=" + worldsRun
                     + " " + line + (protection.isEmpty() ? "" : " protectedBy=" + protection)
                     + (failures.isEmpty() ? "" : " fails=" + failures)
+                    + (counterWorlds < 0 ? "" : " counterP=" + String.format("%.3f", counterP) + " counterWorlds=" + counterWorlds)
                     + (Double.isNaN(pBefore) ? "" : " resp=" + String.format("%.2f", pBefore) + "->" + String.format("%.2f", pBelief)
                             + " checked=" + respChecked + " refuted=" + respRefuted + " nodes=" + respNodes + " responses=" + respResponses
                             + (refutedBy == null ? "" : " by=" + refutedBy)); // opp-response-1108
@@ -7016,6 +7054,14 @@ public final class ForcedWinSolver {
         final Map<String, Integer> fails = new HashMap<>();
         final Set<String> prot = new HashSet<>();
         final int nWorlds = beliefWorlds(live); // deck-belief-1105 (cfg.worlds when off)
+        counterM = 0;
+        if (cfg.counterWorlds && counter != null && redraw != null) {
+            // sdcc-counterworlds-1118: worlds 1..m carry a counter the opponent can cast; m = round(K * P), P public
+            counterAllSources = line.winTurn > 0; // a line that passes the turn meets the opponent's untapped mana
+            e.counterP = counter.prior(live, me, line.winTurn);
+            counterM = CounterWorlds.worlds(nWorlds, e.counterP);
+            e.counterWorlds = counterM;
+        }
         if (cfg.oppResponse && !cfg.oppMin) {
             e.seed = seed; // opp-response-1108
             e.wonWorlds = new ArrayList<>();
@@ -7069,6 +7115,7 @@ public final class ForcedWinSolver {
                 fails.merge(worst.why, 1, Integer::sum);
             }
         }
+        counterM = 0;
         e.worldsRun = n;
         e.pBelief = n == 0 ? 0 : sum / n;
         e.protection = String.join(",", new java.util.TreeSet<>(prot));
@@ -7396,6 +7443,10 @@ public final class ForcedWinSolver {
                         }
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
                         hideOrSample(live, me, liveOpp, o, world == 0, rng, redraw, cfg.hideHidden());
+                    }
+                    if (redraw != null && world >= 1 && world <= counterM && counter != null) {
+                        // sdcc-counterworlds-1118: after the world's hand is final, one hidden slot holds a castable counter
+                        counter.inject(live, me, g, cm, rng, counterAllSources);
                     }
                     if (libArrange != null) {
                         libArrange.apply(cm, rng); // e1-q8-1101: an exact-draw sequence at the first hidden slots
