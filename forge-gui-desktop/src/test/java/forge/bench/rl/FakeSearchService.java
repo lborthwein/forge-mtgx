@@ -66,6 +66,11 @@ public final class FakeSearchService implements Closeable {
     /** Lane sc-wallguard-1009: delay of every DECIDE answer on a play-out connection, in ms (0 = none, the default). */
     public volatile long playoutDecideDelayMs = 0;
     /**
+     * sdcc-item2-hooks-1115 (null = 0, as before): the SCORE answer's v(o) for a decoded frame (tests that find a replayed
+     * position by its v(o) give observations distinct values).
+     */
+    public volatile java.util.function.ToDoubleFunction<RlWire.Decide> scoreValue = null;
+    /**
      * Lane forge-live-fixes-1012: a scripted policy (null = random legal steps, the default): the steps of a DECIDE, or
      * null for the random legal steps.
      */
@@ -210,8 +215,9 @@ public final class FakeSearchService implements Closeable {
                             legal++;
                         }
                     }
+                    final java.util.function.ToDoubleFunction<RlWire.Decide> sv = scoreValue;
                     b.putLong(d.gameUid).putInt(d.decIdx).put((byte) RlWire.ST_OK).put((byte) 0).putShort((short) d.C)
-                            .putInt(7).putFloat(0f);
+                            .putInt(7).putFloat(sv == null ? 0f : (float) sv.applyAsDouble(d));
                     for (int i = 0; i < d.C; i++) {
                         b.putFloat(d.candKind[i] > 0 ? 1f / Math.max(1, legal) : 0f);
                     }

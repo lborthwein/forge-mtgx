@@ -1740,7 +1740,7 @@ public final class ChoiceScorer {
         pileSeen = key;
         // sdcc-scorerleak-1115: with a re-deal key the planner's pile copy is dealt as every other scorer copy (off: as before)
         final List<List<Integer>> ps = ChoiceApply.pileChoices(g, me, cfg.solverCfg, cfg.pileNodes, cfg.pileMs, cfg.pileTop, seed,
-                oppSeed >= 0 || ownSeed >= 0 ? fr::onCopy : null);
+                fr, oppSeed >= 0 || ownSeed >= 0 ? fr::onCopy : null);
         s.menuOptions = ps.size();
         if (ps.isEmpty()) {
             s.unsupported = "noPile";
