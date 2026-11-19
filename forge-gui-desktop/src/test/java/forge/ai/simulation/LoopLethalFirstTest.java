@@ -28,9 +28,10 @@ import forge.game.player.Player;
  *
  * <p>Frames: the recorded one (key on: proven; off: no line), the second target removed (proven either way), the
  * opponent at 4 life (proven either way), at 20 life (proven with the key: the count is sized to the kill, not capped),
- * and with one untapped opposing creature (proven with the key, the count covering the block). Two more variants (the
- * copied creature not summoning sick; the other untapper as the copied creature) only check that the key loses no
- * proven line.</p>
+ * with one untapped opposing creature with no mana ability (proven with the key, the count covering the block), and
+ * with the opponent's untapped mana creature instead (the line is found with the key; the open mana lets a belief world
+ * answer it, so it need not be proven). Two more variants (the copied creature not summoning sick; the other untapper
+ * as the copied creature) only check that the key loses no proven line.</p>
  */
 public class LoopLethalFirstTest extends forge.ai.AITest {
 
@@ -113,7 +114,7 @@ public class LoopLethalFirstTest extends forge.ai.AITest {
         }
         final boolean proven = best != null && best.proven(1);
         System.out.println("LOOPLETHAL " + name + " key=" + (on ? "on" : "off") + " ms=" + (System.nanoTime() - t0) / 1_000_000
-                + " lines=" + props.size() + (best == null ? " none" : " proven=" + proven + " | " + cut(best.text, 200))
+                + " lines=" + props.size() + (best == null ? " none" : " proven=" + proven + " | " + cut(best.text, 1200))
                 + " || " + s.summary());
         return best == null ? -1 : proven ? 1 : 0;
     }
@@ -144,7 +145,11 @@ public class LoopLethalFirstTest extends forge.ai.AITest {
         check(bad, "life4: proven, key off", got.get("life4")[0] == 1);
         check(bad, "life4: proven, key on", got.get("life4")[1] == 1);
         check(bad, "life20: key on proves", got.get("life20")[1] == 1);
-        check(bad, "blocker: key on proves", got.get("blocker")[1] == 1);
+        // one untapped opposing creature: the count covers the block (17 copies, the strongest attacker blocked); the
+        // creature with a mana ability also leaves the opponent one open mana of any color, and a belief world whose hand
+        // answers the loop with it breaks the line (P(belief) < 1, not proven): found, not required to be proven
+        check(bad, "blockerNoMana: key on proves", got.get("blockerNoMana")[1] == 1);
+        check(bad, "blocker: key on finds the line", got.get("blocker")[1] >= 0);
         for (Map.Entry<String, int[]> e : got.entrySet()) {
             check(bad, e.getKey() + ": no proven line lost", e.getValue()[0] != 1 || e.getValue()[1] == 1);
         }
