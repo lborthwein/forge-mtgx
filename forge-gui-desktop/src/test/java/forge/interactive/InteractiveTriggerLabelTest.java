@@ -360,4 +360,231 @@ public class InteractiveTriggerLabelTest extends AITest {
             assertEquals(labels, List.of("Grizzly Bears — Draw a card.", "Gain 1 life."));
         }
     }
+
+    // ------------------------------------------------------------------ review fix 1: one visibility rule
+
+    /**
+     * The label of one ability, as the order prompt reads it (the reviewer's harness for #253: the ability is offered
+     * as the one being ordered, then labeled).
+     */
+    private static String label(final Harness h, final SpellAbility sa) throws Exception {
+        final java.lang.reflect.Field field = PlayerControllerHuman.class.getDeclaredField("orderingAbilities");
+        field.setAccessible(true);
+        field.set(h.controller, java.util.Map.of(sa.getView(), sa));
+        try {
+            final java.lang.reflect.Method method = InteractiveGuiGame.class.getDeclaredMethod("safeAbilityLabel",
+                    forge.game.spellability.SpellAbilityView.class);
+            method.setAccessible(true);
+            return (String) method.invoke(h.gui, sa.getView());
+        } finally {
+            field.set(h.controller, null);
+        }
+    }
+
+    /** A phase trigger of {@code host} remembering {@code remembered}, wrapped as Forge puts it on the stack. */
+    private static SpellAbility wrapped(final Card host, final Player player, final Card remembered, final String text) {
+        final forge.game.trigger.Trigger trigger = forge.game.trigger.TriggerHandler.parseTrigger(
+                "Mode$ Phase | Phase$ End Of Turn | TriggerDescription$ " + text, host, false);
+        if (remembered != null) trigger.addRemembered(remembered);
+        final SpellAbility sa = ability(host, player, "DB$ Draw | Defined$ You | SpellDescription$ Draw a card.");
+        final SpellAbility wrapper = new forge.game.trigger.WrappedAbility(trigger, sa, player);
+        wrapper.setActivatingPlayer(player);
+        wrapper.setTriggeringObject(AbilityKey.Player, player);
+        return wrapper;
+    }
+
+    /**
+     * Review of #253, S1 1 (the reviewer's repro): Sneak Attack's end-step sacrifice remembers a creature that is then
+     * bounced, shuffled into the library and put onto the battlefield face down. The label and the stack entry never name
+     * it; the head named "Grizzly Bears (2)".
+     */
+    @Test(timeOut = 900000)
+    public void review253_aRememberedCreatureHiddenAgainIsNeverNamed() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card sneak = addCard("Sneak Attack", h.foe);
+            Card bears = addCard("Grizzly Bears", h.foe);
+            sneak.addRemembered(bears);
+            AbilityUtils.resolve(ability(sneak, h.foe,
+                    "DB$ Animate | Keywords$ Haste | Defined$ Remembered | Duration$ Permanent | AtEOT$ Sacrifice"));
+            final forge.game.trigger.Trigger delayed = h.game.getTriggerHandler().getDelayedTriggersView().get(0);
+            bears = h.game.getAction().moveTo(ZoneType.Hand, bears, null, null);
+            bears = h.game.getAction().moveTo(ZoneType.Library, bears, null, null);
+            h.foe.shuffle(null);
+            bears = h.game.getAction().moveTo(ZoneType.Battlefield, bears, null, null);
+            bears.turnFaceDown(true);
+            assertFalse(InteractiveState.mayReceiveIdentity(bears.getView(), h.seat.getView()));
+            final SpellAbility sacrifice = new forge.game.trigger.WrappedAbility(delayed,
+                    delayed.getOverridingAbility().copy(delayed.getHostCard(), h.foe, false), h.foe);
+            sacrifice.setActivatingPlayer(h.foe);
+            sacrifice.setTriggeringObject(AbilityKey.Player, h.foe);
+            final String result = label(h, sacrifice);
+            System.out.println("SNEAK label=" + result + " raw=" + sacrifice);
+            assertEquals(result, "Sneak Attack — Sacrifice a hidden card at the beginning of the next end step.");
+            h.game.getStack().add(sacrifice);
+            final JsonArray stack = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack");
+            System.out.println("SNEAK stack=" + stack);
+            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(),
+                    "Sacrifice a hidden card at the beginning of the next end step.");
+            assertFalse(stack.toString().contains("Grizzly Bears"), stack.toString());
+        }
+    }
+
+    /**
+     * Review of #253, S1 1 (the reviewer's repro): a remembered card of the foe's hand, the same card moved to exile face
+     * down (remembered as itself, or as a last-known copy), and a library card are never named, by name or by id; the
+     * remembered list drops them.
+     */
+    @Test(timeOut = 900000)
+    public void review253_rememberedHiddenCardsAreNotListed() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card snapshot = CardCopyService.getLKICopy(addCard("Sneak Attack", h.seat));
+            final List<String> secrets = List.of("Lightning Bolt", "Swords to Plowshares", "Counterspell", "Dark Ritual");
+            for (int mode = 0; mode < secrets.size(); mode++) {
+                Card card = addCardToZone(secrets.get(mode), h.foe, ZoneType.Hand);
+                final Card remembered = mode == 2 ? CardCopyService.getLKICopy(card) : card;
+                if (mode == 1 || mode == 2) {
+                    card = h.game.getAction().moveTo(ZoneType.Exile, card, null, null);
+                    card.turnFaceDown(true);
+                }
+                if (mode == 3) card = h.game.getAction().moveTo(ZoneType.Library, card, null, null);
+                final String result = label(h, wrapped(snapshot, h.seat, remembered, "Return the remembered card."));
+                System.out.println("REMEMBER mode=" + mode + " label=" + result);
+                assertEquals(result, "Sneak Attack — Return the remembered card.", "mode " + mode);
+            }
+        }
+    }
+
+    /**
+     * Review of #253, S1 2 and 3 (the reviewer's repros): an effect whose source has since gone out of view (to the
+     * hand, the library, face down, through the graveyard to the hand, as a last-known copy, from the hand to face-down
+     * exile), and an effect whose source is an effect of such a card, read "A hidden card's effect"; the head named the
+     * source from its old object, or the source effect by its generated name.
+     */
+    @Test(timeOut = 900000)
+    public void review253_staleAndNestedEffectSourcesAreHidden() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            for (int mode = 0; mode < 7; mode++) {
+                Card card = mode == 5 ? addCardToZone("Grizzly Bears", h.foe, ZoneType.Hand) : addCard("Grizzly Bears", h.foe);
+                Card effect = effect(h.game, h.foe, mode == 4 ? CardCopyService.getLKICopy(card) : card);
+                if (mode == 0 || mode == 4) card = h.game.getAction().moveTo(ZoneType.Hand, card, null, null);
+                if (mode == 1) card = h.game.getAction().moveTo(ZoneType.Library, card, null, null);
+                if (mode == 2) card.turnFaceDown(true);
+                if (mode == 3) {
+                    card = h.game.getAction().moveTo(ZoneType.Graveyard, card, null, null);
+                    card = h.game.getAction().moveTo(ZoneType.Hand, card, null, null);
+                }
+                if (mode == 5) {
+                    card = h.game.getAction().moveTo(ZoneType.Exile, card, null, null);
+                    card.turnFaceDown(true);
+                }
+                if (mode == 6) {
+                    card = h.game.getAction().moveTo(ZoneType.Hand, card, null, null);
+                    effect = effect(h.game, h.foe, effect);
+                }
+                assertFalse(InteractiveState.mayReceiveIdentity(card.getView(), h.seat.getView()), "mode " + mode);
+                final String result = label(h, ability(effect, h.foe,
+                        "DB$ Draw | Defined$ You | SpellDescription$ Draw a card."));
+                System.out.println("EFFECT mode=" + mode + " label=" + result);
+                assertEquals(result, "A hidden card's effect — Draw a card.", "mode " + mode);
+            }
+        }
+    }
+
+    /**
+     * The real Necropotence: its delayed "put the exiled card into your hand" remembers a card exiled face down. Its
+     * label and stack entry list nothing of it, not even Forge's hidden reference "Face-down card (H1)".
+     */
+    @Test(timeOut = 900000)
+    public void necropotencesFaceDownExileIsNotListed() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card necro = addCard("Necropotence", h.foe);
+            addCardToZone("Lightning Bolt", h.foe, ZoneType.Library);
+            final SpellAbility activation = necro.getSpellAbilities().stream()
+                    .filter(a -> !a.isSpell() && a.getApi() == forge.game.ability.ApiType.ChangeZone).findFirst().orElseThrow();
+            activation.setActivatingPlayer(h.foe);
+            AbilityUtils.resolve(activation);
+            final forge.game.trigger.Trigger delayed = h.game.getTriggerHandler().getDelayedTriggersView().get(0);
+            final SpellAbility put = new forge.game.trigger.WrappedAbility(delayed, delayed.getOverridingAbility(), h.foe);
+            put.setActivatingPlayer(h.foe);
+            put.setTriggeringObject(AbilityKey.Player, h.foe);
+            final String result = label(h, put);
+            System.out.println("NECRO label=" + result);
+            assertEquals(result, "Put the exiled card into your hand.");
+            h.game.getStack().add(put);
+            final JsonArray stack = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack");
+            System.out.println("NECRO stack=" + stack);
+            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(), "Put the exiled card into your hand.");
+        }
+    }
+
+    /**
+     * The moves (review fix 1): a card is a snapshot host, an effect's source, and a trigger's remembered card; then it
+     * moves. It is named exactly when this seat may identify the card with its id now: hidden after hand to face-down
+     * exile, battlefield to graveyard to hand, or a shuffle into the library; named after a change of control, and after
+     * a token has ceased to exist (a face-up token is public wherever it was).
+     */
+    @Test(timeOut = 900000)
+    public void review253_eachReferenceFollowsTheCardAsItIsNow() throws Exception {
+        for (String move : List.of("hand-to-face-down-exile", "battlefield-graveyard-hand", "shuffle-into-library",
+                "control-change", "token-gone")) {
+            try (Harness h = new Harness((seat, foe) -> { })) {
+                final Card sneak = CardCopyService.getLKICopy(addCard("Sneak Attack", h.seat));
+                final List<Card> cards = new ArrayList<>();
+                for (int role = 0; role < 3; role++) {
+                    cards.add(switch (move) {
+                        case "hand-to-face-down-exile" -> addCardToZone("Grizzly Bears", h.foe, ZoneType.Hand);
+                        case "token-gone" -> addToken("c_1_1_a_thopter_flying", h.foe);
+                        default -> addCard("Grizzly Bears", h.foe);
+                    });
+                }
+                final String name = cards.get(0).getName();
+                final SpellAbility asHost = ability(CardCopyService.getLKICopy(cards.get(0)), h.foe,
+                        "DB$ Draw | Defined$ You | SpellDescription$ Draw a card.");
+                final SpellAbility asSource = ability(effect(h.game, h.foe, cards.get(1)), h.foe,
+                        "DB$ Draw | Defined$ You | SpellDescription$ Draw a card.");
+                final SpellAbility asRemembered = wrapped(sneak, h.seat, cards.get(2), "Return the remembered card.");
+                final List<Card> now = new ArrayList<>();
+                for (Card card : cards) {
+                    Card c = card;
+                    switch (move) {
+                        case "hand-to-face-down-exile" -> {
+                            c = h.game.getAction().moveTo(ZoneType.Exile, c, null, null);
+                            c.turnFaceDown(true);
+                        }
+                        case "battlefield-graveyard-hand" -> {
+                            c = h.game.getAction().moveTo(ZoneType.Graveyard, c, null, null);
+                            c = h.game.getAction().moveTo(ZoneType.Hand, c, null, null);
+                        }
+                        case "shuffle-into-library" -> {
+                            c = h.game.getAction().moveTo(ZoneType.Library, c, null, null);
+                            h.foe.shuffle(null);
+                        }
+                        case "control-change" -> c.setController(h.seat, h.game.getNextTimestamp());
+                        case "token-gone" -> c = h.game.getAction().moveTo(ZoneType.Graveyard, c, null, null);
+                        default -> fail(move);
+                    }
+                    now.add(c);
+                }
+                h.game.getAction().checkStateEffects(true);
+                final boolean named = move.equals("control-change") || move.equals("token-gone");
+                if (move.equals("token-gone")) {
+                    for (Card card : cards) assertEquals(h.game.findById(card.getId()), null, "the token has ceased to exist");
+                } else {
+                    for (Card card : now) {
+                        assertEquals(InteractiveState.mayReceiveIdentity(card.getView(), h.seat.getView()), named, move);
+                    }
+                }
+                final List<String> labels = List.of(label(h, asHost), label(h, asSource), label(h, asRemembered));
+                System.out.println("MOVE " + move + " " + labels);
+                if (named) {
+                    assertEquals(labels, List.of(name + " — Draw a card.", name + " — Draw a card.",
+                            "Sneak Attack — Return the remembered card. (" + name + ")"), move);
+                } else {
+                    assertEquals(labels, List.of("Ability of a hidden card (" + cards.get(0).getId() + ")",
+                            "A hidden card's effect — Draw a card.", "Sneak Attack — Return the remembered card."), move);
+                    for (String label : labels) assertFalse(label.contains(name), move + ": " + label);
+                }
+            }
+        }
+    }
 }

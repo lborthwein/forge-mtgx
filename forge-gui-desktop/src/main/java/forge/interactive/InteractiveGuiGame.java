@@ -4134,19 +4134,22 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             if (described != null) return described;
         }
         final SpellAbility actual = offered != null ? offered : abilityBehind(ability);
-        final String origin = abilityOrigin(host, source, actual);
-        final List<Card> named = new ArrayList<>();
-        String raw = triggerText(Objects.requireNonNullElse(ability.getDescription(), "Ability"), actual, named);
-        // An effect of a hidden card carries that card's name in its own ("Thoughtseize's Effect"): its text says "this
-        // effect" instead, and the effect is no shield.
-        final boolean hiddenEffect = HIDDEN_EFFECT.equals(origin);
-        if (hiddenEffect && host.getName() != null && !host.getName().isBlank()) raw = raw.replace(host.getName(), "this effect");
-        String text = sanitizeText(raw, hiddenEffect ? null : source);
-        // The trigger's own references to cards this seat may identify read as their names ("Return Ragavan, Nimble
-        // Pilferer to your hand"), after sanitizing: a hidden card's reference has become "Face-down card (id)" by then.
-        for (Card card : named) {
-            if (InteractiveState.mayReceiveIdentity(card.getView(), human.getView())) {
-                text = text.replace(card.getName() + " (" + card.getId() + ")", card.getName());
+        // lane trigger-label-1119 review fix 1: one visibility rule for every card the label names
+        // (InteractiveState.knownNow: the current card with that id, identifiable by this seat now).
+        final InteractiveState.EffectOrigin effect = InteractiveState.effectOrigin(effectCard(host, actual), game,
+                human.getView());
+        String raw = Objects.requireNonNullElse(ability.getDescription(), "Ability");
+        // An effect's own name is generated from its source ("Thoughtseize (5)'s Effect"): with a hidden link in its
+        // source chain, it reads "this effect", and the effect shields nothing.
+        if (effect.hidden()) raw = effect.withoutEffectNames(raw);
+        final List<CardView> remembered = new ArrayList<>();
+        raw = InteractiveState.referenceText(raw, actual, effect.links(), host, game, human.getView(), remembered);
+        String text = sanitizeText(raw, effect.hidden() ? null : source);
+        // The trigger's remembered cards this seat may identify now read as their names ("Return Ragavan, Nimble
+        // Pilferer to your hand").
+        for (CardView known : remembered) {
+            if (known.getName() != null && !known.getName().isBlank()) {
+                text = text.replace(known.getName() + " (" + known.getId() + ")", known.getName());
             }
         }
         // A spell copy says so, by its spell's name (owner report 2026-10-21T17-36-59: the storm copies to order).
@@ -4154,28 +4157,19 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 && host.getName() != null && !host.getName().isBlank()) {
             return host.getName() + " (copy)" + (text.isBlank() ? "" : ": " + text);
         }
+        final String origin = abilityOrigin(host, source, effect);
         return origin == null || text.contains(origin) ? text : origin + " — " + text;
     }
 
-    /** {@link #abilityOrigin} for an effect whose source this seat may not identify. */
-    private static final String HIDDEN_EFFECT = "A hidden card's effect";
-
     /**
-     * lane trigger-label-1119: the view this seat may know an ability's host by, or null. The host itself when this seat
-     * may identify it. Otherwise, for a snapshot of a card (Forge's last-known copy, in no zone, not face down: the host
-     * of a delayed trigger, such as dash's "return it at the beginning of the next end step", SpellAbilityEffect
-     * registerDelayedTrigger), the card it is a snapshot of, as it is now, when this seat may identify that; the
-     * mana-source labels judge a last-known copy the same way ({@link InteractiveState#manaSourceLabel}). Owner report
+     * lane trigger-label-1119: the view this seat may know an ability's host by, or null: the current card with the
+     * host's id, when this seat may identify it now ({@link InteractiveState#knownNow}). A snapshot host (Forge's
+     * last-known copy, in no zone: the host of a delayed trigger, such as dash's "return it at the beginning of the next
+     * end step", SpellAbilityEffect.registerDelayedTrigger) is so judged by the card it is a snapshot of. Owner report
      * 2026-11-19T05-23-42: the owner's own dashed Ragavan's return read "Ability of face-down card (100)".
      */
     private CardView identifiedHost(final CardView host) {
-        if (host == null) return null;
-        if (InteractiveState.mayReceiveIdentity(host, human.getView())) return host;
-        if (host.getZone() != null || host.isFaceDown() || host.getGamePieceType() == GamePieceType.COPIED_SPELL
-                || game == null) return null;
-        final Card current = game.findById(host.getId());
-        return current != null && InteractiveState.mayReceiveIdentity(current.getView(), human.getView())
-                ? current.getView() : null;
+        return host == null ? null : InteractiveState.knownNow(game, host, human.getView());
     }
 
     /**
@@ -4193,56 +4187,34 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         return null;
     }
 
-    /**
-     * lane trigger-label-1119: a triggered ability's description ({@code SpellAbility.toUnsuppressedString}, so
-     * {@code WrappedAbility.getStackDescription}) without the stack context Forge appends to the trigger's own text:
-     * <ul>
-     * <li>the trigger's "important stack objects", {@code " [" + Trigger.getImportantStackObjects + "]"} ("[Phase: You]"
-     * after the monarch's draw), cut exactly when the text ends with it;</li>
-     * <li>the objects the trigger remembers, {@code " (" + remembered + ")"}: dropped when the text already names each
-     * remembered card (dash's "Return Ragavan, Nimble Pilferer (100) to your hand ..."), otherwise said as names, a card
-     * this seat may not identify as its reference, which sanitizing then hides.</li>
-     * </ul>
-     * Any other ability, or text that does not end that way, is returned as it is. {@code named} receives the remembered
-     * cards, whose references the caller shortens to names.
-     */
-    static String triggerText(final String text, final SpellAbility ability, final List<Card> named) {
-        if (text == null || !(ability instanceof forge.game.trigger.WrappedAbility wrapped) || wrapped.getTrigger() == null) {
-            return text;
+    /** The effect card an ability's host view stands for, or null when the host is not an effect or cannot be found. */
+    private Card effectCard(final CardView host, final SpellAbility actual) {
+        if (host == null || host.getGamePieceType() != GamePieceType.EFFECT) return null;
+        if (actual != null && actual.getHostCard() != null && actual.getHostCard().getId() == host.getId()) {
+            return actual.getHostCard();
         }
-        final String out = InteractiveState.withoutTriggerContext(text, ability);
-        final List<Object> remembered = wrapped.getTrigger().getTriggerRemembered();
-        final String list = remembered == null || remembered.isEmpty() ? null : " (" + remembered + ")";
-        if (list == null || !out.endsWith(list)) return out;
-        final List<String> names = new ArrayList<>();
-        for (Object object : remembered) {
-            if (!(object instanceof Card card)) return out;
-            named.add(card);
-            names.add(card.toString());
-        }
-        final String cut = InteractiveState.withoutRepeatedRemembered(out, ability);
-        return !cut.equals(out) ? cut : out.substring(0, out.length() - list.length()) + " (" + String.join(", ", names) + ")";
+        return game == null ? null : game.findById(host.getId());
     }
 
     /**
      * lane trigger-label-1119: the card an ability comes from when its host is not that card, said before the ability's
-     * text, or null. An effect (Forge's EFFECT piece in the command zone: a lasting effect, the monarch, an emblem) is
-     * named by its source card when this seat may identify it, by its own name when it has no source ("The Monarch"), and
-     * as "A hidden card's effect" when the source is a card this seat may not identify, whose name the effect's carries.
-     * A snapshot host (a delayed trigger's) is named by the card it is a snapshot of.
+     * text, or null. An effect is named by {@link InteractiveState#effectOrigin}: its source chain's first card that is
+     * not an effect, when every link is a card this seat may identify now; "A hidden card's effect" otherwise; its own
+     * name when it has no source at all (the monarch), unless that name carries a name this seat may not read. A
+     * snapshot host (a delayed trigger's) is named by the card it is a snapshot of.
      */
-    private String abilityOrigin(final CardView host, final CardView source, final SpellAbility actual) {
+    private String abilityOrigin(final CardView host, final CardView source, final InteractiveState.EffectOrigin effect) {
         if (host == null || source == null) return null;
+        if (effect.hidden()) return InteractiveState.HIDDEN_EFFECT;
         if (host.getGamePieceType() == GamePieceType.EFFECT) {
-            Card effect = actual != null && actual.getHostCard() != null && actual.getHostCard().getId() == host.getId()
-                    ? actual.getHostCard() : null;
-            if (effect == null && game != null) effect = game.findById(host.getId());
-            final Card from = effect == null ? null : effect.getEffectSource();
-            if (from == null) return host.getName() == null || host.getName().isBlank() ? null : host.getName();
-            final CardView known = identifiedHost(from.getView());
-            return known == null ? HIDDEN_EFFECT : known.getName();
+            final String name = effect.name();
+            if (name == null) return null;
+            final boolean ownName = effect.effects().stream().anyMatch(e -> name.equals(e.getName()));
+            return ownName && !sanitizeText(name, null).equals(name) ? InteractiveState.HIDDEN_EFFECT : name;
         }
-        return source != host ? source.getName() : null;
+        // a snapshot host, named by the card it is a snapshot of (or by itself when that card has left the game)
+        final boolean snapshot = source != host || host.getZone() == null;
+        return snapshot && source.getName() != null && !source.getName().isBlank() ? source.getName() : null;
     }
 
     /**
