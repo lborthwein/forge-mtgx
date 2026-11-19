@@ -78,6 +78,21 @@ public class GapFinderTest extends forge.ai.AITest {
         cfgE.addProperty("engineMs", String.valueOf(eMs));
         cfgE.addProperty("budgetMs", String.valueOf(eMs * 2));
         final JsonArray ps = root.getAsJsonArray("positions");
+        // sdcc-gapbelief-1118 (opt-in -Dgap.beliefCube=PATH -Dgap.beliefCubeSha256=SHA [-Dgap.beliefSingleton] [-Dgap.beliefBasics]):
+        // every arm's worlds re-deal the opponent's hidden cards from the seat's belief pool, as the live seat does
+        // (PlanSearch: solver.redraw = ls.solverRedraw(cfg)), never from the position's real opponent list
+        final String bc = System.getProperty("gap.beliefCube");
+        if (bc != null && !bc.isEmpty()) {
+            final LookaheadSearch.Config bcfg = new LookaheadSearch.Config();
+            bcfg.belief = "uniform";
+            bcfg.beliefCube = bc;
+            bcfg.beliefCubeSha256 = System.getProperty("gap.beliefCubeSha256");
+            bcfg.beliefBasics = Integer.getInteger("gap.beliefBasics", 8);
+            bcfg.beliefSingleton = Boolean.parseBoolean(System.getProperty("gap.beliefSingleton", "true"));
+            bcfg.threads = 1;
+            BELIEF = new LookaheadSearch(bcfg);
+            System.out.println("GAPFIND belief redraw: cube=" + bc + " singleton=" + bcfg.beliefSingleton + " basics=" + bcfg.beliefBasics);
+        }
         for (JsonElement e : ps) {
             final JsonObject o = e.getAsJsonObject();
             final String id = o.get("game").getAsString();
@@ -130,9 +145,18 @@ public class GapFinderTest extends forge.ai.AITest {
         }
     }
 
+    /** sdcc-gapbelief-1118: the belief search whose re-draw the solver installs (null = off). */
+    private static LookaheadSearch BELIEF = null;
+
     private static ForcedWinSolver.Proposal run(final String frame, final JsonObject cfg, final StringBuilder row, final String tag) {
         final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
         final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get(0), SolverDriver.config(cfg));
+        if (BELIEF != null) {
+            s.redraw = BELIEF.solverRedraw(s.config()); // sdcc-gapbelief-1118: the live seat's re-draw
+            if (s.redraw == null) {
+                throw new IllegalStateException("gap.beliefCube set but no belief redraw");
+            }
+        }
         final long t0 = System.nanoTime();
         final ForcedWinSolver.Proposal p = best(s.propose(g));
         row.append(" ").append(tag).append("=").append(p == null ? "none" : p.proven(1) ? "proven" : "pB" + p.pBelief)
