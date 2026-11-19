@@ -531,6 +531,11 @@ public final class ForcedWinModel {
         /** Observed effects when it goes from the battlefield to our graveyard (a sacrifice: Chromatic Star). */
         final List<Eff> dies = new ArrayList<>();
         boolean counter;
+        /**
+         * sdcc-counterlines-1118 (read only by the planner's heldProt): a counter's readable printed costs, as the probe read
+         * them ({@link ForcedWinModel#readCost}; no alternative costs). Null in a template preloaded from an older cache.
+         */
+        final List<Abil> counterCosts = new ArrayList<>();
         final List<Abil> fromHand = new ArrayList<>();
         final List<Abil> onBattlefield = new ArrayList<>();
         /** On the battlefield: a plain mana source (engine metadata of its mana abilities). */
@@ -572,6 +577,9 @@ public final class ForcedWinModel {
             a.emptyDrawWin = emptyDrawWin;
             a.dies.addAll(dies);
             a.counter = counter;
+            if (counterCosts != null) {
+                a.counterCosts.addAll(counterCosts); // sdcc-counterlines-1118
+            }
             a.fromHand.addAll(fromHand);
             a.onBattlefield.addAll(onBattlefield);
             a.sourceColors = sourceColors;

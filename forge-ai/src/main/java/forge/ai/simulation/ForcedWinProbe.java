@@ -1241,6 +1241,9 @@ public final class ForcedWinProbe {
             final Abil base = sacCost != null ? sacCost : ForcedWinModel.readCost(sa0, kind);
             if (sa0.getApi() == forge.game.ability.ApiType.Counter) {
                 t.counter = true;
+                if (base != null) {
+                    t.counterCosts.add(base); // sdcc-counterlines-1118 (read only by the planner's heldProt)
+                }
             }
             if (base == null) {
                 t.unmodeled = true;
