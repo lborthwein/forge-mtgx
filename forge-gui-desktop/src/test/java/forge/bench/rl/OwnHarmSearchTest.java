@@ -114,6 +114,8 @@ public class OwnHarmSearchTest extends SimulationTest {
         final List<JsonObject> decisions = new ArrayList<>();
         final List<String> ownHarmLines = new ArrayList<>();
         String err;
+        /** The probe's reading of the live game before and after the decision (null: no probe). */
+        String before, after;
 
         JsonObject line() {
             return decisions.isEmpty() ? null : decisions.get(0);
@@ -135,6 +137,11 @@ public class OwnHarmSearchTest extends SimulationTest {
     }
 
     private Run run(final String extra, final Board board, final String pick) throws Exception {
+        return run(extra, board, pick, null);
+    }
+
+    private Run run(final String extra, final Board board, final String pick,
+            final java.util.function.Function<Game, String> probe) throws Exception {
         final Run r = new Run();
         final PrintStream was = System.err;
         final ByteArrayOutputStream buf = new ByteArrayOutputStream();
@@ -159,12 +166,14 @@ public class OwnHarmSearchTest extends SimulationTest {
             game.getAction().checkStateEffects(true);
             svc.script = new Script(RlSearch.splitmix(SEED ^ 0x6c697665L), pick);
             live.bind(game, 0, SEED, null, AiFixes.Mode.OFF);
+            r.before = probe == null ? null : probe.apply(game);
             final List<SpellAbility> a;
             try {
                 a = p0.getController().chooseSpellAbilityToPlay();
             } finally {
                 live.finish();
             }
+            r.after = probe == null ? null : probe.apply(game);
             r.answer = a == null || a.isEmpty() || a.get(0) == null ? "pass"
                     : a.get(0).getHostCard() == null ? "?" : a.get(0).getHostCard().getName();
             System.err.flush();
@@ -372,6 +381,49 @@ public class OwnHarmSearchTest extends SimulationTest {
         final Run r = run("ownHarm=on", ephemerate(), "Ephemerate");
         Assert.assertEquals(r.answer, "Ephemerate", r.summary());
         Assert.assertNull(r.ownHarm(), r.summary());
+    }
+
+    /**
+     * Review 1 of #251, S1 7: the guard reads the live ability without changing it. The reviewer's board (Abrade in hand,
+     * the opponent's Sol Ring, no creature: one mode offered, so a CharmOrder renumbering would show) with the policy
+     * passing, so Abrade is a departure the guard inspects (shadow, on) and never the answer. The key-off seat itself
+     * changes the live Abrade as it builds its menu (it sets the activator, and Forge's makePossibleOptions renumbers the
+     * offered mode's CharmOrder): shadow and on leave the live Abrade (its activator, targets and SVars, its modes'
+     * CharmOrder among them) exactly as off does. The guard's own calls, with nothing else between, are checked
+     * before/after in LineOwnTargetReviewTest and OwnHarmK8Test.
+     */
+    @Test
+    public void theGuardLeavesTheLiveAbilityUnchangedOffShadowAndOn() throws Exception {
+        final Board b = (g, p0, p1) -> {
+            for (String n : new String[] {"Mountain", "Mountain"}) {
+                addCard(n, p0);
+            }
+            addCardToZone("Abrade", p0, ZoneType.Hand);
+            addCard("Sol Ring", p1);
+            addCard("Plains", p1);
+        };
+        final java.util.function.Function<Game, String> probe = g -> {
+            final StringBuilder sb = new StringBuilder();
+            for (Card c : g.getPlayers().get(0).getCardsIn(ZoneType.Hand)) {
+                if (c.getName().equals("Abrade")) {
+                    for (SpellAbility sa : c.getSpellAbilities()) {
+                        sb.append(forge.ai.simulation.LineOwnTargetReviewTest.state(sa));
+                    }
+                }
+            }
+            return sb.toString();
+        };
+        String offAfter = null;
+        for (String mode : new String[] {"", "ownHarm=shadow", "ownHarm=on"}) {
+            final Run r = run(mode, b, null, probe);
+            Assert.assertEquals(r.answer, "pass", r.summary());
+            Assert.assertFalse(r.before.isEmpty(), "Abrade in hand");
+            Assert.assertTrue(r.before.contains("CharmOrder=1") && r.before.contains("CharmOrder=2"), r.before);
+            Assert.assertTrue(r.ownHarmLines.isEmpty(), "destroy Sol Ring is live: nothing refused: " + r.summary());
+            System.out.println("[own-harm-test] '" + mode + "' live Abrade before:\n" + r.before + "after:\n" + r.after);
+            offAfter = offAfter == null ? r.after : offAfter;
+            Assert.assertEquals(r.after, offAfter, "'" + mode + "': the live Abrade after the decision, as off");
+        }
     }
 
     // ------------------------------------------------------------------ the rule itself (no seat)

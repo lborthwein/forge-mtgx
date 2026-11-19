@@ -65,4 +65,35 @@ public class OwnHarmK8Test extends SimulationTest {
         final List<String> shadow = labels(AiFixes.Mode.SHADOW, g, me);
         Assert.assertEquals(shadow, off, "shadow: the candidates as off");
     }
+
+    /**
+     * Review 1 of #251, S1 7: enumerating with the key off, shadow or on leaves the live Abrade as it was (the reviewer's
+     * board: the opponent's Sol Ring, no creature, so a CharmOrder renumbering would show), and Abrade, its destroy mode
+     * live, is a candidate each time.
+     */
+    @Test
+    public void theK8GuardLeavesTheLiveAbilityUnchanged() {
+        final Game g = initAndCreateGame();
+        final Player me = g.getPlayers().get(1);
+        final Player opp = g.getPlayers().get(0);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+        addCard("Mountain", me);
+        addCard("Mountain", me);
+        final Card abrade = addCardToZone("Abrade", me, ZoneType.Hand);
+        addCard("Sol Ring", opp);
+        g.getAction().checkStateEffects(true);
+        final StringBuilder before = new StringBuilder();
+        for (forge.game.spellability.SpellAbility sa : abrade.getSpellAbilities()) {
+            before.append(LineOwnTargetReviewTest.state(sa));
+        }
+        for (AiFixes.Mode mode : new AiFixes.Mode[] {AiFixes.Mode.OFF, AiFixes.Mode.SHADOW, AiFixes.Mode.ON}) {
+            final List<String> l = labels(mode, g, me);
+            Assert.assertTrue(l.stream().anyMatch(x -> x.contains("Abrade")), mode + ": Abrade is a candidate: " + l);
+            final StringBuilder after = new StringBuilder();
+            for (forge.game.spellability.SpellAbility sa : abrade.getSpellAbilities()) {
+                after.append(LineOwnTargetReviewTest.state(sa));
+            }
+            Assert.assertEquals(after.toString(), before.toString(), mode + ": the live Abrade after enumerate");
+        }
+    }
 }

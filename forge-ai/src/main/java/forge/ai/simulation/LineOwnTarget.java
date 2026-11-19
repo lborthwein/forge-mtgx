@@ -1,13 +1,15 @@
 package forge.ai.simulation;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import forge.game.GameEntity;
 import forge.game.ability.AbilityUtils;
 import forge.game.ability.ApiType;
-import forge.game.ability.effects.CharmEffect;
 import forge.game.card.Card;
 import forge.game.player.Player;
 import forge.game.spellability.AbilitySub;
@@ -17,34 +19,40 @@ import forge.game.trigger.TriggerType;
 import forge.game.zone.ZoneType;
 
 /**
- * line-own-target-1119 ({@link ForcedWinSolver.Config#lineOwnTarget}; false = off, and then nothing here runs): may the
- * live seat play a followed line's step now, or would its harmful effect land on one of our own permanents that the
- * line did not plan, or would its destroy effect do nothing?
+ * line-own-target-1119: may {@code me} play this ability now, or is it pure, payoff-free harm to a permanent we control
+ * (or a destroy that does nothing at all)? Read by two default-off keys: the live line follower's
+ * ({@link ForcedWinSolver.Config#lineOwnTarget}, {@link #refuse}: a refused step breaks the line, and the seat searches
+ * again) and the policy search's ({@link LookaheadSearch.Config#ownHarm}, {@link #refuseOpen}: a refused candidate is
+ * dropped). Off, nothing here runs.
  *
  * <p>Owner reports 2026-11-19T01-05-37 and 01-14-57. Proven ENGINE lines held removal steps that did nothing for the
  * win in the solver's copies: Abrade (modal; its mode recorded, its target left to Forge AI as the spell is cast) at our
  * own undamaged 5/4, the only creature, and Snuff Out at our own indestructible Ulamog (a recorded target). Live, the
- * first had become lethal to our creature (the opponent's copied Chain Lightning had marked 3 damage on it) and the
- * second paid 4 life for nothing. The engine search offers our own permanents as targets of any single-target ability
- * (an untap or a blink needs them), and a winning path keeps the moves that did not matter.
+ * first had become lethal to our creature and the second paid 4 life for nothing.
  *
- * <p>Harmful: damage, destroy, -N/-N (a negative toughness pump, -1/-1 counters), sacrifice by effect, and a move from
- * the battlefield to any zone but the battlefield (exile, graveyard, library, a bounce to hand) that does not come back.
- * "Ours" is by CONTROLLER, never owner: a stolen or borrowed permanent we control is ours, one we own that the opponent
- * controls is theirs. A step is refused (the line breaks before it is cast) when:
+ * <p>The guard forbids an action, so it refuses only what is surely pure harm; when unsure it keeps the action (review
+ * 1 of #251: a missed refusal is acceptable, a false one is not).
  * <ul>
- * <li>a destroy's target cannot be destroyed (indestructible), whoever controls it, or every legal target of an open
- * destroy (one Forge AI picks as the spell is cast) cannot;</li>
- * <li>a recorded target (an ENGINE step's) is a permanent we control, unless the line planned that object (a
- * probeObjects step's {@link ForcedWinPlanner.Step#objTarget}) or the effect pays off (a permanent we control triggers on
- * that card dying or leaving the battlefield, on it being destroyed or sacrificed, or, for damage, on it being dealt
- * damage; a bounce of a card with its own enters trigger);</li>
- * <li>an open target's only legal choices are permanents we control (or us), none of them planned or paying off.</li>
+ * <li>Harmful parts: damage, destroy, -N/-N (a toughness-lowering pump with no power gain, -1/-1 counters), and a move
+ * from the battlefield to exile, a graveyard, a library or a hand that does not come back. A move that comes back, at
+ * once or later (a delayed trigger's return, a "until ..." duration), is a blink, not harm. A +X/-Y pump with positive
+ * power on a target that survives it (toughness above the damage marked) is a pump, not harm.</li>
+ * <li>Only permanents count, by CONTROLLER (never owner): a stolen permanent we control is ours, one we own that the
+ * opponent controls is theirs. A player target, and a target that is not on the battlefield (a spell on the stack), is
+ * outside the guard: a choice it never refuses.</li>
+ * <li>A payoff keeps the action: a permanent we control that triggers on the card dying or leaving the battlefield,
+ * being destroyed or sacrificed, or (damage) being dealt damage; for a bounce, an enters trigger on any permanent we
+ * control that could fire for the card; and any other effect of the same ability that gives us something (life, cards,
+ * tokens, lands, mana, counters, for us or for the target's controller, which is then us): Swords to Plowshares, Oust,
+ * Path to Exile and Beast Within on our own permanent are kept.</li>
+ * <li>A destroy whose every target is indestructible is refused only when it is the ability's only effect (Snuff Out);
+ * Beast Within's token and Cleansing Wildfire's land and card stand.</li>
  * </ul>
- * The policy search's ownHarm key ({@link LookaheadSearch.Config#ownHarm}) reads the same rule over its candidates
- * through {@link #refuseOpen}: every target open, a modal spell refused only when every mode it could take is.
- * Never refused: an ability whose targets can only be ours ("target creature you control": a blink, a sacrifice outlet),
- * costs (a sacrifice cost is not a target), and effects that are not harmful.
+ * Refused: a recorded target (an ENGINE step's) on a permanent we control, unless the line planned that object (a
+ * probeObjects step's {@link ForcedWinPlanner.Step#objTarget}) or a payoff exists; an open target (chosen as it is cast)
+ * whose only legal choices are permanents we control with no payoff. A modal spell is refused only when every mode it
+ * could take is (a recorded mode set: its modes). Never refused: "target ... you control" (a blink, a sacrifice outlet),
+ * costs, and effects that are not harmful. Read-only: no ability, mode or card is changed by a check.
  */
 final class LineOwnTarget {
     private LineOwnTarget() {
@@ -61,7 +69,7 @@ final class LineOwnTarget {
      */
     static String refuse(final Player me, final SpellAbility sa, final String modeTok, final Set<Integer> planned) {
         try {
-            return refuse0(me, sa, modeTok, planned);
+            return refuse0(me, sa, modeTok, planned, false);
         } catch (RuntimeException e) {
             return null; // a check that cannot be made refuses nothing (the follower plays the step as before)
         }
@@ -80,10 +88,6 @@ final class LineOwnTarget {
         }
     }
 
-    private static String refuse0(final Player me, final SpellAbility sa, final String modeTok, final Set<Integer> planned) {
-        return refuse0(me, sa, modeTok, planned, false);
-    }
-
     private static String refuse0(final Player me, final SpellAbility sa, final String modeTok, final Set<Integer> planned,
             final boolean open) {
         if (me == null || sa == null) {
@@ -91,7 +95,7 @@ final class LineOwnTarget {
         }
         if (sa.getApi() == ApiType.Charm) {
             // a modal spell: its modes (and their targets) are chosen as it is cast (CharmEffect.makeChoices)
-            final List<AbilitySub> possible = CharmEffect.makePossibleOptions(sa);
+            final List<AbilitySub> possible = possibleModes(sa);
             if (possible.isEmpty()) {
                 return null;
             }
@@ -124,10 +128,30 @@ final class LineOwnTarget {
         return refuseChain(me, sa, open, planned);
     }
 
+    /**
+     * The modes Forge would offer for the modal spell {@code sa} now, in {@code CharmEffect.makePossibleOptions}' order
+     * (a recorded mode index points into it), read without that method's writes: it numbers each offered mode's
+     * {@code CharmOrder} SVar on the live mode objects (review 1 of #251, S1 7).
+     */
+    static List<AbilitySub> possibleModes(final SpellAbility sa) {
+        final Card source = sa.getHostCard();
+        final List<String> restriction = sa.hasParam("ChoiceRestriction")
+                ? source.getChosenModes(sa, sa.getParam("ChoiceRestriction")) : null;
+        final List<AbilitySub> choices = new ArrayList<>(sa.getAdditionalAbilityList("Choices"));
+        if (source.getZone() != null) {
+            // 603.3c: a mode that would be illegal can't be chosen (as makePossibleOptions)
+            choices.removeIf(ch -> (ch.usesTargeting() && ch.getMinTargets() > 0
+                    && ch.getTargetRestrictions().getNumCandidates(ch) == 0)
+                    || (restriction != null && restriction.contains(ch.getDescription())));
+        }
+        return choices;
+    }
+
     /** The first refusal of an ability and its sub-abilities, or null ({@code open}: every target is chosen at cast). */
     private static String refuseChain(final Player me, final SpellAbility sa, final boolean open, final Set<Integer> planned) {
+        final Whole whole = new Whole(sa);
         for (SpellAbility l = sa; l != null; l = l.getSubAbility()) {
-            final String why = refusePart(me, l, open, planned);
+            final String why = refusePart(me, l, open, planned, whole);
             if (why != null) {
                 return why;
             }
@@ -135,25 +159,135 @@ final class LineOwnTarget {
         return null;
     }
 
+    /** What the whole ability does besides one harmful part: something for us, or any other effect at all. */
+    static final class Whole {
+        /** A part gives us something (or the target's controller, which is us when only ours can be targeted). */
+        final boolean benefit;
+        /** The parts that do something (bookkeeping such as Cleanup not counted; a delayed trigger counts its return). */
+        final int effects;
+
+        Whole(final SpellAbility root) {
+            boolean b = false;
+            int n = 0;
+            for (SpellAbility p : tree(root)) {
+                if (p.getApi() == null || BOOKKEEPING.contains(p.getApi())) {
+                    continue;
+                }
+                n++;
+                b |= benefits(p);
+            }
+            benefit = b;
+            effects = n;
+        }
+    }
+
+    private static final Set<ApiType> BOOKKEEPING = Set.of(ApiType.Cleanup, ApiType.StoreSVar, ApiType.DelayedTrigger,
+            ApiType.ImmediateTrigger);
+
+    /**
+     * Every ability part reachable from {@code root} (its sub-abilities, its additional abilities such as a delayed
+     * trigger's Execute, and their lists), each once, in pre-order (the order {@link SpellAbility#setActivatingPlayer}
+     * trickles down in).
+     */
+    static List<SpellAbility> tree(final SpellAbility root) {
+        final List<SpellAbility> out = new ArrayList<>();
+        final Set<SpellAbility> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        walk(root, out, seen);
+        return out;
+    }
+
+    private static void walk(final SpellAbility p, final List<SpellAbility> out, final Set<SpellAbility> seen) {
+        if (p == null || !seen.add(p) || out.size() > 256) {
+            return;
+        }
+        out.add(p);
+        walk(p.getSubAbility(), out, seen);
+        for (SpellAbility x : p.getAdditionalAbilities().values()) {
+            walk(x, out, seen);
+        }
+        for (Map.Entry<String, List<AbilitySub>> e : p.getAdditionalAbilityLists().entrySet()) {
+            for (AbilitySub x : e.getValue()) {
+                walk(x, out, seen);
+            }
+        }
+    }
+
+    /** One part gives us something: life, cards, tokens, lands, mana, counters (not to an opponent by its own words). */
+    static boolean benefits(final SpellAbility p) {
+        final ApiType api = p.getApi();
+        if (api == null) {
+            return false;
+        }
+        for (String k : new String[] {"Defined", "DefinedPlayer", "TokenOwner"}) {
+            final String v = p.getParam(k);
+            if (v != null && v.contains("Opponent")) {
+                return false; // for an opponent: nothing for us
+            }
+        }
+        switch (api) {
+            case GainLife:
+            case Draw:
+            case Token:
+            case CopyPermanent:
+            case Investigate:
+            case Amass:
+            case Incubate:
+            case Mana:
+            case ManaReflected:
+            case Dig:
+            case DigUntil:
+            case Discover:
+            case Learn:
+            case Seek:
+            case Explore:
+            case Connive:
+            case Proliferate:
+            case Endure:
+            case Scry:
+            case Surveil:
+                return true;
+            case PutCounter:
+            case PutCounterAll:
+                return !"M1M1".equals(p.getParam("CounterType"));
+            case ChangeZone:
+            case ChangeZoneAll: {
+                // a card or land put into a hand or onto the battlefield from anywhere but the battlefield (a search)
+                final String origin = p.getParamOrDefault("Origin", "");
+                final String dest = p.getParamOrDefault("Destination", "");
+                return !origin.contains("Battlefield") && (dest.contains("Hand") || dest.contains("Battlefield"));
+            }
+            default:
+                return false;
+        }
+    }
+
     /**
      * One targeting part. {@code open}: a modal spell's mode, whose targets are chosen as it is cast (any targets it holds
      * are stale); otherwise the targets it holds are the step's recorded ones (none = Forge AI picks them at cast).
      */
-    static String refusePart(final Player me, final SpellAbility p, final boolean open, final Set<Integer> planned) {
+    static String refusePart(final Player me, final SpellAbility p, final boolean open, final Set<Integer> planned,
+            final Whole whole) {
         if (!p.usesTargeting()) {
             return null;
         }
         final Harm harm = harm(p);
-        if (harm == null || ownByDesign(p)) {
-            return null;
+        if (harm == null || ownByDesign(p) || whole.benefit) {
+            return null; // not harmful, ours by design, or the ability's own other effect pays off
         }
+        final boolean only = whole.effects <= 1; // this part is all the ability does
         if (!open && !p.getTargets().isEmpty()) {
             for (Card c : p.getTargets().getTargetCards()) {
-                if (harm == Harm.DESTROY && !c.canBeDestroyed()) {
-                    return "destroy has no effect on " + c.getName() + " (" + c.getId() + ")";
+                if (!c.isInPlay()) {
+                    continue; // a spell on the stack, a card elsewhere: never "our permanent"
                 }
-                if (c.isInPlay() && me.equals(c.getController()) && (planned == null || !planned.contains(c.getId()))
-                        && !paysOff(me, c, harm)) {
+                if (harm == Harm.DESTROY && !c.canBeDestroyed()) {
+                    if (only) {
+                        return "destroy has no effect on " + c.getName() + " (" + c.getId() + ")";
+                    }
+                    continue; // nothing happens to it; the ability's other effects stand
+                }
+                if (me.equals(c.getController()) && !spared(p, harm, c)
+                        && (planned == null || !planned.contains(c.getId())) && !paysOff(me, c, harm)) {
                     return harm.name().toLowerCase() + " on our own " + c.getName() + " (" + c.getId() + ")";
                 }
             }
@@ -169,25 +303,26 @@ final class LineOwnTarget {
         boolean affected = false, other = false;
         final List<String> ours = new ArrayList<>();
         for (GameEntity e : cands) {
-            if (e instanceof Card c) {
-                if (harm == Harm.DESTROY && !c.canBeDestroyed()) {
-                    continue;
-                }
+            if (!(e instanceof Card c) || !c.isInPlay()) {
+                // a player (outside this guard), or a spell on the stack / a card elsewhere: a choice never refused
                 affected = true;
-                if (me.equals(c.getController())) {
-                    ours.add(c.getName() + " (" + c.getId() + ")");
-                    // a death (or leave) payoff on one of ours is a choice worth making (as for a recorded target)
-                    other |= (planned != null && planned.contains(c.getId())) || paysOff(me, c, harm);
-                } else {
-                    other = true;
-                }
-            } else if (e instanceof Player pl) {
-                affected = true;
-                other |= !me.equals(pl);
+                other = true;
+                continue;
+            }
+            if (harm == Harm.DESTROY && !c.canBeDestroyed()) {
+                continue;
+            }
+            affected = true;
+            if (me.equals(c.getController())) {
+                ours.add(c.getName() + " (" + c.getId() + ")");
+                // a pump it survives, a planned object, or a payoff on one of ours is a choice worth making
+                other |= spared(p, harm, c) || (planned != null && planned.contains(c.getId())) || paysOff(me, c, harm);
+            } else {
+                other = true;
             }
         }
         if (!affected) {
-            return "destroy has no effect: every legal target is indestructible";
+            return only ? "destroy has no effect: every legal target is indestructible" : null;
         }
         return other ? null : harm.name().toLowerCase() + " with only our own to target: " + ours;
     }
@@ -213,7 +348,7 @@ final class LineOwnTarget {
                 final String origin = p.getParamOrDefault("Origin", "");
                 final String dest = p.getParamOrDefault("Destination", "");
                 if (!origin.contains("Battlefield") || dest.isEmpty() || dest.contains("Battlefield") || returns(p)) {
-                    return null; // not from the battlefield, onto it, or a blink (it comes back)
+                    return null; // not from the battlefield, onto it, or a blink (it comes back, now or later)
                 }
                 return dest.equals("Hand") ? Harm.BOUNCE : Harm.REMOVE;
             }
@@ -226,14 +361,72 @@ final class LineOwnTarget {
         return v != null && v.trim().startsWith("-");
     }
 
-    /** A blink: a later part of the chain puts the card back onto the battlefield. */
-    private static boolean returns(final SpellAbility p) {
-        for (SpellAbility l = p.getSubAbility(); l != null; l = l.getSubAbility()) {
-            if (l.getApi() == ApiType.ChangeZone && "Battlefield".equals(l.getParam("Destination"))) {
-                return true;
+    /**
+     * A blink: the moved card comes back to the battlefield, at once (a later part of the chain), later (a delayed
+     * trigger's Execute: Turn to Mist, Touch the Spirit Realm's channel) or when a duration ends ("until ... leaves").
+     */
+    static boolean returns(final SpellAbility p) {
+        if (p.hasParam("Duration")) {
+            return true;
+        }
+        final List<SpellAbility> rest = tree(p);
+        for (SpellAbility l : rest) {
+            if (l == p) {
+                continue;
+            }
+            final ApiType api = l.getApi();
+            if (api != ApiType.ChangeZone && api != ApiType.ChangeZoneAll) {
+                continue;
+            }
+            final String origin = l.getParamOrDefault("Origin", "");
+            if (l.getParamOrDefault("Destination", "").contains("Battlefield") && (l.hasParam("Defined")
+                    || origin.contains("Exile") || origin.contains("Graveyard") || origin.contains("All"))) {
+                return true; // the object (Defined: the remembered or targeted card) put back, not a library search
             }
         }
         return false;
+    }
+
+    /**
+     * A +X/-Y pump with positive power that {@code c} survives (its toughness stays above the damage marked on it): a
+     * pump, not a shrink. Unsure (an amount that cannot be read) = spared.
+     */
+    static boolean spared(final SpellAbility p, final Harm harm, final Card c) {
+        if (harm != Harm.SHRINK || p.getApi() != ApiType.Pump) {
+            return false;
+        }
+        final Integer att = amount(p, p.getParam("NumAtt"));
+        if (att != null && att <= 0) {
+            return false; // no power gain: a shrink
+        }
+        final Integer def = amount(p, p.getParam("NumDef"));
+        if (att == null || def == null) {
+            return true;
+        }
+        return c.getNetToughness() + def - c.getDamage() > 0;
+    }
+
+    /** A Pump amount ("+3", "-3", "X", "-X"), or null when it cannot be read (absent = 0). */
+    private static Integer amount(final SpellAbility p, final String v) {
+        if (v == null || v.isBlank()) {
+            return 0;
+        }
+        String s = v.trim();
+        int sign = 1;
+        if (s.startsWith("+")) {
+            s = s.substring(1);
+        } else if (s.startsWith("-")) {
+            sign = -1;
+            s = s.substring(1);
+        }
+        try {
+            if (s.matches("\\d+")) {
+                return sign * Integer.parseInt(s);
+            }
+            return sign * AbilityUtils.calculateAmount(p.getHostCard(), s, p);
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /** The card only lets it target permanents its controller controls (or owns): targeting ours is its design. */
@@ -251,9 +444,10 @@ final class LineOwnTarget {
     }
 
     /**
-     * A death (or leave) payoff: a permanent we control (the target among them) triggers on {@code c} leaving the
-     * battlefield, being destroyed or sacrificed, or (damage) being dealt damage; a bounce re-uses {@code c}'s own enters
-     * trigger. Persist and undying are triggers of the card.
+     * A payoff: a permanent we control (the target among them) triggers on {@code c} leaving the battlefield, being
+     * destroyed or sacrificed, or (damage) being dealt damage; for a bounce, an enters trigger on any permanent we control
+     * that could fire for {@code c} when it is played again (its own, or Impact Tremors'). Persist and undying are
+     * triggers of the card.
      */
     static boolean paysOff(final Player me, final Card c, final Harm harm) {
         for (Card src : me.getCardsIn(ZoneType.Battlefield)) {
@@ -265,8 +459,9 @@ final class LineOwnTarget {
                 switch (mode) {
                     case ChangesZone:
                         if (harm == Harm.BOUNCE) {
-                            if (src.equals(c) && "Battlefield".equals(t.getParam("Destination")) && t.matchesValidParam("ValidCard", c)) {
-                                return true; // its own enters trigger, played again
+                            if (t.getParamOrDefault("Destination", "").contains("Battlefield")
+                                    && t.matchesValidParam("ValidCard", c)) {
+                                return true; // an enters trigger that could fire for it, played again
                             }
                         } else if (t.getParamOrDefault("Origin", "").contains("Battlefield")
                                 && !"Battlefield".equals(t.getParam("Destination")) && t.matchesValidParam("ValidCard", c)) {
@@ -274,7 +469,12 @@ final class LineOwnTarget {
                         }
                         break;
                     case ChangesZoneAll:
-                        if (harm != Harm.BOUNCE && t.getParamOrDefault("Origin", "").contains("Battlefield")
+                        if (harm == Harm.BOUNCE) {
+                            if (t.getParamOrDefault("Destination", "").contains("Battlefield")
+                                    && t.matchesValidParam("ValidCards", c)) {
+                                return true;
+                            }
+                        } else if (t.getParamOrDefault("Origin", "").contains("Battlefield")
                                 && t.matchesValidParam("ValidCards", c)) {
                             return true;
                         }

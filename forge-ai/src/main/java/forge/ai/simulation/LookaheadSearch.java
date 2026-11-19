@@ -211,10 +211,12 @@ public final class LookaheadSearch {
         /**
          * Own-harm guard (lane line-own-target-1119, owner reports 2026-11-19T01-05-37 and 01-14-57; off|shadow|on, OFF by
          * default: nothing runs, candidates and decisions unchanged). A candidate whose harmful effect (damage, destroy,
-         * -N/-N, sacrifice, removal from the battlefield) can land only on permanents the seat controls, none of them paying
-         * off, or whose destroy can only hit indestructible permanents, is refused ({@link LineOwnTarget#refuseOpen}: the
-         * rule the live line follower reads under {@link ForcedWinSolver.Config#lineOwnTarget}; every target open, a modal
-         * spell refused only when every mode it could take is; "ours" by controller). The policy seat ({@code
+         * -N/-N with no power gain, removal from the battlefield that does not come back) can land only on permanents the
+         * seat controls with no payoff (a trigger of ours, or the ability's own other benefit for us), or that is a destroy
+         * doing nothing at all (only indestructible targets, no other effect), is refused ({@link LineOwnTarget#refuseOpen}:
+         * the rule the live line follower reads under {@link ForcedWinSolver.Config#lineOwnTarget}; every target open, a
+         * modal spell refused only when every mode it could take is; "ours" by controller; player and stack targets never
+         * refused; when unsure, kept; read-only). The policy seat ({@code
          * forge.bench.rl.RlSearch}) drops a refused candidate before the play-outs, the policy's own choice too (its best
          * remaining entry, or pass, stands in), breaks a policy plan before a refused step and drops a sampled plan that
          * would play one. The K8 seat drops refused departures in {@link #enumerate}; Forge's own answer, whose targets
@@ -2304,14 +2306,35 @@ public final class LookaheadSearch {
         if (me == null || sa == null) {
             return null;
         }
+        if (sa.getActivatingPlayer() != null) {
+            return LineOwnTarget.refuseOpen(me, sa);
+        }
+        // no activator yet: set it for the check, then put every part's own back (the check changes nothing; review 1, S1 7)
+        final List<SpellAbility> parts;
+        final List<Player> was = new ArrayList<>();
         try {
-            if (sa.getActivatingPlayer() == null) {
-                sa.setActivatingPlayer(me);
+            parts = LineOwnTarget.tree(sa);
+            for (SpellAbility p : parts) {
+                was.add(p.getActivatingPlayer());
             }
         } catch (RuntimeException e) {
             return null;
         }
-        return LineOwnTarget.refuseOpen(me, sa);
+        try {
+            sa.setActivatingPlayer(me);
+            return LineOwnTarget.refuseOpen(me, sa);
+        } catch (RuntimeException e) {
+            return null;
+        } finally {
+            try {
+                // pre-order: each part's own value overrides what its parent trickled down
+                for (int i = 0; i < parts.size(); i++) {
+                    parts.get(i).setActivatingPlayer(was.get(i));
+                }
+            } catch (RuntimeException e) {
+                // a restore that fails leaves the activator set, as the check before review 1 did
+            }
+        }
     }
 
     /** ownHarm: one refusal of {@code sa} counted in this search's stats, by its card's name. */

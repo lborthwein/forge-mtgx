@@ -266,25 +266,37 @@ public class LineOwnTargetTest extends SimulationTest {
         Assert.assertEquals(rp[0], 0);
     }
 
-    /** A recorded (ENGINE) target on a permanent we control with no payoff (the Swords and Oust line of fc8c3611). */
+    /**
+     * A recorded (ENGINE) target on a permanent we control with no payoff breaks: Reaver Ambush (exile target creature
+     * with power 3 or less, nothing else) at our own Esper Sentinel. Swords to Plowshares at it (the fc8c3611 line) now
+     * plays: its life gain goes to the target's controller, us, and the ability's own benefit is a payoff (review 1 of
+     * #251, S1 2; the seat decides such a line).
+     */
     @Test
     public void keyOnARecordedRemovalOfOurOwnCreatureBreaks() {
         setUp();
-        final Card thalia = ours("Thalia, Guardian of Thraben");
+        final Card sentinel = ours("Esper Sentinel");
         theirs("Grizzly Bears");
         ours("Plains");
-        ours("Plains"); // Thalia taxes noncreature spells {1}
-        final Card swords = addCardToZone("Swords to Plowshares", me, ZoneType.Hand);
+        ours("Swamp");
+        ours("Swamp");
+        ours("Swamp");
+        final Card ambush = addCardToZone("Reaver Ambush", me, ZoneType.Hand);
         final int[] rp = {0};
-        final Line l = line(engine(swords, me, null, "0:C" + thalia.getId()));
-        Assert.assertTrue(plays(first(false, l, rp), swords), "key off: cast as today");
-        Assert.assertFalse(plays(first(true, l, rp), swords), "key on: no exile of our own Thalia");
+        final Line l = line(engine(ambush, me, null, "0:C" + sentinel.getId()));
+        Assert.assertTrue(plays(first(false, l, rp), ambush), "key off: cast as today");
+        Assert.assertFalse(plays(first(true, l, rp), ambush), "key on: no exile of our own Esper Sentinel");
         Assert.assertEquals(rp[0], 1);
         // a stolen creature we control counts as ours the same way
         final Card bears = theirs("Grizzly Bears");
         control(bears, me);
-        Assert.assertFalse(plays(first(true, line(engine(swords, me, null, "0:C" + bears.getId())), rp), swords));
+        Assert.assertFalse(plays(first(true, line(engine(ambush, me, null, "0:C" + bears.getId())), rp), ambush));
         Assert.assertEquals(rp[0], 1);
+        // Swords to Plowshares at our own Sentinel gains us its power in life: the line plays
+        final Card swords = addCardToZone("Swords to Plowshares", me, ZoneType.Hand);
+        final SpellAbility a = first(true, line(engine(swords, me, null, "0:C" + sentinel.getId())), rp);
+        Assert.assertTrue(plays(a, swords), "key on: Swords' life gain is its own payoff: " + a);
+        Assert.assertEquals(rp[0], 0);
     }
 
     // ------------------------------------------------------------------ intended self-targets still play
