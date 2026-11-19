@@ -1071,6 +1071,8 @@ public final class InteractiveMain {
                 case "deadAltCost": c.deadAltCost = forge.ai.AiFixes.Mode.parse(p[1]); break; // evoke-empty-board-1111
                 case "deadPump": c.deadPump = forge.ai.AiFixes.Mode.parse(p[1]); break; // temp-pump-wrong-turn-1117
                 case "deadFaceUp": c.deadFaceUp = forge.ai.AiFixes.Mode.parse(p[1]); break; // turn-face-up-timing-1118
+                // line-own-target-1119 (absent = off): K8's departures whose harm can land only on our own permanents
+                case "ownHarm": c.ownHarm = forge.ai.simulation.LookaheadSearch.Config.ownHarmKey(p[0].trim(), p[1]); break;
                 case "dudCast": c.dudCast = forge.ai.AiFixes.Mode.parse(p[1]); break; // live-ai-quality-1030
                 case "dudWorlds": c.dudWorlds = Integer.parseInt(p[1].trim()); break;
                 // order-memory-1102 (absent = off): the worlds keep the library positions the seat knows (InfoStates)

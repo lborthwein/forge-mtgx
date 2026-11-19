@@ -130,6 +130,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String deadPump = "off";
         /** turn-face-up-timing-1118: the look-ahead's deadFaceUp guard (off|shadow|on; written to JSON only when not off). */
         public String deadFaceUp = "off";
+        /**
+         * line-own-target-1119: the ownHarm guard ({@link LookaheadSearch.Config#ownHarm}; off|shadow|on exactly, written to
+         * JSON only when not off). ON: a given candidate whose harm can land only on our own permanents (or whose destroy
+         * can only hit indestructible ones) is dropped before the play-outs, the policy's own choice too (its best
+         * remaining entry by prior, or pass, stands in); a policy plan breaks before such a step and a sampled plan that
+         * would play one is not proposed. SHADOW counts and logs; off, nothing runs.
+         */
+        public String ownHarm = "off";
         /** block-vs-open-pump-1118: the block search's lethalBlock guard (off|shadow|on; written to JSON only when not off). */
         public String lethalBlock = "off";
         public boolean stack = false;
@@ -474,7 +482,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
-                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "deadFaceUp", "lethalBlock", "departMedian", "stack", "server", "readTimeoutMs",
+                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "deadFaceUp", "ownHarm", "lethalBlock", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
@@ -543,6 +551,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("deadAltCost")) c.deadAltCost = o.get("deadAltCost").getAsString();
             if (o.has("deadPump")) c.deadPump = o.get("deadPump").getAsString();
             if (o.has("deadFaceUp")) c.deadFaceUp = o.get("deadFaceUp").getAsString();
+            if (o.has("ownHarm")) c.ownHarm = o.get("ownHarm").getAsString();
             if (o.has("lethalBlock")) c.lethalBlock = o.get("lethalBlock").getAsString();
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
@@ -801,6 +810,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             AiFixes.Mode.parse(deadAltCost);
             AiFixes.Mode.parse(deadPump);
             AiFixes.Mode.parse(deadFaceUp);
+            LookaheadSearch.Config.ownHarmKey("ownHarm", ownHarm); // line-own-target-1119: exactly off|shadow|on
             if (!"off".equals(lethalBlock) && !"shadow".equals(lethalBlock) && !"on".equals(lethalBlock)) {
                 // block-vs-open-pump-1118: exactly off|shadow|on, as the host validator takes it (no aliases)
                 throw new IllegalArgumentException("lethalBlock: expected off|shadow|on, got '" + lethalBlock + "'");
@@ -832,6 +842,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (!"off".equals(deadFaceUp)) {
                 o.addProperty("deadFaceUp", deadFaceUp);
+            }
+            if (!"off".equals(ownHarm)) {
+                o.addProperty("ownHarm", ownHarm); // line-own-target-1119
             }
             if (!"off".equals(lethalBlock)) {
                 o.addProperty("lethalBlock", lethalBlock);
@@ -1330,6 +1343,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.deadAltCost = AiFixes.Mode.parse(cfg.deadAltCost);
         lc.deadPump = AiFixes.Mode.parse(cfg.deadPump);
         lc.deadFaceUp = AiFixes.Mode.parse(cfg.deadFaceUp);
+        lc.ownHarm = AiFixes.Mode.parse(cfg.ownHarm); // line-own-target-1119 (applied here, over the given candidates)
         lc.lethalBlock = AiFixes.Mode.parse(cfg.lethalBlock);
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
@@ -1764,8 +1778,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         armRedraw(g, me); // sdcc-scorerleak-1115 (off: nothing)
         final forge.game.WorkClock.Span ws = workBegin();
         lastReason = RlSeat.IMIT_SEARCH;
+        ownHarmLast = null;
+        ownHarmSeen = false;
         try {
-            return decide0(g, me, m, frame, greedy, menuObjs);
+            // line-own-target-1119 (ownHarm off: the answer as decided)
+            return ownHarmNet(g, me, m, menuObjs, greedy, decide0(g, me, m, frame, greedy, menuObjs));
         } finally {
             workEnd(ws);
         }
@@ -1921,6 +1938,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             order.add(0);
         }
         order.addAll(rest);
+        // line-own-target-1119 (ownHarm; off: nothing runs): refused entries leave before the play-outs, the default too
+        final int ohFallback = ownHarmOrder(g, me, m, order, by, menuObjs);
         final List<SpellAbility> given = new ArrayList<>(order.size());
         for (int ch : order) {
             given.add(ch == 0 ? null : menuObjs.get(ch - 1));
@@ -1996,6 +2015,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             r = ls.decideGiven(g, me, given, cfg.breadth);
         }
         ck.ended(DecisionClock.Phase.GIVEN);
+        r.ownHarm = ownHarmLast; // line-own-target-1119 (null unless the rule refused an entry here)
         tookForce(r);
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
@@ -2017,6 +2037,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (r.chosen > 0 && r.chosen < order.size()) {
             answer = (int) by.get(order.get(r.chosen))[1];
             departures++;
+        }
+        if (answer < 0 && ohFallback >= 0) {
+            answer = ohFallback; // line-own-target-1119: the policy's own choice was refused; its stand-in is the default
         }
         if (r.chosenMacro >= 0) {
             // S-t: a macro departure: its base action (the default's when r.chosen == 0), then its schedule
@@ -2254,6 +2277,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("fw_ms", Math.round(sd.lastMs * 10) / 10.0);
             }
             row.addProperty("outcome", r.outcome);
+            if (ownHarmLast != null) {
+                row.add("own_harm", ownHarmLast); // line-own-target-1119 (only when the rule refused an entry)
+            }
             if (r.stackNote != null) {
                 // measurement only (-Dsdcc.stackNote=true): the stack, the policy's answer and the menu by name
                 row.add("stack_note", r.stackNote);
@@ -2279,6 +2305,203 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         tap(r.givenIndex.length > 0 ? "searched" : String.valueOf(r.outcome), stage, r, order.size(), answer);
         return answer;
+    }
+
+    // ------------------------------------------------------------------ line-own-target-1119 (ownHarm)
+
+    /** This decision's ownHarm note (null = the rule refused nothing here): the decision line's and row's field. */
+    private JsonObject ownHarmLast;
+    /** This decision's given entries went through {@link #ownHarmOrder} (the net does not count them again). */
+    private boolean ownHarmSeen;
+
+    /** The ownHarm guard's mode (the look-ahead config's, from {@link Config#ownHarm}). */
+    AiFixes.Mode ownHarmMode() {
+        return ls.getConfig().ownHarm;
+    }
+
+    private JsonObject ownHarmNote(final Game g, final AiFixes.Mode mode) {
+        final JsonObject note = new JsonObject();
+        note.addProperty("mode", mode.key());
+        note.addProperty("turn", g.getPhaseHandler().getTurn());
+        note.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        return note;
+    }
+
+    private static JsonObject ownHarmEntry(final int ch, final SpellAbility sa, final boolean isDefault, final String why) {
+        final JsonObject x = new JsonObject();
+        x.addProperty("entry", ch);
+        x.addProperty("card", sa.getHostCard() == null ? "?" : sa.getHostCard().getName());
+        if (isDefault) {
+            x.addProperty("default", true);
+        }
+        x.addProperty("why", why);
+        return x;
+    }
+
+    /** The menu's pass candidate, or -1. */
+    private static int passCand(final RlCandidates.Menu m) {
+        for (int i = 0; i < m.C(); i++) {
+            if (m.cands.get(i).kind == RlSchema.K_PASS) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * ownHarm over the given entries {@code order} (the policy's own entry first), before the play-outs. Every entry the
+     * rule refuses ({@link LookaheadSearch#ownHarmWhy}) is counted; ON drops them all, the default too. When the default
+     * goes, the remaining entry with the largest prior (pass among them; ties to the earlier entry) moves to the front, so
+     * the search compares the others against it, and its candidate is returned: the answer unless the search departs.
+     * -1 = the policy's own entry stands (off, shadow, nothing refused, or the default kept).
+     */
+    private int ownHarmOrder(final Game g, final Player me, final RlCandidates.Menu m, final List<Integer> order,
+            final Map<Integer, double[]> by, final List<SpellAbility> menuObjs) {
+        final AiFixes.Mode mode = ownHarmMode();
+        if (mode == AiFixes.Mode.OFF) {
+            return -1;
+        }
+        ownHarmSeen = true;
+        final LookaheadSearch.Stats st = ls.getStats();
+        final JsonArray refused = new JsonArray();
+        final List<Integer> drop = new ArrayList<>();
+        for (int k = 0; k < order.size(); k++) {
+            final int ch = order.get(k);
+            if (ch <= 0 || ch > menuObjs.size()) {
+                continue;
+            }
+            final SpellAbility sa = menuObjs.get(ch - 1);
+            final String why = LookaheadSearch.ownHarmWhy(me, sa);
+            if (why == null) {
+                continue;
+            }
+            ls.ownHarmCounted(sa);
+            if (k == 0) {
+                st.ownHarmForge++;
+            } else {
+                st.ownHarmCands++;
+            }
+            refused.add(ownHarmEntry(ch, sa, k == 0, why));
+            drop.add(ch);
+        }
+        if (drop.isEmpty()) {
+            return -1;
+        }
+        st.ownHarmDecisions++;
+        final JsonObject note = ownHarmNote(g, mode);
+        note.add("refused", refused);
+        ownHarmLast = note;
+        if (mode != AiFixes.Mode.ON) {
+            System.err.println("[own-harm] " + note);
+            return -1;
+        }
+        final boolean defGone = drop.get(0) == (int) order.get(0);
+        st.ownHarmDropped += drop.size();
+        order.removeAll(drop);
+        int fallback = -1;
+        if (defGone) {
+            int best = -1;
+            for (int ch : order) {
+                if (best < 0 || by.get(ch)[0] > by.get(best)[0]) {
+                    best = ch;
+                }
+            }
+            if (best >= 0) {
+                order.remove(Integer.valueOf(best));
+                order.add(0, best);
+                fallback = (int) by.get(best)[1];
+                note.addProperty("fallback", best);
+                if (best == 0) {
+                    st.ownHarmPass++;
+                }
+            } else {
+                fallback = passCand(m); // no entry left (never: pass is one); the menu's pass
+                note.addProperty("fallback", 0);
+                st.ownHarmPass++;
+            }
+            st.ownHarmFallback++;
+        }
+        System.err.println("[own-harm] " + note);
+        return fallback;
+    }
+
+    /**
+     * ownHarm's last word on the priority answer {@code a} (-1 = the policy's own candidate {@code greedy}): an answer
+     * the given entries' check did not see (a plan step, a decision with no search: on the stack, a failed score) is
+     * checked here; ON answers pass instead of a refused one. VOID, HOOK and STOP pass through (a solver line is the
+     * lineOwnTarget key's).
+     */
+    private int ownHarmNet(final Game g, final Player me, final RlCandidates.Menu m, final List<SpellAbility> menuObjs,
+            final int greedy, final int a) {
+        final AiFixes.Mode mode = ownHarmMode();
+        if (mode == AiFixes.Mode.OFF || a < -1 || mode != AiFixes.Mode.ON && ownHarmSeen) {
+            return a;
+        }
+        final int cand = a >= 0 ? a : greedy;
+        if (cand < 0 || cand >= m.C()) {
+            return a;
+        }
+        final int ch = choiceOf(m, cand);
+        if (ch <= 0 || ch > menuObjs.size()) {
+            return a;
+        }
+        final SpellAbility sa = menuObjs.get(ch - 1);
+        final String why = LookaheadSearch.ownHarmWhy(me, sa);
+        if (why == null) {
+            return a;
+        }
+        final LookaheadSearch.Stats st = ls.getStats();
+        ls.ownHarmCounted(sa);
+        st.ownHarmDecisions++;
+        if (a == -1) {
+            st.ownHarmForge++;
+        } else {
+            st.ownHarmCands++;
+        }
+        final JsonObject note = ownHarmNote(g, mode);
+        final JsonArray refused = new JsonArray();
+        refused.add(ownHarmEntry(ch, sa, a == -1, why));
+        note.add("refused", refused);
+        note.addProperty("net", true);
+        ownHarmLast = note;
+        final int pass = mode == AiFixes.Mode.ON ? passCand(m) : -1;
+        if (pass >= 0) {
+            st.ownHarmDropped++;
+            st.ownHarmFallback++;
+            st.ownHarmPass++;
+            note.addProperty("fallback", 0);
+        }
+        System.err.println("[own-harm] " + note);
+        return pass >= 0 ? pass : a;
+    }
+
+    /**
+     * ownHarm and S-b's policy plans: a sampled plan whose recording played a refused step ({@code why}), counted and
+     * logged; true = ON, the plan is not proposed.
+     */
+    boolean ownHarmPlanRefused(final Game g, final String label, final String why) {
+        final AiFixes.Mode mode = ownHarmMode();
+        if (mode == AiFixes.Mode.OFF) {
+            return false;
+        }
+        ls.getStats().ownHarmPlanRefused++;
+        final JsonObject note = ownHarmNote(g, mode);
+        note.addProperty("plan", label);
+        note.addProperty("why", why);
+        System.err.println("[own-harm] " + note);
+        return mode == AiFixes.Mode.ON;
+    }
+
+    /** ownHarm: the live policy plan reached a refused step ({@code why}; ON: it broke there), counted and logged. */
+    void ownHarmPlanBreak(final Game g, final String why) {
+        final AiFixes.Mode mode = ownHarmMode();
+        if (mode == AiFixes.Mode.OFF) {
+            return;
+        }
+        ls.getStats().ownHarmPlanBreaks++;
+        final JsonObject note = ownHarmNote(g, mode);
+        note.addProperty("planStep", why);
+        System.err.println("[own-harm] " + note);
     }
 
     /**

@@ -329,6 +329,7 @@ public final class RlLiveSeat {
                     case "deadAltCost": c.deadAltCost = v; break; // evoke-empty-board-1111 (live default off)
                     case "deadPump": c.deadPump = v; break; // temp-pump-wrong-turn-1117 (live default off)
                     case "deadFaceUp": c.deadFaceUp = v; break; // turn-face-up-timing-1118 (live default off)
+                    case "ownHarm": c.ownHarm = v; break; // line-own-target-1119 (live default off; c.check() takes off|shadow|on)
                     case "lethalBlock": c.lethalBlock = v; break; // block-vs-open-pump-1118 (block search; live default off)
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
@@ -890,6 +891,10 @@ public final class RlLiveSeat {
         if (r.deadFaceUp != null) {
             // turn-face-up-timing-1118 (deadFaceUp on or shadow, a turn-up among the candidates; otherwise the line is unchanged)
             d.add("deadFaceUp", r.deadFaceUp);
+        }
+        if (r.ownHarm != null) {
+            // line-own-target-1119 (ownHarm on or shadow, an entry refused here; otherwise the line is unchanged)
+            d.add("ownHarm", r.ownHarm);
         }
         d.addProperty("searched", st.searched);
         d.addProperty("departedTotal", st.departed);

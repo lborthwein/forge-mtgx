@@ -209,6 +209,30 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode deadFaceUp = AiFixes.Mode.OFF;
         /**
+         * Own-harm guard (lane line-own-target-1119, owner reports 2026-11-19T01-05-37 and 01-14-57; off|shadow|on, OFF by
+         * default: nothing runs, candidates and decisions unchanged). A candidate whose harmful effect (damage, destroy,
+         * -N/-N, sacrifice, removal from the battlefield) can land only on permanents the seat controls, none of them paying
+         * off, or whose destroy can only hit indestructible permanents, is refused ({@link LineOwnTarget#refuseOpen}: the
+         * rule the live line follower reads under {@link ForcedWinSolver.Config#lineOwnTarget}; every target open, a modal
+         * spell refused only when every mode it could take is; "ours" by controller). The policy seat ({@code
+         * forge.bench.rl.RlSearch}) drops a refused candidate before the play-outs, the policy's own choice too (its best
+         * remaining entry, or pass, stands in), breaks a policy plan before a refused step and drops a sampled plan that
+         * would play one. The K8 seat drops refused departures in {@link #enumerate}; Forge's own answer, whose targets
+         * Forge AI already chose, is counted and kept, as every guard there keeps it. SHADOW counts and logs.
+         */
+        public AiFixes.Mode ownHarm = AiFixes.Mode.OFF;
+        /**
+         * The ownHarm key's value: exactly off|shadow|on (the host validator takes no aliases), else an error naming
+         * {@code k}.
+         */
+        public static AiFixes.Mode ownHarmKey(final String k, final String v) {
+            final String t = v == null ? "" : v.trim();
+            if (!"off".equals(t) && !"shadow".equals(t) && !"on".equals(t)) {
+                throw new IllegalArgumentException(k + ": expected off|shadow|on, got '" + v + "'");
+            }
+            return AiFixes.Mode.parse(t);
+        }
+        /**
          * Lethal-block guard (lane block-vs-open-pump-1118, report 2026-11-18T05:34Z; off|shadow|on, OFF by default: values
          * and decisions unchanged). In the block search ({@link #decideBlocks}), a candidate declaration whose worst case of
          * this combat's damage to the searching seat is lethal ({@link #lethalBlocks}: what the attackers' controller can add
@@ -629,6 +653,9 @@ public final class LookaheadSearch {
             if (deadFaceUp != AiFixes.Mode.OFF) {
                 o.addProperty("deadFaceUp", deadFaceUp.key());
             }
+            if (ownHarm != AiFixes.Mode.OFF) {
+                o.addProperty("ownHarm", ownHarm.key()); // line-own-target-1119 (only when not off)
+            }
             if (lethalBlock != AiFixes.Mode.OFF) {
                 o.addProperty("lethalBlock", lethalBlock.key());
             }
@@ -799,6 +826,15 @@ public final class LookaheadSearch {
         public long deadFaceUpCands, deadFaceUpDecisions, deadFaceUpDropped, deadFaceUpShadowBest, deadFaceUpForge,
                 deadFaceUpChecked, deadFaceUpNanos;
         public final Map<String, Long> deadFaceUpWhy = new TreeMap<>();
+        /**
+         * ownHarm guard (null = off; line-own-target-1119): refused candidates seen, decisions with one, dropped (ON), the
+         * seat's own choice refused (the policy's or Forge's), the policy's own choice replaced by its best remaining entry
+         * / by pass, sampled plans refused and live policy plans broken before a refused step; refusals by card.
+         */
+        public String ownHarmMode;
+        public long ownHarmCands, ownHarmDecisions, ownHarmDropped, ownHarmForge, ownHarmFallback, ownHarmPass,
+                ownHarmPlanRefused, ownHarmPlanBreaks;
+        public final Map<String, Long> ownHarmCards = new TreeMap<>();
         /**
          * lethalBlock guard (null = off): block decisions checked; stood aside (the bound was not trusted); with a candidate
          * the bound flags; re-scored (ON); with every searched candidate witnessed (unchanged); whose played declaration
@@ -1089,6 +1125,22 @@ public final class LookaheadSearch {
                 d.add("aside", why);
                 d.addProperty("ms", Math.round(deadFaceUpNanos / 1e5) / 10.0);
                 o.add("deadFaceUp", d);
+            }
+            if (ownHarmMode != null) {
+                final JsonObject d = new JsonObject();
+                d.addProperty("mode", ownHarmMode);
+                d.addProperty("cands", ownHarmCands);
+                d.addProperty("decisions", ownHarmDecisions);
+                d.addProperty("dropped", ownHarmDropped);
+                d.addProperty("ownChoice", ownHarmForge);
+                d.addProperty("fallback", ownHarmFallback);
+                d.addProperty("pass", ownHarmPass);
+                d.addProperty("planRefused", ownHarmPlanRefused);
+                d.addProperty("planBreaks", ownHarmPlanBreaks);
+                final JsonObject by = new JsonObject();
+                ownHarmCards.forEach(by::addProperty);
+                d.add("cards", by);
+                o.add("ownHarm", d);
             }
             if (lethalBlockMode != null) {
                 final JsonObject d = new JsonObject();
@@ -2083,6 +2135,9 @@ public final class LookaheadSearch {
         if (cfg.deadFaceUp != AiFixes.Mode.OFF) {
             stats.deadFaceUpMode = cfg.deadFaceUp.key();
         }
+        if (cfg.ownHarm != AiFixes.Mode.OFF) {
+            stats.ownHarmMode = cfg.ownHarm.key(); // line-own-target-1119
+        }
         if (cfg.lethalBlock != AiFixes.Mode.OFF) {
             stats.lethalBlockMode = cfg.lethalBlock.key();
         }
@@ -2238,6 +2293,33 @@ public final class LookaheadSearch {
 
     public Config getConfig() {
         return cfg;
+    }
+
+    /**
+     * line-own-target-1119 ({@link Config#ownHarm}): why {@code me} must not play the candidate {@code sa} now ({@link
+     * LineOwnTarget#refuseOpen}: its harm can land only on permanents {@code me} controls, or its destroy only on
+     * indestructible ones); null = it may, and for pass. Never throws.
+     */
+    public static String ownHarmWhy(final Player me, final SpellAbility sa) {
+        if (me == null || sa == null) {
+            return null;
+        }
+        try {
+            if (sa.getActivatingPlayer() == null) {
+                sa.setActivatingPlayer(me);
+            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        return LineOwnTarget.refuseOpen(me, sa);
+    }
+
+    /** ownHarm: one refusal of {@code sa} counted in this search's stats, by its card's name. */
+    public void ownHarmCounted(final SpellAbility sa) {
+        final String n = sa == null || sa.getHostCard() == null ? "?" : sa.getHostCard().getName();
+        synchronized (stats) {
+            stats.ownHarmCards.merge(n, 1L, Long::sum);
+        }
     }
 
     public Stats getStats() {
@@ -2824,6 +2906,11 @@ public final class LookaheadSearch {
          * checked, dropped (ON) or flagged (SHADOW), the default's own dead turn-up, stand-asides by reason, and ms.
          */
         public JsonObject deadFaceUp;
+        /**
+         * line-own-target-1119 (null = ownHarm is off, or it refused nothing here): the policy seat's refused entries
+         * (dropped under ON, the policy's own choice too, and the entry that stood in for it), set by {@code RlSearch}.
+         */
+        public JsonObject ownHarm;
         /** lethalBlock ON: the witnessed candidates were re-scored as lost play-outs. */
         public boolean lethalRescored;
         /**
@@ -5605,8 +5692,17 @@ public final class LookaheadSearch {
             final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
             final boolean pguard = cfg.deadPump != AiFixes.Mode.OFF;
             final boolean dguard = cfg.deadFaceUp != AiFixes.Mode.OFF;
-            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0, faceHere = 0;
+            final boolean oguard = cfg.ownHarm != AiFixes.Mode.OFF; // line-own-target-1119 (off: nothing runs)
+            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0, faceHere = 0, ownHere = 0;
             final Set<Integer> pumpKnown = pguard ? pumpKnownIds(live, liveMe) : null; // the seat's knowledge, from the live game
+            if (oguard && defSa != null) {
+                final SpellAbility d = locate(g, me, out.get(0));
+                if (d != null && ownHarmWhy(me, d) != null) {
+                    stats.ownHarmForge++; // Forge's own answer (its targets Forge AI's): counted, never dropped
+                    ownHarmCounted(d);
+                    ownHere++;
+                }
+            }
             final DfuTally dfu = dguard ? new DfuTally(() -> pumpKnownIds(live, liveMe), () -> dfuLivePending(live)) : null;
             if (dguard) {
                 deadFaceUpKeys.clear();
@@ -5733,6 +5829,19 @@ public final class LookaheadSearch {
                     }
                     deadFaceUpKeys.add(c.key());
                 }
+                if (oguard && !seen.contains(c.key())) {
+                    final String why = ownHarmWhy(me, sa);
+                    if (why != null) {
+                        ownHere++;
+                        stats.ownHarmCands++;
+                        ownHarmCounted(sa);
+                        if (cfg.ownHarm == AiFixes.Mode.ON) {
+                            seen.add(c.key());
+                            stats.ownHarmDropped++;
+                            continue;
+                        }
+                    }
+                }
                 if (seen.add(c.key())) {
                     out.add(c);
                 }
@@ -5754,6 +5863,9 @@ public final class LookaheadSearch {
             }
             if (faceHere > 0) {
                 stats.deadFaceUpDecisions++;
+            }
+            if (ownHere > 0) {
+                stats.ownHarmDecisions++;
             }
             if (dfu != null) {
                 deadFaceUpLast = dfu.finish(stats, cfg.deadFaceUp);

@@ -39,8 +39,10 @@ import forge.game.zone.ZoneType;
  * probeObjects step's {@link ForcedWinPlanner.Step#objTarget}) or the effect pays off (a permanent we control triggers on
  * that card dying or leaving the battlefield, on it being destroyed or sacrificed, or, for damage, on it being dealt
  * damage; a bounce of a card with its own enters trigger);</li>
- * <li>an open target's only legal choices are permanents we control (or us).</li>
+ * <li>an open target's only legal choices are permanents we control (or us), none of them planned or paying off.</li>
  * </ul>
+ * The policy search's ownHarm key ({@link LookaheadSearch.Config#ownHarm}) reads the same rule over its candidates
+ * through {@link #refuseOpen}: every target open, a modal spell refused only when every mode it could take is.
  * Never refused: an ability whose targets can only be ours ("target creature you control": a blink, a sacrifice outlet),
  * costs (a sacrifice cost is not a target), and effects that are not harmful.
  */
@@ -65,7 +67,25 @@ final class LineOwnTarget {
         }
     }
 
+    /**
+     * line-own-target-1119 ({@link LookaheadSearch.Config#ownHarm}): why a search candidate {@code sa} (a menu entry, its
+     * targets and modes not yet chosen: every target is open, a modal spell is refused only when every mode is) must not
+     * be played by {@code me} now; null = it may. Never throws.
+     */
+    static String refuseOpen(final Player me, final SpellAbility sa) {
+        try {
+            return refuse0(me, sa, null, null, true);
+        } catch (RuntimeException e) {
+            return null; // a check that cannot be made refuses nothing (the candidate stays)
+        }
+    }
+
     private static String refuse0(final Player me, final SpellAbility sa, final String modeTok, final Set<Integer> planned) {
+        return refuse0(me, sa, modeTok, planned, false);
+    }
+
+    private static String refuse0(final Player me, final SpellAbility sa, final String modeTok, final Set<Integer> planned,
+            final boolean open) {
         if (me == null || sa == null) {
             return null;
         }
@@ -101,7 +121,7 @@ final class LineOwnTarget {
             }
             return first;
         }
-        return refuseChain(me, sa, false, planned);
+        return refuseChain(me, sa, open, planned);
     }
 
     /** The first refusal of an ability and its sub-abilities, or null ({@code open}: every target is chosen at cast). */
@@ -156,6 +176,8 @@ final class LineOwnTarget {
                 affected = true;
                 if (me.equals(c.getController())) {
                     ours.add(c.getName() + " (" + c.getId() + ")");
+                    // a death (or leave) payoff on one of ours is a choice worth making (as for a recorded target)
+                    other |= (planned != null && planned.contains(c.getId())) || paysOff(me, c, harm);
                 } else {
                     other = true;
                 }

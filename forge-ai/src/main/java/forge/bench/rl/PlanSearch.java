@@ -12,6 +12,7 @@ import org.apache.commons.lang3.tuple.ImmutablePair;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
+import forge.ai.AiFixes;
 import forge.ai.simulation.ForcedWinSolver;
 import forge.ai.simulation.LookaheadSearch;
 import forge.bench.PlayerControllerBridge;
@@ -381,6 +382,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         int i;
         int state; // 0 running, 1 done, 2 broken
         String why = "";
+        /**
+         * line-own-target-1119 (OFF for every play-out's cursor): the live plan's ownHarm. ON breaks the plan before a
+         * step the rule refuses; SHADOW notes it ({@link #ownHarmNote}) and plays on.
+         */
+        AiFixes.Mode ownHarm = AiFixes.Mode.OFF;
+        String ownHarmNote;
 
         Cursor(final PolicyPlan plan, final LookaheadSearch.FirstAction fa, final int from) {
             this.plan = plan;
@@ -427,6 +434,17 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (idx < 0) {
                 end(2, "missing " + st.label);
                 return -1;
+            }
+            if (ownHarm != AiFixes.Mode.OFF) {
+                final int ch = RlSearch.choiceOf(m, idx);
+                final String refused = ch > 0 && ch <= objs.size() ? LookaheadSearch.ownHarmWhy(p, objs.get(ch - 1)) : null;
+                if (refused != null) {
+                    ownHarmNote = st.label + ": " + refused;
+                    if (ownHarm == AiFixes.Mode.ON) {
+                        end(2, "own-harm " + ownHarmNote);
+                        return -1;
+                    }
+                }
             }
             i++;
             if (i >= plan.steps.size()) {
@@ -485,6 +503,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         /** unified-search-1106 (plans.planX). */
         boolean recordX;
         Player seatPlayer;
+        /** line-own-target-1119: check each recorded step against ownHarm; the first refused step's note (null = none). */
+        boolean ownHarmCheck;
+        String ownHarm;
 
         Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps) {
             this(turn, seed, temperature, sampled, maxSteps, false);
@@ -524,6 +545,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             }
             final SpellAbility sa = choice == 0 ? null : objs.get(choice - 1);
             final String phase = String.valueOf(g.getPhaseHandler().getPhase());
+            if (ownHarmCheck && ownHarm == null && sa != null) {
+                final String why = LookaheadSearch.ownHarmWhy(p, sa); // the recording copy's state, as the plan would play it
+                if (why != null) {
+                    ownHarm = (sa.getHostCard() == null ? "?" : sa.getHostCard().getName()) + ": " + why;
+                }
+            }
             if (exactActions) {
                 steps.add(new PStep(sa, phase, x, true)); // house p3 (exactActions): X or none, matched exactly
             } else if (recordX && x >= 0) {
@@ -992,6 +1019,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         if (idx >= 0) {
             liveSteps++;
         }
+        if (live.ownHarmNote != null) {
+            rs.ownHarmPlanBreak(g, live.ownHarmNote); // line-own-target-1119 (ON: the plan broke before it)
+            live.ownHarmNote = null;
+        }
         if (!live.active()) {
             if (live.state == 2) {
                 liveBreaks++;
@@ -1339,6 +1370,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 final Recorder sampled = new Recorder(ph.getTurn(), RlSearch.splitmix(seed0 ^ (0x5a3L + i)), spec.temperature, true,
                         spec.maxSteps, spec.exactActions);
                 sampled.recordX = spec.planX;
+                sampled.ownHarmCheck = rs.ownHarmMode() != AiFixes.Mode.OFF; // line-own-target-1119
                 recs.add(sampled);
             }
             final boolean[] ok = rs.ls().recordPlans(g, p, recs, st.knownTop, deadline);
@@ -1363,6 +1395,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 final PolicyPlan pp = new PolicyPlan(ph.getTurn(), new ArrayList<>(r.steps));
                 if (!seen.add(pp.key) || match(m, objs, pp.steps.get(0)) < 0) {
                     continue;
+                }
+                if (r.ownHarm != null && rs.ownHarmPlanRefused(g, "sample#" + i + " " + pp.label(), r.ownHarm)) {
+                    continue; // line-own-target-1119 (ON): it would play a refused step
                 }
                 st.plans.add(pp);
                 st.labels.add("sample#" + i + " " + pp.label());
@@ -1534,9 +1569,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         if (idx < 0) {
             return -2;
         }
+        if (rs.ownHarmMode() == AiFixes.Mode.ON) {
+            // line-own-target-1119: its first step refused here (its recording's check missed it): not adopted
+            final int ch = RlSearch.choiceOf(m, idx);
+            final String why = ch > 0 && ch <= objs.size() ? LookaheadSearch.ownHarmWhy(me, objs.get(ch - 1)) : null;
+            if (why != null) {
+                rs.ownHarmPlanRefused(g, pp.label(), pp.steps.get(0).label + ": " + why);
+                return -2;
+            }
+        }
         policyPlanDepartures++;
         planTurns.add(g.getPhaseHandler().getTurn());
         live = new Cursor(pp, null, 1);
+        live.ownHarm = rs.ownHarmMode(); // line-own-target-1119 (OFF: as before)
         if (!live.active()) {
             live = null;
             pointAgain = true;
