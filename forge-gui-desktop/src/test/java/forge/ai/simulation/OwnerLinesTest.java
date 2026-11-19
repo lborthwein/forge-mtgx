@@ -82,6 +82,9 @@ public class OwnerLinesTest extends forge.ai.AITest {
                     if (s.redraw == null) {
                         throw new IllegalStateException("owner.beliefCube set but no belief redraw");
                     }
+                    if (s.config().counterWorlds) {
+                        s.counter = beliefRedraw.counterHook(s.config()); // sdcc-counterworlds-1118 (as PlanSearch)
+                    }
                 }
                 final long t0 = System.nanoTime();
                 final List<ForcedWinSolver.Proposal> props = s.propose(g);
@@ -93,7 +96,9 @@ public class OwnerLinesTest extends forge.ai.AITest {
                 }
                 System.out.println("OWNERLINES " + id + " PROPOSE ms=" + (System.nanoTime() - t0) / 1_000_000 + " lines=" + props.size()
                         + (best == null ? " none" : " proven=" + best.proven(1) + " pUnopposed=" + best.pUnopposed + " pBelief=" + best.pBelief
-                                + " steps=" + best.steps + " winTurn=" + best.winTurn + " how=" + best.how + " | " + cut(best.text, 260))
+                                + " steps=" + best.steps + " winTurn=" + best.winTurn + " how=" + best.how
+                                + (best.counterWorlds >= 0 ? " counterP=" + best.counterP + " counterWorlds=" + best.counterWorlds : "")
+                                + " | " + cut(best.text, 260))
                         + " cap=" + s.lastCap() + " || " + s.summary());
                 if ("true".equals(System.getProperty("owner.full"))) {
                     // sdcc-fetchthin-1117 (opt-in): every proposed line in full (steps with picks), and the probe's timing

@@ -620,6 +620,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         // honest-belief-1020: the solver's verification worlds and engine root draw the opponent's hidden cards from the
         // search's belief pool (null = belief off: as before)
         this.driver.solver().redraw = rs.ls().solverRedraw(sc); // deck-belief-1105: deckBelief, else as before
+        if (sc.counterWorlds) {
+            this.driver.solver().counter = rs.ls().counterHook(sc); // sdcc-counterworlds-1118 (off: null, as before)
+        }
+        if (sc.counterSearch) {
+            rs.ls().searchCounter = rs.ls().counterHook(sc); // sdcc-counterworlds-1118: the search's worlds too
+        }
         this.followCfg = sc;
         this.threat = spec.opp ? new forge.ai.simulation.ThreatCheck(spec.oppConfig()) : null;
         if (spec.defend) {
