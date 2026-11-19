@@ -2985,7 +2985,8 @@ public final class ForcedWinSolver {
      * {@code live} in its own id, cache and random scopes (S1 1: locating it in the live game set the activators of the
      * host's live abilities). The run is charged to {@code work} (propose: the offense's Forge AI work budget; null: a
      * budget of {@link Config#aiWorkCap} opened inside the current one) and is not started past {@code deadline} (a
-     * {@link forge.game.WorkClock} time; 0 = none). Out of budget, or any error: null, so the line is kept unfiltered.
+     * {@link forge.game.WorkClock} time; 0 = none). Out of budget, or any error: null, so the line is kept unfiltered;
+     * review 3: a refusal found after the deadline or with the budget spent is not returned either (counted unchecked).
      */
     String ownTargetAtStart(final Game live, final Line line, final forge.ai.AiWork.Budget work, final long deadline) {
         if (!cfg.lineOwnTarget || !liveSeat || line == null) {
@@ -3031,7 +3032,15 @@ public final class ForcedWinSolver {
             final Follower f = follower(line);
             f.ownTarget = true;
             final Follower.Next n = f.next(g, cm);
-            return n.broken && n.why != null && n.why.startsWith("own-target:") ? n.why : null;
+            final String why = n.broken && n.why != null && n.why.startsWith("own-target:") ? n.why : null;
+            if (why != null && (deadline != 0 && forge.game.WorkClock.nanoTime() > deadline || forge.ai.AiWork.spent())) {
+                // review 3 of #251: the copy and the check ran past the deadline or the budget; over budget the line is
+                // kept, as when the check is never started
+                ownTargetUnchecked++;
+                receipt("FORCED_WIN own-target-unchecked" + tag() + " after line=" + line.steps);
+                return null;
+            }
+            return why;
         } catch (RuntimeException | StackOverflowError e) {
             if (e instanceof forge.ai.AiWork.Exhausted) {
                 ownTargetUnchecked++;

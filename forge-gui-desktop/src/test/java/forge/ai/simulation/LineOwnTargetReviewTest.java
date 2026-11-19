@@ -685,6 +685,26 @@ public class LineOwnTargetReviewTest extends SimulationTest {
     }
 
     /**
+     * Review 3 of #251 (the reviewer's budget caveat): a deadline that passes during the copy and the check keeps the line
+     * too. The deadline is 50 microseconds ahead: the check starts in time, and a game copy takes far longer.
+     */
+    @Test
+    public void r3AFirstStepCheckThatEndsPastItsDeadlineKeepsTheLine() {
+        board();
+        final Card bears = ours("Grizzly Bears");
+        ours("Plains");
+        final SpellAbility sa = ability("Swords to Plowshares", ApiType.ChangeZone);
+        final Line line = modeLine(sa.getHostCard(), sa, null, bears);
+        final ForcedWinSolver s = lineSolver(true, true);
+        Assert.assertNotNull(s.ownTargetAtStart(g, line, null, forge.game.WorkClock.nanoTime() + 60_000_000_000L),
+                "a minute ahead: filtered");
+        Assert.assertEquals(s.ownTargetUnchecked, 0);
+        Assert.assertNull(s.ownTargetAtStart(g, line, null, forge.game.WorkClock.nanoTime() + 50_000L),
+                "past its deadline when the check ends: kept");
+        Assert.assertEquals(s.ownTargetUnchecked, 1, "counted unchecked");
+    }
+
+    /**
      * architect-o, review 2 (option A): a trigger Forge flags static ({@code Static$ True}, rules bookkeeping) is not a
      * payoff. Tear Asunder at our own Chrome Mox (its imprint-cleanup leaves trigger is static), imprinted or not, is
      * refused by both keys, as at Mox Jet. The leaves, cast and death keeps above (Reveillark, Guttersnipe, Bridge from
