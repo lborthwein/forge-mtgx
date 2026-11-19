@@ -304,10 +304,11 @@ final class ForcedWinEngine {
          */
         boolean loopBisect = false;
         /**
-         * sdcc-multitarget-loop-1119 (false = off, with loopOutlets): a loop fast-forward that stopped at a count whose
-         * attackers are lethal past the opponent's untapped creatures ({@link #lethalPastBlockers}) has its node searched
-         * first and the loop hoisted after (the hoist ran first and could spend the budget before that node, whose first ply
-         * attacks); a hoisted fast-forward also stops at such a count and runs its outlet search there.
+         * sdcc-multitarget-loop-1119 (false = off, with loopOutlets and loopHoist): a loop fast-forward that stopped at a
+         * count whose attackers are lethal past the opponent's untapped creatures ({@link #lethalPastBlockers}) tries the
+         * attack alone there first ({@link ForcedWinEngine#lethalAttack}, two nodes, past the root pass move's share), before
+         * the hoist, whose doubling outlet searches could spend the budget first; a hoisted fast-forward tries it once, at its
+         * first lethal doubling. No win leaves the search exactly as with the key off.
          */
         boolean loopLethalFirst = false;
         /**
@@ -1775,6 +1776,7 @@ final class ForcedWinEngine {
         // tokens runs to creditCap's count with no outlet search at the doublings; its outlet is tried once, after
         int cap = lim.repeatCap;
         boolean manaOnly = false;
+        boolean lethalTried = false; // sdcc-multitarget-loop-1119 (loopLethalFirst)
         final long[] start = cur.pv;
         try {
         while (reps < cap && !out()) {
@@ -1817,10 +1819,6 @@ final class ForcedWinEngine {
                 }
                 before = next.pv;
                 done++;
-                if (lim.loopLethalFirst && lethalPastBlockers(next)) {
-                    cap = reps + done; // sdcc-multitarget-loop-1119: as the chunked forward, the outlet search at this count
-                    break;
-                }
             }
             if (TRACE) {
                 ForcedWinSolver.receipt("FW_ENGINE hoist chunk reps=" + reps + " want=" + want + " done=" + done + " failed=" + failed
@@ -1850,9 +1848,12 @@ final class ForcedWinEngine {
             if (manaOnly) {
                 continue;
             }
-            if (lim.loopLethalFirst && reps == cap && lethalPastBlockers(cur)) {
-                // sdcc-multitarget-loop-1119: at the lethal count the attack first (its count is the first lethal one)
+            if (lim.loopLethalFirst && !lethalTried && lethalPastBlockers(cur)) {
+                // sdcc-multitarget-loop-1119: at the first doubling whose attackers are lethal past blockers, the attack alone
+                // first (two nodes); no win leaves the doublings and their outlet searches as before
+                lethalTried = true;
                 final List<Step> now = lethalAttack(loopNode(cur, a, prefix, body, reps));
+                forge.util.IdScope.install(cloneScope(cur.ids));
                 if (now != null) {
                     return now;
                 }
@@ -3694,27 +3695,26 @@ final class ForcedWinEngine {
                         return r;
                     }
                 }
-                // sdcc-multitarget-loop-1119 (loopLethalFirst; off: false, the order as before): a forward that stopped at a
-                // lethal attack count has its node searched before the hoist, which runs after only if that search found nothing
-                final boolean lethalFirst = lim.loopLethalFirst && fw.win == null && fw.node != null
-                        && lim.loopHoist && lim.loopOutlets && !inOutlet && lethalPastBlockers(fw.node);
+                if (fw.win == null && fw.node != null && lim.loopLethalFirst && lim.loopHoist && lim.loopOutlets && !inOutlet
+                        && lethalPastBlockers(fw.node)) {
+                    // sdcc-multitarget-loop-1119 (loopLethalFirst; off: nothing here): a forward that stopped at a lethal
+                    // attack count tries the attack alone there first (two nodes); no win leaves the order as before
+                    final List<Step> now = lethalAttack(fw.node);
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                    if (now != null) {
+                        return now;
+                    }
+                }
                 if (fw.win != null) {
                     final List<Step> w = wonVerified(fw.win, node); // solver-gaps-1104 (off = fw.win)
                     if (w != null || lim.verify == null) {
                         return w;
                     }
-                } else if (lim.loopHoist && lim.loopOutlets && !inOutlet && !lethalFirst) {
+                } else if (lim.loopHoist && lim.loopOutlets && !inOutlet) {
                     final List<Step> hw = hoist(a.child, body, played); // loop-exec-1107
                     forge.util.IdScope.install(cloneScope(node.ids));
                     if (hw != null) {
                         return hw;
-                    }
-                }
-                if (lethalFirst) {
-                    final List<Step> now = lethalAttack(fw.node); // sdcc-multitarget-loop-1119: the attack at the count first
-                    forge.util.IdScope.install(cloneScope(node.ids));
-                    if (now != null) {
-                        return now;
                     }
                 }
                 if (fw.node != null && !seenDominated(fw.node)) {
@@ -3732,13 +3732,6 @@ final class ForcedWinEngine {
                     }
                 } else {
                     st.pruned++;
-                }
-                if (lethalFirst && !out()) {
-                    final List<Step> hw = hoist(a.child, body, played); // sdcc-multitarget-loop-1119: the hoist, after
-                    forge.util.IdScope.install(cloneScope(node.ids));
-                    if (hw != null) {
-                        return hw;
-                    }
                 }
                 return null;
             }

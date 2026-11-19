@@ -223,9 +223,10 @@ public final class ForcedWinSolver {
          */
         public boolean engineLoopBisect = false;
         /**
-         * sdcc-multitarget-loop-1119 (off by default: nothing changes; read with engineLoopReach): a loop whose fast-forward
-         * stopped at a count whose attackers are lethal past the opponent's untapped creatures has that node searched before
-         * the loop is hoisted, and a hoisted fast-forward stops at that count too ({@link ForcedWinEngine.Limits#loopLethalFirst}).
+         * sdcc-multitarget-loop-1119 (off by default: nothing changes; read with engineLoopReach and engineLoopHoist): at a
+         * loop count whose attackers are lethal past the opponent's untapped creatures, the attack alone is tried first (two
+         * nodes, past the root pass move's node share); no win leaves the search as with the key off
+         * ({@link ForcedWinEngine.Limits#loopLethalFirst}).
          */
         public boolean engineLoopLethalFirst = false;
         /**
