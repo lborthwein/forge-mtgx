@@ -51,13 +51,20 @@ public class OwnerLinesTest extends forge.ai.AITest {
             final JsonObject o = e.getAsJsonObject();
             final String id = o.get("game").getAsString();
             final String frame = o.get("state").getAsString();
+            // sdcc-multitarget-loop-1119 (opt-in): a position's own solver keys over the file's (key on / off pairs in one JVM)
+            final JsonObject cfg = solverCfg.deepCopy();
+            if (o.has("cfgExtra")) {
+                for (java.util.Map.Entry<String, JsonElement> x : o.getAsJsonObject("cfgExtra").entrySet()) {
+                    cfg.add(x.getKey(), x.getValue());
+                }
+            }
             System.out.println("OWNERLINES " + id + " win=" + o.get("win") + " go_turn=" + o.get("go_turn")
                     + " own_turns_after_go=" + o.get("own_turns_after_go") + " pile=" + o.get("pile")
                     + (o.has("he_did") ? " he_did=" + o.get("he_did") : ""));
             try {
                 final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
                 final Player me = g.getPlayers().get(0);
-                final ForcedWinSolver s = new ForcedWinSolver(me, SolverDriver.config(solverCfg));
+                final ForcedWinSolver s = new ForcedWinSolver(me, SolverDriver.config(cfg));
                 final long t0 = System.nanoTime();
                 final List<ForcedWinSolver.Proposal> props = s.propose(g);
                 ForcedWinSolver.Proposal best = null;
@@ -80,11 +87,14 @@ public class OwnerLinesTest extends forge.ai.AITest {
             } catch (RuntimeException | Error ex) {
                 System.out.println("OWNERLINES " + id + " PROPOSE failed: " + cut(ex, 200));
             }
+            if ("true".equals(System.getProperty("owner.proposeOnly"))) {
+                continue; // sdcc-multitarget-loop-1119 (opt-in): the proposal only, no setup passes
+            }
             for (int[] b : budgets) {
                 try {
                     final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame);
                     final Player me = g.getPlayers().get(0);
-                    final ForcedWinSolver s = new ForcedWinSolver(me, SolverDriver.config(solverCfg));
+                    final ForcedWinSolver s = new ForcedWinSolver(me, SolverDriver.config(cfg));
                     final ForcedWinSolver.GoldfishOpts go = new ForcedWinSolver.GoldfishOpts();
                     go.horizon = 3;
                     go.active = 3;
