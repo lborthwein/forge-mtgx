@@ -1222,4 +1222,65 @@ public class InteractiveTriggerLabelTest extends AITest {
             assertFalse(hidden.safe("Return Eleven, the Mage."));
         }
     }
+    // ------------------------------------------------------------------ review fix 6
+
+    /** Astra's r6 repro: a sub-ability hosted by {@code printed} renders "Return NICKNAME." as its nickname. */
+    private void nicknameIsHidden(final String printed, final String nickname) throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card secret = addCard(printed, h.foe);
+            final SpellAbility wrapper = wrapped(host, h.foe, null, "ABILITY");
+            final SpellAbility inner = ((forge.game.trigger.WrappedAbility) wrapper).getWrappedAbility();
+            inner.setSubAbility((forge.game.spellability.AbilitySub) ability(secret, h.foe,
+                    "DB$ Draw | Defined$ You | SpellDescription$ Return NICKNAME."));
+            final String rendered = wrapper.getStackDescription();
+            assertTrue(rendered.contains("Return " + nickname + "."), rendered);
+            h.game.getStack().add(wrapper);
+            secret.turnFaceDown(true);
+            assertEquals(InteractiveState.knownNow(h.game, secret.getView(), h.seat.getView()), null);
+            final JsonObject entry = topEntry(h);
+            System.out.println("R6 NICKNAME " + printed + ": " + entry);
+            assertFalse(entry.toString().contains(nickname), entry.toString());
+            assertEquals(entry.get("description").getAsString(), "Sneak Attack — triggered ability", entry.toString());
+        }
+    }
+
+    /** r6 finding: Forge's NICKNAME renders "Nicol Bolas" for Nicol Bolas, the Ravager. */
+    @Test(timeOut = 900000)
+    public void r6_aRawNicknameIsHidden() throws Exception {
+        nicknameIsHidden("Nicol Bolas, the Ravager", "Nicol Bolas");
+    }
+
+    /** r6 finding: the Cecily, Haunted Mage printing's NICKNAME renders "Cecily", its flavor name's nickname. */
+    @Test(timeOut = 900000)
+    public void r6_aFlavorNicknameIsHidden() throws Exception {
+        nicknameIsHidden("Cecily, Haunted Mage", "Cecily");
+    }
+
+    /**
+     * The other rendered name forms (#253 "Rendered name forms covered"): a nickname wherever Forge can render one (a
+     * legendary face without a comma, a script that uses NICKNAME), none where it cannot (a sorcery's first word) and
+     * none that is only an article; an effect's generated name and a card's "Name (id)" form.
+     */
+    @Test(timeOut = 900000)
+    public void r6_renderedNameForms() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card cruise = addCardToZone("Treasure Cruise", h.foe, ZoneType.Hand);
+            addCardToZone("Phage the Untouchable", h.foe, ZoneType.Hand);
+            addCardToZone("Serum Sovereign", h.foe, ZoneType.Hand);
+            addCardToZone("The One Ring", h.foe, ZoneType.Hand);
+            final InteractiveState.HiddenNames hidden = InteractiveState.HiddenNames.of(h.game, h.seat.getView());
+            // Nicknames Forge can render: a legendary face, and a card whose script uses NICKNAME.
+            assertFalse(hidden.safe("Phage deals damage."), "a legendary face's nickname");
+            assertFalse(hidden.safe("Remove an oil counter from Serum."), "Serum Sovereign's script uses NICKNAME");
+            // None where Forge renders none, and none that is only an article.
+            assertTrue(hidden.safe("Create a Treasure token."), "a sorcery has no nickname");
+            assertFalse(hidden.safe("Treasure Cruise"));
+            assertTrue(hidden.safe("The Monarch — draw a card."), "\"The\" names no card");
+            assertFalse(hidden.safe("The One Ring"));
+            // The effect name and "Name (id)" forms carry the name or the id.
+            assertFalse(hidden.safe("Phage the Untouchable's Effect"));
+            assertFalse(hidden.safe("A card (" + cruise.getId() + ")'s Effect"));
+        }
+    }
 }

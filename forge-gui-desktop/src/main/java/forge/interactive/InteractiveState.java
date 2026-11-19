@@ -1078,15 +1078,16 @@ final class InteractiveState {
             if (card == null || !visited.add(card.getId())) return;
             if (knownNow(game, card.getView(), viewer) == null) {
                 ids.add(card.getId());
+                final boolean scriptNickname = scriptUsesNickname(card);
                 // The printed faces, then the current or copied ones (getState of a state the card has creates none).
                 for (CardStateName state : new ArrayList<>(card.getStates())) {
                     if (state != CardStateName.FaceDown && state != CardStateName.EmptyRoom) {
-                        addNames(names, card, card.getOriginalState(state));
+                        addNames(names, card, card.getOriginalState(state), scriptNickname);
                     }
                 }
                 for (CardStateName state : CardStateName.values()) {
                     if (state != CardStateName.FaceDown && state != CardStateName.EmptyRoom && card.hasState(state)) {
-                        addNames(names, card, card.getState(state));
+                        addNames(names, card, card.getState(state), scriptNickname);
                     }
                 }
             }
@@ -1097,16 +1098,86 @@ final class InteractiveState {
         }
 
         /**
-         * A face's names as Forge may render them (review fix 5: Forge renders {@code Card.getDisplayName}, so the
-         * Cecily, Haunted Mage printing of Eleven, the Mage read "Return Cecily, Haunted Mage."): the face's own name,
-         * its flavor name, and the card's effective and display names for it (a name an effect gave it). Read-only.
+         * A face's names in every form Forge renders a card reference (the "Rendered name forms covered" list of #253):
+         * <ul>
+         * <li>the face's own name, its flavor name, and the card's effective and display names for it (review fix 5:
+         * Forge renders {@code Card.getDisplayName}, so the Cecily, Haunted Mage printing of Eleven, the Mage read
+         * "Return Cecily, Haunted Mage.");</li>
+         * <li>review fix 6: the translated form of each ({@code CardTranslation.getTranslatedName}, CARDNAME's form in
+         * another language; the same name in English);</li>
+         * <li>review fix 6: the nickname of each and of its translation ({@code Lang.getNickName}, NICKNAME's form:
+         * "Return Cecily."), where Forge can render one for this card: a name with a comma or a colon, a legendary face,
+         * or a card whose script uses NICKNAME. A nickname that is only an article ("The" of The One Ring) names no
+         * card and is left out.</li>
+         * </ul>
+         * Read-only.
          */
-        private static void addNames(final Set<String> names, final Card card, final CardState face) {
+        private static void addNames(final Set<String> names, final Card card, final CardState face,
+                                     final boolean scriptNickname) {
             if (face == null) return;
-            addName(names, face.getName());
-            addName(names, face.getFlavorName());
-            addName(names, card.getName(face));
-            addName(names, card.getDisplayName(face));
+            boolean legendary;
+            try {
+                legendary = face.getType() != null && face.getType().isLegendary();
+            } catch (RuntimeException unreadable) {
+                legendary = true;
+            }
+            for (String name : new String[] {face.getName(), face.getFlavorName(), card.getName(face),
+                    card.getDisplayName(face)}) {
+                if (name == null || name.isBlank()) continue;
+                final String translated = translated(name);
+                for (String form : translated.equals(name) ? new String[] {name} : new String[] {name, translated}) {
+                    addName(names, form);
+                    if (scriptNickname || legendary || form.contains(",") || form.contains(":")) {
+                        addNickname(names, form);
+                    }
+                }
+            }
+        }
+
+        /** {@code name}'s translated form, as Forge renders CARDNAME; {@code name} itself when there is none. */
+        private static String translated(final String name) {
+            try {
+                final String translated = forge.util.CardTranslation.getTranslatedName(name);
+                return translated == null || translated.isBlank() ? name : translated;
+            } catch (RuntimeException unreadable) {
+                return name;
+            }
+        }
+
+        private static void addNickname(final Set<String> names, final String name) {
+            final String nickname;
+            try {
+                nickname = forge.util.Lang.getInstance().getNickName(name);
+            } catch (RuntimeException unreadable) {
+                return;
+            }
+            if (nickname == null) return;
+            final String trimmed = nickname.trim();
+            if (trimmed.isEmpty() || ARTICLES.contains(trimmed.toLowerCase(java.util.Locale.ROOT))) return;
+            addName(names, trimmed);
+        }
+
+        private static final Set<String> ARTICLES = Set.of("the", "a", "an");
+
+        /** Whether the card's printed script (any face) uses NICKNAME, so Forge may render its nickname. */
+        private static boolean scriptUsesNickname(final Card card) {
+            try {
+                final forge.card.CardRules rules = card.getRules();
+                if (rules == null) return false;
+                for (forge.card.ICardFace face : rules.getAllFaces()) {
+                    if (face == null) continue;
+                    for (Iterable<String> lines : java.util.Arrays.asList(face.getAbilities(), face.getTriggers(),
+                            face.getStaticAbilities(), face.getReplacements(), face.getKeywords())) {
+                        if (lines == null) continue;
+                        for (String line : lines) {
+                            if (line != null && line.contains("NICKNAME")) return true;
+                        }
+                    }
+                }
+                return false;
+            } catch (RuntimeException unreadable) {
+                return true;
+            }
         }
 
         private static void addName(final Set<String> names, final String name) {
