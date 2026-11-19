@@ -39,8 +39,28 @@ public class CostAdjustment {
      * unknown, never unaffordable. Uses the same adjustment functions as payment but
      * excludes choice/target-dependent adjustments and never invokes a controller.
      * The caller must separately exclude alternative payment mechanics (convoke etc.).
+     * Any cost part other than mana or {T}, after the raises, makes the price unknown.
      */
     public static ManaCost presentationManaCost(final SpellAbility sa) {
+        return presentationManaCost(sa, false);
+    }
+
+    /**
+     * {@link #presentationManaCost(SpellAbility)}, with {@code ownParts} for a caller that judges the ability's own
+     * non-mana cost parts itself (loyalty-glow-1119: a loyalty [+1] or [-2] is a counter part, so any raise, reduce or
+     * set static in the game made every loyalty ability's price unknown). With {@code ownParts}:
+     * <ul>
+     *   <li>a cost part other than mana or {T} that the ability's own cost already has does not make the price
+     *       unknown;</li>
+     *   <li>a raise that added such a part, or replaced one of the ability's own (a merged counter or life amount),
+     *       still does;</li>
+     *   <li>a reduction whose size depends on colour or a floor (Color, MinMana) makes the price unknown only when there
+     *       is mana left to reduce: with none, it cannot apply;</li>
+     *   <li>a set static (Trinisphere) prices a cost with no mana part, as payment does, instead of leaving it free.</li>
+     * </ul>
+     * Without {@code ownParts} it is exactly {@link #presentationManaCost(SpellAbility)}.
+     */
+    public static ManaCost presentationManaCost(final SpellAbility sa, final boolean ownParts) {
         if (sa == null || sa.getActivatingPlayer() == null || sa.getPayCosts() == null
                 || sa.isCastFaceDown() || sa.isBestow() || sa.hasParam("RaiseCost")
                 || sa.hasParam("ReduceCost")) return null;
@@ -53,6 +73,7 @@ public class CostAdjustment {
         final List<StaticAbility> raises = Lists.newArrayList();
         final List<StaticAbility> reduces = Lists.newArrayList();
         final List<StaticAbility> sets = Lists.newArrayList();
+        boolean choiceReduce = false;
         for (Card card : active) {
             for (StaticAbility st : card.getStaticAbilities()) {
                 final boolean raise = st.checkMode(StaticAbilityMode.RaiseCost);
@@ -65,19 +86,36 @@ public class CostAdjustment {
                 if (st.hasParam("ValidTarget") || st.hasParam("UpTo") || st.hasParam("Relative")
                         || !st.getParamOrDefault("Amount", "1").matches("[0-9]{1,4}")) return null;
                 // Generic reductions commute; colored/hybrid orderings need choices.
-                if (reduce && (st.hasParam("Color") || st.hasParam("MinMana"))) return null;
+                if (reduce && (st.hasParam("Color") || st.hasParam("MinMana"))) {
+                    if (!ownParts) return null;
+                    choiceReduce = true;
+                    continue;
+                }
                 if (raise) raises.add(st);
                 if (reduce) reduces.add(st);
                 if (set) sets.add(st);
             }
         }
         final Cost adjusted = sa.getPayCosts().copy();
+        // The ability's own parts, by identity: a raise that merges into one replaces it with a new part.
+        final List<CostPart> own = Lists.newArrayList();
+        if (ownParts) {
+            for (CostPart p : adjusted.getCostParts()) {
+                if (!(p instanceof CostPartMana) && !(p instanceof CostTap)) own.add(p);
+            }
+        }
         for (StaticAbility st : raises) applyRaiseCostAbility(adjusted, sa, st);
-        if (adjusted.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana)
-                && !(p instanceof CostTap))) return null;
+        for (CostPart p : adjusted.getCostParts()) {
+            if (p instanceof CostPartMana || p instanceof CostTap) continue;
+            if (own.stream().noneMatch(o -> o == p)) return null;
+        }
         final CostPartMana mana = adjusted.getCostMana();
-        if (mana == null) return ManaCost.ZERO;
-        final ManaCostBeingPaid result = new ManaCostBeingPaid(mana.getMana());
+        // Without ownParts, as before. With them a cost with no mana part can now get here (an evoke that exiles a
+        // card), and a set static prices it as payment does: Trinisphere makes that evoke cost {3}.
+        if (mana == null && (!ownParts || sets.isEmpty())) return ManaCost.ZERO;
+        final ManaCost printed = mana == null ? ManaCost.ZERO : mana.getMana();
+        if (choiceReduce && !printed.isZero()) return null;
+        final ManaCostBeingPaid result = new ManaCostBeingPaid(printed);
         int generic = 0;
         for (StaticAbility st : reduces) {
             if (checkRequirement(sa, st)) generic += applyReduceCostAbility(st, sa, result, generic);
