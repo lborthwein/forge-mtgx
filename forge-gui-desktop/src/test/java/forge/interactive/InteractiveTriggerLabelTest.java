@@ -79,13 +79,19 @@ public class InteractiveTriggerLabelTest extends AITest {
         volatile Thread gameThread;
 
         Harness(final BiConsumer<Player, Player> board) throws IOException {
+            this(board, false);
+        }
+
+        /** {@code humanLobby}: the seat's lobby player is a human one, as Forge's trigger-decision store requires. */
+        Harness(final BiConsumer<Player, Player> board, final boolean humanLobby) throws IOException {
             game = initAndCreateGame();
             seat = game.getPlayers().get(1);
             foe = game.getPlayers().get(0);
             board.accept(seat, foe);
             game.getPhaseHandler().devModeSet(PhaseType.MAIN1, seat);
             game.getAction().checkStateEffects(true);
-            controller = new PlayerControllerHuman(game, seat, seat.getLobbyPlayer());
+            controller = new PlayerControllerHuman(game, seat,
+                    humanLobby ? new forge.player.LobbyPlayerHuman(seat.getName()) : seat.getLobbyPlayer());
             controller.getFullControl().add(FullControlFlag.NoPaymentFromManaAbility);
             seat.dangerouslySetController(controller);
             gui = new InteractiveGuiGame(new InteractiveProtocol.Channel(
@@ -340,8 +346,9 @@ public class InteractiveTriggerLabelTest extends AITest {
                 assertFalse(label.contains("Llanowar Elves"), labels.toString());
                 noEngineTag(label);
             }
+            // The card in the hand and its snapshot read alike; since review fix 4 they are told apart by position.
             assertEquals(labels, List.of("A hidden card's effect — ability", "A face-down card — ability",
-                    "A hidden card — ability", "A hidden card — ability"));
+                    "A hidden card — ability (1 of 2)", "A hidden card — ability (2 of 2)"));
         }
     }
 
@@ -904,8 +911,9 @@ public class InteractiveTriggerLabelTest extends AITest {
 
     /**
      * The sink check itself ({@link InteractiveState.HiddenNames}): a hidden name, word-bounded and with its exact
-     * capitalization (review fix 3b: a hidden Life // Death's "Life" fails "Life" but not "gain 3 life"); a hidden id,
-     * (N) or (HN); both faces of a hidden double-faced card; a visible card sharing a hidden card's name fails too
+     * capitalization (review fix 3b: a hidden Life // Death's "Life" fails "Life" but not "gain 3 life"), except the
+     * first letter of a name of two or more words (review fix 4: "grizzly Bears"); a hidden id (N), while Forge's (HN)
+     * handles pass (review fix 4); both faces of a hidden double-faced card; a visible card sharing a hidden card's name fails too
      * (closed, by design), and passes once no card of that name is hidden.
      */
     @Test(timeOut = 900000)
@@ -924,6 +932,10 @@ public class InteractiveTriggerLabelTest extends AITest {
             // A hidden name.
             assertFalse(hidden.safe("Lightning Bolt deals 3 damage to any target."));
             assertTrue(hidden.safe("copy target lightning bolt"), "exact capitalization: Forge renders names verbatim");
+            // Review fix 4: a name of two or more words matches with its first letter in either case.
+            assertFalse(hidden.safe("lightning Bolt deals 3 damage."), "Forge lowercases a wrapped ability's first letter");
+            assertFalse(hidden.safe("grizzly Bears draws a card."), "the first letter in either case");
+            assertTrue(hidden.safe("grizzly bears draw cards."), "the rest stays exact");
             // Case pair: a hidden Life // Death.
             assertTrue(hidden.safe("You gain 3 life."), "a hidden \"Life\" leaves \"gain 3 life\" alone");
             assertTrue(hidden.safe("Pay 1 life, Sacrifice a land: draw a card."), "a hidden \"Life\" leaves \"pay 1 life\"");
@@ -936,7 +948,8 @@ public class InteractiveTriggerLabelTest extends AITest {
             assertFalse(hidden.safe("Search your library for an Island card."), "the seat's own library is hidden");
             // A hidden id.
             assertFalse(hidden.safe("Return a card (" + bolt.getId() + ")."));
-            assertFalse(hidden.safe("Face-down card (H" + bolt.getId() + ")"));
+            // Forge's (HN) handles are its public masks for face-down cards, not ids (review fix 4).
+            assertTrue(hidden.safe("Face-down card (H" + bolt.getId() + ")"), "an (HN) handle is a public mask");
             assertTrue(hidden.safe("Return a card (" + mine.getId() + ")."), "a visible card's id");
             // Both faces of a hidden double-faced card.
             assertFalse(hidden.safe("Delver of Secrets transforms."));
@@ -992,5 +1005,196 @@ public class InteractiveTriggerLabelTest extends AITest {
             assertEquals(sink.invoke(h.gui, question), "Use triggered ability of Sneak Attack?");
             assertEquals(sink.invoke(h.gui, "Sacrifice Grizzly Bears?"), "Sacrifice Grizzly Bears?", "not a trigger question");
         }
+    }
+    // ------------------------------------------------------------------ review fix 4
+
+    /** A trigger of {@code host}'s, by the start of its description, wrapped as Forge puts it on the stack. */
+    private static SpellAbility etb(final Harness h, final Card host, final Player player) {
+        final forge.game.trigger.Trigger trigger = host.getTriggers().stream()
+                .filter(t -> t.getParamOrDefault("TriggerDescription", "").startsWith("When CARDNAME enters"))
+                .findFirst().orElseThrow();
+        final SpellAbility sa = new forge.game.trigger.WrappedAbility(trigger, trigger.ensureAbility(), player);
+        sa.setActivatingPlayer(player);
+        sa.setTriggeringObject(AbilityKey.Card, host);
+        return sa;
+    }
+
+    /** "Return ORIGINALHOST." with {@code original} as the original host, as Forge stores it. */
+    private static SpellAbility returnOriginal(final Harness h, final Card host, final Card original) {
+        final SpellAbility sa = wrapped(host, h.foe, null, "Return ORIGINALHOST.");
+        sa.getTrigger().setCardState(original.getCurrentState());
+        return sa;
+    }
+
+    /**
+     * r4 finding 1 (ruled not a leak): Windbrisk Heights' hideaway text keeps Forge's "Face-down card (H1)", its public
+     * mask for the face-down card, the same handle the zone views show; the card's real id still fails the check.
+     */
+    @Test(timeOut = 900000)
+    public void r4_aHideawaysFaceDownHandlePassesAndARealIdFails() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Windbrisk Heights", h.foe);
+            final Card secret = addCardToZone("Grizzly Bears", h.foe, ZoneType.Exile);
+            secret.turnFaceDown(true);
+            host.addExiledCard(secret);
+            final SpellAbility sa = host.getSpellAbilities().stream()
+                    .filter(a -> a.getApi() == forge.game.ability.ApiType.Play).findFirst().orElseThrow();
+            sa.setActivatingPlayer(h.foe);
+            h.game.getStack().add(sa);
+            assertEquals(InteractiveState.knownNow(h.game, secret.getView(), h.seat.getView()), null);
+            assertTrue(secret.getId() != secret.getHiddenId());
+            final String description = topEntry(h).get("description").getAsString();
+            System.out.println("R4 HIDEAWAY: " + description);
+            assertTrue(description.contains("may play Face-down card (H" + secret.getHiddenId() + ")"), description);
+            namesNothingOf(description, secret);
+            assertFalse(InteractiveState.hiddenSafe("may play a card (" + secret.getId() + ")", h.game, h.seat.getView()));
+        }
+    }
+
+    /** r4 finding 1 (ruled not a leak): the optional-trigger question keeps the attacker's face-down handle. */
+    @Test(timeOut = 900000)
+    public void r4_theTriggerQuestionKeepsTheFaceDownHandle() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { }, true)) {
+            final Card host = addCard("Sneak Attack", h.seat);
+            final Card secret = addCard("Grizzly Bears", h.foe);
+            secret.turnFaceDown(true);
+            final SpellAbility sa = wrapped(host, h.seat, null, "You may draw a card.");
+            sa.setTriggeringObject(AbilityKey.Attacker, secret);
+            h.onGameThread(() -> h.controller.confirmTrigger((forge.game.trigger.WrappedAbility) sa));
+            final JsonObject request = h.request();
+            final String message = request.getAsJsonObject("prompt").get("message").getAsString();
+            System.out.println("R4 QUESTION: " + message);
+            assertTrue(message.startsWith("Use triggered ability of Sneak Attack (" + host.getId() + ")"), message);
+            assertTrue(message.contains("Face-down card (H" + secret.getHiddenId() + ")"), message);
+            namesNothingOf(message, secret);
+        }
+    }
+
+    /** r4 finding 2: a card copying another keeps its printed name in the hidden set. */
+    @Test(timeOut = 900000)
+    public void r4_aCopiedCardKeepsItsPrintedNameHidden() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card secret = addCard("Grizzly Bears", h.foe);
+            final Card model = addCard("Merfolk Looter", h.foe);
+            h.game.getStack().add(returnOriginal(h, host, secret));
+            final SpellAbility clone = ability(secret, h.foe, "DB$ Clone | Defined$ Self | CloneTarget$ Targeted");
+            secret.addCloneState(forge.game.card.CardFactory.getCloneStates(model, secret, clone), h.game.getNextTimestamp());
+            assertEquals(secret.getState(forge.card.CardStateName.Original).getName(), "Merfolk Looter");
+            secret.turnFaceDown(true);
+            entryIs(topEntry(h), "Sneak Attack", "Sneak Attack — triggered ability", secret);
+        }
+    }
+
+    /** r4 finding 3: a mutated permanent's component, in no zone, is in the hidden set. */
+    @Test(timeOut = 900000)
+    public void r4_aMergedComponentIsHidden() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card base = addCard("Grizzly Bears", h.foe);
+            final Card secret = addCard("Gemrazer", h.foe);
+            h.game.getStack().add(returnOriginal(h, host, secret));
+            final SpellAbility mutate = ability(secret, h.foe, "DB$ Mutate | ValidTgts$ Creature.YouCtrl");
+            mutate.getTargets().add(base);
+            AbilityUtils.resolve(mutate);
+            base.turnFaceDown(true);
+            assertTrue(secret.isFaceDown());
+            assertEquals(InteractiveState.knownNow(h.game, secret.getView(), h.seat.getView()), null);
+            final JsonObject entry = topEntry(h);
+            assertFalse(entry.toString().contains("Gemrazer"), entry.toString());
+            assertEquals(entry.get("description").getAsString(), "Sneak Attack — triggered ability", entry.toString());
+        }
+    }
+
+    /** r4 finding 4: Forge lowercases the first letter of a wrapped ability's words ("grizzly Bears draws a card."). */
+    @Test(timeOut = 900000)
+    public void r4_forgesLowercasedNameIsHidden() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card secret = addCard("Grizzly Bears", h.foe);
+            final SpellAbility inner = ability(host, h.foe, "DB$ Draw | Defined$ You | SpellDescription$ ORIGINALHOST draws a card.");
+            inner.setCardState(secret.getCurrentState());
+            final forge.game.trigger.Trigger trigger = forge.game.trigger.TriggerHandler.parseTrigger(
+                    "Mode$ Phase | Phase$ End Of Turn | TriggerDescription$ At the beginning of your end step, ABILITY", host, false);
+            final SpellAbility sa = new forge.game.trigger.WrappedAbility(trigger, inner, h.foe);
+            sa.setActivatingPlayer(h.foe);
+            sa.setTriggeringObject(AbilityKey.Player, h.foe);
+            final String raw = sa.getStackDescription();
+            assertTrue(raw.contains("grizzly Bears"), raw);
+            h.game.getStack().add(sa);
+            secret.turnFaceDown(true);
+            entryIs(topEntry(h), "Sneak Attack", "Sneak Attack — triggered ability", secret);
+            assertFalse(topEntry(h).toString().contains("grizzly Bears"));
+        }
+    }
+
+    /**
+     * r4 finding 5: two different triggers to order whose labels both fall to the fixed one (a copy of each host is
+     * hidden in the library) are told apart by position, and each id still maps to its own trigger.
+     */
+    @Test(timeOut = 900000)
+    public void r4_differentTriggersToOrderStayDistinguishable() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final List<SpellAbility> abilities = new ArrayList<>();
+            for (String name : List.of("Mulldrifter", "Fleshbag Marauder")) {
+                final Card host = addCard(name, h.seat);
+                addCardToZone(name, h.seat, ZoneType.Library);
+                abilities.add(etb(h, host, h.seat));
+            }
+            final java.util.concurrent.atomic.AtomicReference<List<SpellAbility>> picked =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            h.onGameThread(() -> picked.set(h.controller.orderSimultaneousSa(abilities)));
+            final JsonObject order = h.request();
+            final List<String> labels = itemLabels(order);
+            System.out.println("R4 ORDER: " + labels);
+            assertEquals(labels, List.of("A hidden card — triggered ability (1 of 2)",
+                    "A hidden card — triggered ability (2 of 2)"));
+            final JsonObject action = new JsonObject();
+            action.addProperty("type", "order");
+            action.addProperty("controlId", "selection-order");
+            final JsonArray ids = new JsonArray();
+            ids.add("item:1");
+            ids.add("item:0");
+            action.add("order", ids);
+            h.send(order, action);
+            h.gameThread.join(30000);
+            assertEquals(picked.get(), List.of(abilities.get(1), abilities.get(0)), "each id maps to its own trigger");
+        }
+    }
+
+    /** Review fix 4: identical fixed labels on the stack are told apart by position too; names are left as they are. */
+    @Test(timeOut = 900000)
+    public void r4_identicalFixedStackLabelsAreToldApart() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            for (String name : List.of("Mulldrifter", "Fleshbag Marauder")) {
+                final Card host = addCard(name, h.foe);
+                addCardToZone(name, h.foe, ZoneType.Library);
+                h.game.getStack().add(etb(h, host, h.foe));
+            }
+            final JsonArray stack = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack");
+            System.out.println("R4 STACK: " + stack);
+            assertEquals(stack.size(), 2, stack.toString());
+            for (int i = 0; i < 2; i++) {
+                final JsonObject entry = stack.get(i).getAsJsonObject();
+                assertEquals(entry.get("name").getAsString(), "A hidden card", stack.toString());
+                assertEquals(entry.get("description").getAsString(),
+                        "A hidden card — triggered ability (" + (i + 1) + " of 2)", stack.toString());
+            }
+        }
+    }
+
+    /** The discriminator itself: only identical labels, by position; others and nulls unchanged. */
+    @Test(timeOut = 900000)
+    public void r4_discriminated() {
+        final List<String> labels = new ArrayList<>(List.of("A", "B", "A"));
+        labels.add(null);
+        labels.add("A");
+        labels.add(null);
+        final List<String> expected = new ArrayList<>(List.of("A (1 of 3)", "B", "A (2 of 3)"));
+        expected.add(null);
+        expected.add("A (3 of 3)");
+        expected.add(null);
+        assertEquals(InteractiveState.discriminated(labels), expected);
+        assertEquals(InteractiveState.discriminated(List.of("X", "Y")), List.of("X", "Y"));
     }
 }

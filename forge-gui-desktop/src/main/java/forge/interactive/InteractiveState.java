@@ -559,6 +559,8 @@ final class InteractiveState {
             instances.put(si.getId(), si);
         }
         final HiddenNames hidden = view.getAsJsonArray("stack").isEmpty() ? null : HiddenNames.of(game, viewer);
+        // Review fix 4: entries whose description is a fixed label, told apart by position when identical.
+        final List<JsonObject> fixedLabels = new ArrayList<>();
         for (JsonElement element : view.getAsJsonArray("stack")) {
             if (!element.isJsonObject()) {
                 continue;
@@ -570,6 +572,7 @@ final class InteractiveState {
                 source = ceasedSource(entry, si, game);
             }
             boolean renderedTextSafe = source != null;
+            boolean fixedLabel = false;
             if (!renderedTextSafe) {
                 entry.addProperty("name", "Face-down spell or ability");
             } else if (!source.isFaceDown()) {
@@ -620,6 +623,7 @@ final class InteractiveState {
                 if (!check.allKnown()) {
                     entry.addProperty("name", check.origin());
                     entry.addProperty("description", check.minimalLabel(sa));
+                    fixedLabel = true;
                 } else {
                     final String description = entry.get("description").getAsString();
                     final String clean = fullText(description, sa, check.effects());
@@ -630,8 +634,40 @@ final class InteractiveState {
                 nameEffectSource(entry, source, game, viewer);
             }
             // Review fix 3: the final sink check, the authority over every string of the entry.
-            sinkStackEntry(entry, si, source, game, viewer, hidden);
+            if (sinkStackEntry(entry, si, source, game, viewer, hidden)) fixedLabel = true;
+            if (fixedLabel) fixedLabels.add(entry);
         }
+        if (fixedLabels.size() > 1) {
+            final List<String> descriptions = new ArrayList<>(fixedLabels.size());
+            for (JsonObject entry : fixedLabels) descriptions.add(stringValue(entry, "description"));
+            final List<String> distinct = discriminated(descriptions);
+            for (int i = 0; i < fixedLabels.size(); i++) {
+                if (distinct.get(i) != null) fixedLabels.get(i).addProperty("description", distinct.get(i));
+            }
+        }
+    }
+
+    /**
+     * Lane trigger-label-1119 review fix 4 (Astra: two different triggers to order both read "A hidden card — triggered
+     * ability"): labels that are identical within one prompt get a discriminator by position, " (1 of 2)", " (2 of 2)".
+     * It names nothing, and the ids behind the items are unchanged. Other labels, and nulls, are returned as they are.
+     */
+    static List<String> discriminated(final List<String> labels) {
+        final Map<String, Integer> counts = new HashMap<>();
+        for (String label : labels) {
+            if (label != null) counts.merge(label, 1, Integer::sum);
+        }
+        final Map<String, Integer> seen = new HashMap<>();
+        final List<String> out = new ArrayList<>(labels.size());
+        for (String label : labels) {
+            final int total = label == null ? 1 : counts.get(label);
+            if (total < 2) {
+                out.add(label);
+            } else {
+                out.add(label + " (" + seen.merge(label, 1, Integer::sum) + " of " + total + ")");
+            }
+        }
+        return out;
     }
 
     /**
@@ -976,10 +1012,18 @@ final class InteractiveState {
      * one (both faces of a double-faced card, both halves of a split card), read from the card, never from a view.
      * Word-bounded, with its exact capitalization (review fix 3b): Forge renders a card's name verbatim, so a hidden
      * Life // Death's "Life" matches "Life" but not "pay 1 life", and keywords stay lowercase in rendered text. Basic
-     * land names stay in (closed);</li>
-     * <li>or such a card's id token, {@code (N)} or {@code (HN)}, always.</li>
+     * land names stay in (closed). Review fix 4: a name of two or more words matches with its first letter in either
+     * case, because Forge lowercases the first letter of a wrapped ability's words (Trigger.java, "grizzly Bears draws
+     * a card."); a one-word name stays exact (the residual, a one-word name lowercased at the start of such words, is
+     * contrived). The names are the union of each printed face ({@code getOriginalState}) and each current or copied
+     * face ({@code getState}, for every state the card has), so a copy does not erase the printed name;</li>
+     * <li>or such a card's real id, {@code (N)}, always. Forge's {@code (HN)} handles are not checked (review fix 4):
+     * they are its public masking handles for face-down cards, the same ones the zone views show, and carry no
+     * identity.</li>
      * </ul>
-     * A visible card that shares its name with a hidden one fails too: closed, by design.
+     * The cards are every card in the game ({@code forEachCardInGame}) and the components of each merged (mutated)
+     * card and its melded partner, which no zone lists, each once by id. A visible card that shares its name with a
+     * hidden one fails too: closed, by design.
      */
     static final class HiddenNames {
         private final java.util.regex.Pattern pattern;
@@ -993,16 +1037,9 @@ final class InteractiveState {
             if (game == null) return new HiddenNames(null);
             final Set<String> names = new java.util.LinkedHashSet<>();
             final Set<Integer> ids = new java.util.TreeSet<>();
+            final Set<Integer> visited = new java.util.HashSet<>();
             game.forEachCardInGame(card -> {
-                if (knownNow(game, card.getView(), viewer) == null) {
-                    ids.add(card.getId());
-                    for (CardStateName state : card.getStates()) {
-                        if (state == CardStateName.FaceDown) continue;
-                        final CardState face = card.getState(state);
-                        final String name = face == null ? null : face.getName();
-                        if (name != null && !name.isBlank()) names.add(name.trim());
-                    }
-                }
+                collect(card, game, viewer, visited, names, ids);
                 return true;
             });
             final StringBuilder regex = new StringBuilder();
@@ -1011,14 +1048,14 @@ final class InteractiveState {
                 boolean first = true;
                 for (String name : names) {
                     if (!first) regex.append('|');
-                    regex.append(java.util.regex.Pattern.quote(name));
+                    regex.append(namePattern(name));
                     first = false;
                 }
                 regex.append(")(?![\\p{L}\\p{N}])");
             }
             if (!ids.isEmpty()) {
                 if (regex.length() > 0) regex.append('|');
-                regex.append("\\([Hh]?(?:");
+                regex.append("\\((?:");
                 boolean first = true;
                 for (Integer id : ids) {
                     if (!first) regex.append('|');
@@ -1029,6 +1066,53 @@ final class InteractiveState {
             }
             // Case-sensitive (review fix 3b): names match with their exact capitalization.
             return new HiddenNames(regex.length() == 0 ? null : java.util.regex.Pattern.compile(regex.toString()));
+        }
+
+        /**
+         * Records {@code card} when this seat may not identify it now, then the components of a merged card and a
+         * melded partner, which no zone lists; each card once by id.
+         */
+        private static void collect(final Card card, final Game game, final PlayerView viewer, final Set<Integer> visited,
+                                    final Set<String> names, final Set<Integer> ids) {
+            if (card == null || !visited.add(card.getId())) return;
+            if (knownNow(game, card.getView(), viewer) == null) {
+                ids.add(card.getId());
+                // The printed faces, then the current or copied ones (getState of a state the card has creates none).
+                for (CardStateName state : new ArrayList<>(card.getStates())) {
+                    if (state != CardStateName.FaceDown && state != CardStateName.EmptyRoom) {
+                        addName(names, card.getOriginalState(state));
+                    }
+                }
+                for (CardStateName state : CardStateName.values()) {
+                    if (state != CardStateName.FaceDown && state != CardStateName.EmptyRoom && card.hasState(state)) {
+                        addName(names, card.getState(state));
+                    }
+                }
+            }
+            if (card.hasMergedCard()) {
+                for (Card component : card.getMergedCards()) collect(component, game, viewer, visited, names, ids);
+            }
+            collect(card.getMeldedWith(), game, viewer, visited, names, ids);
+        }
+
+        private static void addName(final Set<String> names, final CardState face) {
+            final String name = face == null ? null : face.getName();
+            if (name != null && !name.isBlank()) names.add(name.trim());
+        }
+
+        /**
+         * One name's pattern: exact, except that a name of two or more words matches with its first letter in either
+         * case (Forge lowercases the first letter of a wrapped ability's words).
+         */
+        static String namePattern(final String name) {
+            if (name.split("\\s+").length < 2) return java.util.regex.Pattern.quote(name);
+            final int first = name.codePointAt(0);
+            final String head = new String(Character.toChars(first));
+            final String upper = head.toUpperCase(java.util.Locale.ROOT);
+            final String lower = head.toLowerCase(java.util.Locale.ROOT);
+            final String rest = java.util.regex.Pattern.quote(name.substring(head.length()));
+            if (upper.equals(lower)) return java.util.regex.Pattern.quote(name);
+            return "(?:" + java.util.regex.Pattern.quote(upper) + "|" + java.util.regex.Pattern.quote(lower) + ")" + rest;
         }
 
         /** True when {@code text} names no hidden card and carries no hidden card's id. */
@@ -1100,10 +1184,11 @@ final class InteractiveState {
      * {@link #A_HIDDEN_CARD} (or {@link #AN_EFFECT} for an effect's entry); a failing description the fixed label
      * ({@link HiddenNames#fixedLabel}). Each targeted stack item's name (finding 4: a Stifle-style target bypassed
      * effect provenance) is first an effect's origin ({@link #effectChain}) when its host is an effect, never the
-     * generated name, then checked the same way.
+     * generated name, then checked the same way. Returns whether the description became the fixed label.
      */
-    private static void sinkStackEntry(final JsonObject entry, final SpellAbilityStackInstance si, final Card source,
-                                       final Game game, final PlayerView viewer, final HiddenNames hidden) {
+    private static boolean sinkStackEntry(final JsonObject entry, final SpellAbilityStackInstance si, final Card source,
+                                          final Game game, final PlayerView viewer, final HiddenNames hidden) {
+        boolean fixed = false;
         final SpellAbility sa = si == null ? null : si.getSpellAbility();
         final String fallback = isEffectNow(source, game) ? AN_EFFECT : A_HIDDEN_CARD;
         final String name = stringValue(entry, "name");
@@ -1111,6 +1196,7 @@ final class InteractiveState {
         final String description = stringValue(entry, "description");
         if (description != null && !hidden.safe(description)) {
             entry.addProperty("description", hidden.fixedLabel(stringValue(entry, "name"), fallback, sa));
+            fixed = true;
         }
         if (entry.has("targetSpells") && entry.get("targetSpells").isJsonArray()) {
             for (JsonElement element : entry.getAsJsonArray("targetSpells")) {
@@ -1129,6 +1215,7 @@ final class InteractiveState {
                         : hidden.safeOrigin(null, effect ? AN_EFFECT : A_HIDDEN_CARD));
             }
         }
+        return fixed;
     }
 
     private static void sanitizeCombat(final JsonObject view, final Game game,

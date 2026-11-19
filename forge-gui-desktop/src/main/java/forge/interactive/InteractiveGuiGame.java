@@ -3233,10 +3233,16 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         all.addAll(destination);
         final List<String> ids = new ArrayList<>(all.size());
         final JsonArray items = new JsonArray();
+        final List<String> labels = new ArrayList<>(all.size());
+        for (T value : all) {
+            labels.add(offeredObjectLabel(value, null));
+        }
+        // Lane trigger-label-1119 review fix 4: identical labels are told apart by position (" (1 of 2)").
+        final List<String> distinct = InteractiveState.discriminated(labels);
         for (int i = 0; i < all.size(); i++) {
             final String id = "item:" + i;
             ids.add(id);
-            items.add(item(id, offeredObjectLabel(all.get(i), null)));
+            items.add(item(id, distinct.get(i)));
         }
         final int total = all.size();
         final int minSelected;
