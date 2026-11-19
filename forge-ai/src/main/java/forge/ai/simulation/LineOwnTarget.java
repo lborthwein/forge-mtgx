@@ -7,15 +7,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import forge.game.CardTraitBase;
+import forge.game.Game;
 import forge.game.GameEntity;
 import forge.game.ability.AbilityUtils;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.player.Player;
+import forge.game.replacement.ReplacementEffect;
+import forge.game.replacement.ReplacementType;
 import forge.game.spellability.AbilitySub;
 import forge.game.spellability.SpellAbility;
 import forge.game.trigger.Trigger;
 import forge.game.trigger.TriggerType;
+import forge.game.zone.Zone;
 import forge.game.zone.ZoneType;
 
 /**
@@ -299,13 +304,13 @@ final class LineOwnTarget {
                     continue; // a spell on the stack, a card elsewhere: never "our permanent"
                 }
                 if (harm == Harm.DESTROY && !c.canBeDestroyed()) {
-                    if (only) {
+                    if (only && !couldFire(me, p, c, null)) {
                         return "destroy has no effect on " + c.getName() + " (" + c.getId() + ")";
                     }
-                    continue; // nothing happens to it; the ability's other effects stand
+                    continue; // nothing happens to it; the ability's other effects (or its cast) stand
                 }
                 if (me.equals(c.getController()) && !spared(p, harm, c)
-                        && (planned == null || !planned.contains(c.getId())) && !paysOff(me, c, harm)) {
+                        && (planned == null || !planned.contains(c.getId())) && !couldFire(me, p, c, harm)) {
                     return harm.name().toLowerCase() + " on our own " + c.getName() + " (" + c.getId() + ")";
                 }
             }
@@ -328,13 +333,17 @@ final class LineOwnTarget {
                 continue;
             }
             if (harm == Harm.DESTROY && !c.canBeDestroyed()) {
+                if (couldFire(me, p, c, null)) {
+                    affected = true; // nothing is destroyed, but casting it at this target could fire a trigger of ours
+                    other = true;
+                }
                 continue;
             }
             affected = true;
             if (me.equals(c.getController())) {
                 ours.add(c.getName() + " (" + c.getId() + ")");
-                // a pump it survives, a planned object, or a payoff on one of ours is a choice worth making
-                other |= spared(p, harm, c) || (planned != null && planned.contains(c.getId())) || paysOff(me, c, harm);
+                // a pump it survives, a planned object, or a trigger of ours this could fire is a choice worth making
+                other |= spared(p, harm, c) || (planned != null && planned.contains(c.getId())) || couldFire(me, p, c, harm);
             } else {
                 other = true;
             }
@@ -406,8 +415,8 @@ final class LineOwnTarget {
     }
 
     /**
-     * A +X/-Y pump with positive power that {@code c} survives (its toughness stays above the damage marked on it): a
-     * pump, not a shrink. Unsure (an amount that cannot be read) = spared.
+     * A +X/-Y pump with positive power that {@code c} survives: a pump, not a shrink. Unsure (an amount that cannot be
+     * read) = spared. A -X/-Y (no power gain) is a shrink whether or not it survives.
      */
     static boolean spared(final SpellAbility p, final Harm harm, final Card c) {
         if (harm != Harm.SHRINK || p.getApi() != ApiType.Pump) {
@@ -421,7 +430,17 @@ final class LineOwnTarget {
         if (att == null || def == null) {
             return true;
         }
-        return c.getNetToughness() + def - c.getDamage() > 0;
+        return survives(c, def);
+    }
+
+    /**
+     * Review 2 of #251, S1 5: {@code c} survives a toughness change of {@code def}: its toughness after it is above 0, and
+     * the damage marked on it is below that toughness or it is indestructible (lethal damage destroys; zero toughness
+     * does not need to).
+     */
+    static boolean survives(final Card c, final int def) {
+        final int t = c.getNetToughness() + def;
+        return t > 0 && (c.getDamage() < t || c.hasKeyword(forge.game.keyword.Keyword.INDESTRUCTIBLE));
     }
 
     /** A Pump amount ("+3", "-3", "X", "-X"), or null when it cannot be read (absent = 0). */
@@ -462,58 +481,247 @@ final class LineOwnTarget {
     }
 
     /**
-     * A payoff: a permanent we control (the target among them) triggers on {@code c} leaving the battlefield, being
-     * destroyed or sacrificed, or (damage) being dealt damage; for a bounce, an enters trigger on any permanent we control
-     * that could fire for {@code c} when it is played again (its own, or Impact Tremors'). Persist and undying are
-     * triggers of the card.
+     * Review 2 of #251 (architect-o: "could any trigger of ours in a public zone fire from this action?"), the one payoff
+     * test both keys read. True (keep the action) when a card we control or own in a public zone (battlefield, graveyard,
+     * exile, command; the stack for replacement effects only), or the spell's own card for its cast triggers, has a
+     * trigger or a replacement effect, active in its zone by Forge's own zone check, whose mode could be set off by:
+     * <ul>
+     * <li>casting, copying or activating this ability, or its targeting {@code target} (always);</li>
+     * <li>{@code target} being dealt damage ({@link Harm#DAMAGE});</li>
+     * <li>{@code target} leaving the battlefield the way this harm moves it (every harm), or, for a bounce, entering the
+     * battlefield again when it is replayed;</li>
+     * <li>counters put on or removed from {@code target} (a -1/-1 counter shrink).</li>
+     * </ul>
+     * Filters are read with Forge's own matching ({@code ValidCard}, {@code ValidTarget}, {@code ValidSource},
+     * {@code ValidActivatingPlayer}, {@code ValidSA}, {@code Origin}, {@code Destination}, ...) against {@code target}, this
+     * ability and its card. A filter that cannot be read (a parameter not read here, an error) counts as passing: a
+     * trigger in the family is a payoff unless a filter it states surely fails. {@code harm} null: nothing happens to
+     * {@code target} (a destroy that cannot destroy it); only the cast and target family is read. Static abilities are
+     * not read on their own: one that grants a trigger shows it on the card it grants it to, and those that scale or stop
+     * triggers (Panharmonicon, Torpor Orb) set off nothing by themselves. Read-only; never throws (an error = true).
      */
-    static boolean paysOff(final Player me, final Card c, final Harm harm) {
-        for (Card src : me.getCardsIn(ZoneType.Battlefield)) {
-            for (Trigger t : src.getTriggers()) {
-                final TriggerType mode = t.getMode();
-                if (mode == null) {
+    static boolean couldFire(final Player me, final SpellAbility p, final Card target, final Harm harm) {
+        try {
+            final Game game = me.getGame();
+            final SpellAbility root = p.getRootAbility() == null ? p : p.getRootAbility();
+            final Card source = p.getHostCard();
+            final String dest = harm == null ? null : destination(p, harm);
+            final Set<Card> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (Card c : sources(me)) {
+                if (!seen.add(c)) {
                     continue;
                 }
-                switch (mode) {
-                    case ChangesZone:
-                        if (harm == Harm.BOUNCE) {
-                            if (t.getParamOrDefault("Destination", "").contains("Battlefield")
-                                    && t.matchesValidParam("ValidCard", c)) {
-                                return true; // an enters trigger that could fire for it, played again
-                            }
-                        } else if (t.getParamOrDefault("Origin", "").contains("Battlefield")
-                                && !"Battlefield".equals(t.getParam("Destination")) && t.matchesValidParam("ValidCard", c)) {
+                final Zone z = game.getZoneOf(c);
+                final boolean stack = z != null && z.is(ZoneType.Stack);
+                if (!stack) {
+                    for (Trigger t : c.getTriggers()) {
+                        if (!t.isSuppressed() && t.zonesCheck(z) && fires(t, me, p, root, source, target, harm, dest)) {
                             return true;
                         }
-                        break;
-                    case ChangesZoneAll:
-                        if (harm == Harm.BOUNCE) {
-                            if (t.getParamOrDefault("Destination", "").contains("Battlefield")
-                                    && t.matchesValidParam("ValidCards", c)) {
-                                return true;
-                            }
-                        } else if (t.getParamOrDefault("Origin", "").contains("Battlefield")
-                                && t.matchesValidParam("ValidCards", c)) {
-                            return true;
-                        }
-                        break;
-                    case Destroyed:
-                    case Sacrificed:
-                        if (harm != Harm.BOUNCE && harm != Harm.REMOVE && t.matchesValidParam("ValidCard", c)) {
-                            return true;
-                        }
-                        break;
-                    case DamageDone:
-                    case DamageDoneOnce:
-                        if (harm == Harm.DAMAGE && t.matchesValidParam("ValidTarget", c)) {
-                            return true;
-                        }
-                        break;
-                    default:
-                        break;
+                    }
+                }
+                for (ReplacementEffect re : c.getReplacementEffects()) {
+                    if (!re.isSuppressed() && re.zonesCheck(z) && replaces(re, p, source, target, harm, dest)) {
+                        return true;
+                    }
+                }
+            }
+            if (source != null && !seen.contains(source)) {
+                // the spell's own card (in hand): its cast triggers fire from the stack
+                for (Trigger t : source.getTriggers()) {
+                    final Set<ZoneType> zs = t.getActiveZone();
+                    if (!t.isSuppressed() && CAST.contains(t.getMode()) && (zs == null || zs.isEmpty() || zs.contains(ZoneType.Stack))
+                            && fires(t, me, p, root, source, target, null, null)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } catch (RuntimeException e) {
+            return true; // unsure: keep
+        }
+    }
+
+    /** The cards whose triggers and replacement effects could fire: ours in public zones, and ours they control. */
+    private static List<Card> sources(final Player me) {
+        final List<Card> out = new ArrayList<>();
+        for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command,
+                ZoneType.Stack}) {
+            for (Card c : me.getGame().getCardsIn(z)) {
+                if (me.equals(c.getController()) || me.equals(c.getOwner())) {
+                    out.add(c);
                 }
             }
         }
+        return out;
+    }
+
+    /** Where this harm puts {@code target}: a graveyard, or the move's own destination (exile, a library, a hand). */
+    private static String destination(final SpellAbility p, final Harm harm) {
+        switch (harm) {
+            case BOUNCE:
+                return "Hand";
+            case REMOVE:
+                return p.getParamOrDefault("Destination", "Exile");
+            default:
+                return "Graveyard";
+        }
+    }
+
+    /** Cast, copy, activation and targeting modes: set off by playing the ability at {@code target}, whatever it does. */
+    private static final Set<TriggerType> CAST = Set.of(TriggerType.SpellCast, TriggerType.SpellCastOrCopy,
+            TriggerType.SpellCopy, TriggerType.SpellAbilityCast, TriggerType.SpellAbilityCopy, TriggerType.AbilityCast,
+            TriggerType.BecomesTarget, TriggerType.BecomesTargetOnce);
+    private static final Set<TriggerType> DAMAGE_MODES = Set.of(TriggerType.DamageDone, TriggerType.DamageDoneOnce,
+            TriggerType.DamageDealtOnce, TriggerType.DamageDoneOnceByController, TriggerType.DamagePreventedOnce,
+            TriggerType.DamageAll, TriggerType.ExcessDamage, TriggerType.ExcessDamageAll);
+    private static final Set<TriggerType> COUNTER_MODES = Set.of(TriggerType.CounterAdded, TriggerType.CounterAddedOnce,
+            TriggerType.CounterAddedAll, TriggerType.CounterTypeAddedAll, TriggerType.CounterRemoved,
+            TriggerType.CounterRemovedOnce);
+
+    /** Could trigger {@code t} (active, ours) fire from this action? See {@link #couldFire}. */
+    private static boolean fires(final Trigger t, final Player me, final SpellAbility p, final SpellAbility root,
+            final Card source, final Card target, final Harm harm, final String dest) {
+        final TriggerType mode = t.getMode();
+        if (mode == null) {
+            return false;
+        }
+        if (CAST.contains(mode)) {
+            final boolean spell = root.isSpell();
+            if (!spell && (mode == TriggerType.SpellCast || mode == TriggerType.SpellCastOrCopy || mode == TriggerType.SpellCopy)) {
+                return false; // spells only; this is an activated ability
+            }
+            if (spell && mode == TriggerType.AbilityCast) {
+                return false;
+            }
+            if (mode == TriggerType.BecomesTarget || mode == TriggerType.BecomesTargetOnce) {
+                return !fails(t, "ValidSource", root) && !fails(t, "ValidTarget", target);
+            }
+            return !fails(t, "ValidActivatingPlayer", me) && !fails(t, "ValidCard", source) && !fails(t, "ValidSA", root)
+                    && !fails(t, "TargetsValid", target);
+        }
+        if (harm == null) {
+            return false;
+        }
+        if (harm == Harm.DAMAGE && DAMAGE_MODES.contains(mode)) {
+            if ("True".equalsIgnoreCase(t.getParam("CombatDamage"))) {
+                return false; // this damage is not combat damage
+            }
+            return !fails(t, "ValidSource", source) && !fails(t, "ValidTarget", target);
+        }
+        if (COUNTER_MODES.contains(mode)) {
+            if (harm != Harm.SHRINK || !counters(p, root)) {
+                return false; // no counter moves
+            }
+            final String type = t.getParam("CounterType");
+            final boolean added = mode != TriggerType.CounterRemoved && mode != TriggerType.CounterRemovedOnce;
+            if (added && type != null && !type.contains("M1M1")) {
+                return false;
+            }
+            return !fails(t, "ValidCard", target);
+        }
+        switch (mode) {
+            case ChangesZone:
+                return (leaves(t, dest) || harm == Harm.BOUNCE && entersAgain(t)) && !fails(t, "ValidCard", target);
+            case ChangesZoneAll:
+                return (leaves(t, dest) || harm == Harm.BOUNCE && entersAgain(t)) && !fails(t, "ValidCards", target);
+            case Destroyed:
+                return (harm == Harm.DESTROY || harm == Harm.DAMAGE) && !fails(t, "ValidCard", target);
+            case Sacrificed:
+            case SacrificedOnce:
+                return harm == Harm.SACRIFICE && !fails(t, "ValidCard", target) && !fails(t, "ValidPlayer", me);
+            case Exiled:
+                return "Exile".equals(dest) && (!t.hasParam("Origin") || t.getParam("Origin").contains("Battlefield")
+                        || "Any".equals(t.getParam("Origin"))) && !fails(t, "ValidCard", target);
+            default:
+                return false;
+        }
+    }
+
+    /** Could replacement effect {@code re} (active, ours) act on this action's event? Filters as in {@link #fires}. */
+    private static boolean replaces(final ReplacementEffect re, final SpellAbility p, final Card source, final Card target,
+            final Harm harm, final String dest) {
+        if (harm == null) {
+            return false;
+        }
+        final ReplacementType mode = re.getMode();
+        if (mode == null) {
+            return false;
+        }
+        switch (mode) {
+            case Moved:
+                return (leaves(re, dest) || harm == Harm.BOUNCE && entersAgain(re)) && !fails(re, "ValidCard", target);
+            case Destroy:
+                return (harm == Harm.DESTROY || harm == Harm.DAMAGE) && !fails(re, "ValidCard", target);
+            case DamageDone:
+            case DealtDamage:
+            case AssignDealDamage:
+                return harm == Harm.DAMAGE && !fails(re, "ValidSource", source) && !fails(re, "ValidTarget", target)
+                        && !fails(re, "ValidCard", target);
+            case AddCounter:
+            case RemoveCounter:
+                return harm == Harm.SHRINK && counters(p, p.getRootAbility() == null ? p : p.getRootAbility())
+                        && !fails(re, "ValidCard", target) && !fails(re, "ValidObject", target);
+            default:
+                return false;
+        }
+    }
+
+    /** The harmful part {@code p}, or a part of its ability, puts or removes counters. */
+    private static boolean counters(final SpellAbility p, final SpellAbility root) {
+        final List<SpellAbility> parts = new ArrayList<>(tree(root));
+        parts.add(p);
+        for (SpellAbility x : parts) {
+            final ApiType a = x.getApi();
+            if (a == ApiType.PutCounter || a == ApiType.PutCounterAll || a == ApiType.RemoveCounter
+                    || a == ApiType.RemoveCounterAll) {
+                return true;
+            }
+        }
         return false;
+    }
+
+    /** A zone-change filter that a move from the battlefield to {@code dest} passes (absent or "Any" passes). */
+    private static boolean leaves(final CardTraitBase t, final String dest) {
+        return zoneOk(t.getParam("Origin"), "Battlefield") && zoneOk(t.getParam("Destination"), dest)
+                && !listed(t.getParam("ExcludedOrigins"), "Battlefield") && !listed(t.getParam("ExcludedDestinations"), dest)
+                && !listed(t.getParam("ExcludeDestination"), dest);
+    }
+
+    /** A zone-change filter that a card entering the battlefield passes (a bounced card played again). */
+    private static boolean entersAgain(final CardTraitBase t) {
+        return zoneOk(t.getParam("Destination"), "Battlefield") && !listed(t.getParam("ExcludedDestinations"), "Battlefield")
+                && !listed(t.getParam("ExcludeDestination"), "Battlefield");
+    }
+
+    private static boolean zoneOk(final String param, final String zone) {
+        return param == null || param.isBlank() || "Any".equals(param.trim()) || listed(param, zone);
+    }
+
+    private static boolean listed(final String param, final String zone) {
+        if (param == null || zone == null) {
+            return false;
+        }
+        for (String z : param.split(",")) {
+            if (z.trim().equals(zone)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * {@code t} states {@code param} and it surely does not match {@code o}. A filter on nothing to match, or one Forge
+     * cannot evaluate here (an error), does not fail.
+     */
+    private static boolean fails(final CardTraitBase t, final String param, final Object o) {
+        if (o == null || !t.hasParam(param)) {
+            return false;
+        }
+        try {
+            return !t.matchesValidParam(param, o);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 }

@@ -336,6 +336,55 @@ public class LineOwnTargetReviewTest extends SimulationTest {
         // the modes the check reads are the modes Forge offers, in its order
         Assert.assertEquals(LineOwnTarget.possibleModes(sa).size(), 1);
         Assert.assertEquals(LineOwnTarget.possibleModes(sa).get(0).getApi(), ApiType.Destroy);
+        // review 2 of #251, S1 1: the first-step filter (ForcedWinSolver#ownTargetAtStart, a dry run of the live
+        // follower's first step) leaves the live ability as it found it: no activator set (the reviewer's repro), the
+        // CharmOrder, the chosen modes, the targets. Abrade's damage mode at our own Bears, recorded as mode 0.
+        ours("Mountain");
+        ours("Mountain");
+        final Card bears = ours("Grizzly Bears");
+        final Line line = modeLine(abrade, sa, "mode:0", bears);
+        sa.setActivatingPlayer(null);
+        final String fresh2 = state(sa);
+        final List<String> order2 = charmOrder(sa);
+        final String chosen2 = chosenModes(abrade, sa);
+        for (String key : new String[] {"off", "on, not the live seat", "on"}) {
+            final String why = lineSolver(!"off".equals(key), "on".equals(key)).ownTargetAtStart(g, line);
+            System.out.println("[own-target-review] first-step filter key " + key + " => " + why + "; live activator="
+                    + sa.getActivatingPlayer());
+            Assert.assertEquals(why != null, "on".equals(key), "key " + key + ": " + why);
+            Assert.assertEquals(state(sa), fresh2, "key " + key + ": the live ability, its modes and targets");
+            Assert.assertEquals(charmOrder(sa), order2, "key " + key + ": the live CharmOrder");
+            Assert.assertEquals(chosenModes(abrade, sa), chosen2, "key " + key + ": the live chosen modes");
+            // the search's check (ownHarm on and shadow read the same) after it: unchanged as well
+            LookaheadSearch.ownHarmWhy(me, sa);
+            Assert.assertEquals(state(sa), fresh2, "key " + key + ": after ownHarmWhy");
+        }
+        Assert.assertTrue(lineSolver(true, true).ownTargetAtStart(g, line).contains("damage"), "the damage mode breaks");
+    }
+
+    /** A one-step line: {@code host}'s spell {@code sa} with its mode {@code mode} recorded at {@code target}. */
+    private static Line modeLine(final Card host, final SpellAbility sa, final String mode, final Card target) {
+        final Step st = Step.engine(AbilKind.ENGINE, host.getId(), host.getName(), sa.getDescription(),
+                sa.getPayCosts().toString(), true);
+        if (mode != null) {
+            st.cac = new ArrayList<>(List.of(mode));
+            st.cacPlayed = new ArrayList<>(List.of(mode));
+        }
+        st.targetRefs.add("0:C" + target.getId());
+        return new Line(new ArrayList<>(List.of(st)), List.of(), 0, 20, 0, 0, List.of(), "review");
+    }
+
+    /** A solver with lineOwnTarget {@code on} and engineModeChoice (as live); {@code live}: the live seat's driver. */
+    private ForcedWinSolver lineSolver(final boolean on, final boolean live) {
+        final JsonObject cfg = new JsonObject();
+        cfg.addProperty("act", "false");
+        cfg.addProperty("engineModeChoice", "true");
+        cfg.addProperty("lineOwnTarget", String.valueOf(on));
+        return new SolverDriver(me, SolverDriver.config(cfg), live).solver();
+    }
+
+    private static String chosenModes(final Card host, final SpellAbility sa) {
+        return host.getChosenModes(sa, "ThisTurn") + "/" + host.getChosenModes(sa, "ThisGame");
     }
 
     // ------------------------------------------------------------------ the reviewer's controls: still kept
@@ -375,6 +424,7 @@ public class LineOwnTargetReviewTest extends SimulationTest {
         board();
         final Card harvester = ours("Harvester of Misery");
         harvester.setDamage(3);
+        game1Rest();
         final SpellAbility open = ability("Abrade", ApiType.Charm);
         final String why = LookaheadSearch.ownHarmWhy(me, open);
         Assert.assertNotNull(why, "no artifact: every mode refused");
@@ -386,7 +436,27 @@ public class LineOwnTargetReviewTest extends SimulationTest {
         Assert.assertNull(LookaheadSearch.ownHarmWhy(me, open), "open, the destroy-artifact mode is live: kept");
     }
 
-    /** Game 2 (38a8a0e4, turn 10): Snuff Out at our own indestructible Ulamog, a destroy that is all the spell does. */
+    /**
+     * The rest of game 1's board at turn 15 (the replay's view): our lands, and Kolaghan's Command, Dauthi Voidwalker,
+     * Dismember and Valki in our graveyard. Review 2 of #251: no trigger or replacement of ours here could fire from the
+     * damage (Harvester's enters trigger is Destination Battlefield; Dauthi's replacement is active on the battlefield
+     * only; Valki's is an enters trigger, in the graveyard).
+     */
+    private void game1Rest() {
+        for (String n : new String[] {"Mountain", "Swamp", "Badlands", "Swamp", "Swamp"}) {
+            ours(n);
+        }
+        for (String n : new String[] {"Kolaghan's Command", "Dauthi Voidwalker", "Dismember", "Valki, God of Lies"}) {
+            addCardToZone(n, me, ZoneType.Graveyard);
+        }
+    }
+
+    /**
+     * Game 2 (38a8a0e4, turn 10): Snuff Out at our own indestructible Ulamog, a destroy that is all the spell does. Review
+     * 2 of #251: on the rest of game 2's board (the replay's view at turn 10) no trigger of ours could fire from the cast:
+     * Ulamog's cast trigger is ValidCard Card.Self, Fallen Shinobi's is combat damage to a player, Valki's an enters
+     * trigger; nor, once the line has cast it, Faerie Mastermind's (a draw trigger).
+     */
     @Test
     public void game2SnuffOutAtOurIndestructibleUlamogIsRefused() {
         board();
@@ -396,14 +466,34 @@ public class LineOwnTargetReviewTest extends SimulationTest {
         g.getAction().checkStateEffects(true);
         Assert.assertEquals(ulamog.getController(), me);
         ours("Swamp");
+        for (String n : new String[] {"Underground Sea", "Valki, God of Lies", "Watery Grave", "Island", "Fallen Shinobi",
+                "Island"}) {
+            ours(n);
+        }
+        addCardToZone("Inquisition of Kozilek", me, ZoneType.Graveyard);
+        addCardToZone("Prismatic Vista", me, ZoneType.Graveyard);
         final SpellAbility sa = ability("Snuff Out", ApiType.Destroy);
         final String open = LookaheadSearch.ownHarmWhy(me, sa);
-        Assert.assertEquals(open, "destroy has no effect: every legal target is indestructible");
-        sa.getTargets().add(ulamog);
-        final String recorded = LineOwnTarget.refuse(me, sa, null, null);
-        sa.resetTargets();
-        Assert.assertNotNull(recorded);
-        Assert.assertTrue(recorded.startsWith("destroy has no effect on Ulamog"), recorded);
+        Assert.assertEquals(open, "destroy has no effect: every legal target is indestructible"); // Valki, Shinobi: black
+        Assert.assertTrue(recordedAt(sa, ulamog).startsWith("destroy has no effect on Ulamog"));
+        ours("Faerie Mastermind");
+        final String open2 = LookaheadSearch.ownHarmWhy(me, sa);
+        System.out.println("[own-target-review] game 2 Snuff Out with Faerie Mastermind open => " + open2);
+        Assert.assertNotNull(open2);
+        Assert.assertTrue(open2.startsWith("destroy with only our own to target: [Faerie Mastermind"), open2);
+        Assert.assertTrue(recordedAt(sa, ulamog).startsWith("destroy has no effect on Ulamog"));
+    }
+
+    /** The line check's reason for {@code sa} with {@code target} recorded (asserted not null). */
+    private String recordedAt(final SpellAbility sa, final Card target) {
+        sa.getTargets().add(target);
+        try {
+            final String recorded = LineOwnTarget.refuse(me, sa, null, null);
+            Assert.assertNotNull(recorded, "recorded at " + target);
+            return recorded;
+        } finally {
+            sa.resetTargets();
+        }
     }
 
     /** The idle games' Tear Asunder (dd0142b5: our own Mox Jet), kicked or not, with only our own permanents to exile. */
@@ -446,5 +536,151 @@ public class LineOwnTargetReviewTest extends SimulationTest {
         addCard("Grizzly Bears", opp);
         Assert.assertNull(LookaheadSearch.ownHarmWhy(me, kicked), "kicked: the opponent's Bears is a target");
         Assert.assertNotNull(LookaheadSearch.ownHarmWhy(me, sa), "unkicked: still only our own Mox");
+    }
+
+    // ------------------------------------------------------------------ review 2 of #251: one conservative payoff test
+
+    /**
+     * The reviewer's S1 2 (Reveillark is our only creature, Bears and Mulldrifter in our graveyard): its leaves trigger
+     * returns both, so Unsummon at it is kept by both keys.
+     */
+    @Test
+    public void r2ABounceWithALeavesTriggerIsKept() {
+        board();
+        final Card lark = ours("Reveillark");
+        addCardToZone("Grizzly Bears", me, ZoneType.Graveyard);
+        addCardToZone("Mulldrifter", me, ZoneType.Graveyard);
+        keptTarget("Unsummon our Reveillark (its leaves trigger)", ability("Unsummon", ApiType.ChangeZone), lark);
+    }
+
+    /**
+     * The reviewer's S1 3 (Guttersnipe is our only creature, the opponent at 2): its cast trigger wins before Flame Slash
+     * resolves, so Flame Slash at it is kept; so is a destroy that destroys nothing, cast while it is in play.
+     */
+    @Test
+    public void r2ACastTriggerOfOursKeepsTheSpell() {
+        board();
+        final Card snipe = ours("Guttersnipe");
+        ours("Mountain");
+        opp.setLife(2, null);
+        keptTarget("Flame Slash at our Guttersnipe (its cast trigger)", ability("Flame Slash", ApiType.DealDamage), snipe);
+        board();
+        ours("Guttersnipe");
+        final Card citadel = ours("Darksteel Citadel");
+        keptTarget("Beast Within at our Citadel with Guttersnipe (its cast trigger)", ability("Beast Within", ApiType.Destroy),
+                citadel);
+    }
+
+    /**
+     * The reviewer's S1 4 (Bears is our only creature, Bridge from Below in our graveyard): Bridge's death trigger, active
+     * in the graveyard, makes a Zombie, so Doom Blade at the Bears is kept. Bridge on the battlefield (where its trigger is
+     * not active) keeps nothing.
+     */
+    @Test
+    public void r2ADeathTriggerInOurGraveyardKeepsTheSpell() {
+        board();
+        final Card bears = ours("Grizzly Bears");
+        addCardToZone("Bridge from Below", me, ZoneType.Graveyard);
+        keptTarget("Doom Blade at our Bears with Bridge from Below in our graveyard", ability("Doom Blade", ApiType.Destroy),
+                bears);
+        board();
+        final Card bears2 = ours("Grizzly Bears");
+        ours("Bridge from Below");
+        final String why = refusedTarget("Doom Blade at our Bears with Bridge from Below in play",
+                ability("Doom Blade", ApiType.Destroy), bears2);
+        Assert.assertTrue(why.startsWith("destroy with only our own to target"), why);
+    }
+
+    /**
+     * The reviewer's S1 5 (our Hazoret, 1 damage marked): Spatial Contortion makes it an 8/1 that survives its damage, as
+     * it is indestructible: kept. Zero toughness kills an indestructible creature: Darksteel Myr (0/1) is refused.
+     */
+    @Test
+    public void r2AnIndestructiblePumpThatSurvivesItsDamageIsKept() {
+        board();
+        final Card hazoret = ours("Hazoret the Fervent");
+        hazoret.setDamage(1);
+        Assert.assertFalse(hazoret.canBeDestroyed());
+        Assert.assertEquals(hazoret.getNetToughness(), 4);
+        keptTarget("Spatial Contortion at our damaged Hazoret (an 8/1 indestructible)",
+                ability("Spatial Contortion", ApiType.Pump), hazoret);
+        board();
+        final Card myr = ours("Darksteel Myr");
+        final String why = refusedTarget("Spatial Contortion at our Darksteel Myr (toughness -2)",
+                ability("Spatial Contortion", ApiType.Pump), myr);
+        Assert.assertTrue(why.startsWith("shrink with only our own to target"), why);
+    }
+
+    /**
+     * Triggers that this action cannot set off keep nothing: enters-only triggers (Harvester of Misery, Valki), a combat
+     * damage to a player trigger (Fallen Shinobi), a draw trigger (Faerie Mastermind), an opponent's-cast trigger (Esper
+     * Sentinel). Flame Slash with only these creatures of ours to hit is refused open and recorded.
+     */
+    @Test
+    public void r2IrrelevantTriggersStillRefuse() {
+        board();
+        final Card harvester = ours("Harvester of Misery");
+        for (String n : new String[] {"Valki, God of Lies", "Fallen Shinobi", "Faerie Mastermind", "Esper Sentinel"}) {
+            ours(n);
+        }
+        final String why = refusedTarget("Flame Slash with only our triggered creatures to hit",
+                ability("Flame Slash", ApiType.DealDamage), harvester);
+        Assert.assertTrue(why.startsWith("damage with only our own to target"), why);
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            Assert.assertFalse(LineOwnTarget.couldFire(me, ability("Flame Slash", ApiType.DealDamage), c, LineOwnTarget.Harm.DAMAGE),
+                    c.getName());
+        }
+    }
+
+    /**
+     * The reviewer's S1 1 repro (our Bears and Plains, Swords in hand, its live ability's activator unset): the first-step
+     * filter refuses the Swords line with the key on at the live seat and leaves the live activator unset, as the key-off
+     * and non-live controls do.
+     */
+    @Test
+    public void r2TheFirstStepFilterDoesNotSetTheLiveActivator() {
+        board();
+        final Card bears = ours("Grizzly Bears");
+        ours("Plains");
+        final SpellAbility sa = ability("Swords to Plowshares", ApiType.ChangeZone);
+        final Line line = modeLine(sa.getHostCard(), sa, null, bears);
+        sa.setActivatingPlayer(null);
+        Assert.assertNull(lineSolver(false, true).ownTargetAtStart(g, line));
+        Assert.assertNull(sa.getActivatingPlayer(), "key-off control");
+        Assert.assertNull(lineSolver(true, false).ownTargetAtStart(g, line));
+        Assert.assertNull(sa.getActivatingPlayer(), "non-live control");
+        final String why = lineSolver(true, true).ownTargetAtStart(g, line);
+        System.out.println("[own-target-review] first step reason=" + why + " liveActivator=" + sa.getActivatingPlayer());
+        Assert.assertNotNull(why);
+        Assert.assertTrue(why.contains("remove on our own Grizzly Bears"), why);
+        Assert.assertNull(sa.getActivatingPlayer(), "the first-step check leaves the live ability unchanged");
+    }
+
+    /** The first-step filter out of budget (its deadline passed, or its work budget spent) keeps the line unfiltered. */
+    @Test
+    public void r2TheFirstStepFilterOutOfBudgetKeepsTheLine() {
+        board();
+        final Card bears = ours("Grizzly Bears");
+        ours("Plains");
+        final SpellAbility sa = ability("Swords to Plowshares", ApiType.ChangeZone);
+        final Line line = modeLine(sa.getHostCard(), sa, null, bears);
+        final ForcedWinSolver s = lineSolver(true, true);
+        Assert.assertNotNull(s.ownTargetAtStart(g, line, null, 0L), "in budget: filtered");
+        Assert.assertNull(s.ownTargetAtStart(g, line, null, forge.game.WorkClock.nanoTime() - 1), "past its deadline: kept");
+        final forge.ai.AiWork.Budget outer = forge.ai.AiWork.open(1);
+        final forge.ai.AiWork.Budget spent = forge.ai.AiWork.current();
+        try {
+            try {
+                forge.ai.AiWork.tick("test", 2);
+            } catch (forge.ai.AiWork.Exhausted expected) {
+                // the budget is spent
+            }
+        } finally {
+            forge.ai.AiWork.restore(outer);
+        }
+        Assert.assertTrue(spent.spent());
+        Assert.assertNull(s.ownTargetAtStart(g, line, spent, 0L), "its work budget spent: kept");
+        Assert.assertEquals(s.ownTargetUnchecked, 2);
+        Assert.assertNull(forge.ai.AiWork.current(), "the caller's budget scope is restored");
     }
 }

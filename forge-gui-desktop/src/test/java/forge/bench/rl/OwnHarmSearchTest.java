@@ -446,6 +446,23 @@ public class OwnHarmSearchTest extends SimulationTest {
         };
     }
 
+    /**
+     * Review 2 of #251: our summoning-sick Bears and Sanguine Bond (whenever we gain life, target opponent loses that
+     * much), the opponent at 2 life with no creature and no card in hand, and Swords to Plowshares in hand: its only legal
+     * target is our own Bears, and casting it wins (we gain 2, the opponent loses 2). No trigger of ours could fire from
+     * the exile itself (Sanguine Bond's is a life-gain trigger, Swords' own follow-up), so a line through it breaks.
+     */
+    private Board sanguineBond() {
+        return (g, p0, p1) -> {
+            addCard("Plains", p0);
+            addCard("Grizzly Bears", p0).setSickness(true);
+            addCard("Sanguine Bond", p0);
+            addCardToZone(SWORDS, p0, ZoneType.Hand);
+            addCard("Island", p1);
+            p1.setLife(2, null);
+        };
+    }
+
     /** The plan search with its solver on (plans present; live requires hideOwnLibrary), lineOwnTarget as given. */
     private static String plans(final boolean lineOwnTarget, final String extra) {
         return "plans.solverCfg.hideOwnLibrary=true,plans.solverCfg.lineOwnTarget=" + lineOwnTarget
@@ -454,27 +471,43 @@ public class OwnHarmSearchTest extends SimulationTest {
 
     /**
      * Key off: the solver proves the Swords line at the plan point and the seat takes it at once (decision outcome
-     * "proven"); its hook casts Swords at our Guttersnipe.
+     * "proven"); its hook casts Swords at our own creature.
      */
     @Test
     public void keyOffAProvenLineThroughSwordsAtOurOwnCreatureIsTaken() throws Exception {
-        final Run r = run(plans(false, ""), guttersnipe(), null);
-        Assert.assertNotNull(r.line(), r.summary());
-        Assert.assertEquals(r.line().get("outcome").getAsString(), "proven", r.summary());
-        Assert.assertEquals(r.answer, SWORDS, r.summary());
+        for (Board b : new Board[] {guttersnipe(), sanguineBond()}) {
+            final Run r = run(plans(false, ""), b, null);
+            Assert.assertNotNull(r.line(), r.summary());
+            Assert.assertEquals(r.line().get("outcome").getAsString(), "proven", r.summary());
+            Assert.assertEquals(r.answer, SWORDS, r.summary());
+        }
     }
 
     /**
-     * Review 1b of #251: with lineOwnTarget on, the same proven line is not proposed (the live follower would break it at
-     * its first step: Swords at our own creature, paid for only by its own life gain), so it is never adopted, broken and
-     * proposed again at this priority. The seat ends on a normal search decision in the same call, where ownHarm keeps
-     * Swords (its life gain) and the search casts it: as the policy's own choice, and as a departure when the policy
-     * passes. Before this fix the line was adopted and broke at once, and Forge AI played the priority.
+     * Review 2 of #251 (the reviewer's S1 3 in a line): Guttersnipe's cast trigger could fire from casting Swords, so with
+     * lineOwnTarget on the proven line through Swords at our own Guttersnipe is proposed and taken, as with the key off.
+     */
+    @Test
+    public void keyOnAProvenLineThroughACastTriggerOfOursIsTaken() throws Exception {
+        final Run r = run(plans(true, "ownHarm=on"), guttersnipe(), null);
+        Assert.assertNotNull(r.line(), r.summary());
+        Assert.assertEquals(r.line().get("outcome").getAsString(), "proven", r.summary());
+        Assert.assertEquals(r.answer, SWORDS, r.summary());
+        Assert.assertTrue(r.ownHarmLines.isEmpty(), r.summary());
+    }
+
+    /**
+     * Review 1b of #251: with lineOwnTarget on, a proven line the live follower would break at its first step (Swords at
+     * our own Bears, paid for only by its own life gain; Sanguine Bond's life-gain trigger is not one the exile sets off)
+     * is not proposed, so it is never adopted, broken and proposed again at this priority. The seat ends on a normal
+     * search decision in the same call, where ownHarm keeps Swords (its life gain) and the search casts it: as the
+     * policy's own choice, and as a departure when the policy passes. Before this fix the line was adopted and broke at
+     * once, and Forge AI played the priority.
      */
     @Test
     public void keyOnTheLineIsNotAdoptedAndTheSearchStillCastsSwords() throws Exception {
         for (String pick : new String[] {SWORDS, null}) {
-            final Run r = run(plans(true, "ownHarm=on"), guttersnipe(), pick);
+            final Run r = run(plans(true, "ownHarm=on"), sanguineBond(), pick);
             Assert.assertEquals(r.decisions.size(), 1, "one decision: " + r.summary());
             Assert.assertNotEquals(r.line().get("outcome").getAsString(), "proven", "no line taken: " + r.summary());
             Assert.assertTrue(r.line().has("candidates") && r.line().get("candidates").getAsInt() >= 2,

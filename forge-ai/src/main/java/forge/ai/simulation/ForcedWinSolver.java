@@ -2459,6 +2459,7 @@ public final class ForcedWinSolver {
         final long workCap = cfg.aiWorkCap();
         final forge.ai.AiWork.Budget outer = forge.ai.AiWork.open(workCap);
         final forge.ai.AiWork.Budget work = workCap > 0 ? forge.ai.AiWork.current() : null;
+        offenseWork = work; // review 2 of #251: propose's first-step filter is charged to what is left of it
         Line l;
         try {
             l = offense0(live, key);
@@ -2849,11 +2850,16 @@ public final class ForcedWinSolver {
         receipt("INFO_STATE" + tag() + " turn=" + ph.getTurn() + " attached=" + (InfoStates.find(live) != null) + " solverInfoState="
                 + cfg.infoState); // unified-search-1106 (report only)
         try {
+            offenseWork = null;
             offense(live);
+            // review 2 of #251: the first-step filter runs on what is left of the offense's Forge AI work budget and
+            // before its wall (decisionWall: the hard deadline, or the decision's own; 0 = budget=counter, no wall)
+            final forge.ai.AiWork.Budget work = offenseWork;
+            final long wall = decisionWall;
             final Set<String> seen = new HashSet<>();
             for (Eval e : evalSink) {
                 if (e.pUnopposed >= 1.0 && seen.add(String.valueOf(e.line))) {
-                    final String refused = ownTargetAtStart(live, e.line);
+                    final String refused = ownTargetAtStart(live, e.line, work, wall);
                     if (refused != null) {
                         // line-own-target-1119 (review 1b of #251): the live follower would break it before it plays
                         // anything, so it is not proposed (the plan point's normal search decides instead)
@@ -2936,7 +2942,7 @@ public final class ForcedWinSolver {
             }
             final Line prefix = new Line(pre, whole.pileNames, 0, whole.lifeLeft, whole.manaLeft, 0, List.of(), "setup");
             prefix.knownTop = whole.knownTop;
-            final String refused = ownTargetAtStart(live, prefix);
+            final String refused = ownTargetAtStart(live, prefix, null, hardDeadline);
             if (refused != null) {
                 ownTargetFiltered++; // line-own-target-1119 (review 1b of #251): as in propose
                 receipt("FORCED_WIN own-target-filtered setup" + tag() + " turn=" + ph.getTurn() + " " + refused + " prefix=" + pre);
@@ -2966,23 +2972,85 @@ public final class ForcedWinSolver {
     /**
      * line-own-target-1119 (review 1b of #251; {@link Config#lineOwnTarget} on the live seat, otherwise null and nothing
      * runs): why the live follower would break {@code line} at its first step at this priority, before it plays anything
-     * ({@link LineOwnTarget#refuse}); null = it would not. A dry run of {@link Follower#next} on a fresh follower: it locates
-     * the step's ability as a copy and returns, so nothing in the live game is played or changed. A line that breaks only
-     * at a later step is proposed; when it breaks there, the step is first in every line proposed from that position.
+     * ({@link LineOwnTarget#refuse}); null = it would not. A dry run of {@link Follower#next} on a fresh follower. A line
+     * that breaks only at a later step is proposed; when it breaks there, the step is first in every line proposed from
+     * that position. Unbudgeted (tests); the solver's calls pass their budget to the overload below.
      */
     String ownTargetAtStart(final Game live, final Line line) {
+        return ownTargetAtStart(live, line, null, 0L);
+    }
+
+    /**
+     * As above, within a budget (review 2 of #251). Read-only: the dry run locates and inspects the step in a copy of
+     * {@code live} in its own id, cache and random scopes (S1 1: locating it in the live game set the activators of the
+     * host's live abilities). The run is charged to {@code work} (propose: the offense's Forge AI work budget; null: a
+     * budget of {@link Config#aiWorkCap} opened inside the current one) and is not started past {@code deadline} (a
+     * {@link forge.game.WorkClock} time; 0 = none). Out of budget, or any error: null, so the line is kept unfiltered.
+     */
+    String ownTargetAtStart(final Game live, final Line line, final forge.ai.AiWork.Budget work, final long deadline) {
         if (!cfg.lineOwnTarget || !liveSeat || line == null) {
             return null;
         }
+        if (deadline != 0 && forge.game.WorkClock.nanoTime() > deadline || work != null && work.spent()) {
+            ownTargetUnchecked++;
+            receipt("FORCED_WIN own-target-unchecked" + tag() + " budget line=" + line.steps);
+            return null;
+        }
+        final forge.ai.AiWork.Budget outer = forge.ai.AiWork.current();
+        if (work != null) {
+            forge.ai.AiWork.restore(work); // the offense's budget again (it charges the outer budgets it was opened in)
+        } else {
+            forge.ai.AiWork.open(cfg.aiWorkCap());
+        }
+        final Random prevRng = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new Random(mix(cfg.seed, 0x0F157L + decisionIndex)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
         try {
+            final Game g;
+            final Player cm;
+            synchronized (live) {
+                final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // as the play-outs' copies
+                copier.setCopyFidelity(1);
+                ForcedWinEngine.copyStackIf(copier, live, cfg.engineStack);
+                copier.setTurnLimits(cfg.turnLimits);
+                copier.setOffBattlefieldLimits(cfg.offBattlefieldLimits);
+                copier.setHistoryLki(cfg.historyLki);
+                copier.setCopyBackFace(cfg.copyBackFace);
+                copier.setCopyDungeon(cfg.copyDungeon);
+                copier.setStackAbilityCopies(cfg.stackAbilityCopies);
+                copier.setStackHistory(cfg.stackHistory);
+                g = copier.makeCopy();
+                g.staleStatics = cfg.staleStatics;
+                g.stalePlayerStatics = cfg.stalePlayerStatics;
+                cm = (Player) copier.find(me);
+            }
             final Follower f = follower(line);
             f.ownTarget = true;
-            final Follower.Next n = f.next(live, me);
+            final Follower.Next n = f.next(g, cm);
             return n.broken && n.why != null && n.why.startsWith("own-target:") ? n.why : null;
         } catch (RuntimeException | StackOverflowError e) {
+            if (e instanceof forge.ai.AiWork.Exhausted) {
+                ownTargetUnchecked++;
+                receipt("FORCED_WIN own-target-unchecked" + tag() + " " + e.getMessage() + " line=" + line.steps);
+            }
             return null; // a check that cannot be made refuses nothing (as LineOwnTarget#refuse)
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prevRng);
+            forge.ai.AiWork.restore(outer);
         }
     }
+
+    /** Review 2 of #251: the offense's Forge AI work budget of the last {@link #propose} (null = none). */
+    private forge.ai.AiWork.Budget offenseWork;
+
+    /** Review 2 of #251 (report only): lines kept unfiltered because the first-step check was out of budget. */
+    public int ownTargetUnchecked;
 
     /** line-own-target-1119 (report only): lines not proposed because their first step would break ({@link #ownTargetAtStart}). */
     public int ownTargetFiltered;
