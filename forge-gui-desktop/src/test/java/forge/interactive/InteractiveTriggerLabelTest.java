@@ -313,8 +313,8 @@ public class InteractiveTriggerLabelTest extends AITest {
 
     /**
      * Hidden information: an effect whose source is a card this seat may not identify (the foe's hand) never names it,
-     * though the effect's own name carries it; a face-down permanent's ability stays "face-down card"; a card in a hidden
-     * zone, and a snapshot of one, are hidden cards.
+     * though the effect's own name carries it; a face-down permanent's ability reads "A face-down card"; a card in a
+     * hidden zone, and a snapshot of one, read "A hidden card". No free text and no id (review fix 2).
      */
     @Test(timeOut = 900000)
     public void hiddenHostsAndSourcesNeverNameTheCard() throws Exception {
@@ -339,10 +339,8 @@ public class InteractiveTriggerLabelTest extends AITest {
                 assertFalse(label.contains("Llanowar Elves"), labels.toString());
                 noEngineTag(label);
             }
-            assertEquals(labels.get(0), "A hidden card's effect — this effect: draw a card.");
-            assertEquals(labels.get(1), "Ability of face-down card (" + cards[1].getId() + ")");
-            assertEquals(labels.get(2), "Ability of a hidden card (" + cards[2].getId() + ")");
-            assertEquals(labels.get(3), "Ability of a hidden card (" + cards[2].getId() + ")");
+            assertEquals(labels, List.of("A hidden card's effect — ability", "A face-down card — ability",
+                    "A hidden card — ability", "A hidden card — ability"));
         }
     }
 
@@ -395,8 +393,8 @@ public class InteractiveTriggerLabelTest extends AITest {
 
     /**
      * Review of #253, S1 1 (the reviewer's repro): Sneak Attack's end-step sacrifice remembers a creature that is then
-     * bounced, shuffled into the library and put onto the battlefield face down. The label and the stack entry never name
-     * it; the head named "Grizzly Bears (2)".
+     * bounced, shuffled into the library and put onto the battlefield face down. The label and the stack entry show no
+     * free text (review fix 2), only the host and the kind; the head 303f98933b0 named "Grizzly Bears (2)".
      */
     @Test(timeOut = 900000)
     public void review253_aRememberedCreatureHiddenAgainIsNeverNamed() throws Exception {
@@ -419,20 +417,20 @@ public class InteractiveTriggerLabelTest extends AITest {
             sacrifice.setTriggeringObject(AbilityKey.Player, h.foe);
             final String result = label(h, sacrifice);
             System.out.println("SNEAK label=" + result + " raw=" + sacrifice);
-            assertEquals(result, "Sneak Attack — Sacrifice a hidden card at the beginning of the next end step.");
+            assertEquals(result, "Sneak Attack — triggered ability");
             h.game.getStack().add(sacrifice);
             final JsonArray stack = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack");
             System.out.println("SNEAK stack=" + stack);
-            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(),
-                    "Sacrifice a hidden card at the beginning of the next end step.");
+            assertEquals(stack.get(0).getAsJsonObject().get("name").getAsString(), "Sneak Attack");
+            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(), "Sneak Attack — triggered ability");
             assertFalse(stack.toString().contains("Grizzly Bears"), stack.toString());
         }
     }
 
     /**
      * Review of #253, S1 1 (the reviewer's repro): a remembered card of the foe's hand, the same card moved to exile face
-     * down (remembered as itself, or as a last-known copy), and a library card are never named, by name or by id; the
-     * remembered list drops them.
+     * down (remembered as itself, or as a last-known copy), and a library card are never named, by name or by id: the
+     * label is the minimal one (review fix 2).
      */
     @Test(timeOut = 900000)
     public void review253_rememberedHiddenCardsAreNotListed() throws Exception {
@@ -449,7 +447,7 @@ public class InteractiveTriggerLabelTest extends AITest {
                 if (mode == 3) card = h.game.getAction().moveTo(ZoneType.Library, card, null, null);
                 final String result = label(h, wrapped(snapshot, h.seat, remembered, "Return the remembered card."));
                 System.out.println("REMEMBER mode=" + mode + " label=" + result);
-                assertEquals(result, "Sneak Attack — Return the remembered card.", "mode " + mode);
+                assertEquals(result, "Sneak Attack — triggered ability", "mode " + mode);
             }
         }
     }
@@ -485,17 +483,18 @@ public class InteractiveTriggerLabelTest extends AITest {
                 final String result = label(h, ability(effect, h.foe,
                         "DB$ Draw | Defined$ You | SpellDescription$ Draw a card."));
                 System.out.println("EFFECT mode=" + mode + " label=" + result);
-                assertEquals(result, "A hidden card's effect — Draw a card.", "mode " + mode);
+                assertEquals(result, "A hidden card's effect — ability", "mode " + mode);
             }
         }
     }
 
     /**
-     * The real Necropotence: its delayed "put the exiled card into your hand" remembers a card exiled face down. Its
-     * label and stack entry list nothing of it, not even Forge's hidden reference "Face-down card (H1)".
+     * The real Necropotence: its delayed "put the exiled card into your hand" remembers a card exiled face down, which
+     * the other seat may not identify. Its label and stack entry are the minimal ones (review fix 2), with nothing of
+     * that card, not even Forge's hidden reference "Face-down card (H1)".
      */
     @Test(timeOut = 900000)
-    public void necropotencesFaceDownExileIsNotListed() throws Exception {
+    public void necropotencesFaceDownExileGivesTheMinimalLabel() throws Exception {
         try (Harness h = new Harness((seat, foe) -> { })) {
             final Card necro = addCard("Necropotence", h.foe);
             addCardToZone("Lightning Bolt", h.foe, ZoneType.Library);
@@ -509,19 +508,21 @@ public class InteractiveTriggerLabelTest extends AITest {
             put.setTriggeringObject(AbilityKey.Player, h.foe);
             final String result = label(h, put);
             System.out.println("NECRO label=" + result);
-            assertEquals(result, "Put the exiled card into your hand.");
+            assertEquals(result, "Necropotence — triggered ability");
             h.game.getStack().add(put);
             final JsonArray stack = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack");
             System.out.println("NECRO stack=" + stack);
-            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(), "Put the exiled card into your hand.");
+            assertEquals(stack.get(0).getAsJsonObject().get("name").getAsString(), "Necropotence");
+            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(), "Necropotence — triggered ability");
+            assertFalse(stack.toString().contains("Face-down card"), stack.toString());
         }
     }
 
     /**
      * The moves (review fix 1): a card is a snapshot host, an effect's source, and a trigger's remembered card; then it
-     * moves. It is named exactly when this seat may identify the card with its id now: hidden after hand to face-down
-     * exile, battlefield to graveyard to hand, or a shuffle into the library; named after a change of control, and after
-     * a token has ceased to exist (a face-up token is public wherever it was).
+     * moves. Its text shows exactly when this seat may identify the card with its id now: the minimal label after hand
+     * to face-down exile, battlefield to graveyard to hand, or a shuffle into the library; the full text after a change
+     * of control, and after a token has ceased to exist (a face-up token is public wherever it was).
      */
     @Test(timeOut = 900000)
     public void review253_eachReferenceFollowsTheCardAsItIsNow() throws Exception {
@@ -580,11 +581,172 @@ public class InteractiveTriggerLabelTest extends AITest {
                     assertEquals(labels, List.of(name + " — Draw a card.", name + " — Draw a card.",
                             "Sneak Attack — Return the remembered card. (" + name + ")"), move);
                 } else {
-                    assertEquals(labels, List.of("Ability of a hidden card (" + cards.get(0).getId() + ")",
-                            "A hidden card's effect — Draw a card.", "Sneak Attack — Return the remembered card."), move);
+                    final String host = move.equals("hand-to-face-down-exile") ? "A face-down card" : "A hidden card";
+                    assertEquals(labels, List.of(host + " — ability", "A hidden card's effect — ability",
+                            "Sneak Attack — triggered ability"), move);
                     for (String label : labels) assertFalse(label.contains(name), move + ": " + label);
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ review fix 2: all or nothing
+
+    /**
+     * A fully visible trigger of this seat's own keeps its full text, in its label and on the stack: its host, its
+     * remembered card and its triggering card are all cards this seat may identify (as in the owner's prompt).
+     */
+    @Test(timeOut = 900000)
+    public void r2_aFullyVisibleOwnTriggerKeepsItsFullText() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card sneak = addCard("Sneak Attack", h.seat);
+            final Card bears = addCard("Grizzly Bears", h.seat);
+            final Card elves = addCard("Llanowar Elves", h.seat);
+            final SpellAbility trigger = wrapped(sneak, h.seat, bears, "Return the remembered card.");
+            trigger.setTriggeringObject(AbilityKey.Card, elves);
+            final String result = label(h, trigger);
+            System.out.println("R2 FULL label=" + result);
+            assertEquals(result, "Return the remembered card. (Grizzly Bears)");
+            h.game.getStack().add(trigger);
+            final JsonObject entry = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack").get(0).getAsJsonObject();
+            System.out.println("R2 FULL stack=" + entry);
+            assertEquals(entry.get("name").getAsString(), "Sneak Attack");
+            assertEquals(entry.get("description").getAsString(), "Return the remembered card. (Grizzly Bears (" + bears.getId() + "))");
+        }
+    }
+
+    /** Astra's re-review of #253, probe 1: a hidden host carries no id ("Ability of a hidden card (1)" at 99a05755e59). */
+    @Test(timeOut = 900000)
+    public void r2_aHiddenHostCarriesNoId() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            Card bears = addCard("Grizzly Bears", h.foe);
+            final Card snapshot = CardCopyService.getLKICopy(bears);
+            bears = h.game.getAction().moveTo(ZoneType.Library, bears, null, null);
+            h.foe.shuffle(null);
+            final String result = label(h, ability(snapshot, h.foe, "DB$ Draw | Defined$ You | SpellDescription$ Draw a card."));
+            System.out.println("R2 HIDDEN HOST: " + result);
+            assertEquals(result, "A hidden card — ability");
+            assertFalse(result.contains("(" + bears.getId() + ")"), result);
+        }
+    }
+
+    /**
+     * Probe 2: a trigger pushed while its remembered Grizzly Bears was face up, the same object then turned face down.
+     * The stored text ("Return the remembered card. ([Grizzly Bears (2)])") is not shown.
+     */
+    @Test(timeOut = 900000)
+    public void r2_aRememberedCardConcealedAfterThePushHidesTheStoredText() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card sneak = addCard("Sneak Attack", h.foe);
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            h.game.getStack().add(wrapped(sneak, h.foe, bears, "Return the remembered card."));
+            bears.turnFaceDown(true);
+            assertFalse(InteractiveState.mayReceiveIdentity(bears.getView(), h.seat.getView()));
+            final JsonArray stack = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack");
+            System.out.println("R2 STORED AFTER: " + stack);
+            assertEquals(stack.get(0).getAsJsonObject().get("name").getAsString(), "Sneak Attack");
+            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(), "Sneak Attack — triggered ability");
+            assertFalse(stack.toString().contains("Grizzly Bears"), stack.toString());
+        }
+    }
+
+    /** Probe 3: a triggering card turned face down after the ability's view was made ("Return Grizzly Bears (2)."). */
+    @Test(timeOut = 900000)
+    public void r2_aTriggeringCardConcealedLaterHidesTheText() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card sneak = addCard("Sneak Attack", h.foe);
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            final SpellAbility trigger = wrapped(sneak, h.foe, null, "Return " + bears + ".");
+            trigger.setTriggeringObject(AbilityKey.Card, bears);
+            trigger.getView();
+            bears.turnFaceDown(true);
+            final String result = label(h, trigger);
+            System.out.println("R2 TRIGGERING: " + result);
+            assertEquals(result, "Sneak Attack — triggered ability");
+        }
+    }
+
+    /**
+     * Probe 4: an effect named "Grizzly Bears's Effect" with no source, while the Bears is face down. A generated name is
+     * never shown: the effect has no engine provenance as a public game effect, so it reads "An effect".
+     */
+    @Test(timeOut = 900000)
+    public void r2_aSourcelessEffectsGeneratedNameIsNeverShown() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            final Card effect = effect(h.game, h.foe, bears);
+            effect.setEffectSource((Card) null);
+            bears.turnFaceDown(true);
+            assertFalse(InteractiveState.mayReceiveIdentity(bears.getView(), h.seat.getView()));
+            final String result = label(h, ability(effect, h.foe, "DB$ Draw | Defined$ You | SpellDescription$ Draw a card."));
+            System.out.println("R2 SOURCELESS: " + result);
+            assertEquals(result, "An effect — Draw a card.");
+            final String named = label(h, ability(effect, h.foe, "DB$ Draw | Defined$ You | SpellDescription$ CARDNAME: draw a card."));
+            System.out.println("R2 SOURCELESS CARDNAME: " + named);
+            assertFalse(named.contains("Grizzly Bears"), named);
+        }
+    }
+
+    /**
+     * Probe 5: an effect of the foe's hidden Thoughtseize has an ability on the stack targeting a face-down creature.
+     * The entry's description is the base's "Hidden spell or ability", and its name is not the effect's generated name.
+     */
+    @Test(timeOut = 900000)
+    public void r2_aHiddenTargetsEntryNamesNoEffect() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card thoughtseize = addCardToZone("Thoughtseize", h.foe, ZoneType.Hand);
+            final Card effect = effect(h.game, h.foe, thoughtseize);
+            final Card target = addCard("Grizzly Bears", h.foe);
+            target.turnFaceDown(true);
+            final SpellAbility pump = ability(effect, h.foe,
+                    "DB$ Pump | ValidTgts$ Creature | NumAtt$ 1 | NumDef$ 1 | SpellDescription$ Pump target creature.");
+            pump.getTargets().add(target);
+            h.game.getStack().add(pump);
+            final JsonArray stack = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack");
+            System.out.println("R2 HIDDEN TARGET EFFECT: " + stack);
+            assertEquals(stack.get(0).getAsJsonObject().get("name").getAsString(), "A hidden card's effect");
+            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(), "Hidden spell or ability");
+            assertFalse(stack.toString().contains("Thoughtseize"), stack.toString());
+        }
+    }
+
+    /** Probe 6: a public host's trigger remembers an effect of the foe's hidden Thoughtseize. */
+    @Test(timeOut = 900000)
+    public void r2_aRememberedEffectFollowsItsSourceChain() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card thoughtseize = addCardToZone("Thoughtseize", h.foe, ZoneType.Hand);
+            final Card effect = effect(h.game, h.foe, thoughtseize);
+            final Card sneak = addCard("Sneak Attack", h.foe);
+            final SpellAbility trigger = wrapped(sneak, h.foe, effect, "Return the remembered card.");
+            final String result = label(h, trigger);
+            h.game.getStack().add(trigger);
+            final JsonArray stack = InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack");
+            System.out.println("R2 REMEMBER EFFECT LABEL: " + result);
+            System.out.println("R2 REMEMBER EFFECT STACK: " + stack);
+            assertEquals(result, "Sneak Attack — triggered ability");
+            assertEquals(stack.get(0).getAsJsonObject().get("description").getAsString(), "Sneak Attack — triggered ability");
+            assertFalse(stack.toString().contains("Thoughtseize"), stack.toString());
+        }
+    }
+
+    /**
+     * The reviewer's cycle and depth probes: an effect chain that loops, or is longer than the cap, cannot be resolved:
+     * the minimal label, naming nothing.
+     */
+    @Test(timeOut = 900000)
+    public void r2_effectChainLoopsAndOverlongChainsFailClosed() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            final Card a = effect(h.game, h.foe, bears);
+            final Card b = effect(h.game, h.foe, a);
+            a.setEffectSource(b);
+            final String cycle = label(h, ability(b, h.foe, "DB$ Draw | Defined$ You | SpellDescription$ CARDNAME: draw a card."));
+            Card deep = effect(h.game, h.foe, bears);
+            for (int i = 0; i < 9; i++) deep = effect(h.game, h.foe, deep);
+            final String overlong = label(h, ability(deep, h.foe, "DB$ Draw | Defined$ You | SpellDescription$ CARDNAME: draw a card."));
+            System.out.println("R2 CYCLE: " + cycle + " / DEPTH: " + overlong);
+            assertEquals(cycle, "An effect — ability");
+            assertEquals(overlong, "An effect — ability");
         }
     }
 }

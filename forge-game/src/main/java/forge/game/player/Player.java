@@ -3709,6 +3709,18 @@ public class Player extends GameEntity implements Comparable<Player> {
         return radiationEffect != null;
     }
 
+    /**
+     * mtgx (lane trigger-label-1119): whether {@code card} is one of this player's field-managed game effects, the
+     * command-zone cards the engine itself makes with a fixed name (the monarch, the initiative, the city's blessing, an
+     * enduring story, contraption sprockets, radiation, keyword effects, speed, the Ring, the commander effect). Their
+     * names come from no card, so a player may read them. Read-only.
+     */
+    public boolean isFieldManagedEffect(final Card card) {
+        return card != null && (card == monarchEffect || card == initiativeEffect || card == blessingEffect
+                || card == enduringStoryEffect || card == contraptionSprocketEffect || card == radiationEffect
+                || card == keywordEffect || card == speedEffect || card == theRing || card == commanderEffect);
+    }
+
     public Card getKeywordCard() {
         if (keywordEffect != null) {
             return keywordEffect;

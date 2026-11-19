@@ -610,16 +610,23 @@ final class InteractiveState {
             }
             if (!renderedTextSafe) {
                 entry.addProperty("description", "Hidden spell or ability");
+                nameEffectSource(entry, source, game, viewer);
             } else if (si != null && entry.has("description") && entry.get("description").isJsonPrimitive()) {
-                // lane trigger-label-1119: an entry reads as its own text, without Forge's stack context, and names
-                // only the cards this seat may identify now (review fix 1: one rule for every reference).
-                final String description = entry.get("description").getAsString();
-                final EffectOrigin origin = effectOrigin(source, game, viewer);
-                String clean = origin.hidden() ? origin.withoutEffectNames(description) : description;
-                clean = referenceText(clean, si.getSpellAbility(), origin.links(), source.getView(), game, viewer,
-                        new ArrayList<>());
-                if (origin.hidden()) entry.addProperty("name", HIDDEN_EFFECT);
-                if (!clean.equals(description)) entry.addProperty("description", clean);
+                // lane trigger-label-1119 (review fix 2): all or nothing, decided now from the stack item's ability and
+                // the objects it references; the text stored at push is shown only when every one passes.
+                final SpellAbility sa = si.getSpellAbility();
+                final AbilityCheck check = checkAbility(sa, source.getView(), game, viewer);
+                if (!check.allKnown()) {
+                    entry.addProperty("name", check.origin());
+                    entry.addProperty("description", check.minimalLabel(sa));
+                } else {
+                    final String description = entry.get("description").getAsString();
+                    final String clean = fullText(description, sa, check.effects());
+                    if (!clean.equals(description)) entry.addProperty("description", clean);
+                    nameEffectSource(entry, source, game, viewer);
+                }
+            } else {
+                nameEffectSource(entry, source, game, viewer);
             }
         }
     }
@@ -648,11 +655,15 @@ final class InteractiveState {
         return text.endsWith(context) ? text.substring(0, text.length() - context.length()) : text;
     }
 
-    /** lane trigger-label-1119 review fix 1: how a reference to a card this seat may not identify now reads. */
-    static final String HIDDEN_REFERENCE = "a hidden card";
     /** lane trigger-label-1119: the origin of an effect whose source chain has a card this seat may not identify. */
     static final String HIDDEN_EFFECT = "A hidden card's effect";
-    /** How an effect's own name reads in its text when its source chain is hidden: the name is generated from a card. */
+    /** The origin of an effect with no source card and no engine provenance as a public game effect. */
+    static final String AN_EFFECT = "An effect";
+    /** The origin of a host this seat may not identify, face down where everyone sees it. */
+    static final String A_FACE_DOWN_CARD = "A face-down card";
+    /** The origin of a host this seat may not identify. */
+    static final String A_HIDDEN_CARD = "A hidden card";
+    /** How a referenced effect's generated name ("X's Effect") reads in a text shown in full. */
     static final String THIS_EFFECT = "this effect";
     private static final int EFFECT_CHAIN_LIMIT = 8;
 
@@ -682,85 +693,194 @@ final class InteractiveState {
     }
 
     /**
-     * lane trigger-label-1119 review fix 1: where an effect comes from, for this seat. The effect's source chain is
-     * followed to its first card that is not an effect (an effect's source may be another effect), each link judged by
-     * {@link #knownNow}, with a visited set and a depth cap. The origin is that card's current name when every link
-     * passes; {@link #HIDDEN_EFFECT} when any link fails, the chain loops, or it is longer than the cap; the last
-     * effect's own name when the chain ends at an effect with no source (the monarch, the initiative); and none for a
-     * host that is not an effect. An effect's generated name ("X's Effect") is never an origin.
+     * lane trigger-label-1119 review fix 2: whether {@code card} is an effect whose name a player may read: one of its
+     * owner's field-managed game effects ({@code Player.isFieldManagedEffect}: the monarch, the initiative, ...), made
+     * by the engine with a fixed name. Decided by that engine pointer, never by the name.
      */
-    static EffectOrigin effectOrigin(final Card effect, final Game game, final PlayerView viewer) {
-        if (effect == null || effect.getGamePieceType() != GamePieceType.EFFECT) return EffectOrigin.NONE;
-        final List<CardView> effects = new ArrayList<>();
-        final List<CardView> links = new ArrayList<>();
+    static boolean isPublicGameEffect(final Card card) {
+        return card != null && card.getOwner() != null && card.getOwner().isFieldManagedEffect(card);
+    }
+
+    /**
+     * An effect's source chain for this seat ({@link #effectChain}): {@code known} when every link is a card this seat
+     * may identify now; {@code origin} what the effect may be called (the chain's first card that is not an effect, by
+     * its current name; a public game effect's own name; {@link #AN_EFFECT} when the chain ends at an effect with no
+     * source) or {@link #HIDDEN_EFFECT}; {@code effects} the chain's effects other than public game effects, whose
+     * generated names never show.
+     */
+    record EffectChain(boolean known, String origin, List<Card> effects) {
+    }
+
+    /**
+     * lane trigger-label-1119 review fix 2: follows {@code effect}'s source chain to its first card that is not an
+     * effect, judging each link by {@link #knownNow}, with a visited set and a depth cap: a hidden link
+     * ({@link #HIDDEN_EFFECT}), a loop or a longer chain ({@link #AN_EFFECT}) is not known. A public game effect ends the
+     * chain with its own name; an effect with no source ends it, known, as {@link #AN_EFFECT}. An effect's generated name
+     * is never an origin.
+     */
+    static EffectChain effectChain(final Card effect, final Game game, final PlayerView viewer) {
+        final List<Card> effects = new ArrayList<>();
         final Set<Integer> visited = new java.util.HashSet<>();
         Card at = effect;
-        visited.add(at.getId());
-        effects.add(at.getView());
-        links.add(at.getView());
-        for (int depth = 0; ; depth++) {
+        for (int depth = 0; depth <= EFFECT_CHAIN_LIMIT; depth++) {
+            if (!visited.add(at.getId())) return new EffectChain(false, AN_EFFECT, effects);
+            if (isPublicGameEffect(at)) return new EffectChain(true, at.getName(), effects);
+            effects.add(at);
             final Card from = at.getEffectSource();
-            if (from == null) {
-                final String own = at.getName();
-                return own == null || own.isBlank() ? new EffectOrigin(null, false, effects, links)
-                        : new EffectOrigin(own, false, effects, links);
-            }
-            links.add(from.getView());
-            if (!visited.add(from.getId()) || depth >= EFFECT_CHAIN_LIMIT) return new EffectOrigin(null, true, effects, links);
+            if (from == null) return new EffectChain(true, AN_EFFECT, effects);
             final CardView known = knownNow(game, from.getView(), viewer);
-            if (known == null) return new EffectOrigin(null, true, effects, links);
+            if (known == null) return new EffectChain(false, HIDDEN_EFFECT, effects);
             final Card current = game == null ? null : game.findById(from.getId());
             final Card next = current != null ? current : from;
             if (next.getGamePieceType() != GamePieceType.EFFECT) {
-                return known.getName() == null || known.getName().isBlank()
-                        ? new EffectOrigin(null, false, effects, links) : new EffectOrigin(known.getName(), false, effects, links);
+                final String name = known.getName();
+                return new EffectChain(true, name == null || name.isBlank() ? AN_EFFECT : name, effects);
             }
-            effects.add(next.getView());
             at = next;
         }
+        return new EffectChain(false, AN_EFFECT, effects);
     }
 
     /**
-     * An effect's origin ({@link #effectOrigin}): {@code name} null for none; {@code hidden} when a link of its source
-     * chain is a card this seat may not identify; {@code effects} the effects of the chain, the host first; {@code links}
-     * every object of the chain, for {@link #referenceText}.
+     * lane trigger-label-1119 review fix 2 (Astra's re-review of #253: free-text redaction missed concealment in place,
+     * generated effect names, a hidden-target fallback and remembered effects). An ability's label is all or nothing.
+     * Every object the ability references is collected:
+     * <ul>
+     * <li>its host (and the view Forge supplied), the host's remembered, imprinted and chosen cards;</li>
+     * <li>its trigger's remembered objects;</li>
+     * <li>every target (a targeted spell by its host) and every triggering object, of it and of the ability it wraps;</li>
+     * <li>the source chain of every effect among them ({@link #effectChain}).</li>
+     * </ul>
+     * Each is resolved by id to the current card ({@link #knownNow}). {@code allKnown} is true only when every one
+     * passes; then the text may be shown in full, with only Forge's stack context cut ({@link #fullText}). Otherwise no
+     * free text is shown, only {@link #minimalLabel}. {@code origin} is made only of verified pieces.
      */
-    record EffectOrigin(String name, boolean hidden, List<CardView> effects, List<CardView> links) {
-        static final EffectOrigin NONE = new EffectOrigin(null, false, List.of(), List.of());
+    record AbilityCheck(boolean allKnown, String origin, List<Card> effects) {
+        /** The fixed label for an ability whose text is not shown: "{@code origin} — triggered ability" or "— ability". */
+        String minimalLabel(final SpellAbility ability) {
+            return origin + " — " + (isTriggered(ability) ? "triggered ability" : "ability");
+        }
+    }
 
-        /** {@code text} with each effect of the chain, by reference or by its name, read as {@link #THIS_EFFECT}. */
-        String withoutEffectNames(final String text) {
-            String out = text;
-            for (CardView effect : effects) {
-                for (String form : referenceForms(effect)) out = out.replace(form, THIS_EFFECT);
+    static boolean isTriggered(final SpellAbility ability) {
+        return ability instanceof forge.game.trigger.WrappedAbility || ability != null && ability.isTrigger();
+    }
+
+    /** {@link AbilityCheck} of {@code ability}, whose host Forge supplied as {@code hostView}. */
+    static AbilityCheck checkAbility(final SpellAbility ability, final CardView hostView, final Game game,
+                                     final PlayerView viewer) {
+        final ReferenceWalk walk = new ReferenceWalk(game, viewer);
+        walk.view(hostView);
+        if (ability != null) {
+            final List<SpellAbility> layers = new ArrayList<>(2);
+            layers.add(ability);
+            if (ability instanceof forge.game.trigger.WrappedAbility wrapped && wrapped.getWrappedAbility() != null) {
+                layers.add(wrapped.getWrappedAbility());
             }
-            for (CardView effect : effects) {
-                if (effect.getName() != null && !effect.getName().isBlank()) out = out.replace(effect.getName(), THIS_EFFECT);
+            for (SpellAbility layer : layers) {
+                try {
+                    final Card host = layer.getHostCard();
+                    walk.card(host);
+                    if (host != null) {
+                        walk.object(host.getRemembered());
+                        walk.object(host.getImprintedCards());
+                        walk.object(host.getChosenCards());
+                    }
+                    final forge.game.trigger.Trigger trigger = layer.getTrigger();
+                    if (trigger != null) walk.object(trigger.getTriggerRemembered());
+                    for (forge.game.spellability.TargetChoices choices : layer.getAllTargetChoices()) {
+                        walk.object(choices.getTargetCards());
+                        walk.object(choices.getTargetSpells());
+                    }
+                    walk.object(layer.getTriggeringObjects().values());
+                } catch (RuntimeException unreadable) {
+                    walk.failed = true;
+                }
             }
-            return out;
+        }
+        return new AbilityCheck(!walk.failed, origin(hostView, game, viewer), walk.effects);
+    }
+
+    /**
+     * The origin of an ability whose host Forge supplied as {@code hostView}, from verified pieces only: an effect by
+     * {@link #effectChain}; a host this seat may identify now by its current name; else {@link #A_FACE_DOWN_CARD} or
+     * {@link #A_HIDDEN_CARD} (no id).
+     */
+    static String origin(final CardView hostView, final Game game, final PlayerView viewer) {
+        if (hostView == null) return A_HIDDEN_CARD;
+        final Card current = game == null ? null : game.findById(hostView.getId());
+        final CardView known = knownNow(game, hostView, viewer);
+        if (known == null) return (current != null ? current.isFaceDown() : hostView.isFaceDown()) ? A_FACE_DOWN_CARD : A_HIDDEN_CARD;
+        if (current != null && current.getGamePieceType() == GamePieceType.EFFECT) {
+            return effectChain(current, game, viewer).origin();
+        }
+        if (known.getName() == null || known.getName().isBlank()) return known.isFaceDown() ? A_FACE_DOWN_CARD : A_HIDDEN_CARD;
+        return known.getName() + (known.getGamePieceType() == GamePieceType.COPIED_SPELL ? " (copy)" : "");
+    }
+
+    /** Collects and judges the objects an ability references ({@link #checkAbility}). */
+    private static final class ReferenceWalk {
+        private final Game game;
+        private final PlayerView viewer;
+        private final Set<Integer> seen = new java.util.HashSet<>();
+        final List<Card> effects = new ArrayList<>();
+        boolean failed;
+
+        ReferenceWalk(final Game game, final PlayerView viewer) {
+            this.game = game;
+            this.viewer = viewer;
+        }
+
+        void object(final Object object) {
+            if (failed || object == null) return;
+            if (object instanceof Card card) {
+                card(card);
+            } else if (object instanceof CardView view) {
+                view(view);
+            } else if (object instanceof SpellAbility sa) {
+                card(sa.getHostCard());
+            } else if (object instanceof Iterable<?> many) {
+                for (Object each : many) object(each);
+            }
+        }
+
+        void card(final Card card) {
+            if (card != null) view(card.getView(), card);
+        }
+
+        void view(final CardView view) {
+            view(view, null);
+        }
+
+        private void view(final CardView view, final Card object) {
+            if (failed || view == null) return;
+            if (knownNow(game, view, viewer) == null) {
+                failed = true;
+                return;
+            }
+            if (!seen.add(view.getId())) return;
+            final Card current = game == null ? null : game.findById(view.getId());
+            final Card effect = current != null ? current : object;
+            if (effect != null && effect.getGamePieceType() == GamePieceType.EFFECT) {
+                final EffectChain chain = effectChain(effect, game, viewer);
+                if (!chain.known()) {
+                    failed = true;
+                    return;
+                }
+                effects.addAll(chain.effects());
+            }
         }
     }
 
     /**
-     * lane trigger-label-1119 (review fix 1): an ability's text as this seat may read it.
-     * <ul>
-     * <li>For a trigger, Forge's stack context is cut exactly ({@link #withoutTriggerContext}); the list of objects
-     * the trigger remembers ({@code " (" + Trigger.getTriggerRemembered + ")"}, before any {@code " (Targeting: ...)"})
-     * keeps only the cards this seat may identify now that the text does not already name, and is dropped when none is
-     * left: a hidden card is not listed at all.</li>
-     * <li>Every reference ("Name (id)", or Forge's "Face-down card (H1)") to a card the ability carries (its host, the
-     * trigger's remembered objects, its triggering objects, its targets, {@code extra}) is resolved by
-     * {@link #knownNow}: the current card's "Name (id)" when this seat may identify it now, else
-     * {@link #HIDDEN_REFERENCE}, with no id.</li>
-     * </ul>
-     * {@code rememberedKnown} receives the current views of the remembered cards this seat may identify.
+     * lane trigger-label-1119: an ability's text in full, for an ability whose every referenced object this seat may
+     * identify now ({@link AbilityCheck#allKnown}): Forge's stack context cut ({@link #withoutTriggerContext}); a
+     * trigger's remembered list ({@code " (" + Trigger.getTriggerRemembered + ")"}, before any {@code " (Targeting: ...)"})
+     * dropped when the text already names each remembered card, else written without the brackets; and each referenced
+     * effect's generated name read as {@link #THIS_EFFECT}.
      */
-    static String referenceText(final String text, final SpellAbility ability, final java.util.Collection<CardView> extra,
-                                final CardView host, final Game game, final PlayerView viewer,
-                                final List<CardView> rememberedKnown) {
+    static String fullText(final String text, final SpellAbility ability, final List<Card> effects) {
         if (text == null) return null;
-        final List<CardView> refs = new ArrayList<>(extra);
-        if (host != null) refs.add(host);
         String body = text;
         String targeting = "";
         if (ability instanceof forge.game.trigger.WrappedAbility wrapped && wrapped.getTrigger() != null) {
@@ -771,27 +891,25 @@ final class InteractiveState {
                 body = body.substring(0, body.length() - targets.length());
             }
             final List<Object> remembered = wrapped.getTrigger().getTriggerRemembered();
-            if (remembered != null && !remembered.isEmpty()) {
+            if (remembered != null && !remembered.isEmpty() && remembered.stream().allMatch(o -> o instanceof Card)) {
                 final String list = " (" + remembered + ")";
-                final boolean cutList = body.endsWith(list) && remembered.stream().allMatch(o -> o instanceof Card);
-                if (cutList) body = body.substring(0, body.length() - list.length());
-                final List<String> keep = new ArrayList<>();
-                for (Object object : remembered) {
-                    if (!(object instanceof Card card)) continue;
-                    refs.add(card.getView());
-                    final CardView known = knownNow(game, card.getView(), viewer);
-                    if (known == null) continue;
-                    rememberedKnown.add(known);
-                    if (cutList && !mentions(body, card.getView()) && !mentions(body, known)) {
-                        keep.add(known.getName() == null || known.getName().isBlank() ? card.toString()
-                                : known.getName() + " (" + known.getId() + ")");
+                if (body.endsWith(list)) {
+                    body = body.substring(0, body.length() - list.length());
+                    final List<String> missing = new ArrayList<>();
+                    for (Object object : remembered) {
+                        if (!body.contains(object.toString())) missing.add(object.toString());
                     }
+                    if (!missing.isEmpty()) body = body + " (" + String.join(", ", missing) + ")";
                 }
-                if (!keep.isEmpty()) body = body + " (" + String.join(", ", keep) + ")";
             }
         }
-        refs.addAll(referencedCards(ability));
-        return resolveReferences(body + targeting, refs, game, viewer);
+        String out = body + targeting;
+        for (Card effect : effects) {
+            final String name = effect.getName();
+            if (name == null || name.isBlank()) continue;
+            out = out.replace(name + " (" + effect.getId() + ")", THIS_EFFECT).replace(name, THIS_EFFECT);
+        }
+        return out;
     }
 
     /** {@code " (Targeting: ...)"} as {@code WrappedAbility.getStackDescription} writes it, or null. */
@@ -807,89 +925,17 @@ final class InteractiveState {
         }
     }
 
-    /** The cards an ability's text may name: the host, the triggering objects and the targets, of it and of what it wraps. */
-    static List<CardView> referencedCards(final SpellAbility ability) {
-        final List<CardView> out = new ArrayList<>();
-        if (ability == null) return out;
-        final List<SpellAbility> layers = new ArrayList<>(2);
-        layers.add(ability);
-        if (ability instanceof forge.game.trigger.WrappedAbility wrapped && wrapped.getWrappedAbility() != null) {
-            layers.add(wrapped.getWrappedAbility());
-        }
-        for (SpellAbility layer : layers) {
-            try {
-                if (layer.getHostCard() != null) out.add(layer.getHostCard().getView());
-                for (Object object : layer.getTriggeringObjects().values()) addCards(object, out);
-                for (forge.game.spellability.TargetChoices choices : layer.getAllTargetChoices()) {
-                    for (Card card : choices.getTargetCards()) out.add(card.getView());
-                }
-            } catch (RuntimeException unreadable) {
-                // what could be read is kept; the sanitizer still redacts by current names
-            }
-        }
-        return out;
-    }
-
-    private static void addCards(final Object object, final List<CardView> out) {
-        if (object instanceof Card card) {
-            out.add(card.getView());
-        } else if (object instanceof Iterable<?> many) {
-            for (Object each : many) {
-                if (each instanceof Card card) out.add(card.getView());
-            }
-        }
-    }
-
-    /** The strings Forge writes for a reference to {@code card}: its {@code toString} and "Name (id)". */
-    static List<String> referenceForms(final CardView card) {
-        final List<String> forms = new ArrayList<>(2);
-        if (card == null || card.getId() <= 0) return forms;
-        final String shown = card.toString();
-        if (shown != null && !shown.isBlank()) forms.add(shown);
-        if (card.getName() != null && !card.getName().isBlank()) {
-            final String plain = card.getName() + " (" + card.getId() + ")";
-            if (!forms.contains(plain)) forms.add(plain);
-        }
-        return forms;
-    }
-
-    private static boolean mentions(final String text, final CardView card) {
-        for (String form : referenceForms(card)) {
-            if (text.contains(form)) return true;
-        }
-        return false;
-    }
-
     /**
-     * {@code text} with each reference to one of {@code refs} ({@link #referenceForms}) resolved by {@link #knownNow}:
-     * the current card's "Name (id)" when this seat may identify it now (the reference as written when the current
-     * name is blank), else {@link #HIDDEN_REFERENCE}. Longest references first, each replaced once.
+     * lane trigger-label-1119 review fix 2: a stack entry's {@code name} for its source: an effect's origin
+     * ({@link #effectChain}), never its generated name; any other source keeps the name it has.
      */
-    static String resolveReferences(final String text, final java.util.Collection<CardView> refs, final Game game,
-                                    final PlayerView viewer) {
-        if (text == null || refs.isEmpty()) return text;
-        final Map<String, String> replacements = new java.util.LinkedHashMap<>();
-        for (CardView ref : refs) {
-            if (ref == null) continue;
-            final List<String> forms = referenceForms(ref);
-            if (forms.stream().noneMatch(text::contains)) continue;
-            final CardView known = knownNow(game, ref, viewer);
-            for (String form : forms) {
-                if (!text.contains(form) || replacements.containsKey(form)) continue;
-                replacements.put(form, known == null ? HIDDEN_REFERENCE
-                        : known.getName() == null || known.getName().isBlank() ? form
-                        : known.getName() + " (" + known.getId() + ")");
-            }
+    static void nameEffectSource(final JsonObject entry, final Card source, final Game game, final PlayerView viewer) {
+        if (source == null) return;
+        final Card current = game == null ? null : game.findById(source.getId());
+        final Card card = current != null ? current : source;
+        if (card.getGamePieceType() == GamePieceType.EFFECT) {
+            entry.addProperty("name", effectChain(card, game, viewer).origin());
         }
-        if (replacements.isEmpty()) return text;
-        final List<String> keys = new ArrayList<>(replacements.keySet());
-        keys.sort(java.util.Comparator.comparingInt(String::length).reversed());
-        String prefix = "\u0000MTGX_REF_";
-        String out = text;
-        while (out.contains(prefix)) prefix += "_";
-        for (int i = 0; i < keys.size(); i++) out = out.replace(keys.get(i), prefix + i + "\u0000");
-        for (int i = 0; i < keys.size(); i++) out = out.replace(prefix + i + "\u0000", replacements.get(keys.get(i)));
-        return out;
     }
 
     private static void sanitizeCombat(final JsonObject view, final Game game,
