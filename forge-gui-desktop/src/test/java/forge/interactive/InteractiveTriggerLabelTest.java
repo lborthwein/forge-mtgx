@@ -903,15 +903,17 @@ public class InteractiveTriggerLabelTest extends AITest {
     }
 
     /**
-     * The sink check itself ({@link InteractiveState.HiddenNames}): a hidden name, word-bounded and ignoring case; a
-     * hidden id, (N) or (HN); both faces of a hidden double-faced card; a visible card sharing a hidden card's name fails
-     * too (closed, by design), and passes once no card of that name is hidden.
+     * The sink check itself ({@link InteractiveState.HiddenNames}): a hidden name, word-bounded and with its exact
+     * capitalization (review fix 3b: a hidden Life // Death's "Life" fails "Life" but not "gain 3 life"); a hidden id,
+     * (N) or (HN); both faces of a hidden double-faced card; a visible card sharing a hidden card's name fails too
+     * (closed, by design), and passes once no card of that name is hidden.
      */
     @Test(timeOut = 900000)
     public void r3_hiddenSafe() throws Exception {
         try (Harness h = new Harness((seat, foe) -> { })) {
             final Card bolt = addCardToZone("Lightning Bolt", h.foe, ZoneType.Hand);
             final Card delver = addCardToZone("Delver of Secrets", h.foe, ZoneType.Hand);
+            addCardToZone("Life // Death", h.foe, ZoneType.Library);
             addCardToZone("Island", h.seat, ZoneType.Library);
             final Card mine = addCard("Grizzly Bears", h.seat);
             final InteractiveState.HiddenNames before = InteractiveState.HiddenNames.of(h.game, h.seat.getView());
@@ -921,7 +923,14 @@ public class InteractiveTriggerLabelTest extends AITest {
             final InteractiveState.HiddenNames hidden = InteractiveState.HiddenNames.of(h.game, h.seat.getView());
             // A hidden name.
             assertFalse(hidden.safe("Lightning Bolt deals 3 damage to any target."));
-            assertFalse(hidden.safe("copy target lightning bolt"), "ignoring case");
+            assertTrue(hidden.safe("copy target lightning bolt"), "exact capitalization: Forge renders names verbatim");
+            // Case pair: a hidden Life // Death.
+            assertTrue(hidden.safe("You gain 3 life."), "a hidden \"Life\" leaves \"gain 3 life\" alone");
+            assertTrue(hidden.safe("Pay 1 life, Sacrifice a land: draw a card."), "a hidden \"Life\" leaves \"pay 1 life\"");
+            assertFalse(hidden.safe("Life"), "the hidden half's own name");
+            assertFalse(hidden.safe("Cast Life"), "the hidden half's own name");
+            assertFalse(hidden.safe("Death returns a creature."), "the other half");
+            assertFalse(hidden.safe("Life // Death"), "the whole card's name");
             assertTrue(hidden.safe("Lightning Bolts are not a card."), "word-bounded");
             assertTrue(hidden.safe("Islandcycling {2}"), "word-bounded: the seat's own library Island");
             assertFalse(hidden.safe("Search your library for an Island card."), "the seat's own library is hidden");

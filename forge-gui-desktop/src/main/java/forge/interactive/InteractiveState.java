@@ -969,12 +969,15 @@ final class InteractiveState {
      * not enumerate: paid lists, ExiledWith, a snapshot's fallback to its current host, sub-abilities, ORIGINALHOST, and
      * stored text rendered from a list that has changed since). The final sink check, and the authority: every string
      * emitted for an ability or a stack item passes it, or is replaced by a fixed label, whatever {@link #checkAbility}
-     * decided. A text fails when it contains, word-bounded and ignoring case:
+     * decided. A text fails when it contains:
      * <ul>
      * <li>a real name of a card in the game this seat may not identify now ({@link #knownNow}): in a hand or a library
      * it may not see, face down, or in hidden exile. The names are the card's own, of every state but the face-down
-     * one (both faces of a double-faced card, both halves of a split card), read from the card, never from a view;</li>
-     * <li>or such a card's id token, {@code (N)} or {@code (HN)}.</li>
+     * one (both faces of a double-faced card, both halves of a split card), read from the card, never from a view.
+     * Word-bounded, with its exact capitalization (review fix 3b): Forge renders a card's name verbatim, so a hidden
+     * Life // Death's "Life" matches "Life" but not "pay 1 life", and keywords stay lowercase in rendered text. Basic
+     * land names stay in (closed);</li>
+     * <li>or such a card's id token, {@code (N)} or {@code (HN)}, always.</li>
      * </ul>
      * A visible card that shares its name with a hidden one fails too: closed, by design.
      */
@@ -1015,7 +1018,7 @@ final class InteractiveState {
             }
             if (!ids.isEmpty()) {
                 if (regex.length() > 0) regex.append('|');
-                regex.append("\\(H?(?:");
+                regex.append("\\([Hh]?(?:");
                 boolean first = true;
                 for (Integer id : ids) {
                     if (!first) regex.append('|');
@@ -1024,8 +1027,8 @@ final class InteractiveState {
                 }
                 regex.append(")\\)");
             }
-            return new HiddenNames(regex.length() == 0 ? null : java.util.regex.Pattern.compile(regex.toString(),
-                    java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE));
+            // Case-sensitive (review fix 3b): names match with their exact capitalization.
+            return new HiddenNames(regex.length() == 0 ? null : java.util.regex.Pattern.compile(regex.toString()));
         }
 
         /** True when {@code text} names no hidden card and carries no hidden card's id. */
