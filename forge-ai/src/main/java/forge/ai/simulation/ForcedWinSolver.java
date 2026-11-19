@@ -223,6 +223,12 @@ public final class ForcedWinSolver {
          */
         public boolean engineLoopBisect = false;
         /**
+         * sdcc-multitarget-loop-1119 (off by default: nothing changes; read with engineLoopReach): a loop whose fast-forward
+         * stopped at a count whose attackers are lethal past the opponent's untapped creatures has that node searched before
+         * the loop is hoisted, and a hoisted fast-forward stops at that count too ({@link ForcedWinEngine.Limits#loopLethalFirst}).
+         */
+        public boolean engineLoopLethalFirst = false;
+        /**
          * sdcc-loops-1111 (off by default: nothing changes; read with cycles and engineLongLoops): unbounded resource loops in
          * the engine search ({@link ForcedWinEngine.Limits#loopCredit}): a mana-positive round is a loop, fast-forwarded to
          * what our cards could spend; X costs at the largest X our mana pays; a land tapped before a sacrifice takes it;
@@ -1034,6 +1040,7 @@ public final class ForcedWinSolver {
             c.engineOutletNodes = intOr(get.apply("engineOutletNodes"), c.engineOutletNodes); // engine-reach-1107
             c.engineLoopHoist = "true".equals(get.apply("engineLoopHoist")); // loop-exec-1107
             c.engineLoopBisect = "true".equals(get.apply("engineLoopBisect")); // loop-exec-1107
+            c.engineLoopLethalFirst = "true".equals(get.apply("engineLoopLethalFirst")); // sdcc-multitarget-loop-1119
             c.engineLoopCredit = "true".equals(get.apply("engineLoopCredit")); // sdcc-loops-1111
             c.engineLoopCreditCap = intOr(get.apply("engineLoopCreditCap"), c.engineLoopCreditCap);
             c.engineFrontierPct = intOr(get.apply("engineFrontierPct"), c.engineFrontierPct); // engine-reach-1107
@@ -1169,6 +1176,7 @@ public final class ForcedWinSolver {
                 + (planWiden > 0 ? " planWiden=" + planWiden : "") // sdcc-widen-1117
                 + (planEscalate > 1 ? " planEscalate=" + planEscalate : "") // sdcc-escalate-1117
                 + (verifyMax > 0 ? " verifyMax=" + verifyMax : "") // sdcc-verify-1117
+                + (engineLoopLethalFirst ? " engineLoopLethalFirst" : "") // sdcc-multitarget-loop-1119
                 + (engineModeChoice ? " engineModeChoice" : "") // owner-misplays-1113
                 + (lineOwnTarget ? " lineOwnTarget" : "") // line-own-target-1119
                 + (copyDungeon ? " copyDungeon" : "") // sdcc-copycast-1114
@@ -4282,6 +4290,7 @@ public final class ForcedWinSolver {
             el.outletNodes = cfg.engineOutletNodes;
             el.loopHoist = cfg.engineLoopHoist; // loop-exec-1107
             el.loopBisect = cfg.engineLoopBisect; // loop-exec-1107
+            el.loopLethalFirst = cfg.engineLoopLethalFirst; // sdcc-multitarget-loop-1119
         }
         el.loopCredit = cfg.engineLoopCredit; // sdcc-loops-1111
         el.creditCap = cfg.engineLoopCreditCap;
@@ -5000,6 +5009,7 @@ public final class ForcedWinSolver {
             el.outletNodes = cfg.engineOutletNodes;
             el.loopHoist = cfg.engineLoopHoist;
             el.loopBisect = cfg.engineLoopBisect;
+            el.loopLethalFirst = cfg.engineLoopLethalFirst; // sdcc-multitarget-loop-1119
         }
         el.loopCredit = cfg.engineLoopCredit; // sdcc-loops-1111
         el.creditCap = cfg.engineLoopCreditCap;

@@ -298,6 +298,13 @@ final class ForcedWinEngine {
          */
         boolean loopBisect = false;
         /**
+         * sdcc-multitarget-loop-1119 (false = off, with loopOutlets): a loop fast-forward that stopped at a count whose
+         * attackers are lethal past the opponent's untapped creatures ({@link #lethalPastBlockers}) has its node searched
+         * first and the loop hoisted after (the hoist ran first and could spend the budget before that node, whose first ply
+         * attacks); a hoisted fast-forward also stops at such a count and runs its outlet search there.
+         */
+        boolean loopLethalFirst = false;
+        /**
          * engine-reach-1107 (false = off, with longLoops): a round back to an ancestor is also a loop when the boards match and
          * our hand holds at least the ancestor's cards (draws are kept, the library may shrink), with progress.
          */
@@ -1768,6 +1775,10 @@ final class ForcedWinEngine {
                 }
                 before = next.pv;
                 done++;
+                if (lim.loopLethalFirst && lethalPastBlockers(next)) {
+                    cap = reps + done; // sdcc-multitarget-loop-1119: as the chunked forward, the outlet search at this count
+                    break;
+                }
             }
             if (TRACE) {
                 ForcedWinSolver.receipt("FW_ENGINE hoist chunk reps=" + reps + " want=" + want + " done=" + done + " failed=" + failed
@@ -3634,12 +3645,16 @@ final class ForcedWinEngine {
                         return r;
                     }
                 }
+                // sdcc-multitarget-loop-1119 (loopLethalFirst; off: false, the order as before): a forward that stopped at a
+                // lethal attack count has its node searched before the hoist, which runs after only if that search found nothing
+                final boolean lethalFirst = lim.loopLethalFirst && fw.win == null && fw.node != null
+                        && lim.loopHoist && lim.loopOutlets && !inOutlet && lethalPastBlockers(fw.node);
                 if (fw.win != null) {
                     final List<Step> w = wonVerified(fw.win, node); // solver-gaps-1104 (off = fw.win)
                     if (w != null || lim.verify == null) {
                         return w;
                     }
-                } else if (lim.loopHoist && lim.loopOutlets && !inOutlet) {
+                } else if (lim.loopHoist && lim.loopOutlets && !inOutlet && !lethalFirst) {
                     final List<Step> hw = hoist(a.child, body, played); // loop-exec-1107
                     forge.util.IdScope.install(cloneScope(node.ids));
                     if (hw != null) {
@@ -3661,6 +3676,13 @@ final class ForcedWinEngine {
                     }
                 } else {
                     st.pruned++;
+                }
+                if (lethalFirst && !out()) {
+                    final List<Step> hw = hoist(a.child, body, played); // sdcc-multitarget-loop-1119: the hoist, after
+                    forge.util.IdScope.install(cloneScope(node.ids));
+                    if (hw != null) {
+                        return hw;
+                    }
                 }
                 return null;
             }
