@@ -157,9 +157,14 @@ public final class HumanManaAffordability {
      * activated where it is (a Spirit Guide). A hybrid pip needs every half unmakeable ({@code canBePaidWithManaOfColor});
      * a Phyrexian pip counts only when life cannot pay it. A source whose colours the proof cannot read (Any, a chosen
      * colour, reflected mana, a filter's combination) makes every colour; a mana conversion, every colour.
+     *
+     * <p>afford-colour-unbounded-1119 (owner report 2026-11-19T01-31-38: Lurrus of the Dream-Den, {1}{W/B}{W/B}, glowing
+     * with Scrubland and Plains tapped and Zirda making Basalt Monolith's untap cost {1}): "an untap can reach it" held
+     * only when the untap could. With {@code reach} known ({@link #untapReach}), a {T} ability of a tapped permanent no
+     * untap can reach makes no colour. Null keeps the old reading: every permanent may be untapped.</p>
      */
     static boolean colourImpossible(final Player player, final SpellAbility ability, final List<ManaCostShard> shards,
-                                    final int hooks, final int extraColours) {
+                                    final int hooks, final int extraColours, final Set<Card> reach) {
         int colours = extraColours;
         if ((hooks & HOOK_CONVERT) != 0) colours |= ManaAtom.ALL_MANA_TYPES;
         for (var mana : player.getManaPool()) {
@@ -168,8 +173,10 @@ public final class HumanManaAffordability {
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             if (card.isPhasedOut()) continue;
+            final boolean shut = reach != null && card.isInZone(ZoneType.Battlefield) && card.isTapped() && !reach.contains(card);
             for (SpellAbility source : card.getManaAbilities()) {
                 if (!card.isInZone(ZoneType.Battlefield) && !activatableWhereItIs(card, source)) continue;
+                if (shut && source.getPayCosts() != null && source.getPayCosts().hasTapCost()) continue;
                 colours |= producibleColours(player, source);
             }
         }
@@ -189,6 +196,10 @@ public final class HumanManaAffordability {
 
     /** The colours a mana ability can make, as a mask; every colour when the proof cannot read them. */
     private static int producibleColours(final Player player, final SpellAbility source) {
+        // afford-colour-unbounded-1119: a sub-ability that makes more mana makes colours the top's Produced does not name.
+        for (SpellAbility tail = source.getSubAbility(); tail != null; tail = tail.getSubAbility()) {
+            if (tail.getApi() == ApiType.Mana || tail.getApi() == ApiType.ManaReflected) return ManaAtom.ALL_MANA_TYPES;
+        }
         final Integer reflected = reflectedColours(player, source);
         if (reflected != null) return reflected;
         if (source.getManaPart() == null) return ManaAtom.ALL_MANA_TYPES;
@@ -263,15 +274,7 @@ public final class HumanManaAffordability {
      * and any tap or untap replacement that puts something in its place, refuses the bound.</p>
      */
     public static Integer untapWidening(final Player player) {
-        if (costStaticInPlay(player) || cycleReaction(player)) return null;
-        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
-                ZoneType.Exile, ZoneType.Command)) {
-            if (card.isPhasedOut()) continue;
-            for (SpellAbility source : card.getManaAbilities()) {
-                if (source.getPayCosts() != null && activatableWhereItIs(card, source)
-                        && source.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostTapType)) return null;
-            }
-        }
+        if (costStaticInPlay(player) || cycleReaction(player) || tapsOthersForMana(player)) return null;
         int widen = 0;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isPhasedOut()) continue;
@@ -291,6 +294,176 @@ public final class HumanManaAffordability {
             }
         }
         return widen;
+    }
+
+    /**
+     * Review S1 (Astra, #240): has the player a mana ability, activatable where its card is, whose cost taps other
+     * permanents ({@code CostTapType}: Urza, Lord High Artificer; Grand Architect)? Such an ability can make mana from a
+     * permanent each time an untap brings it back, in colours of its own.
+     */
+    static boolean tapsOthersForMana(final Player player) {
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            if (card.isPhasedOut()) continue;
+            for (SpellAbility source : card.getManaAbilities()) {
+                if (source.getPayCosts() != null && activatableWhereItIs(card, source)
+                        && source.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostTapType)) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * afford-colour-unbounded-1119 (owner report 2026-11-19T01-31-38: Lurrus of the Dream-Den, {1}{W/B}{W/B}, glowing
+     * with Scrubland and Plains tapped; Zirda, the Dawnwaker made Basalt Monolith's untap cost {1}, so the amount of mana
+     * was unbounded and {@link #untapWidening} refused its bound). An untap reaches only what it untaps. These are the
+     * permanents an untap usable now can untap, or null when the proof cannot bound them.
+     *
+     * <p>Admitted: an ability of a permanent on the battlefield, usable now ({@link #activatableNow}), that untaps only its
+     * own card: an Untap with no target, no Defined other than Self, no choice of permanents, no radiance and no
+     * sub-ability (Basalt Monolith's "{3}: Untap"), or an ability whose cost untaps its own card ({Q}) and whose effect
+     * untaps nothing. Any other untap usable now gives null: a targeted or mass untap, one off the battlefield, a mana
+     * ability that untaps, a cost that untaps other permanents ({@code CostUntapType}).</p>
+     *
+     * <p>Untaps that are no activated ability give null too: anything {@link #cycleReaction} refuses (a trigger on an
+     * event of an untap cycle, a tap or untap replacement, mana with a rider, an ability that copies abilities, a spell
+     * that untaps), and any trigger or replacement in the game whose effect may untap ({@link #mayUntap}), whatever sets
+     * it off.</p>
+     */
+    static Set<Card> untapReach(final Player player) {
+        if (cycleReaction(player)) return null;
+        final Set<Card> reach = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            if (card.isPhasedOut()) continue;
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                if (sa.isSpell() || !activatableWhereItIs(card, sa)) continue;
+                final boolean untapsOthersAsCost = sa.getPayCosts() != null
+                        && sa.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostUntapType);
+                if (!untapsOthersAsCost && !untaps(sa)) continue;
+                // As unenumerated(player, true): an untap usable only later untaps nothing for this payment.
+                if (!activatableNow(card, sa, player)) continue;
+                if (!untapsOthersAsCost && !sa.isManaAbility() && card.isInZone(ZoneType.Battlefield) && untapsOnlyItsCard(sa)) {
+                    reach.add(card);
+                    continue;
+                }
+                return null;
+            }
+        }
+        final forge.game.Game game = player.getGame();
+        final forge.game.trigger.TriggerHandler handler = game.getTriggerHandler();
+        for (Trigger t : handler.getDelayedTriggersView()) {
+            if (mayUntap(t)) return null;
+        }
+        for (Trigger t : handler.getPlayerDefinedDelayedTriggersView().values()) {
+            if (mayUntap(t)) return null;
+        }
+        for (Card card : game.getCardsInGame()) {
+            for (Trigger t : card.getTriggers()) {
+                if (t.getSpawningAbility() == null && !t.zonesCheck(game.getZoneOf(card))) continue;
+                if (mayUntap(t)) return null;
+            }
+            for (ReplacementEffect r : card.getReplacementEffects()) {
+                if (!r.hasParam("ReplaceWith") || !r.zonesCheck(game.getZoneOf(card))) continue;
+                if (mayUntap(r)) return null;
+            }
+        }
+        return reach;
+    }
+
+    /** {@link #untapReach}: does this activated ability untap its own card and nothing else? */
+    private static boolean untapsOnlyItsCard(final SpellAbility sa) {
+        if (sa.getApi() == ApiType.Untap) {
+            return sa.getSubAbility() == null && !sa.usesTargeting() && !sa.hasParam("UntapUpTo")
+                    && !sa.hasParam("UntapExactly") && !sa.hasParam("UntapType") && !sa.hasParam("Radiance")
+                    && "Self".equals(sa.getParamOrDefault("Defined", "Self"));
+        }
+        // {Q}: the cost untaps the card itself; the effect must untap nothing: no untap in its chain, and none in any SVar
+        // it names (a charm's modes, an effect's or a delayed trigger's triggers).
+        if (sa.getPayCosts() == null || sa.getPayCosts().getCostParts().stream().noneMatch(p -> p instanceof CostUntap)) return false;
+        final Set<String> seen = new java.util.HashSet<>();
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (untapApi(s.getApi())) return false;
+            for (var param : s.getMapParams().entrySet()) {
+                if (SVAR_REF_KEYS.contains(param.getKey()) && namesMayUntap(s, param.getValue(), seen)) return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean untapApi(final ApiType api) {
+        return api == ApiType.Untap || api == ApiType.UntapAll || api == ApiType.TapOrUntap || api == ApiType.TapOrUntapAll;
+    }
+
+    /** An untap effect, an untap-symbol cost or a cost that untaps other permanents, in a card script's text. */
+    private static final java.util.regex.Pattern UNTAP_TEXT = java.util.regex.Pattern.compile(
+            "(?:AB|DB|SP)\\$\\s*(?:Untap|UntapAll|TapOrUntap|TapOrUntapAll)\\b|untapYType|Cost\\$[^|]*\\bQ\\b");
+
+    /** The parameters by which an ability or script names further SVars it may run (sub-abilities, charm modes, ...). */
+    private static final Set<String> SVAR_REF_KEYS = Set.of("SubAbility", "Execute", "Triggers", "Choices",
+            "ReplacementEffects", "ReplaceWith", "RepeatSubAbility", "FallbackAbility", "UnlessSwitched");
+    private static final java.util.regex.Pattern SVAR_REFS = java.util.regex.Pattern.compile(
+            "\\b(?:" + String.join("|", SVAR_REF_KEYS) + ")\\$\\s*([^|]+)");
+
+    /**
+     * {@link #untapReach}: may this trigger or replacement untap a permanent? When its ability is built, the chain: an
+     * untap, an untap-symbol cost or a cost that untaps other permanents; otherwise the SVars it names ({@code Execute},
+     * {@code ReplaceWith}), followed through every SVar they name in turn (sub-abilities, charm modes, the triggers of an
+     * effect or a delayed trigger) for such text. Building it is not an option: that would create an ability. A chain too
+     * long to follow counts as an untap; over-reading only keeps the old answer.
+     *
+     * <p>Only what the trait names is read, never every SVar of its card: Forge counts a trigger with no TriggerZones as
+     * active in any zone, so Mana Vault in a hand has a live draw-step trigger (it deals damage), and its card's other
+     * SVar is the untap of an upkeep trigger that works only on the battlefield.</p>
+     */
+    private static boolean mayUntap(final forge.game.TriggerReplacementBase trait) {
+        final Set<String> seen = new java.util.HashSet<>();
+        final SpellAbility built = trait.getOverridingAbility();
+        if (built == null) {
+            return namesMayUntap(trait, trait.getParamOrDefault(trait instanceof ReplacementEffect ? "ReplaceWith" : "Execute", null), seen);
+        }
+        for (SpellAbility s = built; s != null; s = s.getSubAbility()) {
+            if (untapApi(s.getApi())) return true;
+            if (s.getPayCosts() != null && s.getPayCosts().getCostParts().stream()
+                    .anyMatch(p -> p instanceof CostUntap || p instanceof CostUntapType)) return true;
+            for (var param : s.getMapParams().entrySet()) {
+                if (SVAR_REF_KEYS.contains(param.getKey()) && namesMayUntap(s, param.getValue(), seen)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** {@link #mayUntap}: may any SVar in this comma-separated list of names, or any it names in turn, untap? */
+    private static boolean namesMayUntap(final CardTraitBase holder, final String names, final Set<String> seen) {
+        if (names == null) return false;
+        for (String raw : names.split(",")) {
+            final String name = raw.trim();
+            if (name.isEmpty() || !seen.add(name)) continue;
+            if (seen.size() > 64) return true;
+            if (!holder.hasSVar(name)) continue;
+            final String text = holder.getSVar(name);
+            if (text == null) continue;
+            if (UNTAP_TEXT.matcher(text).find()) return true;
+            final java.util.regex.Matcher refs = SVAR_REFS.matcher(text);
+            while (refs.find()) {
+                if (namesMayUntap(holder, refs.group(1), seen)) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * afford-colour-unbounded-1119: the colours an untap can bring back without limit, the colours of every mana ability
+     * of every permanent in {@code reach} ({@link #producibleColours}: every colour when unreadable); with improvise, an
+     * artifact brought back also pays {1}.
+     */
+    static int reachColours(final Player player, final Set<Card> reach, final boolean improvise) {
+        int colours = 0;
+        for (Card card : reach) {
+            for (SpellAbility source : card.getManaAbilities()) colours |= producibleColours(player, source);
+            if (improvise && card.isArtifact()) colours |= ManaAtom.COLORLESS;
+        }
+        return colours;
     }
 
     /**
@@ -683,7 +856,9 @@ public final class HumanManaAffordability {
             // Review S1-1: a production hook set aside for want of an untapped source acts again once the untap brings
             // a tapped one back (Earthcraft + Pulse of Llanowar, Utopia Sprawl on a tapped land): unknown.
             if ((hooks & HOOK_PRODUCTION) != 0) return Assessment.UNKNOWN;
-            return colourImpossible(player, ability, shards, hooks, 0) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
+            // afford-colour-unbounded-1119: this proof decides what is offered at all, so it keeps the old reading (every
+            // permanent may be untapped); the payable flag's proof (assessPayable) uses the untaps' reach.
+            return colourImpossible(player, ability, shards, hooks, 0, null) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
         }
         return Assessment.PROVEN_UNAFFORDABLE;
     }
@@ -1212,12 +1387,29 @@ public final class HumanManaAffordability {
                 }
                 if (!payableWith(shards, wideBase, wideUnits, cap)) return Assessment.PROVEN_UNAFFORDABLE;
             }
-            // Improvise and delve pay with colourless.
+            // afford-colour-unbounded-1119: an unknown AMOUNT must never hide a missing COLOUR. When the untaps' reach is
+            // known (untapReach), every source no untap reaches is counted as before: the pool, each untapped source once
+            // (a tapped one not at all), the costed sources in order. Each reachable permanent may be untapped again and
+            // again, so its colours come without limit: cap tokens of them, as many as any payment can use. A payment
+            // that fails even so is impossible, whatever untaps cost (Zirda, which refuses the bound above, changes no
+            // colour). Not with a mana conversion (any mana may pay any pip), harmonize (a creature brought back lowers
+            // the price), or a mana ability that taps other permanents (it makes its own colours from each one brought
+            // back); the colour screen below still uses the reach.
+            final boolean improvise = spell && host.hasKeyword(Keyword.IMPROVISE);
+            final Set<Card> reach = untapReach(player);
+            if (reach != null && (hooks & HOOK_CONVERT) == 0 && !(spell && ability.isHarmonize()) && !tapsOthersForMana(player)) {
+                final int colours = reachColours(player, reach, improvise);
+                final List<Token> reachBase = new ArrayList<>(base);
+                if (colours != 0) for (int i = 0; i < cap; i++) reachBase.add(new Token(colours, -1, false));
+                if (!payableWith(shards, reachBase, units, cap)) return Assessment.PROVEN_UNAFFORDABLE;
+            }
+            // Improvise and delve pay with colourless. An artifact an untap brings back can improvise too.
             int extra = 0;
             for (Token t : base) {
                 if (t.spellOnly() && t.colors() != LIFE_PAYMENT) extra |= t.colors();
             }
-            return colourImpossible(player, ability, shards, hooks, extra) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
+            if (improvise) extra |= ManaAtom.COLORLESS;
+            return colourImpossible(player, ability, shards, hooks, extra, reach) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
         }
         return Assessment.PROVEN_UNAFFORDABLE;
     }
