@@ -1077,6 +1077,34 @@ public final class ForcedWinModel {
         }
 
         /**
+         * relearn-1119 (solverCfg relearnTurn): a reader with this one's settings (seed, learning flags, loop probe, hidden
+         * sandboxes) and its report counters, but no learned templates or land-entry answers: every card is learned again,
+         * at its next sight, in that moment's context.
+         */
+        Reader renewed() {
+            final Reader r = new Reader();
+            r.seed = seed;
+            r.planScry = planScry;
+            r.probeSettle = probeSettle;
+            r.tutorCast = tutorCast;
+            r.fetchThin = fetchThin;
+            r.protectPass = protectPass;
+            r.drawGrowth = drawGrowth;
+            r.grantSacMana = grantSacMana;
+            r.sourceLeaves = sourceLeaves;
+            r.probeObjects = probeObjects;
+            r.loopProbe = loopProbe;
+            r.hideLibrary = hideLibrary;
+            r.addStats(probeStats);
+            r.landProbes = landProbes;
+            r.landDiffers = landDiffers;
+            r.landContexts = landContexts;
+            r.landContextDiffers = landContextDiffers;
+            r.landPlain = landPlain;
+            return r;
+        }
+
+        /**
          * sdcc-leak-1111: this reader's sandboxes hide what the seat cannot know ({@link ForcedWinProbe#HIDE}); set by
          * a solver with {@code hideOwnLibrary} and without {@code hiddenOrderLegacy}. False: plain copies, as before.
          */
