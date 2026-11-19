@@ -972,7 +972,8 @@ public final class HumanManaAffordability {
      *   <li>2 life per Phyrexian pip when the player can pay it and the ability asks no other life.</li>
      * </ul>
      * The price is the printed mana when no static can raise, reduce or set a price, else Forge's presentation price
-     * ({@link CostAdjustment#presentationManaCost}, null = no proof). No proof with: a cost-changing parameter of its
+     * ({@link CostAdjustment#presentationManaCost(SpellAbility, boolean)} with the ability's own non-mana parts allowed,
+     * null = no proof). No proof with: a cost-changing parameter of its
      * own, a commander, an announced value, a colour-limited X, snow or {2/C} pips, a mana hook or conversion or payment
      * static ({@link #activeHooks}), a CantBeActivated or ManaRestriction static anywhere, or a cost part other than
      * {@link #plainPart}. An ability with no mana to pay is affordable. It speaks to the cost only, never to targets,
@@ -1020,7 +1021,9 @@ public final class HumanManaAffordability {
             }
             priceStatics = raise;
         }
-        final ManaCost cost = priceStatics ? CostAdjustment.presentationManaCost(ability)
+        // loyalty-glow-1119: the ability's own non-mana parts passed plainPart above, as on the no-static path, so they
+        // do not make the price unknown here either; a part a raise adds or changes still does.
+        final ManaCost cost = priceStatics ? CostAdjustment.presentationManaCost(ability, true)
                 : part == null ? ManaCost.ZERO : part.getMana();
         if (cost == null) return false;
         final List<ManaCostShard> shards = new ArrayList<>();

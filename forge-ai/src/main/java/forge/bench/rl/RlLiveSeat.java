@@ -126,7 +126,26 @@ public final class RlLiveSeat {
                 // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
                 "grantSacMana",
                 // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
-                "pileTutorCast"));
+                "pileTutorCast",
+                // sdcc-widen-1117 (absent = 0 = off): narrow first planner pass (ForcedWinSolver.Config.planWiden)
+                "planWiden",
+                // sdcc-escalate-1117 (absent = 0 = off): one planner pass at k x the cap where the passes stopped at it
+                // (ForcedWinSolver.Config.planEscalate)
+                "planEscalate",
+                // sdcc-verify-1117 (absent = 0 = off): verify up to k distinct lines until a proof (ForcedWinSolver.Config.verifyMax)
+                "verifyMax",
+                // sdcc-late-escalate-1117 (absent = 0 = off): after the planner and the engine, one planner pass at k x the
+                // node cap in the decision's time left (ForcedWinSolver.Config.lateEscalate)
+                "lateEscalate",
+                // sdcc-planwall-1117 (absent = 0 = off): the offense planner passes end by this many ms into the decision
+                // (ForcedWinSolver.Config.planWallMs)
+                "planWallMs",
+                // sdcc-late-escalate-1117 (absent = 0 = off): the late pass's own ms past the decision's wall
+                // (ForcedWinSolver.Config.lateEscalateMs)
+                "lateEscalateMs",
+                // line-own-target-1119 (absent = off): the live follower breaks a line before a step whose harmful effect
+                // would land on our own permanent unplanned, or whose destroy cannot destroy (ForcedWinSolver.Config.lineOwnTarget)
+                "lineOwnTarget"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -162,7 +181,10 @@ public final class RlLiveSeat {
                 // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
                 "grantSacMana",
                 // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
-                "pileTutorCast"));
+                "pileTutorCast",
+                // line-own-target-1119 (absent = off): the live follower breaks a line before a step whose harmful effect
+                // would land on our own permanent unplanned, or whose destroy cannot destroy (ForcedWinSolver.Config.lineOwnTarget)
+                "lineOwnTarget"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as
@@ -367,6 +389,7 @@ public final class RlLiveSeat {
                     case "deadAltCost": c.deadAltCost = v; break; // evoke-empty-board-1111 (live default off)
                     case "deadPump": c.deadPump = v; break; // temp-pump-wrong-turn-1117 (live default off)
                     case "deadFaceUp": c.deadFaceUp = v; break; // turn-face-up-timing-1118 (live default off)
+                    case "ownHarm": c.ownHarm = v; break; // line-own-target-1119 (live default off; c.check() takes off|shadow|on)
                     case "lethalBlock": c.lethalBlock = v; break; // block-vs-open-pump-1118 (block search; live default off)
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
@@ -938,6 +961,10 @@ public final class RlLiveSeat {
         if (r.deadFaceUp != null) {
             // turn-face-up-timing-1118 (deadFaceUp on or shadow, a turn-up among the candidates; otherwise the line is unchanged)
             d.add("deadFaceUp", r.deadFaceUp);
+        }
+        if (r.ownHarm != null) {
+            // line-own-target-1119 (ownHarm on, and it changed this decision; otherwise the line is unchanged)
+            d.add("ownHarm", r.ownHarm);
         }
         d.addProperty("searched", st.searched);
         d.addProperty("departedTotal", st.departed);

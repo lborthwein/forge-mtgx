@@ -225,6 +225,52 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode deadFaceUp = AiFixes.Mode.OFF;
         /**
+         * Own-harm guard (lane line-own-target-1119, owner reports 2026-11-19T01-05-37 and 01-14-57; off|shadow|on, OFF by
+         * default: nothing runs, candidates and decisions unchanged). A candidate whose harmful effect (damage, destroy,
+         * -N/-N with no power gain, removal from the battlefield that does not come back) can land only on permanents the
+         * seat controls with no payoff (a trigger of ours, or the ability's own other benefit for us), or that is a destroy
+         * doing nothing at all (only indestructible targets, no other effect), is refused ({@link LineOwnTarget#refuseOpen}:
+         * the rule the live line follower reads under {@link ForcedWinSolver.Config#lineOwnTarget}; every target open, a
+         * modal spell refused only when every mode it could take is; "ours" by controller; player and stack targets never
+         * refused; when unsure, kept; read-only). Review 3: a refusal DEMOTES, it never vetoes. A refused candidate stays
+         * among the candidates and is played out as usual; it is played only if, against the best candidate the rule did
+         * not refuse, it passes the departZ test and its value is higher by {@link #OWN_HARM_FLOOR} ({@link
+         * LookaheadSearch#ownHarmBetter}). The policy seat ({@code forge.bench.rl.RlSearch}) marks its refused given
+         * entries ({@link LookaheadSearch#ownHarmDemote}); its own choice refused, the best entry it did not refuse takes
+         * its place unless the refused one is better so. It still breaks a policy plan before a refused step and drops a
+         * sampled plan that would play one. The K8 seat demotes refused departures the same way, Forge's own answer
+         * staying the baseline (it is counted, never demoted). SHADOW computes the demotion and logs it, the decision
+         * unchanged.
+         */
+        public AiFixes.Mode ownHarm = AiFixes.Mode.OFF;
+        /**
+         * ownHarm's floor (review 3, not a spec key): a refused candidate replaces the best one the rule did not refuse only
+         * if its value is higher by at least this much (absolute, on the win-probability scale of the value leaf), on top
+         * of the departZ test. In a saturated position (value near 1) no real payoff can show a 0.01 gain, and none
+         * matters; in a contested one a real payoff the play-outs see (lifelink at 2 life, a return, a death trigger) shows
+         * a gap far above it. So the demotion only overrides noise. Review 4: it acts only when every value it compares is
+         * on that scale (the policy seat's value leaf, or K8's model leaf, with no fallback); over Forge's static score (a
+         * static leaf, K8 without a model, or any leaf fallback) ownHarm takes no action in the decision
+         * ({@link #OWN_HARM_NO_SCALE}).
+         */
+        public static final double OWN_HARM_FLOOR = 0.01;
+        /**
+         * Review 4: the reason recorded when ownHarm takes no action because the decision's values are not all on the
+         * win-probability scale (a static leaf or a leaf fallback): key-off behavior, no demotion and no veto.
+         */
+        public static final String OWN_HARM_NO_SCALE = "ownHarm-noverdict-scale";
+        /**
+         * The ownHarm key's value: exactly off|shadow|on (the host validator takes no aliases), else an error naming
+         * {@code k}.
+         */
+        public static AiFixes.Mode ownHarmKey(final String k, final String v) {
+            final String t = v == null ? "" : v.trim();
+            if (!"off".equals(t) && !"shadow".equals(t) && !"on".equals(t)) {
+                throw new IllegalArgumentException(k + ": expected off|shadow|on, got '" + v + "'");
+            }
+            return AiFixes.Mode.parse(t);
+        }
+        /**
          * Lethal-block guard (lane block-vs-open-pump-1118, report 2026-11-18T05:34Z; off|shadow|on, OFF by default: values
          * and decisions unchanged). In the block search ({@link #decideBlocks}), a candidate declaration whose worst case of
          * this combat's damage to the searching seat is lethal ({@link #lethalBlocks}: what the attackers' controller can add
@@ -654,6 +700,9 @@ public final class LookaheadSearch {
             if (deadFaceUp != AiFixes.Mode.OFF) {
                 o.addProperty("deadFaceUp", deadFaceUp.key());
             }
+            if (ownHarm != AiFixes.Mode.OFF) {
+                o.addProperty("ownHarm", ownHarm.key()); // line-own-target-1119 (only when not off)
+            }
             if (lethalBlock != AiFixes.Mode.OFF) {
                 o.addProperty("lethalBlock", lethalBlock.key());
             }
@@ -824,6 +873,18 @@ public final class LookaheadSearch {
         public long deadFaceUpCands, deadFaceUpDecisions, deadFaceUpDropped, deadFaceUpShadowBest, deadFaceUpForge,
                 deadFaceUpChecked, deadFaceUpNanos;
         public final Map<String, Long> deadFaceUpWhy = new TreeMap<>();
+        /**
+         * ownHarm guard (null = off; line-own-target-1119): refused candidates seen, decisions with one, decisions the
+         * demotion moved off a refused candidate (dropped; SHADOW: would have), the seat's own choice refused (the policy's
+         * or Forge's), the policy's own choice replaced by an entry it did not refuse / by pass, sampled plans refused and
+         * live policy plans broken before a refused step; review 3: the demotion's tests (a refused pick against the best
+         * candidate not refused) and those the refused pick passed (better by the departZ test and the floor); refusals by
+         * card.
+         */
+        public String ownHarmMode;
+        public long ownHarmCands, ownHarmDecisions, ownHarmDropped, ownHarmForge, ownHarmFallback, ownHarmPass,
+                ownHarmPlanRefused, ownHarmPlanBreaks, ownHarmTests, ownHarmPassed, ownHarmNoScale, ownHarmGuard;
+        public final Map<String, Long> ownHarmCards = new TreeMap<>();
         /**
          * lethalBlock guard (null = off): block decisions checked; stood aside (the bound was not trusted); with a candidate
          * the bound flags; re-scored (ON); with every searched candidate witnessed (unchanged); whose played declaration
@@ -1114,6 +1175,26 @@ public final class LookaheadSearch {
                 d.add("aside", why);
                 d.addProperty("ms", Math.round(deadFaceUpNanos / 1e5) / 10.0);
                 o.add("deadFaceUp", d);
+            }
+            if (ownHarmMode != null) {
+                final JsonObject d = new JsonObject();
+                d.addProperty("mode", ownHarmMode);
+                d.addProperty("cands", ownHarmCands);
+                d.addProperty("decisions", ownHarmDecisions);
+                d.addProperty("dropped", ownHarmDropped);
+                d.addProperty("ownChoice", ownHarmForge);
+                d.addProperty("fallback", ownHarmFallback);
+                d.addProperty("pass", ownHarmPass);
+                d.addProperty("planRefused", ownHarmPlanRefused);
+                d.addProperty("planBreaks", ownHarmPlanBreaks);
+                d.addProperty("tests", ownHarmTests);
+                d.addProperty("passed", ownHarmPassed);
+                d.addProperty("noScale", ownHarmNoScale); // review 4: no action, the values not win probabilities
+                d.addProperty("guard", ownHarmGuard); // review 4: stand-ins the loop guard blocked
+                final JsonObject by = new JsonObject();
+                ownHarmCards.forEach(by::addProperty);
+                d.add("cards", by);
+                o.add("ownHarm", d);
             }
             if (lethalBlockMode != null) {
                 final JsonObject d = new JsonObject();
@@ -1688,6 +1769,8 @@ public final class LookaheadSearch {
     final Set<String> deadPumpKeys = new HashSet<>();
     /** deadFaceUp SHADOW: keys of the last enumeration's dead turn-up candidates (kept); tests read it. */
     final Set<String> deadFaceUpKeys = new HashSet<>();
+    /** line-own-target-1119 (ownHarm on or shadow): this K8 decision's refused departures ({@link #enumerate}), demoted. */
+    final Set<String> ownHarmKeys = new HashSet<>();
     /**
      * deadFaceUp (null = off, or no turn-up candidate at the last guarded enumeration): that enumeration's turn-up
      * candidates, dropped (ON) or flagged (SHADOW), stand-asides by reason and ms ({@link DfuTally#finish}); the given search puts it
@@ -2120,6 +2203,9 @@ public final class LookaheadSearch {
         if (cfg.deadFaceUp != AiFixes.Mode.OFF) {
             stats.deadFaceUpMode = cfg.deadFaceUp.key();
         }
+        if (cfg.ownHarm != AiFixes.Mode.OFF) {
+            stats.ownHarmMode = cfg.ownHarm.key(); // line-own-target-1119
+        }
         if (cfg.lethalBlock != AiFixes.Mode.OFF) {
             stats.lethalBlockMode = cfg.lethalBlock.key();
         }
@@ -2275,6 +2361,293 @@ public final class LookaheadSearch {
 
     public Config getConfig() {
         return cfg;
+    }
+
+    /**
+     * line-own-target-1119 ({@link Config#ownHarm}): why {@code me} must not play the candidate {@code sa} now ({@link
+     * LineOwnTarget#refuseOpen}: its harm can land only on permanents {@code me} controls, or its destroy only on
+     * indestructible ones); null = it may, and for pass. Never throws.
+     */
+    public static String ownHarmWhy(final Player me, final SpellAbility sa) {
+        if (me == null || sa == null) {
+            return null;
+        }
+        if (sa.getActivatingPlayer() != null) {
+            return LineOwnTarget.refuseOpen(me, sa);
+        }
+        // no activator yet: set it for the check, then put every part's own back (the check changes nothing; review 1, S1 7)
+        final List<SpellAbility> parts;
+        final List<Player> was = new ArrayList<>();
+        try {
+            parts = LineOwnTarget.tree(sa);
+            for (SpellAbility p : parts) {
+                was.add(p.getActivatingPlayer());
+            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        try {
+            sa.setActivatingPlayer(me);
+            return LineOwnTarget.refuseOpen(me, sa);
+        } catch (RuntimeException e) {
+            return null;
+        } finally {
+            try {
+                // pre-order: each part's own value overrides what its parent trickled down
+                for (int i = 0; i < parts.size(); i++) {
+                    parts.get(i).setActivatingPlayer(was.get(i));
+                }
+            } catch (RuntimeException e) {
+                // a restore that fails leaves the activator set, as the check before review 1 did
+            }
+        }
+    }
+
+    /** ownHarm: one refusal of {@code sa} counted in this search's stats, by its card's name. */
+    public void ownHarmCounted(final SpellAbility sa) {
+        final String n = sa == null || sa.getHostCard() == null ? "?" : sa.getHostCard().getName();
+        synchronized (stats) {
+            stats.ownHarmCards.merge(n, 1L, Long::sum);
+        }
+    }
+
+    /** ownHarm (K8): a candidate's spell or ability, whatever its target ({@link #targetVariants} keeps host and text). */
+    private static String ownHarmHost(final Cand c) {
+        return c.hostId + "|" + c.land + "|" + c.desc;
+    }
+
+    /** ownHarm (review 3; null = none): the next given decision's refused entries, and whether ON applies the demotion. */
+    private Set<Integer> demoteNext;
+    private boolean demoteApply;
+    /** The decision in progress's (taken from {@link #demoteNext} at its start). */
+    private Set<Integer> decisionDemote;
+    private boolean decisionDemoteApply;
+
+    /**
+     * ownHarm (review 3): the entries of the next {@link #decideGiven} call's given list (indices into it) the rule
+     * refused. That decision demotes them ({@link Config#ownHarm}): a refused pick is played only if it is better than
+     * the best candidate not refused by the departZ test and {@link Config#OWN_HARM_FLOOR}; {@code apply} false
+     * (SHADOW) computes and records it, the decision unchanged. Taken by that decision (a skipped one too).
+     */
+    public void ownHarmDemote(final Set<Integer> givenIdx, final boolean apply) {
+        demoteNext = givenIdx == null || givenIdx.isEmpty() ? null : new HashSet<>(givenIdx);
+        demoteApply = apply;
+    }
+
+    /**
+     * ownHarm (review 4): the stand-in the policy seat plays for its refused own choice when the search gave no verdict
+     * (RlSearch) is a departure for the loop guard, with the same per-turn and identical-departure limits as any
+     * departure ({@link Config#maxDeparturesPerTurn}, {@link Config#maxSameDepartures}). True = admitted and counted;
+     * false = the guard blocks it (counted as a loop-guard hit).
+     */
+    public boolean ownHarmStandInAdmit(final Game live, final String label) {
+        final PhaseHandler ph = live.getPhaseHandler();
+        if (ph.getTurn() != departuresTurn) {
+            departuresTurn = ph.getTurn();
+            departuresThisTurn = 0;
+            departureCounts.clear();
+        }
+        final String key = "standIn|" + label + "@" + ph.getPhase() + "#" + live.getStack().size();
+        final int seen = departureCounts.getOrDefault(key, 0);
+        if (departuresThisTurn >= cfg.maxDeparturesPerTurn || seen >= cfg.maxSameDepartures) {
+            stats.loopGuard++;
+            stats.ownHarmGuard++;
+            return false;
+        }
+        departuresThisTurn++;
+        departureCounts.put(key, seen + 1);
+        return true;
+    }
+
+    /**
+     * Tests only (null = none; never set outside tests): overrides whether this decision's values count as being on the
+     * win-probability scale for ownHarm (review 4), so a test with stubbed values ({@link #testValues}) can drive the
+     * demotion in a seat whose leaf is static.
+     */
+    public static volatile Boolean testScale = null;
+
+    /**
+     * ownHarm's test (review 3): is candidate {@code a} (refused) better than candidate {@code b} (not refused)? Over the
+     * worlds both finished ({@code f} null = every world; a non-finite value never counts), the mean paired difference
+     * a - b must pass the departZ test (above zero and above z standard errors; with z off, above zero; with one world
+     * in a one-world decision, above zero; with one paired world in a larger decision, never) and be at least {@link
+     * Config#OWN_HARM_FLOOR}, as must the difference of their means {@code ev}. Returns {mean, se, worlds, confident,
+     * floor} (1 = true).
+     */
+    public static double[] ownHarmBetter(final double[][] v, final boolean[][] f, final double[] ev, final int a, final int b,
+            final int k, final double z) {
+        double sum = 0;
+        int n = 0;
+        for (int w = 0; w < k; w++) {
+            if ((f == null || f[a][w] && f[b][w]) && Double.isFinite(v[a][w]) && Double.isFinite(v[b][w])) {
+                sum += v[a][w] - v[b][w];
+                n++;
+            }
+        }
+        final double mean = n > 0 ? sum / n : Double.NaN;
+        double se = Double.NaN;
+        if (n > 1) {
+            double ss = 0;
+            for (int w = 0; w < k; w++) {
+                if ((f == null || f[a][w] && f[b][w]) && Double.isFinite(v[a][w]) && Double.isFinite(v[b][w])) {
+                    final double d = v[a][w] - v[b][w] - mean;
+                    ss += d * d;
+                }
+            }
+            se = Math.sqrt(ss / (n - 1)) / Math.sqrt(n);
+        }
+        final boolean confident = n > 0 && mean > 0
+                && (!(z > 0) || (n > 1 ? mean > z * se : k < 2));
+        final double evGap = ev == null ? mean : ev[a] - ev[b];
+        final boolean floor = n > 0 && mean >= Config.OWN_HARM_FLOOR && evGap >= Config.OWN_HARM_FLOOR;
+        return new double[] {mean, se, n, confident ? 1 : 0, floor ? 1 : 0};
+    }
+
+    /** ownHarm: one demotion test's note (the refused pick, the candidate it was tested against, the result). */
+    private static JsonObject ownHarmTestNote(final String refused, final double refusedEv, final String against,
+            final double againstEv, final double[] t, final double z) {
+        final JsonObject o = new JsonObject();
+        o.addProperty("refused", refused);
+        o.addProperty("refusedEv", refusedEv);
+        o.addProperty("against", against);
+        o.addProperty("againstEv", againstEv);
+        if (Double.isFinite(t[0])) {
+            o.addProperty("gain", t[0]);
+        }
+        if (Double.isFinite(t[1])) {
+            o.addProperty("se", t[1]);
+        }
+        o.addProperty("worlds", (int) t[2]);
+        o.addProperty("z", z);
+        o.addProperty("floor", Config.OWN_HARM_FLOOR);
+        o.addProperty("confident", t[3] > 0);
+        o.addProperty("aboveFloor", t[4] > 0);
+        o.addProperty("better", t[3] > 0 && t[4] > 0);
+        return o;
+    }
+
+    /**
+     * ownHarm's demotion in a given decision (review 3): the decision, given the refused candidates {@code dem} (indices
+     * among the searched ones) and the search's own pick {@code best}. Nothing changes unless the pick or the default is
+     * refused. The best candidate not refused: with the default not refused, the normal rule over the candidates not
+     * refused (a proven win among them, else the same chooser and gates, the default the baseline); with the default
+     * refused, the candidate not refused with the largest mean (a proven win first; ties to the earlier). A refused pick
+     * stays only if it is {@link #ownHarmBetter} than that one, which otherwise is the decision; with none (every other
+     * candidate refused or failed) it stays and the caller decides. The default refused and the pick not, the best
+     * candidate not refused is the decision (the search measured its departure against the refused default). Counts the
+     * tests and records {@link GivenResult#ownHarmDemotion}; reads the play-outs only.
+     */
+    private int ownHarmDemotion(final GivenResult res, final List<Cand> cands, final List<Integer> at, final double[][] values,
+            final boolean[][] finished, final double[] ev, final boolean[] okArg, final boolean[] dem, final int n, final int k,
+            final int best, final int provenPick, final boolean[] provenWin, final double[][] rpArg, final double rootP) {
+        if (!dem[best] && !dem[0]) {
+            return best;
+        }
+        // review 4: the floor and the test read win probabilities: with a static leaf or any leaf fallback in this
+        // decision, ownHarm takes no action (key-off behavior: no demotion, and RlSearch vetoes nothing either)
+        final boolean scale = testScale != null ? testScale : hookLeaf && !res.leafFallback;
+        if (!scale) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("natural", at.get(best));
+            o.addProperty("reason", Config.OWN_HARM_NO_SCALE);
+            o.addProperty("leafFallback", res.leafFallback);
+            o.addProperty("decision", at.get(best));
+            o.addProperty("decisionLabel", cands.get(best).label);
+            o.addProperty("changed", false);
+            o.addProperty("applied", decisionDemoteApply);
+            stats.ownHarmNoScale++;
+            res.ownHarmDemotion = o;
+            return best;
+        }
+        final boolean[] okNr = okArg.clone();
+        for (int c = 0; c < n; c++) {
+            if (dem[c]) {
+                okNr[c] = false;
+            }
+        }
+        int alt = -1;
+        if (!dem[0]) {
+            for (int c = 0; provenPick >= 0 && c < n && alt < 0; c++) {
+                if (provenWin[c] && okNr[c]) {
+                    alt = c; // a proven win not refused (the default first), as the search's own proven pick
+                }
+            }
+            if (alt < 0) {
+                final long gated = stats.departGated, medGated = stats.departMedianGated; // the rerun counts nothing
+                alt = finished != null ? chooseAnytime(values, finished, okNr, n, k, cfg.departZ, cfg.margin, rootP, rpArg,
+                        hooks.reachDepart(), null) : argmax(values, okNr, n, k);
+                if (cfg.departMedian == AiFixes.Mode.ON && finished == null) {
+                    alt = argmaxMedian(values, okNr, n, k);
+                }
+                stats.departGated = gated;
+                stats.departMedianGated = medGated;
+            }
+        } else {
+            for (int c = 1; c < n; c++) {
+                if (!okNr[c] || Double.isNaN(ev[c])) {
+                    continue;
+                }
+                if (alt < 0 || provenWin[c] && !provenWin[alt] || provenWin[c] == provenWin[alt] && ev[c] > ev[alt]) {
+                    alt = c;
+                }
+            }
+        }
+        final JsonObject o = new JsonObject();
+        o.addProperty("natural", at.get(best));
+        int dec = best;
+        if (dem[best]) {
+            if (alt < 0) {
+                o.addProperty("noAlternative", true);
+            } else {
+                final double[] t = ownHarmBetter(values, finished, ev, best, alt, k, cfg.departZ);
+                final boolean better = t[3] > 0 && t[4] > 0;
+                stats.ownHarmTests++;
+                if (better) {
+                    stats.ownHarmPassed++;
+                }
+                o.add("test", ownHarmTestNote(cands.get(best).label, ev[best], cands.get(alt).label, ev[alt], t, cfg.departZ));
+                dec = better ? best : alt;
+            }
+        } else {
+            o.addProperty("defaultRefused", true);
+            if (alt >= 0) {
+                dec = alt;
+            }
+        }
+        o.addProperty("decision", at.get(dec));
+        o.addProperty("decisionLabel", cands.get(dec).label);
+        if (Double.isFinite(ev[dec])) {
+            o.addProperty("decisionEv", ev[dec]);
+        }
+        o.addProperty("changed", dec != best);
+        o.addProperty("applied", decisionDemoteApply);
+        if (dec != best) {
+            stats.ownHarmDropped++;
+        }
+        res.ownHarmDemotion = o;
+        return dec;
+    }
+
+    /**
+     * Tests only (null = none; never set outside tests): after a decision's play-outs (and leaf values), each searched
+     * candidate's value in each world is this function of its label and the world, NaN keeping the value played out (a
+     * failed play-out stays failed).
+     */
+    public static volatile java.util.function.ToDoubleBiFunction<String, Integer> testValues = null;
+
+    private static void stubValues(final List<Cand> cands, final double[][] values, final boolean[] ok, final int n, final int k) {
+        final java.util.function.ToDoubleBiFunction<String, Integer> tv = testValues;
+        if (tv == null) {
+            return;
+        }
+        for (int c = 0; c < n; c++) {
+            for (int w = 0; ok[c] && w < k; w++) {
+                final double x = tv.applyAsDouble(cands.get(c).label, w);
+                if (!Double.isNaN(x)) {
+                    values[c][w] = x;
+                }
+            }
+        }
     }
 
     public Stats getStats() {
@@ -2505,6 +2878,7 @@ public final class LookaheadSearch {
             leafFallback = stats.modelFallbacks != fb;
         }
 
+        stubValues(cands, values, ok, n, k); // tests only (null: nothing)
         // Over budget: a play-out was stopped (or never started) by the wall budget, so the search did not finish
         // in time; play Forge AI's own answer.
         final boolean overBudget = abortedHere > 0;
@@ -2529,6 +2903,64 @@ public final class LookaheadSearch {
                 if (cfg.departMedian == AiFixes.Mode.ON) {
                     best = medBest;
                 }
+            }
+        }
+        // line-own-target-1119 (ownHarm's demotion, review 3; off: nothing runs): a refused departure stays only if it is
+        // better than the normal rule's choice among the candidates not refused (Forge's own answer, never demoted, the baseline)
+        JsonObject ownHarmNote = null;
+        // review 4: K8's values are win probabilities only with its model leaf and no fallback; over Forge's static score
+        // (the live K8) ownHarm takes no action here
+        final boolean ownHarmScale = testScale != null ? testScale : model != null && !leafFallback;
+        if (cfg.ownHarm != AiFixes.Mode.OFF && !overBudget && best != 0 && ownHarmKeys.contains(cands.get(best).key())
+                && !ownHarmScale) {
+            stats.ownHarmNoScale++;
+            final JsonObject o = new JsonObject();
+            o.addProperty("mode", cfg.ownHarm.key());
+            o.addProperty("seat", "k8");
+            o.addProperty("turn", turn);
+            o.addProperty("phase", String.valueOf(ph.getPhase()));
+            o.addProperty("natural", cands.get(best).label);
+            o.addProperty("reason", Config.OWN_HARM_NO_SCALE);
+            o.addProperty("leafFallback", leafFallback);
+            o.addProperty("changed", false);
+            System.err.println("[own-harm] " + o);
+        } else if (cfg.ownHarm != AiFixes.Mode.OFF && !overBudget && best != 0 && ownHarmKeys.contains(cands.get(best).key())) {
+            final boolean[] okNr = ok.clone();
+            for (int c = 1; c < n; c++) {
+                if (ownHarmKeys.contains(cands.get(c).key())) {
+                    okNr[c] = false;
+                }
+            }
+            final long gated = stats.departGated, medGated = stats.departMedianGated;
+            int alt = argmax(values, okNr, n, k);
+            if (cfg.departMedian == AiFixes.Mode.ON) {
+                alt = argmaxMedian(values, okNr, n, k);
+            }
+            stats.departGated = gated;
+            stats.departMedianGated = medGated;
+            final double[] t = ownHarmBetter(values, null, ev, best, alt, k, cfg.departZ);
+            final boolean better = t[3] > 0 && t[4] > 0;
+            stats.ownHarmTests++;
+            if (better) {
+                stats.ownHarmPassed++;
+            } else {
+                stats.ownHarmDropped++;
+            }
+            ownHarmNote = new JsonObject();
+            ownHarmNote.addProperty("mode", cfg.ownHarm.key());
+            ownHarmNote.addProperty("seat", "k8");
+            ownHarmNote.addProperty("turn", turn);
+            ownHarmNote.addProperty("phase", String.valueOf(ph.getPhase()));
+            ownHarmNote.add("test", ownHarmTestNote(cands.get(best).label, ev[best], cands.get(alt).label, ev[alt], t,
+                    cfg.departZ));
+            ownHarmNote.addProperty("decision", cands.get(better ? best : alt).label);
+            ownHarmNote.addProperty("changed", !better);
+            ownHarmNote.addProperty("applied", cfg.ownHarm == AiFixes.Mode.ON);
+            System.err.println("[own-harm] " + ownHarmNote);
+            if (!better && cfg.ownHarm == AiFixes.Mode.ON) {
+                best = alt;
+            } else {
+                ownHarmNote = null; // the decision line's field: only when the demotion changed the decision
             }
         }
         if (cfg.deadEtb == AiFixes.Mode.SHADOW && best != 0 && deadEtbKeys.contains(cands.get(best).key())) {
@@ -2747,6 +3179,9 @@ public final class LookaheadSearch {
             }
             d.addProperty("outcome", outcome);
             d.addProperty("departed", "departed".equals(outcome));
+            if (ownHarmNote != null) {
+                d.add("ownHarm", ownHarmNote); // line-own-target-1119: only when the demotion changed the decision (ON)
+            }
             if (forcing) {
                 d.addProperty("forced", true); // J1: only when replaying (aiReplay), so a live line is unchanged
             }
@@ -2861,6 +3296,18 @@ public final class LookaheadSearch {
          * checked, dropped (ON) or flagged (SHADOW), the default's own dead turn-up, stand-asides by reason, and ms.
          */
         public JsonObject deadFaceUp;
+        /**
+         * line-own-target-1119 (null = ownHarm is off, or it did not change this decision): the policy seat's refused
+         * entries and the demotion that moved the decision off one ({@link #ownHarmDemotion}, or the entry that stood in
+         * for a refused own choice the search gave no verdict on), set by {@code RlSearch}.
+         */
+        public JsonObject ownHarm;
+        /**
+         * ownHarm's demotion (review 3; null = no refused candidate was the pick, nor the default): the natural pick and
+         * the decision (indices into the given list), the test of the refused one against the best candidate not refused
+         * ({@link LookaheadSearch#ownHarmBetter}), whether it changed the decision and whether it was applied (ON).
+         */
+        public JsonObject ownHarmDemotion;
         /** lethalBlock ON: the witnessed candidates were re-scored as lost play-outs. */
         public boolean lethalRescored;
         /**
@@ -3336,6 +3783,9 @@ public final class LookaheadSearch {
         final GivenResult res = new GivenResult();
         decisionForce = forcePlayed;
         forcePlayed = null;
+        decisionDemote = demoteNext; // line-own-target-1119 (null = none): this decision's, a skipped one's too
+        decisionDemoteApply = demoteApply;
+        demoteNext = null;
         final java.util.function.IntPredicate bump = testBump;
         if (bump != null && explainLine != null && bump.test(explainLine.getAsInt())) {
             decisionIndex++; // tests only (J1)
@@ -3647,6 +4097,7 @@ public final class LookaheadSearch {
             }
             res.leafFallback = stats.leafFallbacks != fb;
         }
+        stubValues(cands, values, ok, n, k); // tests only (null: nothing)
         final boolean overBudget = aborted > 0;
         final double[] ev = new double[n];
         for (int c = 0; c < n; c++) {
@@ -3736,10 +4187,12 @@ public final class LookaheadSearch {
             res.provenLoss = provenLoss;
             res.planBroken = planBroken;
         }
+        // read only for the anytime chooser, as before review 3 (hooks may be null outside it)
+        final double[][] rpArg = finished != null && hooks.reachDepart() > 0 && reachPart != null && reachPart.length == n
+                ? reachPart : null;
         final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick
                 : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP,
-                        hooks.reachDepart() > 0 && reachPart != null && reachPart.length == n ? reachPart : null,
-                        hooks.reachDepart(), stats)
+                        rpArg, hooks.reachDepart(), stats)
                 : argmax(values, okArg, n, k);
         reachPart = null; // this decision's only
         int best = plainBest;
@@ -3763,6 +4216,24 @@ public final class LookaheadSearch {
         // apply. With no line in the tie set, or a tie with the default, nothing changes.
         if (!overBudget && provenPick < 0 && prioGfGates(live, me, onStack, ph)) {
             best = prioGfRule(live, me, cands, ev, okArg, macroOf, best, decisionSeed, res);
+        }
+        // line-own-target-1119 (ownHarm's demotion, review 3; null = off or nothing refused: unchanged). After C1's
+        // goldfish tie-break, so a refused candidate it picks is demoted as well
+        final Set<Integer> demote = decisionDemote;
+        decisionDemote = null;
+        boolean standIn = false;
+        if (demote != null && !overBudget) {
+            final boolean[] dem = new boolean[n];
+            for (int c = 0; c < n; c++) {
+                dem[c] = demote.contains(at.get(c)); // a macro is its base's entry; a plan is never refused here
+            }
+            final int dec = ownHarmDemotion(res, cands, at, values, finished, ev, okArg, dem, n, k, best, provenPick,
+                    provenWin, rpArg, rootP);
+            if (decisionDemoteApply && dec != best) {
+                // the policy's own entry was refused: its stand-in is a departure for the loop guard like any (review 4)
+                standIn = dem[0] && dec != 0;
+                best = dec;
+            }
         }
         if (cfg.deadEtb == AiFixes.Mode.SHADOW && best != 0 && deadEtbKeys.contains(cands.get(best).key())) {
             stats.deadEtbShadowBest++;
@@ -3818,6 +4289,12 @@ public final class LookaheadSearch {
             if (provenPick < 0 && (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= cfg.maxSameDepartures)) {
                 stats.loopGuard++;
                 outcome = "loop-guard";
+                if (standIn) {
+                    // line-own-target-1119 (review 4): the guard blocked ownHarm's stand-in. Never the stand-in again
+                    // here: RlSearch plays pass in a priority decision with pass legal, else the policy's own choice
+                    stats.ownHarmGuard++;
+                    res.ownHarmDemotion.addProperty("guardBlocked", chosen.label);
+                }
             } else {
                 res.chosen = at.get(best);
                 res.proven = provenPick >= 0 && best == provenPick;
@@ -5913,8 +6390,20 @@ public final class LookaheadSearch {
             final boolean aguard = cfg.deadAltCost != AiFixes.Mode.OFF;
             final boolean pguard = cfg.deadPump != AiFixes.Mode.OFF;
             final boolean dguard = cfg.deadFaceUp != AiFixes.Mode.OFF;
-            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0, faceHere = 0;
+            final boolean oguard = cfg.ownHarm != AiFixes.Mode.OFF; // line-own-target-1119 (off: nothing runs)
+            int deadHere = 0, zeroHere = 0, crewHere = 0, altHere = 0, pumpHere = 0, faceHere = 0, ownHere = 0;
             final Set<Integer> pumpKnown = pguard ? pumpKnownIds(live, liveMe) : null; // the seat's knowledge, from the live game
+            ownHarmKeys.clear();
+            final Set<String> ownHarmHosts = new HashSet<>(); // review 3: a refused spell's target variants are refused too
+            if (oguard && defSa != null) {
+                final SpellAbility d = locate(g, me, out.get(0));
+                if (d != null && ownHarmWhy(me, d) != null) {
+                    stats.ownHarmForge++; // Forge's own answer (its targets Forge AI's): counted, never demoted
+                    ownHarmCounted(d);
+                    ownHere++;
+                    ownHarmHosts.add(ownHarmHost(out.get(0)));
+                }
+            }
             final DfuTally dfu = dguard ? new DfuTally(() -> pumpKnownIds(live, liveMe), () -> dfuLivePending(live)) : null;
             if (dguard) {
                 deadFaceUpKeys.clear();
@@ -6041,6 +6530,16 @@ public final class LookaheadSearch {
                     }
                     deadFaceUpKeys.add(c.key());
                 }
+                if (oguard && !seen.contains(c.key())) {
+                    final String why = ownHarmWhy(me, sa);
+                    if (why != null) {
+                        ownHere++;
+                        stats.ownHarmCands++;
+                        ownHarmCounted(sa);
+                        ownHarmKeys.add(c.key()); // review 3: kept and played out; the choice demotes it (decideSearched)
+                        ownHarmHosts.add(ownHarmHost(c));
+                    }
+                }
                 if (seen.add(c.key())) {
                     out.add(c);
                 }
@@ -6062,6 +6561,9 @@ public final class LookaheadSearch {
             }
             if (faceHere > 0) {
                 stats.deadFaceUpDecisions++;
+            }
+            if (ownHere > 0) {
+                stats.ownHarmDecisions++;
             }
             if (dfu != null) {
                 deadFaceUpLast = dfu.finish(stats, cfg.deadFaceUp);
@@ -6105,6 +6607,12 @@ public final class LookaheadSearch {
                 final int before = out.size();
                 targetVariants(g, me, out, defSa, seen, cfg.targetVariants);
                 stats.targetVariantCands += out.size() - before;
+                for (int i = before; oguard && i < out.size(); i++) {
+                    if (ownHarmHosts.contains(ownHarmHost(out.get(i)))) {
+                        ownHarmKeys.add(out.get(i).key()); // line-own-target-1119: every target of a refused spell is ours
+                        stats.ownHarmCands++;
+                    }
+                }
             }
         } catch (RuntimeException e) {
             // Enumeration failure: search nothing, play Forge's answer.

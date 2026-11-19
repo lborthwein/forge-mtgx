@@ -15,7 +15,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.zip.GZIPOutputStream;
 
 import com.google.gson.JsonArray;
@@ -133,6 +135,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String deadPump = "off";
         /** turn-face-up-timing-1118: the look-ahead's deadFaceUp guard (off|shadow|on; written to JSON only when not off). */
         public String deadFaceUp = "off";
+        /**
+         * line-own-target-1119: the ownHarm guard ({@link LookaheadSearch.Config#ownHarm}; off|shadow|on exactly, written to
+         * JSON only when not off). ON: a given candidate whose harm can land only on our own permanents (or whose destroy
+         * can only hit indestructible ones) is demoted (review 3): played out with the rest, played only if better than
+         * the best entry not refused by the departZ test and {@link LookaheadSearch.Config#OWN_HARM_FLOOR}, the policy's
+         * own choice too; a policy plan breaks before such a step and a sampled plan that would play one is not proposed.
+         * SHADOW computes and logs the demotion; off, nothing runs.
+         */
+        public String ownHarm = "off";
         /** block-vs-open-pump-1118: the block search's lethalBlock guard (off|shadow|on; written to JSON only when not off). */
         public String lethalBlock = "off";
         public boolean stack = false;
@@ -488,7 +499,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
-                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "deadFaceUp", "lethalBlock", "departMedian", "stack", "server", "readTimeoutMs",
+                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "deadFaceUp", "ownHarm", "lethalBlock", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
@@ -561,6 +572,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("deadAltCost")) c.deadAltCost = o.get("deadAltCost").getAsString();
             if (o.has("deadPump")) c.deadPump = o.get("deadPump").getAsString();
             if (o.has("deadFaceUp")) c.deadFaceUp = o.get("deadFaceUp").getAsString();
+            if (o.has("ownHarm")) c.ownHarm = o.get("ownHarm").getAsString();
             if (o.has("lethalBlock")) c.lethalBlock = o.get("lethalBlock").getAsString();
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
@@ -829,6 +841,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             AiFixes.Mode.parse(deadAltCost);
             AiFixes.Mode.parse(deadPump);
             AiFixes.Mode.parse(deadFaceUp);
+            LookaheadSearch.Config.ownHarmKey("ownHarm", ownHarm); // line-own-target-1119: exactly off|shadow|on
             if (!"off".equals(lethalBlock) && !"shadow".equals(lethalBlock) && !"on".equals(lethalBlock)) {
                 // block-vs-open-pump-1118: exactly off|shadow|on, as the host validator takes it (no aliases)
                 throw new IllegalArgumentException("lethalBlock: expected off|shadow|on, got '" + lethalBlock + "'");
@@ -860,6 +873,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (!"off".equals(deadFaceUp)) {
                 o.addProperty("deadFaceUp", deadFaceUp);
+            }
+            if (!"off".equals(ownHarm)) {
+                o.addProperty("ownHarm", ownHarm); // line-own-target-1119
             }
             if (!"off".equals(lethalBlock)) {
                 o.addProperty("lethalBlock", lethalBlock);
@@ -1371,6 +1387,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.deadAltCost = AiFixes.Mode.parse(cfg.deadAltCost);
         lc.deadPump = AiFixes.Mode.parse(cfg.deadPump);
         lc.deadFaceUp = AiFixes.Mode.parse(cfg.deadFaceUp);
+        lc.ownHarm = AiFixes.Mode.parse(cfg.ownHarm); // line-own-target-1119 (applied here, over the given candidates)
         lc.lethalBlock = AiFixes.Mode.parse(cfg.lethalBlock);
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
@@ -1869,9 +1886,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         armRedraw(g, me); // sdcc-scorerleak-1115 (off: nothing)
         final forge.game.WorkClock.Span ws = workBegin();
         lastReason = RlSeat.IMIT_SEARCH;
+        ownHarmLast = null;
+        ownHarmSeen = false;
+        ownHarmDropped = false;
+        ownHarmIdx = null;
+        ownHarmOk = Integer.MIN_VALUE;
+        ownHarmReason = null;
         try {
-            return decide0(g, me, m, frame, greedy, menuObjs);
+            // line-own-target-1119 (ownHarm off: the answer as decided)
+            final int a = ownHarmNet(g, me, m, menuObjs, greedy, decide0(g, me, m, frame, greedy, menuObjs));
+            if (ownHarmLast != null) {
+                System.err.println("[own-harm] " + ownHarmLast);
+            }
+            return a;
         } finally {
+            if (ownHarmMode() != AiFixes.Mode.OFF) {
+                ls.ownHarmDemote(null, false); // never left for a later search
+            }
             workEnd(ws);
         }
     }
@@ -2026,6 +2057,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             order.add(0);
         }
         order.addAll(rest);
+        // line-own-target-1119 (ownHarm; off: nothing runs): refused entries are counted and stay; the search demotes them
+        final int ohFallback = ownHarmRefuse(g, me, m, order, by, menuObjs);
         final List<SpellAbility> given = new ArrayList<>(order.size());
         for (int ch : order) {
             given.add(ch == 0 ? null : menuObjs.get(ch - 1));
@@ -2084,6 +2117,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 System.err.println("[plan-look-floor] turn=" + g.getPhaseHandler().getTurn() + " phase="
                         + g.getPhaseHandler().getPhase() + " addedMs=" + (lt0 - bt0) / 1_000_000L);
             }
+            ownHarmArm();
             r = stage != null ? ls.decideGivenPlans(g, me, given, stage.duel ? 1 : sb.breadthAt(stage, cfg.breadth), stage.plans, stage.labels, kt, lt0, sb.threat, ex)
                     : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
@@ -2096,11 +2130,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             for (int i = 0; i < order.size(); i++) {
                 givenPrior[i] = by.get(order.get(i))[0];
             }
+            ownHarmArm();
             r = ls.decideGiven(g, me, given, cfg.breadth, this);
         } else {
+            ownHarmArm();
             r = ls.decideGiven(g, me, given, cfg.breadth);
         }
         ck.ended(DecisionClock.Phase.GIVEN);
+        // line-own-target-1119: the demotion's record joins the refusal note; the decision line's field only when it
+        // changed the decision
+        r.ownHarm = ownHarmDemoted(r) ? ownHarmLast : null;
         tookForce(r);
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
@@ -2123,6 +2162,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             answer = (int) by.get(order.get(r.chosen))[1];
             departures++;
         }
+        answer = ownHarmAfter(g, m, menuObjs, r, order, by, greedy, answer, ohFallback); // line-own-target-1119 (off: unchanged)
         if (r.chosenMacro >= 0) {
             // S-t: a macro departure: its base action (the default's when r.chosen == 0), then its schedule
             final MacroSpec ms = macroList.get(r.chosenMacro);
@@ -2156,7 +2196,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final Searched hook = onSearched;
         lastProposeMs = stage != null ? stage.ms : -1; // sb-live-1018: S-b only (stage is null without plans)
-        if (hook != null && r.givenIndex.length > 0) {
+        // line-own-target-1119: a decision ownHarm left with fewer than two candidates still gets its decision line, so the
+        // line numbering (replay marks and rebuilds key on it) is the one the key-off seat writes
+        if (hook != null && (r.givenIndex.length > 0 || ownHarmDropped && "uncontested".equals(r.outcome))) {
             try {
                 hook.searched(g, r, by.size(), (System.nanoTime() - t0) / 1e6 - r.ms);
             } catch (RuntimeException e) {
@@ -2359,6 +2401,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.addProperty("fw_ms", Math.round(sd.lastMs * 10) / 10.0);
             }
             row.addProperty("outcome", r.outcome);
+            if (r.ownHarm != null) {
+                row.add("own_harm", r.ownHarm); // line-own-target-1119 (only when ownHarm changed the decision)
+            }
+            if (ownHarmReason != null) {
+                row.addProperty("reason", ownHarmReason); // review 4: ownHarm took no action (ownHarm-noverdict-scale)
+            }
             if (r.prioGf != null) {
                 row.addProperty("prioGf", r.prioGf); // sdcc-c1-priogf-1117: only when the rule ran
             }
@@ -2390,6 +2438,321 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         tap(r.givenIndex.length > 0 ? "searched" : String.valueOf(r.outcome), stage, r, order.size(), answer);
         return answer;
+    }
+
+    // ------------------------------------------------------------------ line-own-target-1119 (ownHarm)
+
+    /**
+     * This decision's ownHarm note (null = the rule refused nothing here), logged once the decision is made; the decision
+     * line's and row's field only when ownHarm changed the decision ({@link LookaheadSearch.GivenResult#ownHarm}).
+     */
+    private JsonObject ownHarmLast;
+    /** This decision's given entries went through {@link #ownHarmRefuse} (the net does not count them again). */
+    private boolean ownHarmSeen;
+    /** ON dropped a sampled plan in this decision (without it the decision had two candidates or more). */
+    private boolean ownHarmDropped;
+    /** This decision's refused given entries (positions in the given list; null = none), for the search's demotion. */
+    private Set<Integer> ownHarmIdx;
+    /** The candidate the demotion let through although refused (the net passes it); MIN_VALUE = none. */
+    private int ownHarmOk = Integer.MIN_VALUE;
+    /** Review 4: why ownHarm took no action in this decision (null = it did not decline), for the decision row. */
+    private String ownHarmReason;
+
+    /** The ownHarm guard's mode (the look-ahead config's, from {@link Config#ownHarm}). */
+    AiFixes.Mode ownHarmMode() {
+        return ls.getConfig().ownHarm;
+    }
+
+    private JsonObject ownHarmNote(final Game g, final AiFixes.Mode mode) {
+        final JsonObject note = new JsonObject();
+        note.addProperty("mode", mode.key());
+        note.addProperty("turn", g.getPhaseHandler().getTurn());
+        note.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        return note;
+    }
+
+    private static JsonObject ownHarmEntry(final int ch, final SpellAbility sa, final boolean isDefault, final String why) {
+        final JsonObject x = new JsonObject();
+        x.addProperty("entry", ch);
+        x.addProperty("card", sa.getHostCard() == null ? "?" : sa.getHostCard().getName());
+        if (isDefault) {
+            x.addProperty("default", true);
+        }
+        x.addProperty("why", why);
+        return x;
+    }
+
+    /** The menu's pass candidate, or -1. */
+    private static int passCand(final RlCandidates.Menu m) {
+        for (int i = 0; i < m.C(); i++) {
+            if (m.cands.get(i).kind == RlSchema.K_PASS) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * ownHarm over the given entries {@code order} (the policy's own entry first), before the play-outs. Review 3: a
+     * demotion, not a veto. Every entry the rule refuses ({@link LookaheadSearch#ownHarmWhy}) is counted and stays among
+     * the candidates; the search demotes them ({@link #ownHarmArm}; SHADOW records the demotion only). With the policy's
+     * own entry refused (ON), the remaining entry with the largest prior (pass among them; ties to the earlier entry) is
+     * returned: it stands in only when the search gives no verdict on the refused entry ({@link #ownHarmAfter}). -1 = none
+     * (off, shadow, nothing refused, or the policy's own entry not refused).
+     */
+    private int ownHarmRefuse(final Game g, final Player me, final RlCandidates.Menu m, final List<Integer> order,
+            final Map<Integer, double[]> by, final List<SpellAbility> menuObjs) {
+        final AiFixes.Mode mode = ownHarmMode();
+        if (mode == AiFixes.Mode.OFF) {
+            return -1;
+        }
+        ownHarmSeen = true;
+        final LookaheadSearch.Stats st = ls.getStats();
+        final JsonArray refused = new JsonArray();
+        final Set<Integer> idx = new TreeSet<>();
+        for (int k = 0; k < order.size(); k++) {
+            final int ch = order.get(k);
+            if (ch <= 0 || ch > menuObjs.size()) {
+                continue;
+            }
+            final SpellAbility sa = menuObjs.get(ch - 1);
+            final String why = LookaheadSearch.ownHarmWhy(me, sa);
+            if (why == null) {
+                continue;
+            }
+            ls.ownHarmCounted(sa);
+            if (k == 0) {
+                st.ownHarmForge++;
+            } else {
+                st.ownHarmCands++;
+            }
+            refused.add(ownHarmEntry(ch, sa, k == 0, why));
+            idx.add(k);
+        }
+        if (idx.isEmpty()) {
+            return -1;
+        }
+        st.ownHarmDecisions++;
+        final JsonObject note = ownHarmNote(g, mode);
+        note.add("refused", refused);
+        ownHarmLast = note;
+        ownHarmIdx = idx;
+        if (mode != AiFixes.Mode.ON || !idx.contains(0)) {
+            return -1;
+        }
+        int best = -1;
+        for (int k = 1; k < order.size(); k++) {
+            final int ch = order.get(k);
+            if (!idx.contains(k) && (best < 0 || by.get(ch)[0] > by.get(best)[0])) {
+                best = ch;
+            }
+        }
+        if (best >= 0) {
+            note.addProperty("standIn", best);
+            return (int) by.get(best)[1];
+        }
+        note.addProperty("standIn", 0); // no entry left (never: pass is one); the menu's pass
+        return passCand(m);
+    }
+
+    /** ownHarm: hands this decision's refused entries to the search right before it runs (off or none: nothing). */
+    private void ownHarmArm() {
+        if (ownHarmIdx != null) {
+            ls.ownHarmDemote(ownHarmIdx, ownHarmMode() == AiFixes.Mode.ON);
+        }
+    }
+
+    /** ownHarm: adds the search's demotion record to this decision's note; true = ON and it changed the decision. */
+    private boolean ownHarmDemoted(final LookaheadSearch.GivenResult r) {
+        final JsonObject dm = r.ownHarmDemotion;
+        if (ownHarmLast == null || dm == null) {
+            return false;
+        }
+        ownHarmLast.add("demotion", dm);
+        return dm.get("changed").getAsBoolean() && dm.get("applied").getAsBoolean();
+    }
+
+    /**
+     * ownHarm (ON) after the search, on the answer {@code answer} (-1 = the policy's own candidate {@code greedy}):
+     * <ul>
+     * <li>the decision's values not all win probabilities (review 4: a static leaf or a leaf fallback;
+     * {@link LookaheadSearch.Config#OWN_HARM_NO_SCALE}): no action, the key-off answer (no demotion, no stand-in, and the
+     * net vetoes nothing), and the decision row says why;</li>
+     * <li>a refused entry the demotion let through (better by the departZ test and the floor) is marked for the net to
+     * pass;</li>
+     * <li>the loop guard blocked the demotion's stand-in (review 4): pass where the menu has it (a priority decision),
+     * else the key-off answer; never the stand-in again;</li>
+     * <li>the policy's own entry refused with no verdict from the search (capped, failed, skipped, no candidate to test
+     * against) gives way to its stand-in {@code standIn}, itself a departure for the loop guard (review 4;
+     * {@link LookaheadSearch#ownHarmStandInAdmit}); blocked, or the guard having blocked the search's own departure in
+     * this decision, as above.</li>
+     * </ul>
+     * The decision line carries the note when the answer is not the key-off one.
+     */
+    private int ownHarmAfter(final Game g, final RlCandidates.Menu m, final List<SpellAbility> menuObjs,
+            final LookaheadSearch.GivenResult r, final List<Integer> order, final Map<Integer, double[]> by,
+            final int greedy, final int answer, final int standIn) {
+        if (ownHarmIdx == null || ownHarmMode() != AiFixes.Mode.ON) {
+            return answer;
+        }
+        final JsonObject dm = r.ownHarmDemotion;
+        if (dm != null && dm.has("reason")) {
+            ownHarmReason = dm.get("reason").getAsString();
+            if (ownHarmLast != null) {
+                ownHarmLast.addProperty("reason", ownHarmReason);
+            }
+            ownHarmOk = answer >= 0 ? answer : greedy; // key-off behavior: the net leaves it too
+            return answer;
+        }
+        final int chosen = r.chosen > 0 && r.chosen < order.size() ? r.chosen : 0;
+        if (!ownHarmIdx.contains(chosen)) {
+            return answer;
+        }
+        final JsonObject test = dm == null || !dm.has("test") ? null : dm.getAsJsonObject("test");
+        if (test != null && test.get("better").getAsBoolean() && dm.get("decision").getAsInt() == chosen) {
+            ownHarmOk = answer >= 0 ? answer : greedy; // better past the departZ test and the floor: played
+            return answer;
+        }
+        if (dm != null && dm.has("guardBlocked")) {
+            return ownHarmGuarded(m, r, greedy, answer, "loop-guard", true);
+        }
+        if (chosen != 0 || standIn < 0) {
+            return answer; // a refused departure with no verdict (a replayed live choice): the net's
+        }
+        if ("loop-guard".equals(r.outcome)) {
+            // review 4: the guard blocked this decision's departure: no other departure in its place either
+            return ownHarmGuarded(m, r, greedy, answer, "loop-guard", false);
+        }
+        final int sc = choiceOf(m, standIn);
+        if (!ls.ownHarmStandInAdmit(g, sc + ":" + actLabel(sc <= 0 || sc > menuObjs.size() ? null : menuObjs.get(sc - 1)))) {
+            ownHarmLast.addProperty("standInBlocked", sc);
+            return ownHarmGuarded(m, r, greedy, answer, r.outcome, false);
+        }
+        final LookaheadSearch.Stats st = ls.getStats();
+        st.ownHarmDropped++;
+        st.ownHarmFallback++;
+        if (standIn == passCand(m)) {
+            st.ownHarmPass++;
+        }
+        ownHarmLast.addProperty("fallback", choiceOf(m, standIn));
+        ownHarmLast.addProperty("noVerdict", r.outcome);
+        r.ownHarm = ownHarmLast;
+        return standIn;
+    }
+
+    /**
+     * ownHarm (review 4): the loop guard blocked a stand-in for the policy's refused own entry. Pass where the menu has it
+     * (a priority decision: passing cannot loop); otherwise the key-off answer, the policy's own choice (a mandatory
+     * choice does not re-enter priority), which the net then leaves. {@code counted}: the search's demotion already
+     * counted the refused entry as dropped.
+     */
+    private int ownHarmGuarded(final RlCandidates.Menu m, final LookaheadSearch.GivenResult r, final int greedy,
+            final int answer, final String why, final boolean counted) {
+        final int pass = passCand(m);
+        final LookaheadSearch.Stats st = ls.getStats();
+        ownHarmLast.addProperty("guard", why);
+        if (pass >= 0) {
+            if (!counted) {
+                st.ownHarmDropped++;
+            }
+            st.ownHarmFallback++;
+            st.ownHarmPass++;
+            ownHarmLast.addProperty("fallback", choiceOf(m, pass));
+            r.ownHarm = ownHarmLast;
+            ownHarmOk = pass;
+            return pass;
+        }
+        ownHarmLast.addProperty("keyOff", true);
+        if (counted) {
+            st.ownHarmDropped--; // the refused entry is played after all
+        }
+        r.ownHarm = null; // the key-off answer: the decision line is the key-off one
+        ownHarmOk = answer >= 0 ? answer : greedy;
+        return answer;
+    }
+
+    /**
+     * ownHarm's last word on the priority answer {@code a} (-1 = the policy's own candidate {@code greedy}): an answer
+     * the given entries' check did not see (a plan step, a decision with no search: on the stack, a failed score) is
+     * checked here, as is a refused departure the search gave no verdict on; ON answers pass instead of a refused one
+     * unless the demotion let it through ({@link #ownHarmAfter}). VOID, HOOK and STOP pass through (a solver line is the
+     * lineOwnTarget key's).
+     */
+    private int ownHarmNet(final Game g, final Player me, final RlCandidates.Menu m, final List<SpellAbility> menuObjs,
+            final int greedy, final int a) {
+        final AiFixes.Mode mode = ownHarmMode();
+        if (mode == AiFixes.Mode.OFF || a < -1 || mode != AiFixes.Mode.ON && ownHarmSeen) {
+            return a;
+        }
+        final int cand = a >= 0 ? a : greedy;
+        if (cand < 0 || cand >= m.C() || cand == ownHarmOk) {
+            return a;
+        }
+        final int ch = choiceOf(m, cand);
+        if (ch <= 0 || ch > menuObjs.size()) {
+            return a;
+        }
+        final SpellAbility sa = menuObjs.get(ch - 1);
+        final String why = LookaheadSearch.ownHarmWhy(me, sa);
+        if (why == null) {
+            return a;
+        }
+        final LookaheadSearch.Stats st = ls.getStats();
+        if (!ownHarmSeen) {
+            ls.ownHarmCounted(sa);
+            st.ownHarmDecisions++;
+            if (a == -1) {
+                st.ownHarmForge++;
+            } else {
+                st.ownHarmCands++;
+            }
+        }
+        final JsonObject note = ownHarmLast != null ? ownHarmLast : ownHarmNote(g, mode);
+        if (ownHarmLast == null) {
+            final JsonArray refused = new JsonArray();
+            refused.add(ownHarmEntry(ch, sa, a == -1, why));
+            note.add("refused", refused);
+        }
+        note.addProperty("net", true);
+        ownHarmLast = note;
+        final int pass = mode == AiFixes.Mode.ON ? passCand(m) : -1;
+        if (pass >= 0) {
+            st.ownHarmDropped++;
+            st.ownHarmFallback++;
+            st.ownHarmPass++;
+            note.addProperty("fallback", 0);
+        }
+        return pass >= 0 ? pass : a;
+    }
+
+    /**
+     * ownHarm and S-b's policy plans: a sampled plan whose recording played a refused step ({@code why}), counted and
+     * logged; true = ON, the plan is not proposed.
+     */
+    boolean ownHarmPlanRefused(final Game g, final String label, final String why) {
+        final AiFixes.Mode mode = ownHarmMode();
+        if (mode == AiFixes.Mode.OFF) {
+            return false;
+        }
+        ls.getStats().ownHarmPlanRefused++;
+        final JsonObject note = ownHarmNote(g, mode);
+        note.addProperty("plan", label);
+        note.addProperty("why", why);
+        System.err.println("[own-harm] " + note);
+        ownHarmDropped |= mode == AiFixes.Mode.ON;
+        return mode == AiFixes.Mode.ON;
+    }
+
+    /** ownHarm: the live policy plan reached a refused step ({@code why}; ON: it broke there), counted and logged. */
+    void ownHarmPlanBreak(final Game g, final String why) {
+        final AiFixes.Mode mode = ownHarmMode();
+        if (mode == AiFixes.Mode.OFF) {
+            return;
+        }
+        ls.getStats().ownHarmPlanBreaks++;
+        final JsonObject note = ownHarmNote(g, mode);
+        note.addProperty("planStep", why);
+        System.err.println("[own-harm] " + note);
     }
 
     /**
