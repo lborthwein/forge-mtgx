@@ -242,6 +242,17 @@ public final class RlReplaySearch implements PriorityDecisionListener {
         }
         o.addProperty("seedSalt", salt);
         o.addProperty("obs", obs);
+        if (s.playFrom) {
+            // gc-1119 (offline harness only): a play-from continuation's own search decision log, as a game run's harness
+            // sets it (the spec may not): <out>/logs/search-decisions-<pid>.jsonl, the JVM's one synchronized writer
+            final Path logs = Paths.get(s.out, "logs");
+            try {
+                Files.createDirectories(logs);
+            } catch (IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+            o.addProperty("decisionLog", logs.resolve("search-decisions-" + ProcessHandle.current().pid() + ".jsonl").toString());
+        }
         return RlSearch.Config.parse(o);
     }
 
