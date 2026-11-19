@@ -162,9 +162,22 @@ public final class HumanManaAffordability {
      * with Scrubland and Plains tapped and Zirda making Basalt Monolith's untap cost {1}): "an untap can reach it" held
      * only when the untap could. With {@code reach} known ({@link #untapReach}), a {T} ability of a tapped permanent no
      * untap can reach makes no color. Null keeps the old reading: every permanent may be untapped.</p>
+     *
+     * <p>This form is the offer's ({@link #assess}): the old reading, unchanged.</p>
      */
     static boolean colourImpossible(final Player player, final SpellAbility ability, final List<ManaCostShard> shards,
-                                    final int hooks, final int extraColours, final Set<Card> reach) {
+                                    final int hooks, final int extraColours) {
+        return colourImpossible(player, ability, shards, hooks, extraColours, null, false);
+    }
+
+    /**
+     * {@link #colourImpossible}, for the payable proof ({@link #assessPayable}) when {@code payableProof} is true: with
+     * {@code reach} known, a tapped source no untap reaches makes no color; and a mana ability whose sub-ability makes more
+     * mana makes every color ({@link #producibleColours}). Review S1 (Astra, #250): with {@code payableProof} false this is
+     * the offer's old reading exactly, whatever {@code reach} is.
+     */
+    static boolean colourImpossible(final Player player, final SpellAbility ability, final List<ManaCostShard> shards,
+                                    final int hooks, final int extraColours, final Set<Card> reach, final boolean payableProof) {
         int colours = extraColours;
         if ((hooks & HOOK_CONVERT) != 0) colours |= ManaAtom.ALL_MANA_TYPES;
         for (var mana : player.getManaPool()) {
@@ -173,11 +186,12 @@ public final class HumanManaAffordability {
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             if (card.isPhasedOut()) continue;
-            final boolean shut = reach != null && card.isInZone(ZoneType.Battlefield) && card.isTapped() && !reach.contains(card);
+            final boolean shut = payableProof && reach != null && card.isInZone(ZoneType.Battlefield) && card.isTapped()
+                    && !reach.contains(card);
             for (SpellAbility source : card.getManaAbilities()) {
                 if (!card.isInZone(ZoneType.Battlefield) && !activatableWhereItIs(card, source)) continue;
                 if (shut && source.getPayCosts() != null && source.getPayCosts().hasTapCost()) continue;
-                colours |= producibleColours(player, source);
+                colours |= producibleColours(player, source, payableProof);
             }
         }
         for (ManaCostShard shard : shards) {
@@ -194,10 +208,13 @@ public final class HumanManaAffordability {
         return false;
     }
 
-    /** The colours a mana ability can make, as a mask; every colour when the proof cannot read them. */
-    private static int producibleColours(final Player player, final SpellAbility source) {
+    /**
+     * The colours a mana ability can make, as a mask; every colour when the proof cannot read them. With
+     * {@code readTail} (the payable proof only, review S1 Astra #250), a sub-ability that makes more mana makes every color.
+     */
+    private static int producibleColours(final Player player, final SpellAbility source, final boolean readTail) {
         // afford-colour-unbounded-1119: a sub-ability that makes more mana makes colors the top's Produced does not name.
-        for (SpellAbility tail = source.getSubAbility(); tail != null; tail = tail.getSubAbility()) {
+        for (SpellAbility tail = readTail ? source.getSubAbility() : null; tail != null; tail = tail.getSubAbility()) {
             if (tail.getApi() == ApiType.Mana || tail.getApi() == ApiType.ManaReflected) return ManaAtom.ALL_MANA_TYPES;
         }
         final Integer reflected = reflectedColours(player, source);
@@ -297,6 +314,26 @@ public final class HumanManaAffordability {
     }
 
     /**
+     * Review S1 (Astra, #250): may {@code player} identify {@code card}? The payable proof's untap and cycle scans
+     * ({@link #untapReach}, {@link #cycleReaction}, {@link #tapsOthersForMana}) read only such cards, so the glow never
+     * depends on a concealed card: an opponent's Vizier of Tumbling Sands in hand or library turned Lurrus from dark to lit.
+     * The rule is the interactive layer's {@code InteractiveState.mayReceiveIdentity} on Forge's views, restated here
+     * because forge-gui cannot see that class: a card in a zone Forge's {@code CardView.canBeShownTo} shows the player
+     * (public zones, the player's own hand, a card revealed to it or that it may look at), and face up or a face-down card
+     * it may look at ({@code canFaceDownBeShownTo}). A card in no zone counts only as a face-up copy of a spell.
+     */
+    public static boolean mayIdentify(final Card card, final Player player) {
+        if (card == null || player == null) return false;
+        final forge.game.card.CardView view = card.getView();
+        final forge.game.player.PlayerView viewer = player.getView();
+        if (view == null || viewer == null) return false;
+        if (view.getZone() == null) {
+            return view.getGamePieceType() == forge.card.GamePieceType.COPIED_SPELL && !view.isFaceDown();
+        }
+        return view.canBeShownTo(viewer) && (!view.isFaceDown() || view.canFaceDownBeShownTo(viewer));
+    }
+
+    /**
      * Review S1 (Astra, #240): has the player a mana ability, activatable where its card is, whose cost taps other
      * permanents ({@code CostTapType}: Urza, Lord High Artificer; Grand Architect)? Such an ability can make mana from a
      * permanent each time an untap brings it back, in colors of its own.
@@ -304,7 +341,7 @@ public final class HumanManaAffordability {
     static boolean tapsOthersForMana(final Player player) {
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
-            if (card.isPhasedOut()) continue;
+            if (card.isPhasedOut() || !mayIdentify(card, player)) continue;
             for (SpellAbility source : card.getManaAbilities()) {
                 if (source.getPayCosts() != null && activatableWhereItIs(card, source)
                         && source.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostTapType)) return true;
@@ -329,13 +366,17 @@ public final class HumanManaAffordability {
      * event of an untap cycle, a tap or untap replacement, mana with a rider, an ability that copies abilities, a spell
      * that untaps), and any trigger or replacement in the game whose effect may untap ({@link #mayUntap}), whatever sets
      * it off.</p>
+     *
+     * <p>Review S1 (Astra, #250): only cards the player may identify are read ({@link #mayIdentify}): never an opponent's
+     * hand or library, the player's own library, or a face-down card it may not look at. Delayed triggers are all read:
+     * each was made by an ability that resolved in view.</p>
      */
     static Set<Card> untapReach(final Player player) {
         if (cycleReaction(player)) return null;
         final Set<Card> reach = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
-            if (card.isPhasedOut()) continue;
+            if (card.isPhasedOut() || !mayIdentify(card, player)) continue;
             for (SpellAbility sa : card.getSpellAbilities()) {
                 if (sa.isSpell() || !activatableWhereItIs(card, sa)) continue;
                 final boolean untapsOthersAsCost = sa.getPayCosts() != null
@@ -359,6 +400,7 @@ public final class HumanManaAffordability {
             if (mayUntap(t)) return null;
         }
         for (Card card : game.getCardsInGame()) {
+            if (!mayIdentify(card, player)) continue;
             for (Trigger t : card.getTriggers()) {
                 if (t.getSpawningAbility() == null && !t.zonesCheck(game.getZoneOf(card))) continue;
                 if (mayUntap(t)) return null;
@@ -460,7 +502,7 @@ public final class HumanManaAffordability {
     static int reachColors(final Player player, final Set<Card> reach, final boolean improvise) {
         int colors = 0;
         for (Card card : reach) {
-            for (SpellAbility source : card.getManaAbilities()) colors |= producibleColours(player, source);
+            for (SpellAbility source : card.getManaAbilities()) colors |= producibleColours(player, source, true);
             if (improvise && card.isArtifact()) colors |= ManaAtom.COLORLESS;
         }
         return colors;
@@ -480,6 +522,8 @@ public final class HumanManaAffordability {
      * zone where it works, as {@link #activeHooks} reads triggers; or delayed), or a tap or untap replacement that puts
      * something in the event's place ({@code ReplaceWith})? A replacement that only stops an untap (Grim Monolith's
      * "doesn't untap during your untap step") can only take mana away.
+     *
+     * <p>Review S1 (Astra, #250): of cards, only those the player may identify ({@link #mayIdentify}).</p>
      */
     static boolean cycleReaction(final Player player) {
         // Re-review 3 S1 (Astra, #240): a reaction can also ride on mana, registered only when the mana is spent
@@ -490,6 +534,7 @@ public final class HumanManaAffordability {
         }
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
+            if (!mayIdentify(card, player)) continue;
             for (SpellAbility source : card.getManaAbilities()) {
                 if (manaRider(source.getManaPart())) return true;
             }
@@ -514,6 +559,7 @@ public final class HumanManaAffordability {
                 || handler.getPlayerDefinedDelayedTriggersView().values().stream()
                     .anyMatch(t -> CYCLE_REACTIONS.contains(t.getMode()))) return true;
         for (Card card : player.getGame().getCardsInGame()) {
+            if (!mayIdentify(card, player)) continue;
             for (Trigger t : card.getTriggers()) {
                 if (!CYCLE_REACTIONS.contains(t.getMode())) continue;
                 if (t.getSpawningAbility() != null || t.zonesCheck(player.getGame().getZoneOf(card))) return true;
@@ -858,7 +904,7 @@ public final class HumanManaAffordability {
             if ((hooks & HOOK_PRODUCTION) != 0) return Assessment.UNKNOWN;
             // afford-colour-unbounded-1119: this proof decides what is offered at all, so it keeps the old reading (every
             // permanent may be untapped); the payable flag's proof (assessPayable) uses the untaps' reach.
-            return colourImpossible(player, ability, shards, hooks, 0, null) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
+            return colourImpossible(player, ability, shards, hooks, 0) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
         }
         return Assessment.PROVEN_UNAFFORDABLE;
     }
@@ -1409,7 +1455,7 @@ public final class HumanManaAffordability {
                 if (t.spellOnly() && t.colors() != LIFE_PAYMENT) extra |= t.colors();
             }
             if (improvise) extra |= ManaAtom.COLORLESS;
-            return colourImpossible(player, ability, shards, hooks, extra, reach) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
+            return colourImpossible(player, ability, shards, hooks, extra, reach, true) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
         }
         return Assessment.PROVEN_UNAFFORDABLE;
     }
