@@ -99,6 +99,12 @@ final class ForcedWinEngine {
          * count ({@link ForcedWinEngine#lethalAttack}), and those that won.
          */
         int lethalAttacks, lethalWins;
+        /**
+         * sdcc-loopclose-1119 (loopCloseFirst; report only, printed when non-zero): moves whose trigger variant aimed at the
+         * move's own host was searched first, and moves where that variant was not led because the trigger's effect on its
+         * target is harmful ({@link TriggerTargets#harmful}).
+         */
+        int closeFirst, closeGuarded;
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
@@ -111,7 +117,8 @@ final class ForcedWinEngine {
                     + (ordered > 0 || orderFails > 0 ? " ordered=" + ordered + " orderFails=" + orderFails : "")
                     + (focusSkips > 0 || focusGains > 0 || focusInert > 0 ? " focusDepth=" + focusDepth + " focusSkips="
                             + focusSkips + " focusGains=" + focusGains + " focusInert=" + focusInert : "")
-                    + (lethalAttacks > 0 ? " lethalAttacks=" + lethalAttacks + " lethalWins=" + lethalWins : "");
+                    + (lethalAttacks > 0 ? " lethalAttacks=" + lethalAttacks + " lethalWins=" + lethalWins : "")
+                    + (closeFirst > 0 || closeGuarded > 0 ? " closeFirst=" + closeFirst + " closeGuarded=" + closeGuarded : "");
         }
     }
 
@@ -311,6 +318,14 @@ final class ForcedWinEngine {
          * first lethal doubling. No win leaves the search exactly as with the key off.
          */
         boolean loopLethalFirst = false;
+        /**
+         * sdcc-loopclose-1119 (false = off): a move that tapped its own host and caused a targeting trigger of ours that can
+         * target that host (among the trigger's first variants) has that variant searched first, ahead of the move with Forge
+         * AI's own target, unless the trigger's effect on its target is harmful (line-own-target-1119's classification,
+         * {@link TriggerTargets#harmful}). The variant set is unchanged (a reorder only). The unordered searches only
+         * (dfs0 and engineFocus's); under engineOrder the children are ranked by value.
+         */
+        boolean loopCloseFirst = false;
         /**
          * engine-reach-1107 (false = off, with longLoops): a round back to an ancestor is also a loop when the boards match and
          * our hand holds at least the ancestor's cards (draws are kept, the library may shrink), with progress.
@@ -1536,6 +1551,32 @@ final class ForcedWinEngine {
     }
 
     /**
+     * sdcc-loopclose-1119 ({@link Limits#loopCloseFirst}; off: false): whether the applied move {@code mv} (Forge AI's own
+     * trigger target) is searched after its variant aimed at the move's own host: the key on, no forced target yet, not
+     * a win, not led already, and the host's ref among the variants the move gets anyway (a reorder, never one more).
+     * A refused (harmful) host variant is counted once per move.
+     */
+    private boolean closeLead(Step mv, Applied a, Set<Step> closeLed) {
+        if (!lim.loopCloseFirst || a.won || mv.triggerRef != null || closeLed.contains(mv)) {
+            return false;
+        }
+        if (a.closeRef == null) {
+            if (a.closeHarm) {
+                st.closeGuarded++;
+                closeLed.add(mv);
+            }
+            return false;
+        }
+        final int idx = a.triggerCandidates.indexOf(a.closeRef);
+        if (idx < 0 || idx >= (lim.triggerTargets ? lim.triggerVariants : lim.targetVariants)) {
+            return false;
+        }
+        closeLed.add(mv);
+        st.closeFirst++;
+        return true;
+    }
+
+    /**
      * sdcc-multitarget-loop-1119 ({@link Limits#loopLethalFirst}): at a loop's lethal count ({@link #lethalPastBlockers}),
      * the attack alone (the node and the one after it), tried even when the root pass move's node share or the search's
      * node cap is spent: two nodes at most, still inside the wall and the decision's Forge AI work. The outlet searches at
@@ -2588,6 +2629,7 @@ final class ForcedWinEngine {
         int tried = 0;
         final Set<Step> variants = new HashSet<>();
         final Set<Step> deferred = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()); // sdcc-loops-1111
+        final Set<Step> closeLed = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()); // sdcc-loopclose-1119
         // labeller-v2 (a)/(e): variants applied while ranking, kept for their turn in the loop (by identity)
         final java.util.Map<Step, Applied> pre = new java.util.IdentityHashMap<>();
         final List<Applied> luck = lim.verify != null ? new ArrayList<>() : null; // unified-search-1106
@@ -2636,6 +2678,18 @@ final class ForcedWinEngine {
                 deferred.add(mv);
                 continue;
             }
+            if (closeLead(mv, a, closeLed)) {
+                // sdcc-loopclose-1119 (loopCloseFirst; off: false): the variant aimed at the move's own host is searched
+                // first, this move (already applied) right after it; its other variants follow it as before
+                final Step v = mv.copy();
+                v.triggerRef = a.closeRef;
+                moves.add(mi + 1, v);
+                variants.add(v);
+                moves.add(mi + 2, mv);
+                pre.put(mv, a);
+                deferred.add(mv);
+                continue;
+            }
             if (a.rec != null) {
                 if (a.rec.miss && !a.won) {
                     continue; // a forced answer that did not apply: the same play as another variant
@@ -2669,14 +2723,18 @@ final class ForcedWinEngine {
             }
             if (mv.triggerRef == null && !a.triggerCandidates.isEmpty()) {
                 // the move caused a targeting trigger of ours: try it again with each of a few forced targets next
-                int k = 0;
+                final String led = closeLed.contains(mv) ? a.closeRef : null; // sdcc-loopclose-1119: searched already
+                int k = 0, at = 0;
                 for (String ref : a.triggerCandidates) {
                     if (k++ >= (lim.triggerTargets ? lim.triggerVariants : lim.targetVariants)) {
                         break;
                     }
+                    if (ref.equals(led)) {
+                        continue;
+                    }
                     final Step v = mv.copy();
                     v.triggerRef = ref;
-                    moves.add(mi + k, v);
+                    moves.add(mi + ++at, v);
                     variants.add(v);
                 }
             }
@@ -3147,6 +3205,7 @@ final class ForcedWinEngine {
         final java.util.Map<Step, Applied> pre = new java.util.IdentityHashMap<>();
         // sdcc-integ2-1111: a move waiting behind its "yes" variant (engineLoopCredit; empty with that key off)
         final Set<Step> deferred = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        final Set<Step> closeLed = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()); // sdcc-loopclose-1119
         for (int mi = 0; mi < moves.size(); mi++) {
             final Step mv = moves.get(mi);
             if (out()) {
@@ -3214,6 +3273,18 @@ final class ForcedWinEngine {
                 deferred.add(mv);
                 continue;
             }
+            if (closeLead(mv, a, closeLed)) {
+                // sdcc-loopclose-1119 (loopCloseFirst; off: false): the variant aimed at the move's own host is searched
+                // first, this move (already applied) right after it; its other variants follow it as before
+                final Step v = mv.copy();
+                v.triggerRef = a.closeRef;
+                moves.add(mi + 1, v);
+                variants.add(v);
+                moves.add(mi + 2, mv);
+                pre.put(mv, a);
+                deferred.add(mv);
+                continue;
+            }
             if (again) {
                 a.declined = false; // its "yes" variant is already in the list
             }
@@ -3246,14 +3317,18 @@ final class ForcedWinEngine {
                 }
             }
             if (mv.triggerRef == null && !a.triggerCandidates.isEmpty()) {
-                int k = 0;
+                final String led = closeLed.contains(mv) ? a.closeRef : null; // sdcc-loopclose-1119: searched already
+                int k = 0, at = 0;
                 for (String ref : a.triggerCandidates) {
                     if (k++ >= (lim.triggerTargets ? lim.triggerVariants : lim.targetVariants)) {
                         break;
                     }
+                    if (ref.equals(led)) {
+                        continue;
+                    }
                     final Step v = mv.copy();
                     v.triggerRef = ref;
-                    moves.add(mi + k, v);
+                    moves.add(mi + ++at, v);
                     variants.add(v);
                 }
             }
@@ -4630,6 +4705,34 @@ final class ForcedWinEngine {
         List<String> nextCandidates = List.of();
         /** Engine only: Forge AI declined an optional trigger of ours in this window. */
         boolean declined;
+        /**
+         * sdcc-loopclose-1119 (engine only, loopCloseFirst; 0 = off): the move's host, untapped before the move. When the
+         * first targeting trigger of ours can target it and the move left it tapped, {@link #closeRef} is its candidate
+         * ref, unless the trigger's effect is harmful ({@link #closeHarm}).
+         */
+        int closeHost;
+        String closeRef;
+        boolean closeHarm;
+
+        /**
+         * sdcc-loopclose-1119: the trigger's effect on its target is harmful to the target's controller: a targeting part
+         * whose effect line-own-target-1119 classifies as harm ({@link LineOwnTarget#harm}: damage, destroy, -N/-N, a
+         * removal that does not come back, a bounce, a sacrifice), in the ability or any part it reaches. Unreadable =
+         * harmful (the variant is then not led).
+         */
+        static boolean harmful(SpellAbility sa) {
+            try {
+                final SpellAbility root = sa instanceof forge.game.trigger.WrappedAbility w ? w.getWrappedAbility() : sa;
+                for (SpellAbility p : LineOwnTarget.tree(root)) {
+                    if (p.usesTargeting() && LineOwnTarget.harm(p) != null) {
+                        return true;
+                    }
+                }
+                return false;
+            } catch (RuntimeException e) {
+                return true;
+            }
+        }
 
         /** sdcc-loops-1111: our own optional trigger while the step says yes. */
         boolean confirmsOwn(forge.game.trigger.WrappedAbility w, Player me) {
@@ -4744,6 +4847,18 @@ final class ForcedWinEngine {
                 all.addAll(mine);
                 all.addAll(theirs);
                 candidates = wide ? wideCandidates(g, me, sa, slot) : all;
+                if (closeHost > 0) {
+                    // sdcc-loopclose-1119: the move tapped its host, and this trigger can target it
+                    final Card h = g.findById(closeHost);
+                    final String hr = "C" + closeHost;
+                    if (h != null && h.isTapped() && h.getController() == me && slot.canTarget(h) && candidates.contains(hr)) {
+                        if (harmful(sa)) {
+                            closeHarm = true;
+                        } else {
+                            closeRef = hr;
+                        }
+                    }
+                }
                 if (TRACE) {
                     final StringBuilder sb = new StringBuilder();
                     for (String r : all) {
@@ -4944,6 +5059,12 @@ final class ForcedWinEngine {
         String why = "";
         List<String> triggerCandidates = List.of();
         List<String> pickCandidates = List.of();
+        /**
+         * sdcc-loopclose-1119 (loopCloseFirst; null = off or none): the trigger variant aimed at the move's own host (a
+         * candidate), and whether such a variant was refused as harmful.
+         */
+        String closeRef;
+        boolean closeHarm;
         /** sdcc-order-1111 (read by engineFocus only): the move's first own-card choice was a search of our library. */
         boolean pickLibrary;
         /** sdcc-loops-1111 (loopCredit): the targets of the trigger after the forced ones; an optional trigger declined. */
@@ -5046,6 +5167,13 @@ final class ForcedWinEngine {
             }
             ai.lim = lim;
             ai.triggers.deep = lim.loopCredit; // sdcc-loops-1111
+            if (lim.loopCloseFirst && mv.triggerRef == null && mv.hostId > 0) {
+                // sdcc-loopclose-1119: the move's host, untapped before the move (the move may tap it)
+                final Card h = g.findById(mv.hostId);
+                if (h != null && h.isInPlay() && !h.isTapped() && h.getController() == me) {
+                    ai.triggers.closeHost = mv.hostId;
+                }
+            }
             if (lim.triggerTargets) {
                 ai.triggers.wide = true; // solver-gaps-1104
                 ai.triggers.cap = lim.triggerVariants;
@@ -5087,6 +5215,8 @@ final class ForcedWinEngine {
             }
             final Applied a = new Applied();
             a.triggerCandidates = ai.triggers.candidates;
+            a.closeRef = ai.triggers.closeRef; // sdcc-loopclose-1119 (off: null)
+            a.closeHarm = ai.triggers.closeHarm;
             a.nextTriggerCandidates = ai.triggers.nextCandidates;
             a.declined = ai.triggers.declined;
             a.pickCandidates = ai.picks.candidates;
