@@ -1197,4 +1197,29 @@ public class InteractiveTriggerLabelTest extends AITest {
         assertEquals(InteractiveState.discriminated(labels), expected);
         assertEquals(InteractiveState.discriminated(List.of("X", "Y")), List.of("X", "Y"));
     }
+    // ------------------------------------------------------------------ review fix 5
+
+    /**
+     * r5 finding: Forge renders a card's display name, so the Cecily, Haunted Mage printing (stored as Eleven, the Mage)
+     * read "Return Cecily, Haunted Mage." after it was turned face down. Both names are hidden now.
+     */
+    @Test(timeOut = 900000)
+    public void r5_aPrintedFlavorNameIsHidden() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card secret = addCard("Cecily, Haunted Mage", h.foe);
+            assertEquals(secret.getName(), "Eleven, the Mage");
+            assertEquals(secret.getDisplayName(), "Cecily, Haunted Mage");
+            h.game.getStack().add(returnOriginal(h, host, secret));
+            secret.turnFaceDown(true);
+            assertEquals(InteractiveState.knownNow(h.game, secret.getView(), h.seat.getView()), null);
+            final JsonObject entry = topEntry(h);
+            System.out.println("R5 FLAVOR: " + entry);
+            assertFalse(entry.toString().contains("Cecily") || entry.toString().contains("Eleven"), entry.toString());
+            assertEquals(entry.get("description").getAsString(), "Sneak Attack — triggered ability", entry.toString());
+            final InteractiveState.HiddenNames hidden = InteractiveState.HiddenNames.of(h.game, h.seat.getView());
+            assertFalse(hidden.safe("Return Cecily, Haunted Mage."));
+            assertFalse(hidden.safe("Return Eleven, the Mage."));
+        }
+    }
 }

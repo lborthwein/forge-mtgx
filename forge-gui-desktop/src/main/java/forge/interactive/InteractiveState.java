@@ -1016,7 +1016,8 @@ final class InteractiveState {
      * case, because Forge lowercases the first letter of a wrapped ability's words (Trigger.java, "grizzly Bears draws
      * a card."); a one-word name stays exact (the residual, a one-word name lowercased at the start of such words, is
      * contrived). The names are the union of each printed face ({@code getOriginalState}) and each current or copied
-     * face ({@code getState}, for every state the card has), so a copy does not erase the printed name;</li>
+     * face ({@code getState}, for every state the card has), so a copy does not erase the printed name; for each face,
+     * its own name, its flavor name, and the card's effective and display names for it (review fix 5);</li>
      * <li>or such a card's real id, {@code (N)}, always. Forge's {@code (HN)} handles are not checked (review fix 4):
      * they are its public masking handles for face-down cards, the same ones the zone views show, and carry no
      * identity.</li>
@@ -1080,12 +1081,12 @@ final class InteractiveState {
                 // The printed faces, then the current or copied ones (getState of a state the card has creates none).
                 for (CardStateName state : new ArrayList<>(card.getStates())) {
                     if (state != CardStateName.FaceDown && state != CardStateName.EmptyRoom) {
-                        addName(names, card.getOriginalState(state));
+                        addNames(names, card, card.getOriginalState(state));
                     }
                 }
                 for (CardStateName state : CardStateName.values()) {
                     if (state != CardStateName.FaceDown && state != CardStateName.EmptyRoom && card.hasState(state)) {
-                        addName(names, card.getState(state));
+                        addNames(names, card, card.getState(state));
                     }
                 }
             }
@@ -1095,8 +1096,20 @@ final class InteractiveState {
             collect(card.getMeldedWith(), game, viewer, visited, names, ids);
         }
 
-        private static void addName(final Set<String> names, final CardState face) {
-            final String name = face == null ? null : face.getName();
+        /**
+         * A face's names as Forge may render them (review fix 5: Forge renders {@code Card.getDisplayName}, so the
+         * Cecily, Haunted Mage printing of Eleven, the Mage read "Return Cecily, Haunted Mage."): the face's own name,
+         * its flavor name, and the card's effective and display names for it (a name an effect gave it). Read-only.
+         */
+        private static void addNames(final Set<String> names, final Card card, final CardState face) {
+            if (face == null) return;
+            addName(names, face.getName());
+            addName(names, face.getFlavorName());
+            addName(names, card.getName(face));
+            addName(names, card.getDisplayName(face));
+        }
+
+        private static void addName(final Set<String> names, final String name) {
             if (name != null && !name.isBlank()) names.add(name.trim());
         }
 
