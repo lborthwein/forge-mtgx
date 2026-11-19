@@ -2402,6 +2402,9 @@ public class GameAction {
             if (game.getRules().getGameType().equals(GameType.Puzzle)) {
                 return game.getPlayers().get(0);
             }
+            if (lastGameOutcome == null && game.getForcedFirstPlayer() != null) {
+                return game.getForcedFirstPlayer(); // exact-hand-1116 (bench research; null = off)
+            }
 
             // 904.6: in Archenemy games the Archenemy goes first
             if (game.getRules().hasAppliedVariant(GameType.Archenemy)) {

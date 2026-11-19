@@ -572,6 +572,10 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
          */
         int decide(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, int greedy, List<SpellAbility> menuObjs);
 
+        /** nestfix-1118: {@code n} real-seat asks were refused inside this decision's search (logged; default none). */
+        default void guardRefused(Game g, RlWire.Decide frame, long n, String what) {
+        }
+
         int VOID = -2;
 
         /**
@@ -1122,7 +1126,16 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             // S1: the look-ahead over the policy's own priority decision (the policy's choice is its default)
             @SuppressWarnings("unchecked")
             final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
-            final int alt = search.decide(g, player, m, frame, d.steps[0], menuObjs);
+            int alt;
+            forge.ai.simulation.SearchGuard.enter(g); // nestfix-1118: the look-ahead never asks a real seat
+            try {
+                alt = search.decide(g, player, m, frame, d.steps[0], menuObjs);
+            } catch (forge.ai.simulation.SearchGuard.RealSeatAsk e) {
+                alt = -1; // the policy's own answer stands
+            } finally {
+                forge.ai.simulation.SearchGuard.exit(g);
+            }
+            guardRefusals(g, frame, search);
             if (alt == PrioritySearch.VOID) {
                 endGame("cpu_cap");
                 return null;
@@ -1169,7 +1182,16 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 && d.status == RlWire.ST_OK) {
             // block-search-1019: the look-ahead over block assignments (the policy's own declaration is its default; a
             // no-op unless the spec turns block search on)
-            final short[] alt = search.decideBlocks(g, player, m, frame, d.steps, objs);
+            short[] alt;
+            forge.ai.simulation.SearchGuard.enter(g); // nestfix-1118
+            try {
+                alt = search.decideBlocks(g, player, m, frame, d.steps, objs);
+            } catch (forge.ai.simulation.SearchGuard.RealSeatAsk e) {
+                alt = null;
+            } finally {
+                forge.ai.simulation.SearchGuard.exit(g);
+            }
+            guardRefusals(g, frame, search);
             if (alt != null && !java.util.Arrays.equals(alt, d.steps)) {
                 final String badAlt = m.validate(alt);
                 if (badAlt != null) {
@@ -1203,7 +1225,16 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
         if (search != null && d.status == RlWire.ST_OK && search.choiceAsk(family)) {
             // choice-scorer-1106: the options applied on copies, one batched value pass (the policy's answer is the default)
-            final short[] alt = search.decideChoice(g, player, m, frame, d.steps, objs); // choice-search-1109: + objs
+            short[] alt;
+            forge.ai.simulation.SearchGuard.enter(g); // nestfix-1118
+            try {
+                alt = search.decideChoice(g, player, m, frame, d.steps, objs); // choice-search-1109: + objs
+            } catch (forge.ai.simulation.SearchGuard.RealSeatAsk e) {
+                alt = null;
+            } finally {
+                forge.ai.simulation.SearchGuard.exit(g);
+            }
+            guardRefusals(g, frame, search);
             if (alt != null && m.validate(alt) == null) {
                 if (!java.util.Arrays.equals(alt, d.steps)) {
                     searchOverride(frame.decIdx); // an answer equal to the policy's own stays the policy's choice
@@ -1378,6 +1409,28 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         return ans;
     }
 
+    /** nestfix-1118: search asks refused on the real game (SearchGuard), counted on the game and logged as a row. */
+    public long searchGuardRefusals;
+
+    private void guardRefusals(final Game g, final RlWire.Decide frame, final PrioritySearch search) {
+        final long seen = forge.ai.simulation.SearchGuard.takeSeen(g);
+        if (seen > 0) {
+            forgeDecidedExtra.merge("searchGuardSeen", (int) seen, Integer::sum); // counted only, nothing refused
+        }
+        final long n = forge.ai.simulation.SearchGuard.takeBlocked(g);
+        if (n <= 0) {
+            return;
+        }
+        final String what = forge.ai.simulation.SearchGuard.takeLast(g);
+        searchGuardRefusals += n;
+        forgeDecidedExtra.merge("searchGuard", (int) n, Integer::sum);
+        System.err.println("[search-guard] dec " + frame.decIdx + ": " + n + " real-seat ask(s) refused inside the search, last "
+                + what);
+        if (search != null) {
+            search.guardRefused(g, frame, n, what);
+        }
+    }
+
     /** DECIDE → DECISION for one frame; null (the game is ended as server_error) on any transport or protocol fault. */
     private RlWire.Decision decide(final RlWire.Decide frame) {
         final RlWire.Decision d;
@@ -1455,6 +1508,17 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         if (g == game) {
             note(key);
         }
+    }
+
+    /**
+     * sdcc-item2-hooks-1115 (offline replay hooks only; nothing else calls it): the DECIDE frame {@link #frame} builds for
+     * {@code m} and {@code o}, numbered {@code decIdx}; the seat's own counters are not touched.
+     */
+    public RlWire.Decide frameAt(final int seat, final Game g, final RlCandidates.Menu m, final RlFeaturizer.Obs o,
+            final int decIdx) {
+        final RlWire.Decide f = frame(seat, g, m, o);
+        f.decIdx = decIdx;
+        return f;
     }
 
     private RlWire.Decide frame(final int seat, final Game g, final RlCandidates.Menu m, final RlFeaturizer.Obs o) {

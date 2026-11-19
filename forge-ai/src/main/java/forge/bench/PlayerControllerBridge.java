@@ -474,12 +474,32 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * <p>On the delegate branch this also arms {@link #pendingEcho}. See the ECHO block
      * below for why the arming and the reading are two steps.
      */
+    /**
+     * nestfix-1118: the plan hook's priority search runs in a {@link forge.ai.simulation.SearchGuard} scope on the real
+     * game; a search that asks a real seat ends with no opinion (the policy / Forge path decides, as without a plan).
+     */
+    private List<SpellAbility> guardedPriority() {
+        final forge.game.Game g = getGame();
+        forge.ai.simulation.SearchGuard.enter(g);
+        try {
+            return planHook.priority(this);
+        } catch (forge.ai.simulation.SearchGuard.RealSeatAsk e) {
+            counters.instrument("searchGuard.planHook");
+            return NO_OPINION;
+        } finally {
+            forge.ai.simulation.SearchGuard.exit(g);
+        }
+    }
+
     private JsonObject ask(final String method, final String kind, final JsonObject body) {
         return ask(method, kind, body, null);
     }
 
     /** As above; {@code menuObjects} reach an in-process answerer only (see BenchSession.LocalAnswerer). */
     private JsonObject ask(final String method, final String kind, final JsonObject body, final Object menuObjects) {
+        // nestfix-1118: no real-game decision inside a search over this game: neither a seat's DECIDE nor the plan line's
+        // Forge answer below (an Emerge / Offering pick there marks a real permanent usedToPay)
+        forge.ai.simulation.SearchGuard.check(getGame(), "bridge:" + method);
         if (planHook != null && !"priority".equals(kind) && !"attackers".equals(kind)
                 && !"blockers".equals(kind) && !"mulligan".equals(kind) && !"startingPlayer".equals(kind)
                 && planHook.forgeChoices()) {
@@ -1193,16 +1213,83 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
     }
 
+    /**
+     * sdcc-item2-hooks-1115 (offline play-from-position only; null = off, and nothing changes): a one-shot answer for
+     * this seat's next bridged priority ask, in the ask's own answer shape ({@code {"choice": n, "x": ...}}). It is played
+     * instead of the plan hook and the seat (the forced action of a play-from-position run), then cleared. With
+     * {@code "menu"} (the menu size the caller saw) a different menu size refuses it (Forge decides; {@link
+     * #forcedPriorityResult} says why).
+     */
+    public volatile JsonObject forcedPriority;
+    /** sdcc-item2-hooks-1115: what happened to the last {@link #forcedPriority} ("played", or a refusal), or null. */
+    public volatile String forcedPriorityResult;
+
+    /**
+     * sdcc-item2-hooks-1115 (offline replay hooks only; nothing else calls it): the priority menu this seat's next
+     * bridged priority ask would carry and its ask body ({@code game}, {@code seat}, {@code menu}: what the candidate
+     * builder reads), as {@link #chooseSpellAbilityToPlayBridged} builds them, without asking anyone or counting
+     * anything. The caller runs it inside {@link #isolated}: building the menu prices costs.
+     */
+    public Object[] shadowPriorityAsk() {
+        final List<SpellAbility> menu = new ArrayList<>(legalSpellAbilities(null));
+        final JsonObject body = envelope(false);
+        final JsonArray items = new JsonArray();
+        items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
+        for (SpellAbility sa : menu) {
+            items.add(StateEncoder.encodeSpellAbility(sa));
+        }
+        body.add("menu", items);
+        return new Object[] {menu, body};
+    }
+
+    /** sdcc-item2-hooks-1115: the bridged priority ask answered by {@link #forcedPriority} (see there). */
+    private List<SpellAbility> playForcedPriority(final JsonObject ans) {
+        final List<SpellAbility> menu = new ArrayList<>(legalSpellAbilities(null));
+        final Integer choice = optInt(ans, "choice");
+        if (ans.has("menu") && ans.get("menu").getAsInt() != menu.size()) {
+            forcedPriorityResult = "menu_size " + menu.size() + " != " + ans.get("menu").getAsInt();
+            return super.chooseSpellAbilityToPlay();
+        }
+        if (choice == null || choice < 0 || choice > menu.size()) {
+            forcedPriorityResult = "choice out of range: " + choice;
+            return super.chooseSpellAbilityToPlay();
+        }
+        if (choice == 0) {
+            forcedPriorityResult = "played";
+            return null; // pass
+        }
+        final SpellAbility chosen = menu.get(choice - 1);
+        if (!chosen.canPlay()) {
+            forcedPriorityResult = "not playable: " + chosen;
+            return super.chooseSpellAbilityToPlay();
+        }
+        if (!announceX(chosen, ans)) {
+            forcedPriorityResult = "announce X refused";
+            return super.chooseSpellAbilityToPlay();
+        }
+        if (!ensureTargets(chosen)) {
+            forcedPriorityResult = "targets refused";
+            return super.chooseSpellAbilityToPlay();
+        }
+        forcedPriorityResult = "played";
+        return Lists.newArrayList(chosen);
+    }
+
     private List<SpellAbility> chooseSpellAbilityToPlayBridged() {
         count("chooseSpellAbilityToPlay");
         if (!bridged()) {
             return super.chooseSpellAbilityToPlay();
         }
+        final JsonObject forced = forcedPriority; // sdcc-item2-hooks-1115 (null unless a play-from run forces this ask)
+        if (forced != null) {
+            forcedPriority = null;
+            return playForcedPriority(forced);
+        }
         if (planHook != null) {
             // search-bones-1015: the plan follower first (its answer is played, never asked)
             final boolean rec = hookRows() != null; // sdcc-imit2-1111: the answerer records this line (census below)
             final Object[] shadow = hookShadow(); // sdcc-imit-1111: null unless the answerer records a line's priorities
-            final List<SpellAbility> p = planHook.priority(this);
+            final List<SpellAbility> p = guardedPriority();
             if (p != NO_OPINION) {
                 if (shadow != null) {
                     hookShadowAnswered((BenchSession.LocalAnswerer) shadow[0], (List<SpellAbility>) shadow[1], shadow[2], p);
@@ -1242,7 +1329,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body, menu);
         if (ans == null && planHook != null && planHook.handoff()) {
             // search-bones-1015: the seat's search handed this priority to the plan hook
-            final List<SpellAbility> p = planHook.priority(this);
+            final List<SpellAbility> p = guardedPriority();
             if (p != NO_OPINION) {
                 takeEcho();
                 final BenchSession.LocalAnswerer la = session.getLocalAnswerer();

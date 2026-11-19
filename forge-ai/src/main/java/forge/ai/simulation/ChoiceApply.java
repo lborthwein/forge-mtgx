@@ -349,6 +349,11 @@ public final class ChoiceApply {
         }
     }
 
+    /** pileChoices' copier: level-1 fidelity, the stack, and the frames' copy-side keys (copyside review 11-15, item 1). */
+    static GameCopier pileCopier(final Game live, final Frames frames) {
+        return copier(live, 1, true, frames);
+    }
+
     private static GameCopier copier(final Game live, final int fidelity, final boolean stack, final Frames frames) {
         final GameCopier c = new GameCopier(live, true);
         if (frames != null && frames.copyDungeon()) {
@@ -386,12 +391,17 @@ public final class ChoiceApply {
      */
     public static List<List<Integer>> pileChoices(final Game live, final Player liveMe, final ForcedWinSolver.Config cfg,
             final int nodes, final long ms, final int top, final long seed) {
-        return pileChoices(live, liveMe, cfg, nodes, ms, top, seed, null);
+        return pileChoices(live, liveMe, cfg, nodes, ms, top, seed, null, null);
     }
 
-    /** As above; sdcc-scorerleak-1115: {@code onCopy} (null = none, as before) edits the copy before the planner reads it. */
+    /**
+     * As above, with the seat's frames and an optional copy edit. Frames: the copy takes their copy-side keys (copyDungeon,
+     * copyStaleRefs, copyTriggers), as every other copier here does, so a pile ask over a waiting trigger is planned on the
+     * same stack the scorer let through (copyside review 11-15, item 1); null = the plain copy, as before.
+     * sdcc-scorerleak-1115: {@code onCopy} (null = none, as before) edits the copy before the planner reads it.
+     */
     public static List<List<Integer>> pileChoices(final Game live, final Player liveMe, final ForcedWinSolver.Config cfg,
-            final int nodes, final long ms, final int top, final long seed,
+            final int nodes, final long ms, final int top, final long seed, final Frames frames,
             final java.util.function.BiConsumer<Game, Player> onCopy) {
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -408,7 +418,7 @@ public final class ChoiceApply {
             final Game g;
             final Player me;
             synchronized (live) {
-                final GameCopier copier = copier(live, 1, true, null);
+                final GameCopier copier = pileCopier(live, frames);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
                 if (onCopy != null) {

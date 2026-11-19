@@ -129,6 +129,22 @@ public final class LookaheadSearch {
          */
         public double departZ = 0.0;
         /**
+         * sdcc-c1-priogf-1117 (C1; 0 = off, the default, and then nothing of it runs: no copy, no RNG draw): at our own
+         * main phase with an empty stack, a goldfish tie-break among the given candidates whose mean leaf value is within
+         * {@link #prioGfMargin} of the best ({@link #prioGfRule}); the goldfish plans this many of our turns. Only while our
+         * own-turn count is at most {@link #prioGfTurns} (0 = any turn).
+         */
+        public int prioGf = 0;
+        public double prioGfMargin = 0.01;
+        public int prioGfTurns = 4;
+        /**
+         * sdcc-c1-priogf-1117 (C1 hold; false = off, the default, and then nothing changes): inside the prioGf rule, among
+         * candidates that tie on the goldfish score, prefer one that spends no card (pass, or our hand size plus our
+         * permanents not lower on its copy after it was applied); and the pass candidate is searched at the rule's
+         * decisions even when the breadth cut it ({@link #prioGfSelect(double[], boolean[], double[], int, boolean[])}).
+         */
+        public boolean prioGfHold = false;
+        /**
          * unified-search-1106 (off by default; proof decisions only): one anytime comparison. Each candidate is compared with
          * the default on the worlds both finished, by the departZ test on those paired differences. A failed or unfinished
          * world drops that world, not the candidate or the decision; a default with no finished world is estimated by
@@ -649,6 +665,15 @@ public final class LookaheadSearch {
             }
             if (departZ > 0) {
                 o.addProperty("departZ", departZ);
+            }
+            if (prioGf > 0) {
+                // sdcc-c1-priogf-1117: only when on, so every other spec's JSON is unchanged
+                o.addProperty("prioGf", prioGf);
+                o.addProperty("prioGfMargin", prioGfMargin);
+                o.addProperty("prioGfTurns", prioGfTurns);
+                if (prioGfHold) {
+                    o.addProperty("prioGfHold", true);
+                }
             }
             if (deadEtb != AiFixes.Mode.OFF) {
                 o.addProperty("deadEtb", deadEtb.key());
@@ -1995,6 +2020,18 @@ public final class LookaheadSearch {
             return 0.0;
         }
 
+        /**
+         * sdcc-c1-priogf-1117 (called only with {@link Config#prioGf} > 0): decision thread, the goldfish score of copy
+         * {@code g} for {@code me} ({@link ForcedWinSolver#goldfish}: gamma^turn of its soonest unopposed line, over
+         * {@code horizon} of our turns; 0 = no line; NaN = not computed). {@code copyCtx} is this hook's
+         * {@link #onCopy} context (the seat's knowledge: only its known library top is read), {@code seed} the sampled
+         * orders' seed (the same for every candidate of one decision), {@code share} the number of positions the
+         * decision scores (a per-decision node allowance is shared among them).
+         */
+        default double prioGoldfish(Object copyCtx, Game g, Player me, int horizon, long seed, int share) {
+            return Double.NaN;
+        }
+
         /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
         default String leafError() {
             return null;
@@ -3207,6 +3244,11 @@ public final class LookaheadSearch {
         public boolean[] witnessed;
         public String[] witnessLine;
         public double witnessMs;
+        /**
+         * sdcc-c1-priogf-1117 (null unless the prioGf rule ran on this decision): "cands=[i:label:leaf:gf,...] base=i
+         * pick=i changed=true|false" (searched indices; gf -1 = not computed).
+         */
+        public String prioGf;
     }
 
     /**
@@ -3778,6 +3820,21 @@ public final class LookaheadSearch {
         if (cfg.deadFaceUp != AiFixes.Mode.OFF) {
             res.deadFaceUp = deadFaceUpLast; // this decision's turn-up checks (null = none)
         }
+        if (cfg.prioGfHold && prioGfGates(live, me, onStack, ph)) {
+            // sdcc-c1-priogf-1117 (C1 hold): the pass candidate is searched at the rule's decisions, so the tie set can be
+            // the default plus pass even when the breadth cut pass (appended last; the other candidates are unchanged)
+            boolean has = false;
+            for (Cand c : cands) {
+                has |= c.pass;
+            }
+            for (int i = 0; i < all.size() && !has; i++) {
+                if (all.get(i).pass) {
+                    cands.add(all.get(i));
+                    at.add(allAt.get(i));
+                    has = true;
+                }
+            }
+        }
         final List<Object> plans = pendingPlans;
         if (plans != null) {
             // search-bones-1015 (S-b): the turn-plan candidates, after the given ones (their index: given.size() + i)
@@ -4073,7 +4130,20 @@ public final class LookaheadSearch {
                 }
             }
         }
-        // line-own-target-1119 (ownHarm's demotion, review 3; null = off or nothing refused: unchanged)
+        // sdcc-c1-priogf-1117 (C1; prioGf 0 = off, the default: this block is skipped before anything is read, copied or
+        // drawn). At our own main phase with an empty stack, while our own-turn count is <= prioGfTurns (0 = any), after
+        // the argmax and its gates (departZ, median, margin) chose `best`: the eligible candidates whose mean leaf value is
+        // within prioGfMargin of the best mean form the tie set. With two or more, each of them and the default is applied
+        // on a copy and scored by the goldfish (prioGfRule). Interaction with departZ: the gated `best` stands unless the
+        // goldfish winner w of the tie set differs from it AND either w is the default (playing the default needs no gate)
+        // or w's goldfish score beats the default's by > 0; then w replaces `best`, exempt from departZ (and from the
+        // margin / median gates), but the loop guard, shadow mode, the over-budget cap and a J1 forced replay below still
+        // apply. With no line in the tie set, or a tie with the default, nothing changes.
+        if (!overBudget && provenPick < 0 && prioGfGates(live, me, onStack, ph)) {
+            best = prioGfRule(live, me, cands, ev, okArg, macroOf, best, decisionSeed, res);
+        }
+        // line-own-target-1119 (ownHarm's demotion, review 3; null = off or nothing refused: unchanged). After C1's
+        // goldfish tie-break, so a refused candidate it picks is demoted as well
         final Set<Integer> demote = decisionDemote;
         decisionDemote = null;
         boolean demoteBase = false;
@@ -4235,6 +4305,245 @@ public final class LookaheadSearch {
             System.err.println("[lookahead-explain] " + x);
         }
         return true;
+    }
+
+    // ------------------------------------------------------------------ C1: the goldfish tie-break (sdcc-c1-priogf-1117)
+
+    /**
+     * C1: the rule's decision gates (prioGf on, the hooks set, our own main phase with an empty stack, our own-turn count
+     * at most prioGfTurns, 0 = any). False at once with prioGf 0 (nothing else is read).
+     */
+    private boolean prioGfGates(Game live, Player me, boolean onStack, PhaseHandler ph) {
+        return cfg.prioGf > 0 && hooks != null && !onStack && ph.isPlayerTurn(me) && ph.getPhase() != null
+                && ph.getPhase().isMain() && (cfg.prioGfTurns <= 0 || me.getTurn() <= cfg.prioGfTurns);
+    }
+
+    /** C1: main-loop steps a candidate's copy may take to reach our next priority with an empty stack. */
+    static final int PRIO_GF_SETTLE = 400;
+
+    /**
+     * C1: the tie set. Candidate c is in it when eligible, ok, and its mean leaf value is within {@code margin} of the
+     * best ok mean (ev NaN = failed, never in it).
+     */
+    public static boolean[] prioGfTieSet(double[] ev, boolean[] ok, boolean[] eligible, double margin) {
+        final int n = ev.length;
+        double top = Double.NEGATIVE_INFINITY;
+        for (int c = 0; c < n; c++) {
+            if (ok[c] && !Double.isNaN(ev[c]) && ev[c] > top) {
+                top = ev[c];
+            }
+        }
+        final boolean[] in = new boolean[n];
+        for (int c = 0; c < n; c++) {
+            in[c] = ok[c] && eligible[c] && !Double.isNaN(ev[c]) && ev[c] >= top - margin;
+        }
+        return in;
+    }
+
+    /**
+     * C1: the selection rule (pure). {@code gf[c]} is candidate c's goldfish score (NaN = none, read as 0), computed for
+     * the tie set {@code in} and the default (index 0); {@code current} is the gated argmax. The winner w is the tie-set
+     * candidate with the largest score; ties go to {@code current}, then the larger ev, then the lower index. Returns -1
+     * (nothing changes) when the tie set has fewer than two candidates, no tie-set candidate has a line (score > 0), or
+     * w == current; else w when w is the default (index 0) or score(w) > score(default); else -1.
+     */
+    public static int prioGfSelect(double[] ev, boolean[] in, double[] gf, int current) {
+        return prioGfSelect(ev, in, gf, current, null);
+    }
+
+    /**
+     * C1 with hold ({@code hold} null = off: exactly the rule above). {@code hold[c]}: candidate c spends no card. Among
+     * equal scores a holding candidate goes first, then the order above (current pick, larger ev, lower index). A
+     * holding winner that ties the default's score while the default spends a card also replaces the choice (the hold
+     * is the tie-break against the default); everything else as above.
+     */
+    public static int prioGfSelect(double[] ev, boolean[] in, double[] gf, int current, boolean[] hold) {
+        int m = 0;
+        int w = -1;
+        double wg = 0;
+        for (int c = 0; c < in.length; c++) {
+            if (!in[c]) {
+                continue;
+            }
+            m++;
+            final double g = Double.isNaN(gf[c]) ? 0.0 : gf[c];
+            if (w < 0 || g > wg || g == wg && (hold != null && hold[c] != hold[w] ? hold[c]
+                    : c == current || w != current && ev[c] > ev[w])) {
+                w = c;
+                wg = g;
+            }
+        }
+        if (m < 2 || !(wg > 0) || w == current) {
+            return -1;
+        }
+        if (w == 0) {
+            return 0;
+        }
+        final double g0 = Double.isNaN(gf[0]) ? 0.0 : gf[0];
+        if (wg > g0) {
+            return w;
+        }
+        return hold != null && wg == g0 && hold[w] && !hold[0] ? w : -1;
+    }
+
+    /** C1: the rule at one decision (see the call site for the gates); returns the candidate to play (searched index). */
+    private int prioGfRule(Game live, Player me, List<Cand> cands, double[] ev, boolean[] ok, int[] macroOf, int best,
+            long decisionSeed, GivenResult res) {
+        final int n = cands.size();
+        final boolean[] eligible = new boolean[n];
+        for (int c = 0; c < n; c++) {
+            final Cand cd = cands.get(c);
+            // base candidates only: no S-t macro (a forced-answer schedule), S-b plan or block candidate
+            eligible[c] = (macroOf == null || macroOf[c] < 0) && cd.plan == null && cd.block == null && cd.schedule == null;
+        }
+        final boolean[] in = prioGfTieSet(ev, ok, eligible, cfg.prioGfMargin);
+        int m = 0;
+        for (boolean b : in) {
+            m += b ? 1 : 0;
+        }
+        if (m < 2) {
+            return best;
+        }
+        final double[] gf = new double[n];
+        Arrays.fill(gf, Double.NaN);
+        final boolean[] hold = cfg.prioGfHold ? new boolean[n] : null;
+        final long seed = mix(decisionSeed, 0xC1F15L);
+        final int share = m + (in[0] ? 0 : 1);
+        for (int c = 0; c < n; c++) {
+            if ((in[c] || c == 0) && eligible[c]) {
+                final boolean[] noSpend = {false};
+                gf[c] = prioGfOf(live, me, cands.get(c), seed, share, noSpend);
+                if (hold != null) {
+                    hold[c] = cands.get(c).pass || noSpend[0];
+                }
+            }
+        }
+        final int pick = prioGfSelect(ev, in, gf, best, hold);
+        final int played = pick < 0 ? best : pick;
+        final StringBuilder sb = new StringBuilder("cands=[");
+        boolean first = true;
+        for (int c = 0; c < n; c++) {
+            if (!in[c] && c != 0) {
+                continue;
+            }
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append(c).append(':').append(cands.get(c).label.replaceAll("[\\[\\],:]", "_")).append(':')
+                    .append(Double.isNaN(ev[c]) ? "nan" : String.format(java.util.Locale.ROOT, "%.4f", ev[c])).append(':')
+                    .append(Double.isNaN(gf[c]) ? "-1" : String.format(java.util.Locale.ROOT, "%.3f", gf[c]));
+            if (hold != null && hold[c]) {
+                sb.append(":hold"); // C1 hold: spends no card
+            }
+            if (!in[c]) {
+                sb.append(":out"); // the default outside the tie set: scored for the comparison only
+            }
+        }
+        sb.append("] base=").append(best).append(" pick=").append(played).append(" changed=").append(played != best);
+        res.prioGf = sb.toString();
+        return played;
+    }
+
+    /**
+     * C1: candidate {@code c} applied on one copy of the live game (a world drawn as the search's own: the belief
+     * re-draw of the hidden cards, our library below its known top), settled to our next priority with an empty stack
+     * (no opponent acts: a goldfish), and scored there by {@link SearchHooks#prioGoldfish}. The candidate's choices are
+     * Forge AI's or its target variant ({@link #prepare(Game, Player, Cand, SpellAbility, GameCopier)}). A terminal
+     * position scores 1 (we won) or 0; NaN = the candidate could not be applied or did not settle.
+     */
+    private double prioGfOf(Game live, Player liveMe, Cand c, long seed, int share, boolean[] noSpend) {
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 1)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player me;
+            final Object ctx;
+            SpellAbility sa = null;
+            synchronized (live) {
+                final GameCopier copier = copierOf(live);
+                copier.setCopyStack(cfg.stack);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+                if (worldMode == WORLD_BELIEF) {
+                    redraw(live, liveMe, g, me, new Random(mix(seed, 2)));
+                    if (ownKnownTop > 0) {
+                        restoreOwnTop(liveMe, me, ownKnownTop);
+                    }
+                    if (beliefWorldDecks()) {
+                        worldDecks(g, me);
+                    }
+                }
+                MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
+                ctx = hooks.onCopy(g, me);
+                if (!c.pass) {
+                    sa = prepare(g, me, c, null, copier);
+                    if (sa == null) {
+                        return Double.NaN;
+                    }
+                }
+            }
+            final double[] score = {Double.NaN};
+            final boolean[] reached = {false};
+            // C1 hold: our cards in hand plus the permanents we control, before the candidate (the copy as drawn)
+            final int cards0 = me.getCardsIn(ZoneType.Hand).size() + me.getCardsIn(ZoneType.Battlefield).size();
+            final List<SpellAbility> firstList = sa == null ? null : new ArrayList<>(List.of(sa));
+            final int horizon = cfg.prioGf;
+            me.dangerouslySetController(new PlayerControllerAi(g, me, me.getController().getLobbyPlayer()) {
+                private boolean used = false;
+
+                @Override
+                public List<SpellAbility> chooseSpellAbilityToPlay() {
+                    if (!used) {
+                        used = true;
+                        return firstList; // the candidate (null: the pass candidate passes)
+                    }
+                    if (!getGame().getStack().isEmpty()) {
+                        return null; // let our own spell and its triggers resolve
+                    }
+                    if (!reached[0]) {
+                        reached[0] = true;
+                        final Player p = getPlayer();
+                        noSpend[0] = p.getCardsIn(ZoneType.Hand).size() + p.getCardsIn(ZoneType.Battlefield).size() >= cards0;
+                        score[0] = hooks.prioGoldfish(ctx, getGame(), p, horizon, seed, share);
+                    }
+                    return null;
+                }
+            });
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    // a goldfish: the opponents never act (their other answers stay Forge AI's)
+                    o.dangerouslySetController(new PlayerControllerAi(g, o, o.getController().getLobbyPlayer()) {
+                        @Override
+                        public List<SpellAbility> chooseSpellAbilityToPlay() {
+                            return null;
+                        }
+                    });
+                }
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            givePriority(ph, me);
+            int steps = 0;
+            while (!g.isGameOver() && !reached[0] && steps < PRIO_GF_SETTLE) {
+                ph.mainLoopStep();
+                steps++;
+            }
+            if (!reached[0] && (g.isGameOver() || !me.isInGame())) {
+                return me.hasWon() ? 1.0 : 0.0;
+            }
+            return score[0];
+        } catch (RuntimeException | StackOverflowError e) {
+            System.err.println("[lookahead] prioGf copy failed: " + e);
+            return Double.NaN;
+        } finally {
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
     }
 
     /** S-t: values within 1e-6 of each other in every world (P(win) scale; the leaf is float32). */

@@ -138,6 +138,14 @@ public final class RlFrameDump implements PriorityDecisionListener {
             java.util.Arrays.asList("chooseSingleCardForZoneChange", "orderMoveToZoneList", "arrangeForScry",
                     "arrangeForSurveil", "chooseCardsToDiscardFrom", "tuckCardsViaMulligan")));
 
+    /**
+     * mull-check-1116 (research, offline; off unless -Dforge.bench.frameDump.mullDecide=true, which needs choices):
+     * at each forced mulliganKeepHand ask the seat's policy DECIDE frame (family MULLIGAN, keep / mulligan, as the
+     * policy seat builds it) is written as a {@code row_kind: "mull"} record, so checkpoints can be scored on the
+     * asks the pilot faced. Off: nothing here runs and every output is unchanged.
+     */
+    static final boolean MULL_DECIDE = Boolean.getBoolean("forge.bench.frameDump.mullDecide");
+
     private final int bandLo, bandHi;
     private final boolean choices;
     private final JsonObject tape;
@@ -221,6 +229,9 @@ public final class RlFrameDump implements PriorityDecisionListener {
                     if (CHOICE_METHODS.contains(method)) {
                         choiceFrame(c.getPlayer(), ordinal, method);
                     }
+                    if (MULL_DECIDE && "mulliganKeepHand".equals(method)) {
+                        mullFrame(c.getPlayer(), ordinal);
+                    }
                 }
 
                 @Override
@@ -283,6 +294,82 @@ public final class RlFrameDump implements PriorityDecisionListener {
         byMethod.merge(method, 1, Integer::sum);
         row(seat, decisions, turn, tbe, phase, stack, (String) got[2], (byte[]) got[0], (Integer) got[1], "choice",
                 ordinal, method);
+    }
+
+    /** mull-check-1116: the policy DECIDE frame of a forced mulligan keep ask (after its recorded answer). */
+    private void mullFrame(final Player p, final int ordinal) {
+        final Game g = game;
+        if (g == null || g.isGameOver()) {
+            return;
+        }
+        final int seat = g.getRegisteredPlayers().indexOf(p);
+        if (seat < 0 || seat > 1) {
+            return;
+        }
+        final int turn = g.getPhaseHandler().getTurn();
+        final Object[] got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+            final String stateSha = TrajectoryRef.stateSha(g);
+            final RlCandidates.Menu m = RlCandidates.build(g, p, "mulliganKeepHand", "mulligan", new JsonObject(), null);
+            final RlFeaturizer mf = new RlFeaturizer(feat.index());
+            mf.setVersion(feat.version());
+            mf.reset();
+            mf.setKnowledge(knowledge == null ? null : knowledge.forkFor(g));
+            final RlFeaturizer.Obs o = mf.observe(g, p, m.mullK, false, m);
+            m.bind(o, mf, p);
+            final RlWire.Decide f = o.version == 2 ? RlWire.Decide.v2() : new RlWire.Decide();
+            f.gameUid = uid;
+            f.decIdx = decisions;
+            f.seat = seat;
+            f.family = m.family;
+            f.mode = m.mode;
+            f.flags = (o.truncated ? RlWire.F_TRUNC_TOKENS : 0) | (o.droppedRefs ? RlWire.F_DROPPED_REFS : 0);
+            f.minPick = m.minPick;
+            f.maxPick = m.maxPick;
+            f.turn = Math.min(0xffff, turn);
+            f.L = o.L;
+            f.D = o.D;
+            f.C = m.C();
+            f.S = m.S();
+            f.P = 0;
+            f.tokCard = o.tokCard;
+            f.tokZone = o.tokZone;
+            f.tokAttr = o.tokAttr;
+            f.deckCard = o.deckCard;
+            f.deckCnt = o.deckCnt;
+            System.arraycopy(o.scal, 0, f.scal, 0, RlSchema.N_SCAL);
+            System.arraycopy(o.ctx, 0, f.ctx, 0, f.nCtx());
+            f.candKind = m.kindA;
+            f.candTok = m.tok;
+            f.candCard = m.card;
+            f.candTgt = m.tgt;
+            f.candSlot = m.slot;
+            f.candNum = m.num;
+            f.candAbility = m.ability;
+            f.candFlags = m.flagsA;
+            f.slotTok = m.slotTok;
+            if (o.version == 2) {
+                f.R = o.R;
+                f.F = o.F;
+                f.Dr = o.Dr;
+                f.tokBits = o.tokBits;
+                f.relSrc = o.relSrc;
+                f.relDst = o.relDst;
+                f.relType = o.relType;
+                f.relArg = o.relArg;
+                f.relNum = o.relNum;
+                f.factTok = o.factTok;
+                f.factId = o.factId;
+                f.factArg = o.factArg;
+                f.factNum = o.factNum;
+                f.restCard = o.restCard;
+                f.restCnt = o.restCnt;
+            }
+            return new Object[] {RlWire.encodeDecide(f), f.C, stateSha, m.family};
+        }));
+        choiceRows++;
+        byMethod.merge("mulliganKeepHand", 1, Integer::sum);
+        row(seat, decisions, turn, tapeTurns - turn, String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(),
+                (String) got[2], (byte[]) got[0], (Integer) got[1], "mull", ordinal, "mulliganKeepHand");
     }
 
     /** The seat's own v(o) frame, under the bench isolation (as the labeller's priority rows). */

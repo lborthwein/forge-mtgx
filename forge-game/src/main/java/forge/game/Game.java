@@ -151,6 +151,16 @@ public class Game {
     private Player monarch;
     private Player monarchBeginTurn;
     private Player startingPlayer;
+    /** exact-hand-1116 (bench research, offline; null = off, the default): the first game's first player, no roll. */
+    private Player forcedFirstPlayer;
+
+    public Player getForcedFirstPlayer() {
+        return forcedFirstPlayer;
+    }
+
+    public void setForcedFirstPlayer(final Player p) {
+        forcedFirstPlayer = p;
+    }
 
     private Direction turnOrder = Direction.getDefaultDirection();
 

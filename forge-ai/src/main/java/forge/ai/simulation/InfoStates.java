@@ -637,6 +637,18 @@ public final class InfoStates implements LibraryInfoListener {
         return out;
     }
 
+    /**
+     * sdcc-item2-hooks-1115 (offline play-from-position only; nothing else calls it): {@code owner}'s library was
+     * re-ordered in place with every card whose position anyone knows kept at its index (a continuation seed's
+     * re-shuffle of the unknown future). Record the new order as explained, so the next read does not take it for an
+     * unexplained change and forget the library.
+     */
+    public synchronized void resnapReordered(final Player owner) {
+        if (owner != null && owner.getGame() == game) {
+            snap.put(owner.getId(), ids(owner));
+        }
+    }
+
     private void forgetLib(final int owner) {
         for (int o : seats) {
             final View v = view(o, owner);

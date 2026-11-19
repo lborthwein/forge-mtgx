@@ -74,7 +74,20 @@ public final class ForcedWinModel {
          * that way in the sandbox (one run per card name of ours); {@link Eff#n} = 1: a searched card that is not cast
          * goes to our hand (observed), 0: it does not (such a pick is not planned).
          */
-        TUTOR_CAST
+        TUTOR_CAST,
+        /**
+         * sdcc-fetchthin-1117 (observed only by a fetchThin reader): search our library for a land and put it onto the
+         * battlefield (the library shrinks by one; the land is ours in play). {@link Eff#names}: the card names the engine
+         * offered the search in the sandbox (its filter, as observed; null = any land); {@link Eff#colors} = 1 when the
+         * land entered tapped there (the ability's own instruction), 0 otherwise.
+         */
+        TUTOR_BF,
+        /**
+         * sdcc-sacmana-1117 (observed only by a grantSacMana reader): until end of turn our permanents gain "sacrifice
+         * this: add one mana" ({@link Eff#colors}: its colours; {@link Eff#n} = 1: every permanent that gained it was a
+         * land, 2: other permanents too).
+         */
+        GRANT_SAC_MANA
     }
 
     /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
@@ -348,6 +361,16 @@ public final class ForcedWinModel {
         int returnN;
         String returnType;
         boolean tapSelf, sacSelf, discardHand;
+        /**
+         * sdcc-protect-1117 (a protectUntilNext reader only; false otherwise): playing it gave our player a protection
+         * keyword against everything or against creatures (observed in the sandbox), lasting until our next turn.
+         */
+        boolean protectsPass;
+        /**
+         * sdcc-protect-1117 (a drawGrowth reader only; 0 otherwise): each earlier activation of this permanent's ability
+         * makes its draw this many cards larger (observed: two activations in one sandbox, the host untapped between).
+         */
+        int drawGrowth;
         /**
          * sdcc-tutorcast-1110 (set only by a sourceLeaves reader; 0 otherwise, and then nothing changes): where the
          * engine left this activated ability's own source once it had resolved, when that is no longer the battlefield
@@ -869,6 +892,11 @@ public final class ForcedWinModel {
         int pendingId = -1;
         /** sdcc-etb-1110 (landEntersProbe; null = off): this position's land entries, asked when a plan plays a land. */
         LandEntry landEntry;
+        /**
+         * sdcc-costtax-1117 (costTax; null = off): for our spells in hand, library and graveyard, "card id|cost text" ->
+         * the change of its generic mana under this position's cost adjustments (taxes positive, reductions negative).
+         */
+        java.util.Map<String, Integer> tax;
 
         String describe() {
             return "life=" + life + " opp=" + oppLife + " oppLib=" + oppLibrary + " landDrop=" + landDrop + " storm="
@@ -1064,8 +1092,10 @@ public final class ForcedWinModel {
             // sdcc-tutorcast-1110: so does a tutorCast reader ("tc|"), whose probes also observe search-and-cast effects
             // sdcc-tutorcast-1110: and a sourceLeaves reader ("sl|"), whose probes also note where an ability's source ends
             // sdcc-probeobj-1111: and a probeObjects reader ("po|"), whose probes give an ability the object it needs
+            // sdcc-fetchthin-1117: and a fetchThin reader ("ft|"), whose probes map a land searched onto the battlefield
             final String key = (probeObjects ? "po|" : "") + (sourceLeaves ? "sl|" : "") + (tutorCast ? "tc|" : "") + (planScry ? "scry|" : "")
-                    + (probeSettle ? "settle|" : "") + c.getName();
+                    + (probeSettle ? "settle|" : "") + (fetchThin ? "ft|" : "") + (protectPass ? "pp|" : "") + (drawGrowth ? "dg|" : "") + (grantSacMana ? "gs|" : "")
+                    + c.getName();
             final boolean prevHide = ForcedWinProbe.HIDE.get();
             ForcedWinProbe.HIDE.set(hideLibrary); // sdcc-leak-1111 (the template's probes and its loop probe)
             final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
@@ -1088,6 +1118,13 @@ public final class ForcedWinModel {
                 final boolean prev = ForcedWinProbe.PLAN_SCRY.get(), prevSettle = ForcedWinProbe.PROBE_SETTLE.get();
                 final boolean prevTc = ForcedWinProbe.TUTOR_CAST.get(), prevSl = ForcedWinProbe.SOURCE_LEAVES.get();
                 final boolean prevPo = ForcedWinProbe.PROBE_OBJECTS.get();
+                final boolean prevFt = ForcedWinProbe.FETCH_THIN.get();
+                final boolean prevPp = ForcedWinProbe.PROTECT_PASS.get(), prevDg = ForcedWinProbe.DRAW_GROWTH.get();
+                ForcedWinProbe.FETCH_THIN.set(fetchThin);
+                ForcedWinProbe.PROTECT_PASS.set(protectPass);
+                ForcedWinProbe.DRAW_GROWTH.set(drawGrowth);
+                final boolean prevGs = ForcedWinProbe.GRANT_SAC.get();
+                ForcedWinProbe.GRANT_SAC.set(grantSacMana);
                 ForcedWinProbe.PROBE_OBJECTS.set(probeObjects);
                 ForcedWinProbe.PLAN_SCRY.set(planScry);
                 ForcedWinProbe.PROBE_SETTLE.set(probeSettle);
@@ -1101,6 +1138,10 @@ public final class ForcedWinModel {
                     ForcedWinProbe.TUTOR_CAST.set(prevTc);
                     ForcedWinProbe.SOURCE_LEAVES.set(prevSl);
                     ForcedWinProbe.PROBE_OBJECTS.set(prevPo);
+                    ForcedWinProbe.FETCH_THIN.set(prevFt);
+                    ForcedWinProbe.PROTECT_PASS.set(prevPp);
+                    ForcedWinProbe.DRAW_GROWTH.set(prevDg);
+                    ForcedWinProbe.GRANT_SAC.set(prevGs);
                 }
                 if (!forge.ai.AiWork.spent()) {
                     synchronized (templates) {
@@ -1150,6 +1191,18 @@ public final class ForcedWinModel {
          * as their payment, and a search that puts the card into our hand by way of exile (a TUTOR).
          */
         boolean tutorCast;
+
+        /**
+         * sdcc-fetchthin-1117 (solver key fetchThin; false = off, and then nothing changes): the probes map a land that an
+         * ability searches from our library onto the battlefield ({@link EffKind#TUTOR_BF}) instead of dropping the move,
+         * under their own template keys.
+         */
+        boolean fetchThin;
+
+        /** sdcc-protect-1117 (solver keys protectUntilNext / drawGrowth; false = off): see {@link ForcedWinProbe#PROTECT_PASS}. */
+        boolean protectPass, drawGrowth;
+        /** sdcc-sacmana-1117 (solver key grantSacMana; false = off): see {@link ForcedWinProbe#GRANT_SAC}. */
+        boolean grantSacMana;
 
         /**
          * sdcc-tutorcast-1110 (solver key sourceLeaves; false = off, and then nothing changes): the probes also note
@@ -1510,7 +1563,8 @@ public final class ForcedWinModel {
             }
             for (ACard a : p.battlefield) {
                 for (Abil ab : a.onBattlefield) {
-                    chooses |= !ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
+                    chooses |= !ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP)
+                            || ab.has(EffKind.TUTOR_BF)); // sdcc-fetchthin-1117 (a fetchThin reader's templates only)
                 }
             }
             // sdcc-probeobj-1111 (a probeObjects reader only): an ability whose object is a card in our graveyard needs the
