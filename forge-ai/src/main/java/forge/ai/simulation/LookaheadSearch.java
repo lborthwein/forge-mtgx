@@ -4114,7 +4114,9 @@ public final class LookaheadSearch {
             res.provenLoss = provenLoss;
             res.planBroken = planBroken;
         }
-        final double[][] rpArg = hooks.reachDepart() > 0 && reachPart != null && reachPart.length == n ? reachPart : null;
+        // read only for the anytime chooser, as before review 3 (hooks may be null outside it)
+        final double[][] rpArg = finished != null && hooks.reachDepart() > 0 && reachPart != null && reachPart.length == n
+                ? reachPart : null;
         final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick
                 : finished != null ? chooseAnytime(values, finished, okArg, n, k, cfg.departZ, cfg.margin, rootP,
                         rpArg, hooks.reachDepart(), stats)
