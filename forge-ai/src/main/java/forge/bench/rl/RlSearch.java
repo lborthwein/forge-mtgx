@@ -1780,6 +1780,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lastReason = RlSeat.IMIT_SEARCH;
         ownHarmLast = null;
         ownHarmSeen = false;
+        ownHarmDropped = false;
         try {
             // line-own-target-1119 (ownHarm off: the answer as decided)
             return ownHarmNet(g, me, m, menuObjs, greedy, decide0(g, me, m, frame, greedy, menuObjs));
@@ -2074,7 +2075,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final Searched hook = onSearched;
         lastProposeMs = stage != null ? stage.ms : -1; // sb-live-1018: S-b only (stage is null without plans)
-        if (hook != null && r.givenIndex.length > 0) {
+        // line-own-target-1119: a decision ownHarm left with fewer than two candidates still gets its decision line, so the
+        // line numbering (replay marks and rebuilds key on it) is the one the key-off seat writes
+        if (hook != null && (r.givenIndex.length > 0 || ownHarmDropped && "uncontested".equals(r.outcome))) {
             try {
                 hook.searched(g, r, by.size(), (System.nanoTime() - t0) / 1e6 - r.ms);
             } catch (RuntimeException e) {
@@ -2313,6 +2316,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private JsonObject ownHarmLast;
     /** This decision's given entries went through {@link #ownHarmOrder} (the net does not count them again). */
     private boolean ownHarmSeen;
+    /** ON dropped a given entry or a sampled plan in this decision (without it the decision had two candidates or more). */
+    private boolean ownHarmDropped;
 
     /** The ownHarm guard's mode (the look-ahead config's, from {@link Config#ownHarm}). */
     AiFixes.Mode ownHarmMode() {
@@ -2397,6 +2402,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final boolean defGone = drop.get(0) == (int) order.get(0);
         st.ownHarmDropped += drop.size();
+        ownHarmDropped = true;
         order.removeAll(drop);
         int fallback = -1;
         if (defGone) {
@@ -2489,6 +2495,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         note.addProperty("plan", label);
         note.addProperty("why", why);
         System.err.println("[own-harm] " + note);
+        ownHarmDropped |= mode == AiFixes.Mode.ON;
         return mode == AiFixes.Mode.ON;
     }
 

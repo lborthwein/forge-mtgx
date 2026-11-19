@@ -201,12 +201,19 @@ public class OwnHarmSearchTest extends SimulationTest {
      * the opponent with no creature; Snuff Out in our hand, castable both ways (four lands, two Swamps, 20 life).
      */
     private Board snuff() {
+        return snuff(true);
+    }
+
+    /** As {@link #snuff()}; {@code island}: an Island in hand too (a land play among the candidates). */
+    private Board snuff(final boolean island) {
         return (g, p0, p1) -> {
             for (String n : new String[] {"Swamp", "Swamp", "Mountain", "Mountain"}) {
                 addCard(n, p0);
             }
             addCardToZone(SNUFF, p0, ZoneType.Hand);
-            addCardToZone("Island", p0, ZoneType.Hand);
+            if (island) {
+                addCardToZone("Island", p0, ZoneType.Hand);
+            }
             final Card ulamog = addCard(ULAMOG, p1);
             control(ulamog, p0);
             ulamog.setSickness(false);
@@ -312,6 +319,27 @@ public class OwnHarmSearchTest extends SimulationTest {
                 "only the refused entries leave: off " + off.line() + " on " + on.line());
     }
 
+    /**
+     * Decision-line numbering: replay marks and "Continue from here" rebuilds key on the policy seat's decision-line index.
+     * The policy passes with only Snuff Out besides: off, the decision is searched (decision line 0); on, Snuff Out leaves
+     * and pass is alone, yet decision line 0 is still written (outcome uncontested, with its ownHarm field), so every later
+     * line keeps its key-off index.
+     */
+    @Test
+    public void keyOnADecisionLeftUncontestedKeepsItsDecisionLine() throws Exception {
+        final Run off = run("", snuff(false), null);
+        final Run on = run("ownHarm=on", snuff(false), null);
+        Assert.assertEquals(off.answer, "pass", off.summary());
+        Assert.assertEquals(on.answer, "pass", on.summary());
+        Assert.assertNotNull(off.line(), off.summary());
+        Assert.assertNotNull(on.line(), on.summary());
+        Assert.assertEquals(off.line().get("decision").getAsInt(), 0);
+        Assert.assertEquals(on.line().get("decision").getAsInt(), 0);
+        Assert.assertNotEquals(off.line().get("outcome").getAsString(), "uncontested", off.summary());
+        Assert.assertEquals(on.line().get("outcome").getAsString(), "uncontested", on.summary());
+        Assert.assertNotNull(on.ownHarm(), on.summary());
+    }
+
     // ------------------------------------------------------------------ what stays
 
     /**
@@ -327,11 +355,12 @@ public class OwnHarmSearchTest extends SimulationTest {
         Assert.assertTrue(live.ownHarmLines.isEmpty(), live.summary());
         final Run dead = run("ownHarm=on", abrade(false), "Abrade");
         Assert.assertNotEquals(dead.answer, "Abrade", dead.summary());
-        // pass alone is left: nothing to search, so no decision line; the refusal's own line says it
-        Assert.assertNull(dead.line(), dead.summary());
+        // pass alone is left: nothing to search, but the decision line is still written (see the numbering test)
+        Assert.assertNotNull(dead.line(), dead.summary());
+        Assert.assertEquals(dead.line().get("outcome").getAsString(), "uncontested", dead.summary());
         Assert.assertEquals(dead.ownHarmLines.size(), 1, dead.summary());
-        final JsonObject oh = JsonParser.parseString(dead.ownHarmLines.get(0).substring("[own-harm] ".length()))
-                .getAsJsonObject();
+        final JsonObject oh = dead.ownHarm();
+        Assert.assertNotNull(oh, dead.summary());
         Assert.assertEquals(oh.get("fallback").getAsInt(), 0, oh.toString());
         Assert.assertTrue(oh.getAsJsonArray("refused").get(0).getAsJsonObject().get("why").getAsString()
                 .contains("only our own to target: [Grizzly Bears"), oh.toString());
