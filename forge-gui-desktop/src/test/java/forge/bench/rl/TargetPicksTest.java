@@ -413,9 +413,39 @@ public class TargetPicksTest extends SimulationTest {
     // ------------------------------------------------------------------ A3: the cast-time pick
 
     /**
+     * Forge AI's own pick for Flame Slash on this board (a plain Forge AI seat, no policy) is their Grizzly Bears, never
+     * our Runeclaw Bear: the harmful mixed-target pick below is constructed (the scripted policy picks ours), as the brief
+     * asks when Forge does not pick ours.
+     */
+    @Test
+    public void forgeAiOwnPickForFlameSlashIsTheirs() {
+        final Game game = initAndCreateGame();
+        final Player p0 = game.getPlayers().get(0);
+        final Player p1 = game.getPlayers().get(1);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, p0);
+        slash().build(game, p0, p1);
+        game.getAction().checkStateEffects(true);
+        Card slash = null;
+        for (Card c : p0.getCardsIn(ZoneType.Hand)) {
+            if (c.getName().equals(SLASH)) {
+                slash = c;
+            }
+        }
+        Assert.assertNotNull(slash);
+        final SpellAbility sa = slash.getFirstSpellAbility();
+        sa.setActivatingPlayer(p0);
+        Assert.assertTrue(p0.getController().chooseTargetsFor(sa), "Forge AI targets Flame Slash");
+        final List<String> names = new ArrayList<>();
+        for (GameObject o : sa.getTargets()) {
+            names.add(o instanceof Card ? ((Card) o).getName() : String.valueOf(o));
+        }
+        System.out.println("[target-picks-test] Forge AI's Flame Slash: " + names);
+        Assert.assertEquals(names, List.of(THEIRS));
+    }
+
+    /**
      * Key off: the policy's Flame Slash, its target asked of the policy (two creatures: a real choice), picks our own
-     * Runeclaw Bear; the pick stands. (Forge AI's own pick here is their Grizzly Bears: the guard's first try below; in 23
-     * live mixed-target casts it never picked ours, so the harmful pick is the policy's, constructed by the script.)
+     * Runeclaw Bear; the pick stands (constructed: see {@link #forgeAiOwnPickForFlameSlashIsTheirs}).
      */
     @Test
     public void slashKeyOffThePolicysOwnPickStands() throws Exception {
