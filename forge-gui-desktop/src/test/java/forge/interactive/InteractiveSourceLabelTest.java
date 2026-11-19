@@ -274,8 +274,9 @@ public class InteractiveSourceLabelTest extends AITest {
         final Card[] freeze = new Card[1];
         try (Harness h = new Harness((seat, foe) -> {
             freeze[0] = addCardToZone("Brain Freeze", seat, ZoneType.Hand);
-            // Hidden cards that must stay hidden: a second Brain Freeze in the seat's library, the foe's hand.
-            addCardToZone("Brain Freeze", seat, ZoneType.Library);
+            // Hidden cards that must stay hidden: the seat's library, the foe's hand. (Not a second Brain Freeze: since
+            // review fix 3 of #253 a hidden card of the same name makes the label the fixed one, by design.)
+            addCardToZone("Force of Will", seat, ZoneType.Library);
             addCardToZone("Lightning Bolt", foe, ZoneType.Hand);
         }, false)) {
             final SpellAbility spell = onStack(h.game, freeze[0], h.seat, h.foe);
@@ -603,6 +604,10 @@ public class InteractiveSourceLabelTest extends AITest {
         twincast.setActivatingPlayer(you);
         final Card copy = CardFactory.copySpellAbilityAndPossiblyHost(twincast, spell, you).getHostCard();
         assertTrue(copy.isCopiedSpell());
+        // The original resolved too: it is in the graveyard, public (since review fix 3 of #253, a Pact of Negation
+        // hidden in a hand makes the name the fixed one for a seat that may not see it, by design).
+        you.getZone(ZoneType.Hand).remove(pact);
+        you.getZone(ZoneType.Graveyard).add(pact);
         // It resolved: on the stack, then gone (a copy leaving the stack ceases to exist).
         game.getStackZone().add(copy);
         game.getStackZone().remove(copy);

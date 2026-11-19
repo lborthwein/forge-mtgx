@@ -1069,7 +1069,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                         "Forge input " + input.getClass().getName() + " exposed no human controls",
                         kind);
             }
-            final String cleanPrompt = sanitizeText(promptMessage);
+            final String cleanPrompt = input instanceof InputConfirm ? sinkTriggerQuestion(sanitizeText(promptMessage))
+                    : sanitizeText(promptMessage);
             final String fingerprint = System.identityHashCode(input) + "|" + kind + "|"
                     + cleanPrompt + "|" + controls;
             if (fingerprint.equals(lastInputFingerprint) && activeRequest.get() != null) {
@@ -4117,13 +4118,58 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         return lethal;
     }
 
+    /**
+     * The label of an ability Forge supplied as a view: the order prompt's items, a stack ability, an ability to choose.
+     * Lane trigger-label-1119 review fix 3: every label but an offered ability's own words passes the final sink check
+     * ({@link InteractiveState.HiddenNames}), the authority; a failing one becomes the fixed label, "Origin — triggered
+     * ability" (or "— ability"), with "A hidden card" or "An effect" as the origin when the host's own name fails too.
+     * An offered ability's words ({@link #describeAbility}: "Choose an ability", the action preview) are the printed
+     * words of a card this seat may identify and stay outside it: owner report 2026-10-21T21-17-01 ("Cast Lórien
+     * Revealed · (Face-down cardcycling {1})") was a basic land hidden in a library cutting "Island" out of
+     * islandcycling's own text.
+     */
     private String safeAbilityLabel(final SpellAbilityView ability) {
         if (ability == null) {
             return "Unknown ability";
         }
         final CardView host = ability.getHostCard();
         final var offered = controller == null ? null : controller.getBrowserAbility(ability);
+        final PlayerView viewer = human.getView();
+        if (offered != null && (host == null || InteractiveState.knownNow(game, host, viewer) != null)) {
+            final String described = describeAbility(offered, (text, from) -> sanitizeText(text, from.getView()));
+            if (described != null) return described;
+        }
         final SpellAbility actual = offered != null ? offered : abilityBehind(ability);
+        final String label = abilityLabelBeforeSink(ability, actual);
+        final InteractiveState.HiddenNames hidden = InteractiveState.HiddenNames.of(game, viewer);
+        if (hidden.safe(label)) return label;
+        final Card hostCard = actual == null ? null : actual.getHostCard();
+        final boolean effect = host != null && host.getGamePieceType() == GamePieceType.EFFECT
+                || hostCard != null && hostCard.getGamePieceType() == GamePieceType.EFFECT;
+        return hidden.fixedLabel(InteractiveState.origin(host, hostCard, game, viewer),
+                effect ? InteractiveState.AN_EFFECT : InteractiveState.A_HIDDEN_CARD, actual);
+    }
+
+    /**
+     * Lane trigger-label-1119 review fix 3: Forge's optional-trigger question ("Use triggered ability of X?" with the
+     * trigger's words, PlayerControllerHuman.confirmTrigger) carries ability text, so it passes the sink check too; a
+     * failing one is asked as "Use triggered ability of Origin?", the origin from the prompt's card. Any other confirm
+     * is returned unchanged.
+     */
+    private String sinkTriggerQuestion(final String prompt) {
+        final String question = forge.util.Localizer.getInstance().getMessage("lblUseTriggeredAbilityOf");
+        if (prompt == null || question == null || question.isBlank() || !prompt.startsWith(question)) return prompt;
+        final InteractiveState.HiddenNames hidden = InteractiveState.HiddenNames.of(game, human.getView());
+        if (hidden.safe(prompt)) return prompt;
+        final CardView card = promptCard;
+        final String origin = card == null ? InteractiveState.A_HIDDEN_CARD
+                : InteractiveState.origin(card, game, human.getView());
+        return question + " " + hidden.safeOrigin(origin, InteractiveState.A_HIDDEN_CARD) + "?";
+    }
+
+    /** {@link #safeAbilityLabel} before its sink check, for an ability that is not offered in its own words. */
+    private String abilityLabelBeforeSink(final SpellAbilityView ability, final SpellAbility actual) {
+        final CardView host = ability.getHostCard();
         final PlayerView viewer = human.getView();
         // lane trigger-label-1119: with the ability in hand, the host is judged as the card with its id is now (a
         // delayed trigger's host is a last-known copy: owner report 2026-11-19T05-23-42, the owner's dashed Ragavan read
@@ -4133,12 +4179,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 : InteractiveState.mayReceiveIdentity(host, viewer));
         if (!hostKnown) {
             // "A face-down card" or "A hidden card", with no id (review fix 2).
-            return InteractiveState.origin(host, game, viewer) + " — "
-                    + (InteractiveState.isTriggered(actual) ? "triggered ability" : "ability");
-        }
-        if (offered != null) {
-            final String described = describeAbility(offered, (text, from) -> sanitizeText(text, from.getView()));
-            if (described != null) return described;
+            return InteractiveState.origin(host, actual == null ? null : actual.getHostCard(), game, viewer) + " — "
+                    + InteractiveState.kindOf(actual);
         }
         final String description = Objects.requireNonNullElse(ability.getDescription(), "Ability");
         if (actual == null) {

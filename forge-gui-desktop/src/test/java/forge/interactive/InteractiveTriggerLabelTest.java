@@ -216,15 +216,16 @@ public class InteractiveTriggerLabelTest extends AITest {
     /**
      * The reported prompt, rebuilt: the seat is the monarch and has dashed Ragavan; at its end step the monarch's draw and
      * dash's return are to be ordered. The draw reads as the monarch's, without "[Phase: ...]"; the return names Ragavan.
-     * The foe holds a Ragavan of its own and a Lightning Bolt, hidden: the seat's Ragavan is still named, and nothing of
-     * the foe's hand shows.
+     * The foe holds a Lightning Bolt and a Counterspell, hidden: nothing of the foe's hand shows. (The owner's game was a
+     * singleton cube, so no other Ragavan was hidden; since review fix 3 a hidden card of the same name would make the
+     * label the fixed one, by design: {@link #r3_hiddenSafe}.)
      */
     @Test(timeOut = 900000)
     public void owner1119_theMonarchsDrawAndDashsReturnNameTheirCards() throws Exception {
         final Card[] ragavan = new Card[1];
         try (Harness h = new Harness((seat, foe) -> {
             ragavan[0] = addCardToZone("Ragavan, Nimble Pilferer", seat, ZoneType.Hand);
-            addCardToZone("Ragavan, Nimble Pilferer", foe, ZoneType.Hand);
+            addCardToZone("Counterspell", foe, ZoneType.Hand);
             addCardToZone("Lightning Bolt", foe, ZoneType.Hand);
         })) {
             h.game.getAction().becomeMonarch(h.seat, null);
@@ -747,6 +748,240 @@ public class InteractiveTriggerLabelTest extends AITest {
             System.out.println("R2 CYCLE: " + cycle + " / DEPTH: " + overlong);
             assertEquals(cycle, "An effect — ability");
             assertEquals(overlong, "An effect — ability");
+        }
+    }
+
+    // ------------------------------------------------------------------ review fix 3: the final sink check
+
+    /** The seat's view of the stack's top entry. */
+    private static JsonObject topEntry(final Harness h) {
+        return InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack").get(0).getAsJsonObject();
+    }
+
+    /** Neither the hidden card's name nor its id anywhere in {@code text}. */
+    private static void namesNothingOf(final String text, final Card secret) {
+        assertFalse(text.contains("Grizzly Bears") || text.contains("(" + secret.getId() + ")"), text);
+    }
+
+    private static void entryIs(final JsonObject entry, final String name, final String description, final Card secret) {
+        namesNothingOf(entry.toString(), secret);
+        assertEquals(entry.get("name").getAsString(), name, entry.toString());
+        assertEquals(entry.get("description").getAsString(), description, entry.toString());
+    }
+
+    /** r3 finding 1: an ability rendering the host's ExiledWith list ("Return {c:ExiledWith}."), the card hidden since. */
+    @Test(timeOut = 900000)
+    public void r3_anExiledWithListConcealedLaterIsNotShown() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card bears = addCardToZone("Grizzly Bears", h.foe, ZoneType.Exile);
+            host.addExiledCard(bears);
+            h.game.getStack().add(ability(host, h.foe, "DB$ ChangeZone | Origin$ Exile | Destination$ Hand | Defined$ ExiledWith"
+                    + " | StackDescription$ Return {c:ExiledWith}. | SpellDescription$ Return exiled cards."));
+            bears.turnFaceDown(true);
+            entryIs(topEntry(h), "Sneak Attack", "Sneak Attack — ability", bears);
+        }
+    }
+
+    /** r3 finding 1: Dollhouse of Horrors' paid "Exiled" list, the exiled card turned face down since. */
+    @Test(timeOut = 900000)
+    public void r3_aPaidExiledListConcealedLaterIsNotShown() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Dollhouse of Horrors", h.foe);
+            final Card bears = addCardToZone("Grizzly Bears", h.foe, ZoneType.Exile);
+            final SpellAbility sa = host.getSpellAbilities().stream()
+                    .filter(a -> a.getApi() == forge.game.ability.ApiType.CopyPermanent).findFirst().orElseThrow();
+            sa.setActivatingPlayer(h.foe);
+            sa.addCostToHashList(bears, "Exiled", true);
+            h.game.getStack().add(sa);
+            bears.turnFaceDown(true);
+            entryIs(topEntry(h), "Dollhouse of Horrors", "Dollhouse of Horrors — ability", bears);
+        }
+    }
+
+    /** r3 finding 1: a snapshot host's Remembered falls back to the current host's list. */
+    @Test(timeOut = 900000)
+    public void r3_aSnapshotsRememberedFallbackIsNotShown() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card snapshot = CardCopyService.getLKICopy(host);
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            host.addRemembered(bears);
+            h.game.getStack().add(ability(snapshot, h.foe, "DB$ ChangeZone | Origin$ Battlefield | Destination$ Hand"
+                    + " | Defined$ Remembered | StackDescription$ Return {c:Remembered}. | SpellDescription$ Return remembered cards."));
+            bears.turnFaceDown(true);
+            entryIs(topEntry(h), "Sneak Attack", "Sneak Attack — ability", bears);
+        }
+    }
+
+    /** r3 finding 2: text rendered from a remembered list that has been cleared since; the card hidden after. */
+    @Test(timeOut = 900000)
+    public void r3_storedTextFromAListChangedSinceIsNotShown() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            host.addRemembered(bears);
+            h.game.getStack().add(ability(host, h.foe, "DB$ ChangeZone | Origin$ Battlefield | Destination$ Hand"
+                    + " | Defined$ Remembered | StackDescription$ Return {c:Remembered}. | SpellDescription$ Return remembered cards."));
+            host.clearRemembered();
+            bears.turnFaceDown(true);
+            entryIs(topEntry(h), "Sneak Attack", "Sneak Attack — ability", bears);
+        }
+    }
+
+    /** r3 finding 1: a sub-ability with its own host and remembered list. */
+    @Test(timeOut = 900000)
+    public void r3_aSubAbilitysOwnReferencesAreNotShown() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card snapshot = CardCopyService.getLKICopy(host);
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            host.addRemembered(bears);
+            final SpellAbility sa = ability(snapshot, h.foe, "AB$ Draw | Cost$ 0 | Defined$ You | SpellDescription$ Draw a card.");
+            sa.setSubAbility((forge.game.spellability.AbilitySub) ability(host, h.foe, "DB$ ChangeZone | Origin$ Battlefield"
+                    + " | Destination$ Hand | Defined$ Remembered | StackDescription$ Return {c:Remembered}."));
+            h.game.getStack().add(sa);
+            bears.turnFaceDown(true);
+            entryIs(topEntry(h), "Sneak Attack", "Sneak Attack — ability", bears);
+        }
+    }
+
+    /** r3 finding 1: a trigger's ORIGINALHOST, rendered into the stored stack text, the card hidden since. */
+    @Test(timeOut = 900000)
+    public void r3_anOriginalHostInStoredTextIsNotShown() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            final SpellAbility sa = wrapped(host, h.foe, null, "Return ORIGINALHOST.");
+            sa.getTrigger().setCardState(bears.getCurrentState());
+            h.game.getStack().add(sa);
+            bears.turnFaceDown(true);
+            entryIs(topEntry(h), "Sneak Attack", "Sneak Attack — triggered ability", bears);
+        }
+    }
+
+    /**
+     * r3 finding 3: an effect the game no longer has (removed from the command zone) is not named by its generated name,
+     * and its source chain is still followed: its source is hidden.
+     */
+    @Test(timeOut = 900000)
+    public void r3_aRemovedEffectNeverShowsItsGeneratedName() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            final Card effect = effect(h.game, h.foe, bears);
+            final SpellAbility sa = ability(effect, h.foe, "DB$ Draw | Defined$ You | SpellDescription$ Draw a card.");
+            h.foe.getZone(ZoneType.Command).remove(effect);
+            assertEquals(h.game.findById(effect.getId()), null);
+            bears.turnFaceDown(true);
+            final String result = label(h, sa);
+            namesNothingOf(result, bears);
+            assertEquals(result, "A hidden card's effect — ability");
+            // With its source in view, it is named by that source, still never by its generated name.
+            bears.turnFaceUp(false, null);
+            assertEquals(label(h, sa), "Grizzly Bears — Draw a card.");
+        }
+    }
+
+    /** r3 finding 4: a Stifle-style target's name follows the targeted effect's provenance. */
+    @Test(timeOut = 900000)
+    public void r3_aTargetedEffectsNameFollowsItsProvenance() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            final Card effect = effect(h.game, h.foe, bears);
+            final SpellAbility target = ability(effect, h.foe, "DB$ Draw | Defined$ You | SpellDescription$ Draw a card.");
+            h.game.getStack().add(target);
+            final Card stifle = addCard("Stifle", h.seat);
+            final SpellAbility sa = ability(stifle, h.seat, "DB$ Counter | ValidTgts$ Ability | SpellDescription$ Counter target ability.");
+            sa.getTargets().add(target);
+            h.game.getStack().add(sa);
+            bears.turnFaceDown(true);
+            final JsonObject entry = topEntry(h);
+            entryIs(entry, "Stifle", "Stifle — ability", bears);
+            assertEquals(entry.getAsJsonArray("targetSpells").get(0).getAsJsonObject().get("name").getAsString(),
+                    "A hidden card's effect", entry.toString());
+        }
+    }
+
+    /**
+     * The sink check itself ({@link InteractiveState.HiddenNames}): a hidden name, word-bounded and ignoring case; a
+     * hidden id, (N) or (HN); both faces of a hidden double-faced card; a visible card sharing a hidden card's name fails
+     * too (closed, by design), and passes once no card of that name is hidden.
+     */
+    @Test(timeOut = 900000)
+    public void r3_hiddenSafe() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card bolt = addCardToZone("Lightning Bolt", h.foe, ZoneType.Hand);
+            final Card delver = addCardToZone("Delver of Secrets", h.foe, ZoneType.Hand);
+            addCardToZone("Island", h.seat, ZoneType.Library);
+            final Card mine = addCard("Grizzly Bears", h.seat);
+            final InteractiveState.HiddenNames before = InteractiveState.HiddenNames.of(h.game, h.seat.getView());
+            assertTrue(before.safe("Grizzly Bears attacks."), "no hidden Grizzly Bears yet");
+            assertTrue(before.safe("Grizzly Bears (" + mine.getId() + ") attacks."), "a visible card's id");
+            final Card theirs = addCardToZone("Grizzly Bears", h.foe, ZoneType.Hand);
+            final InteractiveState.HiddenNames hidden = InteractiveState.HiddenNames.of(h.game, h.seat.getView());
+            // A hidden name.
+            assertFalse(hidden.safe("Lightning Bolt deals 3 damage to any target."));
+            assertFalse(hidden.safe("copy target lightning bolt"), "ignoring case");
+            assertTrue(hidden.safe("Lightning Bolts are not a card."), "word-bounded");
+            assertTrue(hidden.safe("Islandcycling {2}"), "word-bounded: the seat's own library Island");
+            assertFalse(hidden.safe("Search your library for an Island card."), "the seat's own library is hidden");
+            // A hidden id.
+            assertFalse(hidden.safe("Return a card (" + bolt.getId() + ")."));
+            assertFalse(hidden.safe("Face-down card (H" + bolt.getId() + ")"));
+            assertTrue(hidden.safe("Return a card (" + mine.getId() + ")."), "a visible card's id");
+            // Both faces of a hidden double-faced card.
+            assertFalse(hidden.safe("Delver of Secrets transforms."));
+            assertFalse(hidden.safe("Insectile Aberration attacks."), "the back face");
+            assertFalse(hidden.safe("(" + delver.getId() + ")"));
+            // A visible card sharing a hidden card's name fails too.
+            assertFalse(hidden.safe("Grizzly Bears attacks."), "closed: the foe's Grizzly Bears is hidden");
+            assertFalse(InteractiveState.hiddenSafe("Grizzly Bears attacks.", h.game, h.seat.getView()));
+            // The foe sees its own hand: those names pass for the foe; the seat's library is hidden from it.
+            final InteractiveState.HiddenNames foes = InteractiveState.HiddenNames.of(h.game, h.foe.getView());
+            assertTrue(foes.safe("Lightning Bolt deals 3 damage to any target."));
+            assertTrue(foes.safe("Return a card (" + theirs.getId() + ")."));
+            assertFalse(foes.safe("Search your library for an Island card."));
+        }
+    }
+
+    /** The fixed label's last resort: when even the host's name is hidden, "A hidden card — ...". */
+    @Test(timeOut = 900000)
+    public void r3_aHostNamedLikeAHiddenCardFallsToAHiddenCard() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            addCardToZone("Sneak Attack", h.foe, ZoneType.Hand);
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            host.addRemembered(bears);
+            h.game.getStack().add(ability(host, h.foe, "DB$ ChangeZone | Origin$ Battlefield | Destination$ Hand"
+                    + " | Defined$ Remembered | StackDescription$ Return {c:Remembered}. | SpellDescription$ Return remembered cards."));
+            bears.turnFaceDown(true);
+            // The check fails (the remembered card is hidden): "Sneak Attack — ability"; a Sneak Attack is hidden too.
+            final JsonObject entry = topEntry(h);
+            namesNothingOf(entry.toString(), bears);
+            assertEquals(entry.get("name").getAsString(), "A hidden card", entry.toString());
+            assertEquals(entry.get("description").getAsString(), "A hidden card — ability", entry.toString());
+            final String order = label(h, wrapped(host, h.foe, bears, "Return remembered cards."));
+            assertEquals(order, "A hidden card — triggered ability");
+        }
+    }
+
+    /** Forge's optional-trigger question carries the trigger's words: it passes the sink check too. */
+    @Test(timeOut = 900000)
+    public void r3_theOptionalTriggerQuestionPassesTheSink() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card host = addCard("Sneak Attack", h.foe);
+            final Card bears = addCard("Grizzly Bears", h.foe);
+            final java.lang.reflect.Field card = InteractiveGuiGame.class.getDeclaredField("promptCard");
+            card.setAccessible(true);
+            card.set(h.gui, host.getView());
+            final java.lang.reflect.Method sink = InteractiveGuiGame.class.getDeclaredMethod("sinkTriggerQuestion", String.class);
+            sink.setAccessible(true);
+            final String question = "Use triggered ability of Sneak Attack (" + host.getId() + ")?\n(Return Grizzly Bears ("
+                    + bears.getId() + ").)";
+            assertEquals(sink.invoke(h.gui, question), question, "nothing hidden: unchanged");
+            bears.turnFaceDown(true);
+            assertEquals(sink.invoke(h.gui, question), "Use triggered ability of Sneak Attack?");
+            assertEquals(sink.invoke(h.gui, "Sacrifice Grizzly Bears?"), "Sacrifice Grizzly Bears?", "not a trigger question");
         }
     }
 }
