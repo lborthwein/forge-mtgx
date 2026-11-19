@@ -391,6 +391,16 @@ public final class ForcedWinPlanner {
             return steps.toString();
         }
 
+        /** sdcc-counterlines-1118 (planEndStep): the line passes to the opponent's end step and acts there. */
+        boolean endStep() {
+            for (Step s : steps) {
+                if (s.toEnd) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         @Override
         public String toString() {
             return "turn+" + winTurn + " " + how + (pileNames.isEmpty() ? "" : " pile=" + pileNames) + " steps="
@@ -540,6 +550,20 @@ public final class ForcedWinPlanner {
          * and its lines are unchanged.
          */
         boolean bridge;
+        /**
+         * sdcc-counterlines-1118 (solverCfg planEndStep; false = off, and then nothing changes): this search plans only lines
+         * that pass our turn with mana up and act at the opponent's end step. From our main phase this turn the only moves
+         * are a land drop and PASS_END (the opponent's turn as {@link #passTurn} models it, then their end step: instant
+         * speed, our permanents still tapped as we left them, no draw); from there instant-speed moves and PASS (our untap
+         * and draw). Runs only from our main phase, horizon 2, with a spell in hand we can cast at instant speed.
+         */
+        boolean endOnly;
+        /**
+         * sdcc-counterlines-1118 (solverCfg planHeldProt; false = off, and then nothing changes): a line's protection is the
+         * fewest, over its spell casts (after each one's payment), of the counters held in hand then (chosen cards only)
+         * whose observed cost the untapped mana could still pay; with no cast, those held at the win.
+         */
+        boolean heldProt;
     }
 
     /**
@@ -691,10 +715,16 @@ public final class ForcedWinPlanner {
         boolean dead;
         /** sdcc-tutorcast-1110: the card the ability being resolved casts for free once it has resolved (-1 = none). */
         int pendingFree = -1;
+        /** sdcc-counterlines-1118 (endOnly): at our priority in the opponent's end step, after PASS_END (turnIdx stays 0). */
+        boolean atEnd;
+        /** sdcc-counterlines-1118 (heldProt): the fewest payable held counters after any spell cast so far (MAX = none cast). */
+        int exposedProt = Integer.MAX_VALUE;
 
         S copy() {
             final S s = new S();
             s.pendingFree = pendingFree;
+            s.atEnd = atEnd;
+            s.exposedProt = exposedProt;
             s.turnIdx = turnIdx;
             s.sorcery = sorcery;
             s.preMain = preMain;
@@ -733,7 +763,8 @@ public final class ForcedWinPlanner {
 
         String key() {
             final StringBuilder sb = new StringBuilder();
-            sb.append(turnIdx).append(sorcery ? 'S' : 'i').append(preMain ? "M" : "").append('/').append(life).append('/').append(oppLife).append('/').append(oppLib)
+            sb.append(turnIdx).append(sorcery ? 'S' : 'i').append(preMain ? "M" : "").append(atEnd ? "E" : "")
+                    .append(lim.heldProt ? "p" + exposedProt : "").append('/').append(life).append('/').append(oppLife).append('/').append(oppLib)
                     .append('/').append(storm).append(landDrop ? 'L' : 'l').append(Arrays.toString(pool)).append('h');
             sb.append(names(hand)).append('b');
             // permutations of the same permanents are one position (order matters only for returned subtypes)
@@ -902,7 +933,12 @@ public final class ForcedWinPlanner {
         nodeCap = lim.nodes;
         depthCap = lim.depth;
         result.ordered = lim.order != 0;
-        if ((lim.order & Limits.ORDER_SHALLOW) == 0 || !shallow(s)) {
+        if (lim.endOnly) {
+            // sdcc-counterlines-1118 (planEndStep): pass with mana up, act at the opponent's end step (depth-first only)
+            if (lim.horizon >= 2 && s.sorcery && !s.preMain && pos.pendingId < 0 && instantSpellInHand(s)) {
+                dfs(s, 0);
+            }
+        } else if ((lim.order & Limits.ORDER_SHALLOW) == 0 || !shallow(s)) {
             dfs(s, 0);
         }
         rank();
@@ -1077,7 +1113,50 @@ public final class ForcedWinPlanner {
         return out0;
     }
 
+    /**
+     * sdcc-counterlines-1118 (endOnly): the moves at our main phase this turn: a land drop (as the full move list makes it),
+     * then PASS_END.
+     */
+    private List<S> endRoot(S s) {
+        final List<S> out = new ArrayList<>();
+        if (s.landDrop && s.sorcery) {
+            lim.endOnly = false;
+            try {
+                for (S n : successors0(s)) {
+                    if (n.turnIdx == 0 && !n.atEnd && n.steps.size() > s.steps.size()
+                            && n.steps.get(s.steps.size()).kind == AbilKind.LAND) {
+                        out.add(n);
+                    }
+                }
+            } finally {
+                lim.endOnly = true;
+            }
+        }
+        final S n = s.copy();
+        n.steps.add(Step.PASS_END);
+        out.addAll(passToEnd(n));
+        return out;
+    }
+
+    /** sdcc-counterlines-1118 (endOnly): a spell in hand (a chosen card) we could cast at instant speed. */
+    private boolean instantSpellInHand(S s) {
+        for (int h : s.hand) {
+            if (h < 0) {
+                continue;
+            }
+            for (Abil ab : cards.get(h).fromHand) {
+                if (ab.kind == AbilKind.SPELL && ab.instant && !ab.unplayable) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private List<S> successors0(S s) {
+        if (lim.endOnly && s.turnIdx == 0 && !s.atEnd) {
+            return endRoot(s); // sdcc-counterlines-1118
+        }
         final List<S> first = new ArrayList<>(), second = new ArrayList<>(), third = new ArrayList<>();
         // planner-fixes-1110 (planOrder's ORDER_WIN_FIRST; both stay empty when off): the moves that win at once, and the
         // win-condition casts that neither win nor leave a way to win behind
@@ -1851,33 +1930,10 @@ public final class ForcedWinPlanner {
      */
     private List<S> passTurn(S s) {
         final List<S> out = new ArrayList<>();
-        final boolean prot = lim.protectUntilNext && s.protectedPass; // sdcc-protect-1117
-        s.protectedPass = false; // it lasts until our next turn
-        if (s.oppLib > 0 && !pos.oppPowers.isEmpty() && !prot) {
-            final int blockers = blockers(s);
-            if (blockers != s.bf.stream().filter(p -> cards.get(p.card).creature).count()) {
-                blockerDiffs++; // blockers-1109: a pass where the old count (every creature) differs; logged once per plan
-            }
-            int damage = 0;
-            for (int i = blockers; i < pos.oppPowers.size(); i++) {
-                damage += pos.oppPowers.get(i);
-            }
-            if (damage >= s.life) {
-                return out;
-            }
-            s.life -= damage;
-        }
-        if (s.oppLib <= 0) {
-            // the opponent loses drawing from an empty library in their draw step, before our next turn
-            s.turnIdx++;
-            s.won = true;
-            s.how = "opponent-decked";
-            out.add(s);
+        if (s.atEnd) {
+            s.atEnd = false; // sdcc-counterlines-1118: from their end step; their turn was played at PASS_END
+        } else if (!opponentTurn(s, out)) {
             return out;
-        }
-        if (!lim.goneAtPass.isEmpty()) {
-            // next-turn-1107: permanents a verification world lost in the opponent's turn are not there on our next turn
-            s.bf.removeIf(p -> lim.goneAtPass.contains(cards.get(p.card).id));
         }
         s.turnIdx++;
         s.sorcery = true;
@@ -1893,6 +1949,67 @@ public final class ForcedWinPlanner {
         }
         final List<Eff> draw = List.of(new Eff(EffKind.DRAW, 1, 0));
         resolve(s, draw, 0, 0, null, out);
+        return out;
+    }
+
+    /**
+     * The opponent's turn after our pass, as {@link #passTurn} models it: their creatures attack (blockers, protection),
+     * an opponent with an empty library loses in their draw step (the win goes to {@code out}), and permanents a
+     * verification lost in their turn are gone. False = the line ends here (we died, or they decked).
+     */
+    private boolean opponentTurn(S s, List<S> out) {
+        final boolean prot = lim.protectUntilNext && s.protectedPass; // sdcc-protect-1117
+        s.protectedPass = false; // it lasts until our next turn
+        if (s.oppLib > 0 && !pos.oppPowers.isEmpty() && !prot) {
+            final int blockers = blockers(s);
+            if (blockers != s.bf.stream().filter(p -> cards.get(p.card).creature).count()) {
+                blockerDiffs++; // blockers-1109: a pass where the old count (every creature) differs; logged once per plan
+            }
+            int damage = 0;
+            for (int i = blockers; i < pos.oppPowers.size(); i++) {
+                damage += pos.oppPowers.get(i);
+            }
+            if (damage >= s.life) {
+                return false;
+            }
+            s.life -= damage;
+        }
+        if (s.oppLib <= 0) {
+            // the opponent loses drawing from an empty library in their draw step, before our next turn
+            s.turnIdx++;
+            s.won = true;
+            s.how = "opponent-decked";
+            out.add(s);
+            return false;
+        }
+        if (!lim.goneAtPass.isEmpty()) {
+            // next-turn-1107: permanents a verification world lost in the opponent's turn are not there on our next turn
+            s.bf.removeIf(p -> lim.goneAtPass.contains(cards.get(p.card).id));
+        }
+        return true;
+    }
+
+    /**
+     * sdcc-counterlines-1118 (endOnly): PASS_END. The opponent's turn ({@link #opponentTurn}), then our priority in their
+     * end step: instant speed, no land drop, an empty pool, a new turn's storm and once-a-turn uses; our permanents stay
+     * tapped as we left them (our untap step comes after) and nothing is drawn.
+     */
+    private List<S> passToEnd(S s) {
+        final List<S> out = new ArrayList<>();
+        if (!opponentTurn(s, out)) {
+            return out;
+        }
+        s.atEnd = true;
+        s.sorcery = false;
+        s.landDrop = false;
+        Arrays.fill(s.pool, 0);
+        s.storm = 0;
+        s.anyQueue.clear();
+        for (Perm p : s.bf) {
+            p.activated = false;
+            p.sacMana = 0;
+        }
+        out.add(s);
         return out;
     }
 
@@ -2952,7 +3069,43 @@ public final class ForcedWinPlanner {
                 return false;
             }
         }
+        if (lim.heldProt && ab.kind == AbilKind.SPELL) {
+            s.exposedProt = Math.min(s.exposedProt, heldPayable(s)); // sdcc-counterlines-1118
+        }
         return true;
+    }
+
+    /**
+     * sdcc-counterlines-1118 (heldProt): the counters in hand now (chosen cards; an unchosen pile card is not held) with an
+     * observed cost the position could still pay: its mana from the pool and untapped sources, its life, and a permanent
+     * to return when the cost returns one. A counter with no readable cost counts for nothing.
+     */
+    private int heldPayable(S s) {
+        int n = 0;
+        for (int h : s.hand) {
+            if (h < 0 || !cards.get(h).counter || cards.get(h).counterCosts == null) {
+                continue;
+            }
+            for (Abil x : cards.get(h).counterCosts) {
+                if (s.life > x.life && affordable(s, x) && (x.returnN == 0 || returnable(s, x.returnType) >= x.returnN)) {
+                    n++;
+                    break;
+                }
+            }
+        }
+        return n;
+    }
+
+    /** sdcc-counterlines-1118 (heldProt): our permanents of a returned cost's type (a subtype, Land or Permanent). */
+    private int returnable(S s, String type) {
+        int n = 0;
+        for (Perm p : s.bf) {
+            final ACard a = cards.get(p.card);
+            if (a.subtypes.contains(type) || "Land".equals(type) && a.land || "Permanent".equals(type)) {
+                n++;
+            }
+        }
+        return n;
     }
 
     private boolean canPayColour(S s, int col, Perm self) {
@@ -3166,7 +3319,7 @@ public final class ForcedWinPlanner {
             if (result.firstLineAt < 0) {
                 result.firstLineAt = nodes; // planner-fixes-1110 (report only)
             }
-            if (s.turnIdx == 0) {
+            if (s.turnIdx == 0 && !s.atEnd) {
                 result.sameTurn = true;
             } else {
                 result.nextTurn = true;
@@ -3260,7 +3413,10 @@ public final class ForcedWinPlanner {
                 prot.add(cards.get(c).name);
             }
         }
-        final Line line = new Line(steps, pileNames, s.turnIdx, s.life, mana, prot.size(), prot, s.how);
+        // sdcc-counterlines-1118: a win in the opponent's end step comes after the pass (winTurn 1); heldProt: protection
+        // actually held, with its cost payable, at the line's most exposed cast
+        final int protN = !lim.heldProt ? prot.size() : s.exposedProt == Integer.MAX_VALUE ? heldPayable(s) : s.exposedProt;
+        final Line line = new Line(steps, pileNames, s.turnIdx + (s.atEnd ? 1 : 0), s.life, mana, protN, prot, s.how);
         line.offMain = pos.offMain; // line-adoption-1107
         return line;
     }

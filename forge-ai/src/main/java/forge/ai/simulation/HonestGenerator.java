@@ -118,6 +118,10 @@ public final class HonestGenerator {
         defaults.put("counterSeenGain", 1.0); // sdcc-counterworlds-1118: 1 = no effect
         defaults.put("counterLines", false); // sdcc-counterlines-1118: off = the recorded config unchanged
         defaults.put("counterLinesMax", 6); // sdcc-counterlines-1118: read only with counterLines
+        defaults.put("planEndStep", 0); // sdcc-counterlines-1118: off = the recorded config unchanged
+        defaults.put("planEndStepNodes", 6000); // sdcc-counterlines-1118: read only with planEndStep
+        defaults.put("planEndStepMax", 3); // sdcc-counterlines-1118: read only with planEndStep
+        defaults.put("planHeldProt", false); // sdcc-counterlines-1118: off = the recorded config unchanged
         defaults.put("planWallMs", 0); // sdcc-planwall-1117: off = the recorded config unchanged
         defaults.put("lateEscalateMs", 0); // sdcc-late-escalate-1117: off = the recorded config unchanged
         defaults.put("probeObjects", false); // sdcc-probeobj-1111: off = the recorded config unchanged

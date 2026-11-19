@@ -149,7 +149,10 @@ public final class RlLiveSeat {
                 "counterWorlds", "counterSearch", "counterSeenGain",
                 // sdcc-counterlines-1118 (absent = off): the robust pass over the planner's lines when counter worlds break
                 // the best one (ForcedWinSolver.Config.counterLines / counterLinesMax)
-                "counterLines", "counterLinesMax"));
+                "counterLines", "counterLinesMax",
+                // sdcc-counterlines-1118 (absent = off): end-step lines and held protection in the offense planner
+                // (ForcedWinSolver.Config.planEndStep / planEndStepNodes / planEndStepMax / planHeldProt)
+                "planEndStep", "planEndStepNodes", "planEndStepMax", "planHeldProt"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless
@@ -188,8 +191,8 @@ public final class RlLiveSeat {
                 "pileTutorCast",
                 // sdcc-counterworlds-1118 (absent = off): ForcedWinSolver.Config.counterWorlds / counterSearch
                 "counterWorlds", "counterSearch",
-                // sdcc-counterlines-1118 (absent = off): ForcedWinSolver.Config.counterLines
-                "counterLines"));
+                // sdcc-counterlines-1118 (absent = off): ForcedWinSolver.Config.counterLines / planHeldProt
+                "counterLines", "planHeldProt"));
 
         /**
          * shipA-on-leakfix-1112: one {@code choiceScorer.<key>} or {@code reach.<key>} entry into its JSON object, typed as

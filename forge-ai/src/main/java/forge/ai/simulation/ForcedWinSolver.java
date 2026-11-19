@@ -416,6 +416,17 @@ public final class ForcedWinSolver {
         /** sdcc-counterlines-1118: the robust pass's extra verifications (counterLines only). */
         public int counterLinesMax = 6;
         /**
+         * sdcc-counterlines-1118 (0 = off, the default, and then nothing changes): the offense also plans lines that pass our
+         * turn with mana up and act at the opponent's end step ({@link ForcedWinPlanner.Limits#endOnly}: one more planner
+         * search of planEndStepNodes nodes, from our main phase with an instant-speed spell in hand), verified like any
+         * line (same worlds, counter worlds, adversary). At most planEndStepMax distinct such lines join the candidates, and
+         * they do not count toward verifyMax. 1: after the other lines; 2: after this turn's lines, before the other lines
+         * that pass the turn.
+         */
+        public int planEndStep = 0, planEndStepNodes = 6000, planEndStepMax = 3;
+        /** sdcc-counterlines-1118 (false = off, nothing changes): the offense planner's {@link ForcedWinPlanner.Limits#heldProt}. */
+        public boolean planHeldProt = false;
+        /**
          * sdcc-planwall-1117 (0 = off, the default, and then nothing changes): every planner pass of an offense decision
          * ends by this many ms after the decision's start, so a larger node cap cannot take the engine fallback's time
          * (each pass keeps its own planMs too).
@@ -1088,6 +1099,10 @@ public final class ForcedWinSolver {
             c.counterSeenGain = dblOr(get.apply("counterSeenGain"), c.counterSeenGain); // sdcc-counterworlds-1118
             c.counterLines = "true".equals(get.apply("counterLines")); // sdcc-counterlines-1118
             c.counterLinesMax = intOr(get.apply("counterLinesMax"), c.counterLinesMax); // sdcc-counterlines-1118
+            c.planEndStep = intOr(get.apply("planEndStep"), c.planEndStep); // sdcc-counterlines-1118
+            c.planEndStepNodes = intOr(get.apply("planEndStepNodes"), c.planEndStepNodes);
+            c.planEndStepMax = intOr(get.apply("planEndStepMax"), c.planEndStepMax);
+            c.planHeldProt = "true".equals(get.apply("planHeldProt"));
             c.planWallMs = intOr(get.apply("planWallMs"), c.planWallMs); // sdcc-planwall-1117
             c.lateEscalateMs = intOr(get.apply("lateEscalateMs"), c.lateEscalateMs); // sdcc-late-escalate-1117
             c.verifyMax = intOr(get.apply("verifyMax"), c.verifyMax); // sdcc-verify-1117
@@ -2742,6 +2757,7 @@ public final class ForcedWinSolver {
         }
         final ForcedWinPlanner.Limits lim = limits();
         lim.nodes = cfg.nodes;
+        lim.heldProt = cfg.planHeldProt; // sdcc-counterlines-1118 (the offense's own searches only)
         // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
         lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
@@ -2865,6 +2881,9 @@ public final class ForcedWinSolver {
             // sdcc-escalate-1117 (planEscalate): every pass ran out of nodes or time without exhausting the tree: one more
             // pass with planEscalate x the node cap and plan time (only there: where a line may be just out of reach)
             res = escalate(pos, lim, res);
+        }
+        if (cfg.planEndStep > 0 && cfg.forced && cfg.horizon >= 2) {
+            res = endStepLines(pos, lim, res); // sdcc-counterlines-1118
         }
         plannerNanos += forge.game.WorkClock.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
@@ -6859,12 +6878,18 @@ public final class ForcedWinSolver {
         }
         final List<Line> picked = new ArrayList<>();
         final Set<String> shapes = new HashSet<>();
+        int endPicked = 0; // sdcc-counterlines-1118 (planEndStep): end-step lines picked (outside the verifyMax count)
         for (Line l : lines) {
-            final String shape = l.pileNames + "|" + l.steps.size() + "|" + l.winTurn + "|" + l.protectionNames;
+            final boolean end = cfg.planEndStep > 0 && l.endStep();
+            if (end && endPicked >= cfg.planEndStepMax) {
+                continue;
+            }
+            final String shape = shapeOf(l);
             if (shapes.add(shape)) {
                 picked.add(l);
+                endPicked += end ? 1 : 0;
             }
-            if (picked.size() >= (cfg.verifyMax > cfg.top ? cfg.verifyMax : cfg.top)) {
+            if (picked.size() - endPicked >= (cfg.verifyMax > cfg.top ? cfg.verifyMax : cfg.top)) {
                 break; // sdcc-verify-1117 (verifyMax): more distinct lines, verified in rank order until one is proven
             }
         }
@@ -6906,15 +6931,87 @@ public final class ForcedWinSolver {
                 break;
             }
         }
-        if (evaluated != null && best != null && best.pBelief < 1.0 && best.counterLost > 0 && cfg.counterLinesMax > 0) {
+        if (cfg.counterLines && evaluated != null && best != null && best.pBelief < 1.0 && best.counterLost > 0
+                && cfg.counterLinesMax > 0) {
             best = counterLinesPass(live, lines, evaluated, index, deadline, best); // sdcc-counterlines-1118
         }
         return best;
     }
 
     /** sdcc-counterlines-1118: the verification's distinct-line key, as {@link #evaluateTop} builds it. */
-    static String shapeOf(Line l) {
-        return l.pileNames + "|" + l.steps.size() + "|" + l.winTurn + "|" + l.protectionNames;
+    String shapeOf(Line l) {
+        return l.pileNames + "|" + l.steps.size() + "|" + l.winTurn + "|" + l.protectionNames
+                + (cfg.planEndStep > 0 && l.endStep() ? "|end" : ""); // sdcc-counterlines-1118
+    }
+
+    /** sdcc-counterlines-1118 (planEndStep, report only): end-step searches run, their nodes, and the lines they added. */
+    public int endStepSearches, endStepNodes, endStepAdded;
+
+    /**
+     * sdcc-counterlines-1118 ({@link Config#planEndStep}): one more planner search of the lines that pass our turn with mana
+     * up and act at the opponent's end step ({@link ForcedWinPlanner.Limits#endOnly}), with its own planEndStepNodes nodes
+     * and at most a quarter of the plan time. Its new lines join {@code res}: mode 1 after the other lines, mode 2 after
+     * this turn's lines (winTurn 0) and before the other lines.
+     */
+    private ForcedWinPlanner.Result endStepLines(Position pos, ForcedWinPlanner.Limits lim, ForcedWinPlanner.Result res) {
+        final int nodes0 = lim.nodes, horizon0 = lim.horizon, pay0 = lim.payPolicies;
+        final long ms0 = lim.ms;
+        final boolean bridge0 = lim.bridge;
+        lim.endOnly = true;
+        lim.nodes = Math.max(1, cfg.planEndStepNodes);
+        lim.horizon = 2;
+        lim.payPolicies = 1;
+        lim.bridge = false;
+        lim.ms = ms0 < 0 ? -1L : Math.max(1L, ms0 / 4);
+        final ForcedWinPlanner.Result end;
+        try {
+            end = planCapped(pos, lim);
+        } finally {
+            lim.endOnly = false;
+            lim.nodes = nodes0;
+            lim.horizon = horizon0;
+            lim.payPolicies = pay0;
+            lim.bridge = bridge0;
+            lim.ms = ms0;
+        }
+        endStepSearches++;
+        endStepNodes += end.nodes;
+        final Set<String> keys = new HashSet<>();
+        for (Line l : res.lines) {
+            keys.add(l.key());
+        }
+        final List<Line> added = new ArrayList<>();
+        for (Line l : end.lines) {
+            if (l.endStep() && keys.add(l.key())) {
+                added.add(l);
+            }
+        }
+        endStepAdded += added.size();
+        receipt("FORCED_WIN endStep" + tag() + " turn=" + pos.turn + " mode=" + cfg.planEndStep + " nodes=" + end.nodes
+                + " lines=" + end.lines.size() + " added=" + added.size() + (added.isEmpty() ? "" : " best=" + added.get(0)));
+        if (added.isEmpty()) {
+            res.nodes += end.nodes;
+            return res;
+        }
+        final List<Line> merged = new ArrayList<>();
+        int i = 0;
+        if (cfg.planEndStep >= 2) {
+            while (i < res.lines.size() && res.lines.get(i).winTurn == 0) {
+                merged.add(res.lines.get(i++));
+            }
+            merged.addAll(added);
+        }
+        while (i < res.lines.size()) {
+            merged.add(res.lines.get(i++));
+        }
+        if (cfg.planEndStep < 2) {
+            merged.addAll(added);
+        }
+        res.lines.clear();
+        res.lines.addAll(merged);
+        res.nodes += end.nodes;
+        res.nextTurn = true;
+        return res;
     }
 
     /** sdcc-counterlines-1118 ({@link Config#counterLines}, report only): robust passes run, their verifications, passes that found a better line. */
