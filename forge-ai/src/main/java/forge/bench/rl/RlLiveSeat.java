@@ -125,6 +125,9 @@ public final class RlLiveSeat {
                 "costTax",
                 // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
                 "grantSacMana",
+                // relearn-1119 (absent = off): the solver's own reader is renewed each game turn, our cards' templates learned
+                // again in that turn's context (ForcedWinSolver.Config.relearnTurn)
+                "relearnTurn",
                 // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
                 "pileTutorCast",
                 // sdcc-widen-1117 (absent = 0 = off): narrow first planner pass (ForcedWinSolver.Config.planWiden)
@@ -180,6 +183,9 @@ public final class RlLiveSeat {
                 "costTax",
                 // sdcc-sacmana-1117 (absent = off): granted sacrifice-for-mana abilities (ForcedWinSolver.Config.grantSacMana)
                 "grantSacMana",
+                // relearn-1119 (absent = off): the solver's own reader is renewed each game turn, our cards' templates learned
+                // again in that turn's context (ForcedWinSolver.Config.relearnTurn)
+                "relearnTurn",
                 // sdcc-piletc-1117 (absent = off): search-and-cast from an unchosen pile slot (ForcedWinSolver.Config.pileTutorCast)
                 "pileTutorCast",
                 // line-own-target-1119 (absent = off): the live follower breaks a line before a step whose harmful effect
