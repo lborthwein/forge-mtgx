@@ -1283,4 +1283,125 @@ public class InteractiveTriggerLabelTest extends AITest {
             assertFalse(hidden.safe("A card (" + cruise.getId() + ")'s Effect"));
         }
     }
+
+    // ------------------------------------------------------------------ review fix 7
+
+    /**
+     * Astra's r7 setup: a mixed-host sub-ability hosted by {@code secret}, with {@code raw} (an ability's words as
+     * Forge's script writes them) as its description, under a visible Sneak Attack wrapper; then {@code secret} turns
+     * face down.
+     */
+    private JsonObject pushAndHide(final Harness h, final Card secret, final String raw) {
+        final Card host = addCard("Sneak Attack", h.foe);
+        final SpellAbility wrapper = wrapped(host, h.foe, null, "ABILITY");
+        final SpellAbility inner = ((forge.game.trigger.WrappedAbility) wrapper).getWrappedAbility();
+        inner.setSubAbility((forge.game.spellability.AbilitySub) ability(secret, h.foe,
+                "DB$ Draw | Defined$ You | SpellDescription$ " + raw));
+        System.out.println("R7 RENDERED " + wrapper.getStackDescription());
+        h.game.getStack().add(wrapper);
+        secret.turnFaceDown(true);
+        assertEquals(InteractiveState.knownNow(h.game, secret.getView(), h.seat.getView()), null);
+        final JsonObject entry = topEntry(h);
+        System.out.println("R7 EMITTED " + entry);
+        return entry;
+    }
+
+    /** {@code copier} becomes a copy of {@code model}, as Clone makes one. */
+    private static void copy(final Harness h, final Card copier, final Card model) {
+        final SpellAbility clone = ability(copier, h.foe, "DB$ Clone | Defined$ Self | CloneTarget$ Targeted");
+        copier.addCloneState(forge.game.card.CardFactory.getCloneStates(model, copier, clone),
+                h.game.getNextTimestamp());
+    }
+
+    /** The words of {@code card}'s ability that use NICKNAME (Serum Sovereign's oil-counter cost), or null. */
+    private static String nicknameAbility(final Card card) {
+        for (SpellAbility sa : card.getSpellAbilities()) {
+            if (sa.getDescription().contains("NICKNAME")) return sa.getDescription();
+        }
+        return null;
+    }
+
+    /**
+     * Astra's r7 repro 1: Clone copies Serum Sovereign, whose oil-counter cost uses NICKNAME; Clone's printed script
+     * does not. The copied ability's words render "Remove an oil counter from Serum".
+     */
+    @Test(timeOut = 900000)
+    public void r7_aCopiedScriptsNicknameIsHidden() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card secret = addCard("Clone", h.foe);
+            final Card model = addCard("Serum Sovereign", h.foe);
+            copy(h, secret, model);
+            assertEquals(secret.getName(), "Serum Sovereign");
+            assertEquals(secret.getRules().getName(), "Clone");
+            final String raw = nicknameAbility(secret);
+            assertNotNull(raw, "the copied ability uses NICKNAME");
+            // Only the copy stays in the game, so the printed model adds no nickname of its own.
+            model.getZone().remove(model);
+            final JsonObject entry = pushAndHide(h, secret, raw);
+            assertFalse(entry.toString().contains("Serum"), entry.toString());
+            assertEquals(entry.get("description").getAsString(), "Sneak Attack — triggered ability", entry.toString());
+        }
+    }
+
+    /** The same through a copy of a copy: the script is two origins away. */
+    @Test(timeOut = 900000)
+    public void r7_aCopyOfACopysNicknameIsHidden() throws Exception {
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            final Card first = addCard("Clone", h.foe);
+            final Card model = addCard("Serum Sovereign", h.foe);
+            copy(h, first, model);
+            final Card secret = addCard("Clone", h.foe);
+            copy(h, secret, first);
+            assertEquals(secret.getName(), "Serum Sovereign");
+            final String raw = nicknameAbility(secret);
+            assertNotNull(raw, "the twice-copied ability uses NICKNAME");
+            model.getZone().remove(model);
+            first.getZone().remove(first);
+            final JsonObject entry = pushAndHide(h, secret, raw);
+            assertFalse(entry.toString().contains("Serum"), entry.toString());
+            assertEquals(entry.get("description").getAsString(), "Sneak Attack — triggered ability", entry.toString());
+        }
+    }
+
+    /**
+     * Astra's r7 repro 2, then the language gate: in de-DE, Rune-Scarred Demon's trigger renders "Wenn der
+     * Runenvernarbte Dämon…", an inflection of its translated name, Runenvernarbter Dämon. Outside English, rendered
+     * text fails closed while anything is hidden, and a verified-visible name still passes; in English nothing
+     * changes; German prompts alone also count as not English.
+     */
+    @Test(timeOut = 900000)
+    public void r7_aLanguageOtherThanEnglishFailsClosed() throws Exception {
+        final String languages = forge.localinstance.properties.ForgeConstants.LANG_DIR;
+        try (Harness h = new Harness((seat, foe) -> { })) {
+            try {
+                forge.util.Lang.createInstance("de-DE");
+                forge.util.CardTranslation.preloadTranslation("de-DE", languages);
+                final Card secret = addCard("Rune-Scarred Demon", h.foe);
+                assertEquals(secret.getTranslatedName(), "Runenvernarbter Dämon");
+                final JsonObject entry = pushAndHide(h, secret,
+                        secret.getTriggers().get(0).getParam("TriggerDescription"));
+                assertFalse(entry.toString().contains("Runenvernarbte"), entry.toString());
+                final String origin = entry.get("name").getAsString();
+                assertEquals(entry.get("description").getAsString(), origin + " — triggered ability", entry.toString());
+                assertFalse(InteractiveState.HiddenNames.renderedInEnglish());
+                final InteractiveState.HiddenNames hidden = InteractiveState.HiddenNames.of(h.game, h.seat.getView());
+                assertFalse(hidden.safe("Draw a card."), "rendered text fails closed while anything is hidden");
+                assertTrue(hidden.safeName(origin), "a verified-visible name still passes");
+                assertFalse(hidden.safeName("Runenvernarbter Dämon"), "a hidden name still fails");
+            } finally {
+                forge.util.CardTranslation.preloadTranslation("en-US", languages);
+                forge.util.Lang.createInstance("en-US");
+            }
+            assertTrue(InteractiveState.HiddenNames.renderedInEnglish());
+            assertTrue(InteractiveState.HiddenNames.of(h.game, h.seat.getView()).safe("Draw a card."),
+                    "in English nothing changes");
+            try {
+                forge.util.Localizer.getInstance().setLanguage("de-DE", languages);
+                assertFalse(InteractiveState.HiddenNames.renderedInEnglish(), "German prompts alone");
+            } finally {
+                forge.util.Localizer.getInstance().setLanguage("en-US", languages);
+            }
+            assertTrue(InteractiveState.HiddenNames.renderedInEnglish());
+        }
+    }
 }

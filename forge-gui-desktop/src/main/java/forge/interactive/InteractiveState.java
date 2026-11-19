@@ -1028,9 +1028,33 @@ final class InteractiveState {
      */
     static final class HiddenNames {
         private final java.util.regex.Pattern pattern;
+        /** Review fix 7: something is hidden and Forge renders in a language other than English ({@link #safe}). */
+        private final boolean failClosed;
 
         private HiddenNames(final java.util.regex.Pattern pattern) {
             this.pattern = pattern;
+            this.failClosed = pattern != null && !renderedInEnglish();
+        }
+
+        /** The prompt read to tell whether Forge's prompts are English; every shipped language translates it. */
+        private static final String LANGUAGE_PROBE = "lblUseTriggeredAbilityOf";
+
+        /**
+         * Review fix 7: whether Forge renders in English now, as the live server does: card text
+         * ({@code CardTranslation}), grammar and nicknames ({@code Lang}) and prompts ({@code Localizer}) all English.
+         * Anything unreadable counts as not English.
+         */
+        static boolean renderedInEnglish() {
+            try {
+                if (!"en-US".equals(forge.util.CardTranslation.getLanguageSelected())) return false;
+                final forge.util.Lang lang = forge.util.Lang.getInstance();
+                if (lang != null && !(lang instanceof forge.util.lang.LangEnglish)) return false;
+                final forge.util.Localizer prompts = forge.util.Localizer.getInstance();
+                return java.util.Objects.equals(prompts.getMessage(LANGUAGE_PROBE),
+                        prompts.getEnglishMessage(LANGUAGE_PROBE));
+            } catch (RuntimeException unreadable) {
+                return false;
+            }
         }
 
         /** The names and ids hidden from {@code viewer} in {@code game} now. */
@@ -1078,7 +1102,7 @@ final class InteractiveState {
             if (card == null || !visited.add(card.getId())) return;
             if (knownNow(game, card.getView(), viewer) == null) {
                 ids.add(card.getId());
-                final boolean scriptNickname = scriptUsesNickname(card);
+                final boolean scriptNickname = usesNickname(card);
                 // The printed faces, then the current or copied ones (getState of a state the card has creates none).
                 for (CardStateName state : new ArrayList<>(card.getStates())) {
                     if (state != CardStateName.FaceDown && state != CardStateName.EmptyRoom) {
@@ -1107,9 +1131,12 @@ final class InteractiveState {
          * another language; the same name in English);</li>
          * <li>review fix 6: the nickname of each and of its translation ({@code Lang.getNickName}, NICKNAME's form:
          * "Return Cecily."), where Forge can render one for this card: a name with a comma or a colon, a legendary face,
-         * or a card whose script uses NICKNAME. A nickname that is only an article ("The" of The One Ring) names no
-         * card and is left out.</li>
+         * or a card whose script uses NICKNAME ({@link #usesNickname}: review fix 7 adds current and copied traits and
+         * the scripts copies came from). A nickname that is only an article ("The" of The One Ring) names no card and
+         * is left out.</li>
          * </ul>
+         * Review fix 7: localized rendering inflects names past any list ("Wenn der Runenvernarbte Dämon…" for
+         * Runenvernarbter Dämon), so outside English the sink fails closed instead ({@link #safe}).
          * Read-only.
          */
         private static void addNames(final Set<String> names, final Card card, final CardState face,
@@ -1159,25 +1186,110 @@ final class InteractiveState {
 
         private static final Set<String> ARTICLES = Set.of("the", "a", "an");
 
-        /** Whether the card's printed script (any face) uses NICKNAME, so Forge may render its nickname. */
-        private static boolean scriptUsesNickname(final Card card) {
+        /**
+         * Whether Forge may render NICKNAME for this card: its printed script (any face) uses it, or (review fix 7) a
+         * trait it has now does, on any printed or copied state, or a script one of its copied states came from does.
+         * Read-only. A state's SVars, intrinsic keywords, triggers and static abilities, and the traits it gained, are
+         * read as they are. Its own spell abilities and replacement effects have no accessor that creates nothing
+         * ({@code CardState.getSpellAbilities} and {@code getReplacementEffects} build lazy traits), so those are judged
+         * by the scripts they were printed or copied from: each copy's origin, that card's own copies in turn, and the
+         * copy effect's host. Anything unreadable counts as using it.
+         */
+        private static boolean usesNickname(final Card card) {
             try {
-                final forge.card.CardRules rules = card.getRules();
-                if (rules == null) return false;
-                for (forge.card.ICardFace face : rules.getAllFaces()) {
-                    if (face == null) continue;
-                    for (Iterable<String> lines : java.util.Arrays.asList(face.getAbilities(), face.getTriggers(),
-                            face.getStaticAbilities(), face.getReplacements(), face.getKeywords())) {
-                        if (lines == null) continue;
-                        for (String line : lines) {
-                            if (line != null && line.contains("NICKNAME")) return true;
+                final Set<Card> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                final java.util.ArrayDeque<Card> pending = new java.util.ArrayDeque<>();
+                pending.add(card);
+                while (!pending.isEmpty()) {
+                    final Card next = pending.poll();
+                    if (!seen.add(next)) continue;
+                    if (scriptUsesNickname(next.getRules())) return true;
+                    for (CardStateName state : new ArrayList<>(next.getStates())) {
+                        if (traitsUseNickname(next, next.getOriginalState(state))) return true;
+                    }
+                    for (forge.game.card.CardCloneStates copy : new ArrayList<>(next.getCloneStates().values())) {
+                        if (copy == null) continue;
+                        for (CardState state : new ArrayList<>(copy.values())) {
+                            if (traitsUseNickname(next, state)) return true;
                         }
+                        if (copy.getOrigin() != null) pending.add(copy.getOrigin());
+                        final forge.game.CardTraitBase cause = copy.getSource();
+                        if (cause != null && cause.getHostCard() != null) pending.add(cause.getHostCard());
                     }
                 }
                 return false;
             } catch (RuntimeException unreadable) {
                 return true;
             }
+        }
+
+        /** Whether a printed script (any face, its SVars included) uses NICKNAME. */
+        private static boolean scriptUsesNickname(final forge.card.CardRules rules) {
+            if (rules == null) return false;
+            for (forge.card.ICardFace face : rules.getAllFaces()) {
+                if (face == null) continue;
+                for (Iterable<String> lines : java.util.Arrays.asList(face.getAbilities(), face.getTriggers(),
+                        face.getStaticAbilities(), face.getReplacements(), face.getKeywords())) {
+                    if (lines == null) continue;
+                    for (String line : lines) {
+                        if (line != null && line.contains("NICKNAME")) return true;
+                    }
+                }
+                if (face.getVariables() == null) continue;
+                for (Map.Entry<String, String> variable : face.getVariables()) {
+                    if (variable != null && variable.getValue() != null && variable.getValue().contains("NICKNAME")) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /** Whether a state's readable traits (see {@link #usesNickname}) use NICKNAME. Read-only. */
+        private static boolean traitsUseNickname(final Card card, final CardState state) {
+            if (state == null) return false;
+            for (String value : state.getSVars().values()) {
+                if (value != null && value.contains("NICKNAME")) return true;
+            }
+            for (forge.game.keyword.KeywordInterface keyword : state.getIntrinsicKeywords()) {
+                if (keyword != null && keyword.getOriginal() != null && keyword.getOriginal().contains("NICKNAME")) {
+                    return true;
+                }
+            }
+            final List<forge.game.CardTraitBase> traits = new ArrayList<>();
+            traits.addAll(state.getTriggers());
+            traits.addAll(state.getStaticAbilities());
+            for (forge.game.card.ICardTraitChanges changes : card.getChangedCardTraitsList(state)) {
+                if (changes instanceof forge.game.card.CardTraitChanges gained) {
+                    traits.addAll(gained.getAbilities());
+                    traits.addAll(gained.getTriggers());
+                    traits.addAll(gained.getReplacements());
+                    traits.addAll(gained.getStaticAbilities());
+                }
+            }
+            for (forge.game.CardTraitBase trait : traits) {
+                if (traitUsesNickname(trait)) return true;
+            }
+            return false;
+        }
+
+        /** Whether one trait's parameters, or its ability and that ability's sub-abilities, use NICKNAME. */
+        private static boolean traitUsesNickname(final forge.game.CardTraitBase trait) {
+            if (trait == null) return false;
+            if (paramsUseNickname(trait)) return true;
+            SpellAbility ability = trait instanceof SpellAbility own ? own.getSubAbility()
+                    : trait instanceof forge.game.TriggerReplacementBase wrapping ? wrapping.getOverridingAbility() : null;
+            for (int depth = 0; ability != null && depth < 64; depth++, ability = ability.getSubAbility()) {
+                if (paramsUseNickname(ability)) return true;
+            }
+            return false;
+        }
+
+        private static boolean paramsUseNickname(final forge.game.CardTraitBase trait) {
+            for (String value : trait.getMapParams().values()) {
+                if (value != null && value.contains("NICKNAME")) return true;
+            }
+            return false;
         }
 
         private static void addName(final Set<String> names, final String name) {
@@ -1199,27 +1311,44 @@ final class InteractiveState {
             return "(?:" + java.util.regex.Pattern.quote(upper) + "|" + java.util.regex.Pattern.quote(lower) + ")" + rest;
         }
 
-        /** True when {@code text} names no hidden card and carries no hidden card's id. */
+        /**
+         * True when rendered text ({@code text}: a stack description, an ability label, a trigger question) names no
+         * hidden card and carries no hidden card's id. Review fix 7: outside English, Forge's localized rendering
+         * inflects card references past any name list, so whenever anything is hidden, rendered text fails (the live
+         * server renders in English, where nothing changes).
+         */
         boolean safe(final String text) {
-            return text == null || pattern == null || !pattern.matcher(text).find();
+            if (text == null || pattern == null) return true;
+            return !failClosed && !pattern.matcher(text).find();
+        }
+
+        /**
+         * A name already verified visible (an origin, a stack entry's name, a targeted stack item's name) names no
+         * hidden card. A name is not rendered text, so this check is the same in every language (review fix 7).
+         */
+        boolean safeName(final String name) {
+            return name == null || pattern == null || !pattern.matcher(name).find();
         }
 
         /**
          * The fixed label for an ability or a stack item whose text failed: "{@code origin} — kind" when that passes;
          * else the same with {@code fallback} ({@link #A_HIDDEN_CARD} or {@link #AN_EFFECT}); else "A hidden card —
-         * kind".
+         * kind". The origin is a verified-visible name, so it is checked as a name ({@link #safeName}).
          */
         String fixedLabel(final String origin, final String fallback, final SpellAbility ability) {
             final String kind = " — " + kindOf(ability);
-            if (origin != null && !origin.isBlank() && safe(origin + kind)) return origin + kind;
-            if (safe(fallback + kind)) return fallback + kind;
+            if (origin != null && !origin.isBlank() && safeName(origin + kind)) return origin + kind;
+            if (safeName(fallback + kind)) return fallback + kind;
             return A_HIDDEN_CARD + kind;
         }
 
-        /** {@code origin} when it passes; else {@code fallback} when that does; else {@link #A_HIDDEN_CARD}. */
+        /**
+         * {@code origin}, a verified-visible name, when it passes as a name; else {@code fallback} when that does; else
+         * {@link #A_HIDDEN_CARD}.
+         */
         String safeOrigin(final String origin, final String fallback) {
-            if (origin != null && !origin.isBlank() && safe(origin)) return origin;
-            return safe(fallback) ? fallback : A_HIDDEN_CARD;
+            if (origin != null && !origin.isBlank() && safeName(origin)) return origin;
+            return safeName(fallback) ? fallback : A_HIDDEN_CARD;
         }
     }
 
@@ -1268,7 +1397,9 @@ final class InteractiveState {
      * {@link #A_HIDDEN_CARD} (or {@link #AN_EFFECT} for an effect's entry); a failing description the fixed label
      * ({@link HiddenNames#fixedLabel}). Each targeted stack item's name (finding 4: a Stifle-style target bypassed
      * effect provenance) is first an effect's origin ({@link #effectChain}) when its host is an effect, never the
-     * generated name, then checked the same way. Returns whether the description became the fixed label.
+     * generated name, then checked the same way. Returns whether the description became the fixed label. Names are
+     * verified visible by the steps before (a visible source, an effect's origin, or a fixed name), so they are checked
+     * as names ({@link HiddenNames#safeName}); the description is rendered text ({@link HiddenNames#safe}).
      */
     private static boolean sinkStackEntry(final JsonObject entry, final SpellAbilityStackInstance si, final Card source,
                                           final Game game, final PlayerView viewer, final HiddenNames hidden) {
@@ -1276,7 +1407,7 @@ final class InteractiveState {
         final SpellAbility sa = si == null ? null : si.getSpellAbility();
         final String fallback = isEffectNow(source, game) ? AN_EFFECT : A_HIDDEN_CARD;
         final String name = stringValue(entry, "name");
-        if (name != null && !hidden.safe(name)) entry.addProperty("name", hidden.safeOrigin(null, fallback));
+        if (name != null && !hidden.safeName(name)) entry.addProperty("name", hidden.safeOrigin(null, fallback));
         final String description = stringValue(entry, "description");
         if (description != null && !hidden.safe(description)) {
             entry.addProperty("description", hidden.fixedLabel(stringValue(entry, "name"), fallback, sa));
@@ -1295,7 +1426,7 @@ final class InteractiveState {
                     final Card current = game == null ? null : game.findById(host.getId());
                     named = effectChain(current != null ? current : host, game, viewer).origin();
                 }
-                target.addProperty("name", hidden.safe(named) ? named
+                target.addProperty("name", hidden.safeName(named) ? named
                         : hidden.safeOrigin(null, effect ? AN_EFFECT : A_HIDDEN_CARD));
             }
         }
