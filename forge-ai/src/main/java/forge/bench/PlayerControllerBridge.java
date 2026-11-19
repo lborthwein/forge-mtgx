@@ -992,17 +992,36 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         // the choose-a-card hook once on it; no hook = exactly the bridge's answer
         final forge.ai.CacHook h = getCacHook();
         if (h == null) {
-            return chooseSpellAbilityToPlayBridged();
+            return priorityDisarmed();
         }
         final List<SpellAbility> def;
         cacSuppressed = true;
         try {
-            def = chooseSpellAbilityToPlayBridged();
+            def = priorityDisarmed();
         } finally {
             cacSuppressed = false;
         }
         // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
         return cacOnce(forge.ai.dp.Kind.PRIORITY, "chooseSpellAbilityToPlay", null, null, -1, -1, def);
+    }
+
+    /**
+     * target-picks-1119: the bridged priority answer; a search variant's cast target armed for it is never left for a
+     * later ask (nothing armed: exactly the bridged answer).
+     */
+    private List<SpellAbility> priorityDisarmed() {
+        try {
+            return chooseSpellAbilityToPlayBridged();
+        } finally {
+            if (castRef != null) {
+                note("variant.unused");
+                final TargetPickLog log = targetLog;
+                if (log != null) {
+                    log.variant("missed");
+                }
+                disarmCastTarget();
+            }
+        }
     }
 
     /**
@@ -1299,6 +1318,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                     final SpellAbility a = p == null || p.isEmpty() ? null : p.get(0);
                     note(a == null ? "imit.prio.noRow.pass" : a.isManaAbility() ? "imit.prio.noRow.mana" : "imit.prio.noRow.action");
                 }
+                if (targetLog != null && p != null && !p.isEmpty()) {
+                    lineTargets(p.get(0), "line"); // target-picks-1119
+                }
                 return p;
             }
             if (shadow != null) {
@@ -1335,6 +1357,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 final BenchSession.LocalAnswerer la = session.getLocalAnswerer();
                 if (la != null && la.wantsHook(getGame(), getPlayer())) {
                     hookShadowAnswered(la, menu, null, p); // sdcc-imit-1111: the handed-over decision's label
+                }
+                if (targetLog != null && p != null && !p.isEmpty()) {
+                    lineTargets(p.get(0), "line"); // target-picks-1119
                 }
                 return p;
             }
@@ -1487,9 +1512,15 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             if (cur.usesTargeting()) {
                 cur.clearTargets();
                 cur.setTargetingPlayer(getPlayer());
-                if (!chooseTargetsFor(cur) || !cur.isTargetNumberValid()) {
+                // target-picks-1119 (both keys off and no variant armed: exactly as before)
+                final List<GameEntity> legal = picksOn() ? legalTargets(cur) : null;
+                final boolean variant = castRef != null && forcedCastTarget(root, cur);
+                if (!variant && (!chooseTargetsFor(cur) || !cur.isTargetNumberValid())) {
                     refuse("chooseSpellAbilityToPlay", "could not legally target " + cur);
                     return false;
+                }
+                if (picksOn()) {
+                    picked(root, cur, "cast", variant ? "variant" : lastPickBy, legal);
                 }
             }
             cur = cur.getSubAbility();
@@ -2626,6 +2657,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public boolean chooseTargetsFor(final SpellAbility currentAbility) {
         count("chooseTargetsFor");
+        lastPickBy = "forge"; // target-picks-1119 (read only by the pick log and guard)
         if (!bridged() || currentAbility == null || !currentAbility.usesTargeting()) {
             return super.chooseTargetsFor(currentAbility);
         }
@@ -2728,6 +2760,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             refuse("chooseTargetsFor", divideProblem);
             return super.chooseTargetsFor(currentAbility);
         }
+        lastPickBy = "seat";
         return true;
     }
 
@@ -3457,6 +3490,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             // search-bones-1015: a plan's forced trigger target is played by the hook; the rest go on as before
             final List<SpellAbility> rest = planHook.triggers(activePlayerSAs);
             if (rest != null) {
+                if (targetLog != null && activePlayerSAs != null) {
+                    for (SpellAbility sa : activePlayerSAs) {
+                        if (sa != null && !rest.contains(sa)) {
+                            lineTargets(sa, "trigger"); // target-picks-1119: the line's own trigger targets
+                        }
+                    }
+                }
                 activePlayerSAs = rest;
             }
         }
@@ -3511,6 +3551,25 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             if (planHook.confirmTrigger(sa)) {
                 choiceShadowAnswered(sh, () -> echoBool("yes", true), null);
                 return true; // search-bones-1015: the trigger whose target the plan forced
+            }
+        }
+        if (ownHarmPicks) {
+            // target-picks-1119 (ownHarmPicks off: never): an optional trigger of ours whose targets are pure own harm
+            final String why = declineOwnHarm(sa);
+            if (why != null) {
+                note("ownHarmPicks.trigger.declined");
+                System.err.println("[own-harm-pick] trigger " + (sa.getHostCard() == null ? "?" : sa.getHostCard().getName())
+                        + ": " + why + " -> declined");
+                final TargetPickLog log = targetLog;
+                if (log != null) {
+                    final SpellAbility whole = unwrap(sa);
+                    for (SpellAbility cur = whole; cur != null; cur = cur.getSubAbility()) {
+                        if (cur.usesTargeting()) {
+                            log.pick(getPlayer(), whole, cur, "trigger", "guard", null, 0, "declined", false);
+                        }
+                    }
+                }
+                return false;
             }
         }
         return bridgedConfirmTrigger(sa);
@@ -4781,6 +4840,251 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         return yes;
     }
 
+    // ---- target-picks-1119: the pick guard (ownHarmPicks), the pick log (targetLog), a search variant's cast target
+
+    /**
+     * target-picks-1119 ({@code ownHarmPicks=on}; false = off, the default, and then nothing below runs): set by the policy
+     * seat ({@code RlLiveSeat}) on its live controller. A targeted pick of the seat (a spell or ability it casts, a trigger
+     * of its own, an effect cast, a no-stack effect) whose targets are pure, payoff-free harm to our own permanent
+     * ({@link forge.ai.simulation.TargetPicks#ownHarm}) is retargeted to an opposing legal target when one exists (Forge
+     * AI's own pick for the part with ours ruled out; else Forge AI's best opposing card, else an opponent); otherwise an
+     * optional trigger is declined when it resolves ({@link #confirmTrigger}) and a mandatory one is left and logged
+     * ({@code forced}). A followed solver line's own targets are its own guard's (lineOwnTarget), never touched here.
+     */
+    public boolean ownHarmPicks = false;
+    /** target-picks-1119 ({@code targetLog=on}; null = off, the default: nothing is recorded or computed). */
+    public volatile TargetPickLog targetLog;
+    /** target-picks-1119: who answered the last {@link #chooseTargetsFor}: "seat" (its answer applied) or "forge". */
+    private String lastPickBy = "forge";
+    /** target-picks-1119: a search target variant's cast target, forced on the next cast-time pick of that ability. */
+    private int castHost = -1;
+    private String castDesc, castRef;
+
+    /**
+     * target-picks-1119: the search departed to a target variant of {@code sa}: the cast's single-target slot takes
+     * {@code ref} ({@link forge.ai.simulation.LookaheadSearch#applyTargetRef}) instead of a targets ask. Cleared when the
+     * seat's priority ask ends, used or not.
+     */
+    public void armCastTarget(final SpellAbility sa, final String ref, final String label) {
+        if (sa != null && sa.getHostCard() != null) {
+            armCastTarget(sa.getHostCard().getId(), sa.getDescription(), ref, label);
+        }
+    }
+
+    /** As above, by the ability's host card id and description (a play-out's first action). */
+    public void armCastTarget(final int hostId, final String desc, final String ref, final String label) {
+        castHost = hostId;
+        castDesc = desc;
+        castRef = ref;
+        final TargetPickLog log = targetLog;
+        if (log != null) {
+            log.variant("armed");
+        }
+    }
+
+    private void disarmCastTarget() {
+        castHost = -1;
+        castDesc = null;
+        castRef = null;
+    }
+
+    /**
+     * target-picks-1119: the armed variant target on {@code cur}, the first targeting part of {@code root}, when they match;
+     * true = applied (no targets ask). A target no longer legal is a miss: the seat is asked as usual.
+     */
+    private boolean forcedCastTarget(final SpellAbility root, final SpellAbility cur) {
+        if (castRef == null || root.getHostCard() == null || root.getHostCard().getId() != castHost
+                || !java.util.Objects.equals(castDesc, root.getDescription()) || firstTargeting(root) != cur) {
+            return false;
+        }
+        final String ref = castRef;
+        disarmCastTarget();
+        final TargetPickLog log = targetLog;
+        if (forge.ai.simulation.LookaheadSearch.applyTargetRef(root, ref) && cur.isTargetNumberValid()) {
+            note("variant.applied");
+            if (log != null) {
+                log.variant("applied");
+            }
+            return true;
+        }
+        cur.clearTargets();
+        cur.setTargetingPlayer(getPlayer());
+        note("variant.missed");
+        if (log != null) {
+            log.variant("missed");
+        }
+        return false;
+    }
+
+    private static SpellAbility firstTargeting(final SpellAbility root) {
+        for (SpellAbility s = root; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting()) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    /** target-picks-1119: either key on (the legal targets are read before a pick only then). */
+    private boolean picksOn() {
+        return ownHarmPicks || targetLog != null;
+    }
+
+    /** target-picks-1119: the part's legal targets now (null = unreadable). */
+    private static List<GameEntity> legalTargets(final SpellAbility cur) {
+        try {
+            return cur.getTargetRestrictions() == null ? null : cur.getTargetRestrictions().getAllCandidates(cur);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * target-picks-1119: the seat's pick on the part {@code cur} of {@code root} is made ({@code chooser}: seat, forge,
+     * variant); the guard (ownHarmPicks) then the log (targetLog). {@code legal}: the part's legal targets, read before the
+     * pick.
+     */
+    private void picked(final SpellAbility root, final SpellAbility cur, final String origin, final String chooser,
+            final List<GameEntity> legal) {
+        String by = chooser;
+        if ("seat".equals(by)) {
+            final int n = (legal == null ? 0 : legal.size()) + stackCandidates(cur).size();
+            by = n <= 1 || cur.getMinTargets() >= n ? "single" : "policy";
+        }
+        String g = null;
+        if (ownHarmPicks && seatPlays()) {
+            g = guardPick(root, cur, origin, legal);
+            if ("retarget".equals(g)) {
+                by = "guard";
+            }
+        }
+        final TargetPickLog log = targetLog;
+        if (log != null) {
+            log.pick(getPlayer(), unwrap(root), cur, origin, by, legal, stackCandidates(cur).size(), g,
+                    planHook != null && planHook.lineActive());
+        }
+    }
+
+    /**
+     * target-picks-1119 (ownHarmPicks): the guard on one pick. Null = not own harm; "retarget" = moved to an opposing
+     * target; "kept" = an opposing target exists but none could be set (the pick stands); "decline" = an optional
+     * trigger with only our own to target (declined when it resolves); "forced" = a mandatory trigger with only our own
+     * (left, logged); "none-opposing" = a cast with only our own (its cast is the search's ownHarm check's).
+     */
+    private String guardPick(final SpellAbility root, final SpellAbility cur, final String origin,
+            final List<GameEntity> legal) {
+        final Player me = getPlayer();
+        final SpellAbility whole = unwrap(root);
+        final String why = forge.ai.simulation.TargetPicks.ownHarm(me, cur, whole);
+        if (why == null) {
+            return null;
+        }
+        note("ownHarmPicks." + origin + ".harm");
+        final List<GameEntity> opp = new ArrayList<>();
+        if (legal != null) {
+            for (GameEntity e : legal) {
+                if (forge.ai.simulation.TargetPicks.opposing(me, e)) {
+                    opp.add(e);
+                }
+            }
+        }
+        final String g;
+        if (!opp.isEmpty()) {
+            g = retargetOpposing(whole, cur, opp) ? "retarget" : "kept";
+        } else if (root.isTrigger() && root.isOptionalTrigger()) {
+            g = "decline";
+        } else {
+            g = root.isTrigger() ? "forced" : "none-opposing";
+        }
+        note("ownHarmPicks." + origin + "." + g);
+        System.err.println("[own-harm-pick] " + origin + " " + (whole.getHostCard() == null ? "?" : whole.getHostCard().getName())
+                + ": " + why + " -> " + g + (g.equals("retarget") ? " " + cur.getTargets() : ""));
+        return g;
+    }
+
+    /**
+     * target-picks-1119: replace the own-harm pick on {@code cur} by an opposing one: Forge AI's own pick for the part when
+     * it is opposing and harms nothing of ours (its order among the opposing candidates), else Forge AI's best card among
+     * the opposing permanents ({@link forge.ai.ComputerUtilCard#getBestAI}), else the first opponent. False = none could
+     * be set: the pick is restored.
+     */
+    private boolean retargetOpposing(final SpellAbility whole, final SpellAbility cur, final List<GameEntity> opp) {
+        final Player me = getPlayer();
+        final TargetChoices before = cur.getTargets();
+        try {
+            clearForSeat(cur);
+            cur.setTargetingPlayer(me);
+            if (super.chooseTargetsFor(cur) && cur.isTargetNumberValid() && !cur.getTargets().isEmpty()
+                    && forge.ai.simulation.TargetPicks.ownHarm(me, cur, whole) == null && allOpposing(cur)) {
+                return true;
+            }
+            clearForSeat(cur);
+            cur.setTargetingPlayer(me);
+            final List<Card> cards = new ArrayList<>();
+            Player face = null;
+            for (GameEntity e : opp) {
+                if (e instanceof Card) {
+                    cards.add((Card) e);
+                } else if (face == null && e instanceof Player) {
+                    face = (Player) e;
+                }
+            }
+            final GameEntity pick = !cards.isEmpty() ? forge.ai.ComputerUtilCard.getBestAI(cards) : face;
+            if (pick != null && cur.canTarget(pick)) {
+                cur.getTargets().add(pick);
+                if (cur.isTargetNumberValid() && forge.ai.simulation.TargetPicks.ownHarm(me, cur, whole) == null) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("own-harm retarget failed for " + cur, e);
+        }
+        cur.resetTargets();
+        cur.setTargets(before);
+        return false;
+    }
+
+    private boolean allOpposing(final SpellAbility cur) {
+        for (GameObject o : cur.getTargets()) {
+            if (!(o instanceof GameEntity) || !forge.ai.simulation.TargetPicks.opposing(getPlayer(), (GameEntity) o)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * target-picks-1119 (ownHarmPicks): an optional trigger of ours, resolving, whose targets are pure own harm: why to
+     * decline it (null = ask as usual).
+     */
+    private String declineOwnHarm(final WrappedAbility w) {
+        if (!ownHarmPicks || w == null || !seatPlays() || !w.isOptionalTrigger() || w.getActivatingPlayer() != getPlayer()) {
+            return null;
+        }
+        final SpellAbility whole = unwrap(w);
+        for (SpellAbility cur = whole; cur != null; cur = cur.getSubAbility()) {
+            final String why = forge.ai.simulation.TargetPicks.ownHarm(getPlayer(), cur, whole);
+            if (why != null) {
+                return why;
+            }
+        }
+        return null;
+    }
+
+    /** target-picks-1119 (targetLog): a followed solver line's action or trigger, with the targets the line gave it. */
+    private void lineTargets(final SpellAbility root, final String origin) {
+        final TargetPickLog log = targetLog;
+        if (log == null || root == null) {
+            return;
+        }
+        final SpellAbility whole = unwrap(root);
+        for (SpellAbility cur = whole; cur != null; cur = cur.getSubAbility()) {
+            if (cur.usesTargeting() && !cur.getTargets().isEmpty()) {
+                log.pick(getPlayer(), whole, cur, origin, "line", null, 0, null, true);
+            }
+        }
+    }
+
     // ---- TARGETS for triggers, effect casts, no-stack effects, charm modes
     /** The ability itself, or the ability a trigger wraps. */
     private static SpellAbility unwrap(final SpellAbility sa) {
@@ -4818,6 +5122,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             final TargetChoices forge = cur.getTargets();
             clearForSeat(cur);
             cur.setTargetingPlayer(getPlayer());
+            final List<GameEntity> legal = picksOn() ? legalTargets(cur) : null; // target-picks-1119 (off: not read)
             final String before = targetingOrigin;
             targetingOrigin = origin;
             boolean ok;
@@ -4833,6 +5138,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 cur.resetTargets();
                 cur.setTargets(forge);
                 note(origin + ".keptForge");
+            }
+            if (picksOn()) {
+                picked(root, cur, origin, ok ? lastPickBy : "forge", legal); // target-picks-1119
             }
         }
     }

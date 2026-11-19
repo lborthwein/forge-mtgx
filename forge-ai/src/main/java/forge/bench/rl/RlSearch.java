@@ -144,6 +144,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * SHADOW computes and logs the demotion; off, nothing runs.
          */
         public String ownHarm = "off";
+        /**
+         * target-picks-1119 (exactly off|on; written to JSON only when on): the pick guard. On: the seat's bridged controller
+         * retargets a targeted pick that is pure own harm to an opposing legal target, declines an optional trigger whose
+         * targets are, and logs a mandatory one as forced ({@code forge.bench.PlayerControllerBridge}); and the ownHarm check
+         * (where ownHarm runs) also refuses a permanent spell whose mandatory targeted enters trigger can harm only our own
+         * permanents ({@link LookaheadSearch.Config#ownHarmEtb}).
+         */
+        public String ownHarmPicks = "off";
+        /**
+         * target-picks-1119 ({@link LookaheadSearch.Config#targetVariants} on the given path; 0 = off, the default, written to
+         * JSON only when set): up to this many target variants of the given candidates per searched decision; a departure to
+         * one plays its base entry with the variant's target forced on the seat's next cast-time targets ask.
+         */
+        public int targetVariants = 0;
         /** block-vs-open-pump-1118: the block search's lethalBlock guard (off|shadow|on; written to JSON only when not off). */
         public String lethalBlock = "off";
         public boolean stack = false;
@@ -499,7 +513,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
-                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "deadFaceUp", "ownHarm", "lethalBlock", "departMedian", "stack", "server", "readTimeoutMs",
+                "playoutSample", "deadEtb", "zeroX", "crewNoop", "deadAltCost", "deadPump", "deadFaceUp", "ownHarm", "ownHarmPicks", "targetVariants", "lethalBlock", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
@@ -573,6 +587,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("deadPump")) c.deadPump = o.get("deadPump").getAsString();
             if (o.has("deadFaceUp")) c.deadFaceUp = o.get("deadFaceUp").getAsString();
             if (o.has("ownHarm")) c.ownHarm = o.get("ownHarm").getAsString();
+            if (o.has("ownHarmPicks")) c.ownHarmPicks = o.get("ownHarmPicks").getAsString(); // target-picks-1119
+            if (o.has("targetVariants")) c.targetVariants = o.get("targetVariants").getAsInt(); // target-picks-1119
             if (o.has("lethalBlock")) c.lethalBlock = o.get("lethalBlock").getAsString();
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
@@ -842,6 +858,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             AiFixes.Mode.parse(deadPump);
             AiFixes.Mode.parse(deadFaceUp);
             LookaheadSearch.Config.ownHarmKey("ownHarm", ownHarm); // line-own-target-1119: exactly off|shadow|on
+            if (!"off".equals(ownHarmPicks) && !"on".equals(ownHarmPicks)) {
+                throw new IllegalArgumentException("ownHarmPicks: expected off|on, got '" + ownHarmPicks + "'"); // target-picks-1119
+            }
+            if (targetVariants < 0 || targetVariants > 16) {
+                throw new IllegalArgumentException("targetVariants: expected 0..16, got " + targetVariants); // target-picks-1119
+            }
             if (!"off".equals(lethalBlock) && !"shadow".equals(lethalBlock) && !"on".equals(lethalBlock)) {
                 // block-vs-open-pump-1118: exactly off|shadow|on, as the host validator takes it (no aliases)
                 throw new IllegalArgumentException("lethalBlock: expected off|shadow|on, got '" + lethalBlock + "'");
@@ -876,6 +898,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (!"off".equals(ownHarm)) {
                 o.addProperty("ownHarm", ownHarm); // line-own-target-1119
+            }
+            if ("on".equals(ownHarmPicks)) {
+                o.addProperty("ownHarmPicks", ownHarmPicks); // target-picks-1119 (only when on)
+            }
+            if (targetVariants > 0) {
+                o.addProperty("targetVariants", targetVariants); // target-picks-1119 (only when set)
             }
             if (!"off".equals(lethalBlock)) {
                 o.addProperty("lethalBlock", lethalBlock);
@@ -1388,6 +1416,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.deadPump = AiFixes.Mode.parse(cfg.deadPump);
         lc.deadFaceUp = AiFixes.Mode.parse(cfg.deadFaceUp);
         lc.ownHarm = AiFixes.Mode.parse(cfg.ownHarm); // line-own-target-1119 (applied here, over the given candidates)
+        lc.ownHarmEtb = "on".equals(cfg.ownHarmPicks); // target-picks-1119 (A2; off: false, as before)
+        lc.targetVariants = cfg.targetVariants; // target-picks-1119 (0 = off, as before)
         lc.lethalBlock = AiFixes.Mode.parse(cfg.lethalBlock);
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
@@ -2163,6 +2193,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             departures++;
         }
         answer = ownHarmAfter(g, m, menuObjs, r, order, by, greedy, answer, ohFallback); // line-own-target-1119 (off: unchanged)
+        if (r.chosenTarget != null) {
+            // target-picks-1119 (targetVariants 0: never): a departure to a target variant plays its base entry with the
+            // variant's target forced (a variant of the policy's own entry is a departure too)
+            if (r.chosen == 0) {
+                departures++;
+            }
+            armVariant(me, r, m, menuObjs, order, greedy, answer);
+        }
         if (r.chosenMacro >= 0) {
             // S-t: a macro departure: its base action (the default's when r.chosen == 0), then its schedule
             final MacroSpec ms = macroList.get(r.chosenMacro);
@@ -2463,6 +2501,37 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return ls.getConfig().ownHarm;
     }
 
+    /** target-picks-1119: the ownHarm check also reads enters triggers ({@link Config#ownHarmPicks} on). */
+    boolean ownHarmEtb() {
+        return ls.getConfig().ownHarmEtb;
+    }
+
+    /**
+     * target-picks-1119 ({@link Config#targetVariants}): the search departed to a target variant and the answer is still its
+     * base entry ({@code answer}: the menu candidate played, -1 = the policy's own {@code greedy}): the seat's bridged
+     * controller forces the variant's target on that cast's targets ask. Anything else arms nothing.
+     */
+    private void armVariant(final Player me, final LookaheadSearch.GivenResult r, final RlCandidates.Menu m,
+            final List<SpellAbility> menuObjs, final List<Integer> order, final int greedy, final int answer) {
+        if (r.chosenTarget == null || r.chosen < 0 || r.chosen >= order.size()) {
+            return;
+        }
+        final int played = choiceOf(m, answer >= 0 ? answer : greedy);
+        final int base = order.get(r.chosen);
+        if (played != base || base <= 0 || base > menuObjs.size()) {
+            variantDropped++;
+            return;
+        }
+        final SpellAbility sa = menuObjs.get(base - 1);
+        if (me.getController() instanceof forge.bench.PlayerControllerBridge) {
+            ((forge.bench.PlayerControllerBridge) me.getController()).armCastTarget(sa, r.chosenTarget, r.chosenTargetLabel);
+            variantArmed++;
+        }
+    }
+
+    /** target-picks-1119: variant departures armed on the live controller / dropped (the answer changed after the search). */
+    public int variantArmed, variantDropped;
+
     private JsonObject ownHarmNote(final Game g, final AiFixes.Mode mode) {
         final JsonObject note = new JsonObject();
         note.addProperty("mode", mode.key());
@@ -2516,7 +2585,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 continue;
             }
             final SpellAbility sa = menuObjs.get(ch - 1);
-            final String why = LookaheadSearch.ownHarmWhy(me, sa);
+            final String why = LookaheadSearch.ownHarmWhy(me, sa, ownHarmEtb());
             if (why == null) {
                 continue;
             }
@@ -2693,7 +2762,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return a;
         }
         final SpellAbility sa = menuObjs.get(ch - 1);
-        final String why = LookaheadSearch.ownHarmWhy(me, sa);
+        final String why = LookaheadSearch.ownHarmWhy(me, sa, ownHarmEtb());
         if (why == null) {
             return a;
         }
@@ -6174,6 +6243,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         pc.forcedBlocks = first.block;
         pc.forcedAttacks = first.attack; // attack-holdback-1118 (null for every other candidate)
+        if (first.tgt != null) {
+            pc.armCastTarget(first.hostId, first.desc, first.tgt, null); // target-picks-1119: a target variant's play-out
+        }
         return new LookaheadSearch.PlayoutSeat() {
             @Override
             public PlayerControllerAi controller() {

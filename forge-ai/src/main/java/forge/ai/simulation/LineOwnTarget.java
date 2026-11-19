@@ -309,13 +309,32 @@ final class LineOwnTarget {
                     }
                     continue; // nothing happens to it; the ability's other effects (or its cast) stand
                 }
-                if (me.equals(c.getController()) && !spared(p, harm, c)
-                        && (planned == null || !planned.contains(c.getId())) && !couldFire(me, p, c, harm)) {
+                if (ownHarmed(me, p, harm, c, planned)) {
                     return harm.name().toLowerCase() + " on our own " + c.getName() + " (" + c.getId() + ")";
                 }
             }
             return null;
         }
+        return openOwnOnly(me, p, harm, planned, only);
+    }
+
+    /**
+     * {@code c} (a permanent the part {@code p} holds or would hold as its target) is ours and takes pure, payoff-free harm:
+     * we control it, a pump does not spare it, the line did not plan it ({@code planned}), and no trigger of ours could
+     * fire from it. The recorded-target test of {@link #refusePart}; target-picks-1119 reads it for a chosen target.
+     */
+    static boolean ownHarmed(final Player me, final SpellAbility p, final Harm harm, final Card c, final Set<Integer> planned) {
+        return me.equals(c.getController()) && !spared(p, harm, c)
+                && (planned == null || !planned.contains(c.getId())) && !couldFire(me, p, c, harm);
+    }
+
+    /**
+     * The open-target test of {@link #refusePart} ({@code p}'s targets chosen as it is cast or put on the stack): the
+     * harm with only our own permanents to target, no payoff; with {@code only}, also a destroy whose every legal target
+     * is indestructible. Null = it may.
+     */
+    static String openOwnOnly(final Player me, final SpellAbility p, final Harm harm, final Set<Integer> planned,
+            final boolean only) {
         if (p.getMinTargets() <= 0 || p.getTargetRestrictions() == null) {
             return null; // "up to": nothing has to be chosen
         }
@@ -352,6 +371,98 @@ final class LineOwnTarget {
             return only ? "destroy has no effect: every legal target is indestructible" : null;
         }
         return other ? null : harm.name().toLowerCase() + " with only our own to target: " + ours;
+    }
+
+    /**
+     * target-picks-1119 (the pick guard, {@code ownHarmPicks}): the targets the part {@code p} holds now (chosen by the seat,
+     * Forge AI or a variant) put pure, payoff-free harm on a permanent we control, with the search's own-payoff exception
+     * ({@link Whole#benefit} of {@code root}, the whole ability: Swords to Plowshares' life, Beast Within's token keep the
+     * pick). A destroy that cannot destroy its target does nothing to it, and is not own harm here. Why, or null. Read-only;
+     * never throws.
+     */
+    static String pickHarm(final Player me, final SpellAbility p, final SpellAbility root) {
+        try {
+            if (me == null || p == null || !p.usesTargeting() || p.getTargets().isEmpty()) {
+                return null;
+            }
+            final Harm harm = harm(p);
+            if (harm == null || ownByDesign(p)) {
+                return null;
+            }
+            if (new Whole(root == null ? p : root).benefit) {
+                return null;
+            }
+            for (Card c : p.getTargets().getTargetCards()) {
+                if (!c.isInPlay() || harm == Harm.DESTROY && !c.canBeDestroyed()) {
+                    continue;
+                }
+                if (ownHarmed(me, p, harm, c, null)) {
+                    return harm.name().toLowerCase() + " on our own " + c.getName() + " (" + c.getId() + ")";
+                }
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return null; // unsure: the pick stands
+        }
+    }
+
+    /**
+     * target-picks-1119 (A2, under {@code ownHarmPicks}): {@code sa} casts a permanent whose mandatory "enters" trigger of
+     * its own (this card entering from anywhere, its hand or the stack; no "you may", no cost) must target, and every legal
+     * target of a harmful part now is a permanent we control, with no payoff ({@link #openOwnOnly}; the trigger's own other
+     * effect for us keeps it): Woodfall Primus with no noncreature permanent of the opponent's to destroy. Why, or null.
+     * The trigger's ability is read on a copy whose ids come from a scope of their own (the live game's ids are
+     * unchanged). Read-only; never throws.
+     */
+    static String refuseEtb(final Player me, final SpellAbility sa) {
+        try {
+            if (me == null || sa == null || !sa.isSpell() || sa.getHostCard() == null || !sa.getHostCard().isPermanent()) {
+                return null;
+            }
+            final Card host = sa.getHostCard();
+            return forge.util.IdScope.detached(() -> refuseEtb0(me, host));
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static String refuseEtb0(final Player me, final Card host) {
+        for (Trigger tr : host.getTriggers()) {
+            if (tr.getMode() != TriggerType.ChangesZone || !ZoneType.Battlefield.toString().equals(tr.getParam("Destination"))
+                    || !"Card.Self".equals(tr.getParam("ValidCard")) || tr.hasParam("OptionalDecider")) {
+                continue;
+            }
+            final String origin = tr.getParamOrDefault("Origin", "Any");
+            if (!"Any".equals(origin) && !"Hand".equals(origin) && !"Stack".equals(origin)) {
+                continue;
+            }
+            if (!tr.requirementsCheck(host.getGame())) {
+                continue;
+            }
+            final SpellAbility ex = tr.ensureAbility();
+            if (ex == null || !(ex instanceof AbilitySub) && ex.hasParam("Cost") && !"0".equals(ex.getParam("Cost"))) {
+                continue; // a trigger with a cost is optional
+            }
+            final SpellAbility root = ex.copy(me);
+            root.setActivatingPlayer(me);
+            if (new Whole(root).benefit) {
+                continue;
+            }
+            for (SpellAbility p : tree(root)) {
+                if (!p.usesTargeting()) {
+                    continue;
+                }
+                final Harm harm = harm(p);
+                if (harm == null || ownByDesign(p)) {
+                    continue;
+                }
+                final String why = openOwnOnly(me, p, harm, null, false);
+                if (why != null) {
+                    return "enters: " + why;
+                }
+            }
+        }
+        return null;
     }
 
     /** The harm of one ability part, or null when it is not one read here. */

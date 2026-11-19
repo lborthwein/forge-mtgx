@@ -260,6 +260,14 @@ public final class LookaheadSearch {
          */
         public static final String OWN_HARM_NO_SCALE = "ownHarm-noverdict-scale";
         /**
+         * target-picks-1119 (A2; false = off, the default: nothing changes, and the JSON is unchanged): the ownHarm check
+         * ({@link #ownHarmWhy(Player, SpellAbility, boolean)}) also refuses a permanent spell whose mandatory targeted enters
+         * trigger can harm only our own permanents ({@link LineOwnTarget#refuseEtb}: Woodfall Primus with nothing of the
+         * opponent's to destroy). Same demotion and floor as every ownHarm refusal. Set by the policy seat's
+         * {@code ownHarmPicks=on}; it acts only where ownHarm runs (on or shadow).
+         */
+        public boolean ownHarmEtb = false;
+        /**
          * The ownHarm key's value: exactly off|shadow|on (the host validator takes no aliases), else an error naming
          * {@code k}.
          */
@@ -702,6 +710,9 @@ public final class LookaheadSearch {
             }
             if (ownHarm != AiFixes.Mode.OFF) {
                 o.addProperty("ownHarm", ownHarm.key()); // line-own-target-1119 (only when not off)
+            }
+            if (ownHarmEtb) {
+                o.addProperty("ownHarmEtb", true); // target-picks-1119 (only when on)
             }
             if (lethalBlock != AiFixes.Mode.OFF) {
                 o.addProperty("lethalBlock", lethalBlock.key());
@@ -1853,6 +1864,11 @@ public final class LookaheadSearch {
          * (opaque: {@link LookaheadSearch#applyAttacks}); null = not an attack candidate.
          */
         public final Object attack;
+        /**
+         * target-picks-1119: a target variant's target ({@link Cand#tgt}; null = none): the play-out seat puts it in the
+         * first action's single-target slot instead of choosing one ({@link #applyTarget}).
+         */
+        public final String tgt;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
@@ -1865,6 +1881,7 @@ public final class LookaheadSearch {
             this.attack = c.attack;
             this.maySig = c.maySig;
             this.mayOpt = c.mayOpt;
+            this.tgt = c.tgt;
         }
 
         /**
@@ -2401,6 +2418,19 @@ public final class LookaheadSearch {
                 // a restore that fails leaves the activator set, as the check before review 1 did
             }
         }
+    }
+
+    /**
+     * target-picks-1119: {@link #ownHarmWhy(Player, SpellAbility)}, and with {@code etb} ({@link Config#ownHarmEtb}) also a
+     * permanent spell whose mandatory targeted enters trigger can harm only our own permanents ({@link
+     * LineOwnTarget#refuseEtb}). {@code etb} false: exactly the two-argument check.
+     */
+    public static String ownHarmWhy(final Player me, final SpellAbility sa, final boolean etb) {
+        final String why = ownHarmWhy(me, sa);
+        if (why != null || !etb || me == null || sa == null) {
+            return why;
+        }
+        return LineOwnTarget.refuseEtb(me, sa);
     }
 
     /** ownHarm: one refusal of {@code sa} counted in this search's stats, by its card's name. */
@@ -3262,6 +3292,13 @@ public final class LookaheadSearch {
          */
         public int[] macro = new int[0];
         public int chosenMacro = -1;
+        /**
+         * target-picks-1119 ({@link Config#targetVariants} on the given path; 0 / null otherwise): the target variants
+         * offered in this decision, and, when the search departed to one, its target ({@code "P<player index>"},
+         * {@code "C<card id>"}, {@code "N"}) and label. {@link #chosen} is then its base entry's index (0: the default's).
+         */
+        public int targetVariants;
+        public String chosenTarget, chosenTargetLabel;
         /** Lane sc-wallguard-1009: the hard wall cut this decision's wait for its play-outs (outcome "capped"). */
         public boolean wall;
         /**
@@ -3908,6 +3945,11 @@ public final class LookaheadSearch {
                 }
             }
         }
+        if (cfg.targetVariants > 0 && cands.size() > 0) {
+            // target-picks-1119 (0 = off, the default: nothing runs): K8's target variants of the given candidates, after
+            // them (the breadth cut is the given entries'), each with its base entry's given index
+            givenVariants(live, me, cands, at, decisionSeed, res);
+        }
         final List<Object> plans = pendingPlans;
         if (plans != null) {
             // search-bones-1015 (S-b): the turn-plan candidates, after the given ones (their index: given.size() + i)
@@ -4319,6 +4361,12 @@ public final class LookaheadSearch {
             res.chosen = 0;
             res.chosenMacro = -1;
             outcome = "capped";
+        }
+        if ("departed".equals(outcome) && cands.get(best).tgt != null) {
+            // target-picks-1119: a departure to a target variant (res.chosen is its base entry's index, 0 for the default's)
+            res.chosenTarget = cands.get(best).tgt;
+            res.chosenTargetLabel = cands.get(best).label;
+            stats.targetVariantDepartures++;
         }
         res.outcome = outcome;
         res.played = cands.get("departed".equals(outcome) ? best : 0).label;
@@ -4813,6 +4861,77 @@ public final class LookaheadSearch {
         }
         out.addAll(o);
         outAt.addAll(oAt);
+    }
+
+    /**
+     * target-picks-1119 ({@link Config#targetVariants} on the given path): K8's target variants ({@link #targetVariants}) of
+     * the given candidates {@code cands}, appended after them, each with its base candidate's given index in {@code at}
+     * (so a variant departure plays its base entry, the variant's target forced). Built in a copy of the live game with
+     * scoped ids, caches and random stream, as {@link #guardGiven}; Forge AI's own pick for each base candidate in that
+     * copy is the target left out. A failure offers none; the given candidates stand as before.
+     */
+    private void givenVariants(Game live, Player liveMe, List<Cand> cands, List<Integer> at, long decisionSeed,
+            GivenResult res) {
+        final Random prev = MyRandom.getThreadRandom();
+        MyRandom.setThreadRandom(new Random(mix(decisionSeed, 11)));
+        final Object prevAiCache = AiCache.captureScope();
+        AiCache.openScope();
+        final Object prevIds = forge.util.IdScope.capture();
+        forge.util.IdScope.open();
+        try {
+            final GameCopier copier = copierOf(live);
+            copier.setCopyStack(cfg.stack);
+            final Game g = copier.makeCopy();
+            final Player me = (Player) copier.find(liveMe);
+            final int n = cands.size();
+            final List<Cand> out = new ArrayList<>(cands);
+            final Set<String> seen = new HashSet<>();
+            for (Cand c : cands) {
+                seen.add(c.key());
+            }
+            targetVariants(g, me, out, null, seen, cfg.targetVariants);
+            for (int i = n; i < out.size(); i++) {
+                final Cand v = out.get(i);
+                int base = -1;
+                for (int j = 0; j < n && base < 0; j++) {
+                    final Cand b = cands.get(j);
+                    if (!b.pass && !b.land && b.tgt == null && b.macro == null && b.plan == null && b.block == null
+                            && b.attack == null && b.hostId == v.hostId && b.desc.equals(v.desc)) {
+                        base = j;
+                    }
+                }
+                if (base < 0) {
+                    continue;
+                }
+                cands.add(v);
+                at.add(at.get(base));
+                res.targetVariants++;
+                stats.targetVariantCands++;
+            }
+        } catch (RuntimeException e) {
+            // no variant offered: the decision searches its given candidates as before
+        } finally {
+            AiCache.installScope(prevAiCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /**
+     * target-picks-1119: put the target {@code ref} ({@link Cand#tgt}: "P<player index>", "C<card id>", "N") into the
+     * single-target slot of {@code sa} in its own game; false when it has none or the target is not legal there.
+     */
+    public static boolean applyTargetRef(SpellAbility sa, String ref) {
+        try {
+            return sa != null && sa.getHostCard() != null && ref != null && applyTarget(sa, ref, sa.getHostCard().getGame());
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** target-picks-1119: the target reference ({@link Cand#tgt} form) of a game object in {@code g}, or null. */
+    public static String targetRefOf(Game g, forge.game.GameObject o) {
+        return targetRef(g, o);
     }
 
     /**
@@ -6397,7 +6516,7 @@ public final class LookaheadSearch {
             final Set<String> ownHarmHosts = new HashSet<>(); // review 3: a refused spell's target variants are refused too
             if (oguard && defSa != null) {
                 final SpellAbility d = locate(g, me, out.get(0));
-                if (d != null && ownHarmWhy(me, d) != null) {
+                if (d != null && ownHarmWhy(me, d, cfg.ownHarmEtb) != null) {
                     stats.ownHarmForge++; // Forge's own answer (its targets Forge AI's): counted, never demoted
                     ownHarmCounted(d);
                     ownHere++;
@@ -6531,7 +6650,7 @@ public final class LookaheadSearch {
                     deadFaceUpKeys.add(c.key());
                 }
                 if (oguard && !seen.contains(c.key())) {
-                    final String why = ownHarmWhy(me, sa);
+                    final String why = ownHarmWhy(me, sa, cfg.ownHarmEtb);
                     if (why != null) {
                         ownHere++;
                         stats.ownHarmCands++;
