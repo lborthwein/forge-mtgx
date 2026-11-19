@@ -116,6 +116,8 @@ public final class HonestGenerator {
         defaults.put("counterSearch", false); // sdcc-counterworlds-1118: off = the recorded config unchanged
         defaults.put("counterTable", "drafted"); // sdcc-counterworlds-1118: read only with counterWorlds / counterSearch
         defaults.put("counterSeenGain", 1.0); // sdcc-counterworlds-1118: 1 = no effect
+        defaults.put("counterLines", false); // sdcc-counterlines-1118: off = the recorded config unchanged
+        defaults.put("counterLinesMax", 6); // sdcc-counterlines-1118: read only with counterLines
         defaults.put("planWallMs", 0); // sdcc-planwall-1117: off = the recorded config unchanged
         defaults.put("lateEscalateMs", 0); // sdcc-late-escalate-1117: off = the recorded config unchanged
         defaults.put("probeObjects", false); // sdcc-probeobj-1111: off = the recorded config unchanged
