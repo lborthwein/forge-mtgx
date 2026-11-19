@@ -157,13 +157,19 @@ public final class RlReplaySearch implements PriorityDecisionListener {
          * nothing here reaches a search, a decision or a label.
          */
         public boolean exportState = false;
+        /**
+         * ddgate-1119 (offline diagnosis only, default off): one search per game and run k, built at the game's first
+         * found position and kept for its later positions, as the live seat keeps one search (and its solver, whose card
+         * templates are learned once per name at first sight) for the whole game. Off: a fresh search per position.
+         */
+        public boolean persist = false;
         public final boolean playFrom;
 
         Spec(final boolean playFrom) {
             this.playFrom = playFrom;
         }
 
-        static final Set<String> KEYS = Set.of("positions", "spec", "server", "policySha", "out", "saltBase", "tol", "exportState");
+        static final Set<String> KEYS = Set.of("positions", "spec", "server", "policySha", "out", "saltBase", "tol", "exportState", "persist");
 
         public static Spec parse(final JsonObject o, final boolean playFrom) {
             final String what = playFrom ? "playFrom" : "replaySearch";
@@ -206,6 +212,9 @@ public final class RlReplaySearch implements PriorityDecisionListener {
             }
             if (o.has("tol")) {
                 s.tol = o.get("tol").getAsDouble();
+            }
+            if (o.has("persist")) {
+                s.persist = o.get("persist").getAsBoolean();
             }
             final Set<String> ids = new HashSet<>();
             for (Pos p : s.positions) {
@@ -307,6 +316,8 @@ public final class RlReplaySearch implements PriorityDecisionListener {
     private final RlSearch anchor;
     private int priorityDecisions = 0, probed = 0;
     private String fatal;
+    /** ddgate-1119 ({@link Spec#persist}): the kept search of each run k for this game. */
+    private final Map<Integer, RlSearch> kept = new LinkedHashMap<>();
 
     /** Tests: told every probe (found or not). */
     public static volatile java.util.function.Consumer<JsonObject> TEST_PROBE = null;
@@ -544,13 +555,19 @@ public final class RlReplaySearch implements PriorityDecisionListener {
         for (int k = 0; k < q.K; k++) {
             final long sk = salt(spec, q, k);
             salts.add(sk);
-            final RlSearch s = new RlSearch(cfgs[k], seed, uid, index, know, jarSha, "rs" + k, obs);
+            final RlSearch old = spec.persist ? kept.get(k) : null;
+            final RlSearch s = old != null ? old : new RlSearch(cfgs[k], seed, uid, index, know, jarSha, "rs" + k, obs);
             s.rowsWanted = true;
             final long t0 = System.nanoTime();
             int ans;
             List<JsonObject> rows;
             try {
-                s.attachShadow(g, p, liveSeat);
+                if (old == null) {
+                    s.attachShadow(g, p, liveSeat);
+                    if (spec.persist) {
+                        kept.put(k, s);
+                    }
+                }
                 ans = PlayerControllerBridge.isolated(g, () -> IdScope.detached(
                         () -> s.decide(g, p, pr.m, frame, greedy, pr.objs)));
                 rows = s.takeRows();
@@ -561,7 +578,12 @@ public final class RlReplaySearch implements PriorityDecisionListener {
                 rows = new ArrayList<>();
                 st.addProperty("error_run_" + k, String.valueOf(e));
             } finally {
-                s.close();
+                if (!spec.persist) {
+                    s.close();
+                }
+            }
+            if (spec.persist) {
+                st.addProperty("persist_reused_" + k, old != null);
             }
             ms.add(Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
             answers.add(ans);
@@ -641,6 +663,10 @@ public final class RlReplaySearch implements PriorityDecisionListener {
      */
     public int finish(final Sink sink, final boolean digestEqual, final JsonObject replayRow) throws IOException {
         anchor.close();
+        for (RlSearch s : kept.values()) {
+            s.close();
+        }
+        kept.clear();
         final boolean ok = digestEqual && fatal == null;
         int written = 0;
         if (ok) {
