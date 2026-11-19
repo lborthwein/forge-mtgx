@@ -2853,6 +2853,15 @@ public final class ForcedWinSolver {
             final Set<String> seen = new HashSet<>();
             for (Eval e : evalSink) {
                 if (e.pUnopposed >= 1.0 && seen.add(String.valueOf(e.line))) {
+                    final String refused = ownTargetAtStart(live, e.line);
+                    if (refused != null) {
+                        // line-own-target-1119 (review 1b of #251): the live follower would break it before it plays
+                        // anything, so it is not proposed (the plan point's normal search decides instead)
+                        ownTargetFiltered++;
+                        receipt("FORCED_WIN own-target-filtered" + tag() + " turn=" + ph.getTurn() + " " + refused + " line="
+                                + e.line.steps);
+                        continue;
+                    }
                     out.add(new Proposal(e));
                 }
             }
@@ -2927,6 +2936,12 @@ public final class ForcedWinSolver {
             }
             final Line prefix = new Line(pre, whole.pileNames, 0, whole.lifeLeft, whole.manaLeft, 0, List.of(), "setup");
             prefix.knownTop = whole.knownTop;
+            final String refused = ownTargetAtStart(live, prefix);
+            if (refused != null) {
+                ownTargetFiltered++; // line-own-target-1119 (review 1b of #251): as in propose
+                receipt("FORCED_WIN own-target-filtered setup" + tag() + " turn=" + ph.getTurn() + " " + refused + " prefix=" + pre);
+                return null;
+            }
             setupProposals++;
             receipt("FORCED_WIN setup" + tag() + " turn=" + ph.getTurn() + " gf=" + gf.g + " winTurn=" + whole.winTurn + " prefix="
                     + pre + " of " + whole);
@@ -2947,6 +2962,30 @@ public final class ForcedWinSolver {
         liveAnswers(); // sdcc-tutorcast-1110 (off: nothing)
         taken++;
     }
+
+    /**
+     * line-own-target-1119 (review 1b of #251; {@link Config#lineOwnTarget} on the live seat, otherwise null and nothing
+     * runs): why the live follower would break {@code line} at its first step at this priority, before it plays anything
+     * ({@link LineOwnTarget#refuse}); null = it would not. A dry run of {@link Follower#next} on a fresh follower: it locates
+     * the step's ability as a copy and returns, so nothing in the live game is played or changed. A line that breaks only
+     * at a later step is proposed; when it breaks there, the step is first in every line proposed from that position.
+     */
+    String ownTargetAtStart(final Game live, final Line line) {
+        if (!cfg.lineOwnTarget || !liveSeat || line == null) {
+            return null;
+        }
+        try {
+            final Follower f = follower(line);
+            f.ownTarget = true;
+            final Follower.Next n = f.next(live, me);
+            return n.broken && n.why != null && n.why.startsWith("own-target:") ? n.why : null;
+        } catch (RuntimeException | StackOverflowError e) {
+            return null; // a check that cannot be made refuses nothing (as LineOwnTarget#refuse)
+        }
+    }
+
+    /** line-own-target-1119 (report only): lines not proposed because their first step would break ({@link #ownTargetAtStart}). */
+    public int ownTargetFiltered;
 
     /** search-bones-1015: the active line has been played to its end or broke (or none was adopted). */
     public boolean lineDone() {

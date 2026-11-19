@@ -54,6 +54,8 @@ public class OwnHarmSearchTest extends SimulationTest {
     static final long SEED = 1119L;
     static final String SNUFF = "Snuff Out";
     static final String ULAMOG = "Ulamog, the Ceaseless Hunger";
+    static final String SWORDS = "Swords to Plowshares";
+    static final String GUTTERSNIPE = "Guttersnipe";
 
     private static Path indexFile;
     private static final Map<Integer, String> NAMES = new HashMap<>();
@@ -61,7 +63,8 @@ public class OwnHarmSearchTest extends SimulationTest {
     private static synchronized Path index() throws Exception {
         if (indexFile == null) {
             final TreeSet<String> names = new TreeSet<>(Arrays.asList("Swamp", "Mountain", "Plains", "Island", SNUFF, ULAMOG,
-                    "Abrade", "Sol Ring", "Grizzly Bears", "Ephemerate", "Runeclaw Bear", "Disfigure", "Blood Artist"));
+                    "Abrade", "Sol Ring", "Grizzly Bears", "Ephemerate", "Runeclaw Bear", "Disfigure", "Blood Artist", SWORDS,
+                    GUTTERSNIPE));
             final StringBuilder sb = new StringBuilder("<pad>\t0\n<unk>\t1\n");
             int i = 2;
             for (String n : names) {
@@ -423,6 +426,62 @@ public class OwnHarmSearchTest extends SimulationTest {
             System.out.println("[own-harm-test] '" + mode + "' live Abrade before:\n" + r.before + "after:\n" + r.after);
             offAfter = offAfter == null ? r.after : offAfter;
             Assert.assertEquals(r.after, offAfter, "'" + mode + "': the live Abrade after the decision, as off");
+        }
+    }
+
+    // ------------------------------------------------------------------ review 1b: a proven line through such a step
+
+    /**
+     * Our summoning-sick Guttersnipe (2 damage to each opponent whenever we cast an instant or sorcery), the opponent at 2
+     * life with no creature and no card in hand, and Swords to Plowshares in hand: its only legal target is our own
+     * Guttersnipe, and casting it wins (the trigger resolves first). Every winning line casts Swords at our Guttersnipe.
+     */
+    private Board guttersnipe() {
+        return (g, p0, p1) -> {
+            addCard("Plains", p0);
+            addCard(GUTTERSNIPE, p0).setSickness(true);
+            addCardToZone(SWORDS, p0, ZoneType.Hand);
+            addCard("Island", p1);
+            p1.setLife(2, null);
+        };
+    }
+
+    /** The plan search with its solver on (plans present; live requires hideOwnLibrary), lineOwnTarget as given. */
+    private static String plans(final boolean lineOwnTarget, final String extra) {
+        return "plans.solverCfg.hideOwnLibrary=true,plans.solverCfg.lineOwnTarget=" + lineOwnTarget
+                + (extra.isEmpty() ? "" : "," + extra);
+    }
+
+    /**
+     * Key off: the solver proves the Swords line at the plan point and the seat takes it at once (decision outcome
+     * "proven"); its hook casts Swords at our Guttersnipe.
+     */
+    @Test
+    public void keyOffAProvenLineThroughSwordsAtOurOwnCreatureIsTaken() throws Exception {
+        final Run r = run(plans(false, ""), guttersnipe(), null);
+        Assert.assertNotNull(r.line(), r.summary());
+        Assert.assertEquals(r.line().get("outcome").getAsString(), "proven", r.summary());
+        Assert.assertEquals(r.answer, SWORDS, r.summary());
+    }
+
+    /**
+     * Review 1b of #251: with lineOwnTarget on, the same proven line is not proposed (the live follower would break it at
+     * its first step: Swords at our own creature, paid for only by its own life gain), so it is never adopted, broken and
+     * proposed again at this priority. The seat ends on a normal search decision in the same call, where ownHarm keeps
+     * Swords (its life gain) and the search casts it: as the policy's own choice, and as a departure when the policy
+     * passes. Before this fix the line was adopted and broke at once, and Forge AI played the priority.
+     */
+    @Test
+    public void keyOnTheLineIsNotAdoptedAndTheSearchStillCastsSwords() throws Exception {
+        for (String pick : new String[] {SWORDS, null}) {
+            final Run r = run(plans(true, "ownHarm=on"), guttersnipe(), pick);
+            Assert.assertEquals(r.decisions.size(), 1, "one decision: " + r.summary());
+            Assert.assertNotEquals(r.line().get("outcome").getAsString(), "proven", "no line taken: " + r.summary());
+            Assert.assertTrue(r.line().has("candidates") && r.line().get("candidates").getAsInt() >= 2,
+                    "a searched decision: " + r.summary());
+            Assert.assertNull(r.ownHarm(), "ownHarm refuses nothing here (Swords' life gain): " + r.summary());
+            Assert.assertTrue(r.ownHarmLines.isEmpty(), r.summary());
+            Assert.assertEquals(r.answer, SWORDS, "pick " + pick + ": " + r.summary());
         }
     }
 

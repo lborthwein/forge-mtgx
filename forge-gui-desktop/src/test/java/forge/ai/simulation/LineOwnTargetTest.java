@@ -268,9 +268,8 @@ public class LineOwnTargetTest extends SimulationTest {
 
     /**
      * A recorded (ENGINE) target on a permanent we control with no payoff breaks: Reaver Ambush (exile target creature
-     * with power 3 or less, nothing else) at our own Esper Sentinel. Swords to Plowshares at it (the fc8c3611 line) now
-     * plays: its life gain goes to the target's controller, us, and the ability's own benefit is a payoff (review 1 of
-     * #251, S1 2; the seat decides such a line).
+     * with power 3 or less, nothing else) at our own Esper Sentinel. Swords to Plowshares at it breaks too: its life gain
+     * (for the target's controller, us) keeps it in the search only (review 1b of #251).
      */
     @Test
     public void keyOnARecordedRemovalOfOurOwnCreatureBreaks() {
@@ -292,11 +291,91 @@ public class LineOwnTargetTest extends SimulationTest {
         control(bears, me);
         Assert.assertFalse(plays(first(true, line(engine(ambush, me, null, "0:C" + bears.getId())), rp), ambush));
         Assert.assertEquals(rp[0], 1);
-        // Swords to Plowshares at our own Sentinel gains us its power in life: the line plays
+        // Swords to Plowshares at our own Sentinel: its life gain does not pay for it in a line
         final Card swords = addCardToZone("Swords to Plowshares", me, ZoneType.Hand);
-        final SpellAbility a = first(true, line(engine(swords, me, null, "0:C" + sentinel.getId())), rp);
-        Assert.assertTrue(plays(a, swords), "key on: Swords' life gain is its own payoff: " + a);
-        Assert.assertEquals(rp[0], 0);
+        final Line sl = line(engine(swords, me, null, "0:C" + sentinel.getId()));
+        Assert.assertTrue(plays(first(false, sl, rp), swords), "key off: cast as today");
+        final SpellAbility a = first(true, sl, rp);
+        Assert.assertFalse(plays(a, swords), "key on: Swords at our own Sentinel breaks the line: " + a);
+        Assert.assertEquals(rp[0], 1);
+    }
+
+    // ------------------------------------------------------------------ review 1b: the own-payoff exception is the search's
+
+    /** A live solver's own-target reason for {@code sa} with {@code target} recorded (null = plays). */
+    private String recorded(final SpellAbility sa, final Card target) {
+        sa.setActivatingPlayer(me);
+        sa.getTargets().add(target);
+        try {
+            return LineOwnTarget.refuse(me, sa, null, null);
+        } finally {
+            sa.resetTargets();
+        }
+    }
+
+    private SpellAbility spell(final Card c) {
+        final SpellAbility sa = c.getFirstSpellAbility();
+        sa.setActivatingPlayer(me);
+        return sa;
+    }
+
+    /**
+     * Game fc8c3611 (turn 10): the followed proven line held Oust at our own Esper Sentinel and Swords to Plowshares at
+     * our own Thalia, Guardian of Thraben; the opponent controlled no creature. Each recorded step breaks the line (key
+     * on), though each gives the target's controller, us, life; the same spells offered to the policy search are kept by
+     * {@code ownHarm}, whose play-outs decide them (review 1b of #251).
+     */
+    @Test
+    public void fc8c3611OustAndSwordsAtOurOwnCreaturesBreakTheLineAndStayInTheSearch() {
+        setUp();
+        final Card sentinel = ours("Esper Sentinel");
+        final Card thalia = ours("Thalia, Guardian of Thraben");
+        for (int i = 0; i < 4; i++) {
+            ours("Plains");
+        }
+        theirs("Island");
+        final Card oust = addCardToZone("Oust", me, ZoneType.Hand);
+        final Card swords = addCardToZone("Swords to Plowshares", me, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        final int[] rp = {0};
+        final Line ol = line(engine(oust, me, null, "0:C" + sentinel.getId()));
+        final Line sl = line(engine(swords, me, null, "0:C" + thalia.getId()));
+        Assert.assertTrue(plays(first(false, ol, rp), oust), "key off: Oust is cast as in fc8c3611");
+        Assert.assertTrue(plays(first(false, sl, rp), swords), "key off: Swords is cast as in fc8c3611");
+        Assert.assertFalse(plays(first(true, ol, rp), oust), "key on: the recorded Oust at our Sentinel breaks");
+        Assert.assertEquals(rp[0], 1);
+        Assert.assertFalse(plays(first(true, sl, rp), swords), "key on: the recorded Swords at our Thalia breaks");
+        Assert.assertEquals(rp[0], 1);
+        final String ro = recorded(spell(oust), sentinel), rs = recorded(spell(swords), thalia);
+        System.out.println("[line-own-target] fc8c3611 recorded Oust=" + ro + " Swords=" + rs);
+        Assert.assertTrue(ro != null && ro.startsWith("remove on our own Esper Sentinel"), ro);
+        Assert.assertTrue(rs != null && rs.startsWith("remove on our own Thalia"), rs);
+        // the search: the same spells, every target open (only our creatures to target), are kept (their life gain)
+        Assert.assertNull(LookaheadSearch.ownHarmWhy(me, spell(oust)), "ownHarm keeps Oust");
+        Assert.assertNull(LookaheadSearch.ownHarmWhy(me, spell(swords)), "ownHarm keeps Swords");
+    }
+
+    /**
+     * Beast Within at our own indestructible land (Darksteel Citadel): in a line it destroys nothing and breaks it (key on);
+     * the search keeps it (the Beast token is the ability's own payoff).
+     */
+    @Test
+    public void beastWithinAtOurIndestructibleLandBreaksALineAndStaysInTheSearch() {
+        setUp();
+        final Card citadel = ours("Darksteel Citadel");
+        for (int i = 0; i < 3; i++) {
+            ours("Forest");
+        }
+        final Card beast = addCardToZone("Beast Within", me, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        final int[] rp = {0};
+        final Line l = line(engine(beast, me, null, "0:C" + citadel.getId()));
+        Assert.assertTrue(plays(first(false, l, rp), beast), "key off: cast as today");
+        Assert.assertFalse(plays(first(true, l, rp), beast), "key on: a destroy with no effect breaks the line");
+        Assert.assertEquals(rp[0], 1);
+        final String why = recorded(spell(beast), citadel);
+        Assert.assertTrue(why != null && why.startsWith("destroy has no effect on Darksteel Citadel"), why);
+        Assert.assertNull(LookaheadSearch.ownHarmWhy(me, spell(beast)), "ownHarm keeps Beast Within (its token)");
     }
 
     // ------------------------------------------------------------------ intended self-targets still play

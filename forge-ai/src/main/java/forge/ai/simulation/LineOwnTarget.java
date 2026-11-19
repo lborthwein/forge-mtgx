@@ -42,11 +42,14 @@ import forge.game.zone.ZoneType;
  * outside the guard: a choice it never refuses.</li>
  * <li>A payoff keeps the action: a permanent we control that triggers on the card dying or leaving the battlefield,
  * being destroyed or sacrificed, or (damage) being dealt damage; for a bounce, an enters trigger on any permanent we
- * control that could fire for the card; and any other effect of the same ability that gives us something (life, cards,
- * tokens, lands, mana, counters, for us or for the target's controller, which is then us): Swords to Plowshares, Oust,
- * Path to Exile and Beast Within on our own permanent are kept.</li>
- * <li>A destroy whose every target is indestructible is refused only when it is the ability's only effect (Snuff Out);
- * Beast Within's token and Cleansing Wildfire's land and card stand.</li>
+ * control that could fire for the card.</li>
+ * <li>The search only ({@link #refuseOpen}, review 1b of #251): any other effect of the same ability that gives us
+ * something (life, cards, tokens, lands, mana, counters, for us or for the target's controller, which is then us) keeps
+ * it, so Swords to Plowshares, Oust, Path to Exile and Beast Within on our own permanent stay candidates; and a destroy
+ * whose every target is indestructible is refused only when it is the ability's only effect (Snuff Out), so Beast
+ * Within's token and Cleansing Wildfire's land and card stand. The line check ({@link #refuse}) takes neither
+ * exception: a line step whose harm to our own permanent is paid for only by its own follow-up, or whose destroy hits
+ * only indestructible targets, breaks the line, and the seat's normal search (which keeps those spells) decides.</li>
  * </ul>
  * Refused: a recorded target (an ENGINE step's) on a permanent we control, unless the line planned that object (a
  * probeObjects step's {@link ForcedWinPlanner.Step#objTarget}) or a payoff exists; an open target (chosen as it is cast)
@@ -69,7 +72,7 @@ final class LineOwnTarget {
      */
     static String refuse(final Player me, final SpellAbility sa, final String modeTok, final Set<Integer> planned) {
         try {
-            return refuse0(me, sa, modeTok, planned, false);
+            return refuse0(me, sa, modeTok, planned, false, false);
         } catch (RuntimeException e) {
             return null; // a check that cannot be made refuses nothing (the follower plays the step as before)
         }
@@ -82,14 +85,19 @@ final class LineOwnTarget {
      */
     static String refuseOpen(final Player me, final SpellAbility sa) {
         try {
-            return refuse0(me, sa, null, null, true);
+            return refuse0(me, sa, null, null, true, true);
         } catch (RuntimeException e) {
             return null; // a check that cannot be made refuses nothing (the candidate stays)
         }
     }
 
+    /**
+     * {@code open}: every target is chosen as it is cast. {@code search}: the policy search's check, which keeps an ability
+     * whose own other effects pay for the harm (review 1b of #251: the line check does not; a modal mode in a line is
+     * open but still the line's check).
+     */
     private static String refuse0(final Player me, final SpellAbility sa, final String modeTok, final Set<Integer> planned,
-            final boolean open) {
+            final boolean open, final boolean search) {
         if (me == null || sa == null) {
             return null;
         }
@@ -107,7 +115,7 @@ final class LineOwnTarget {
                     : ForcedWinChoices.applyMode(modeTok, possible, min, num);
             if (chosen != null) {
                 for (AbilitySub mode : chosen) {
-                    final String why = refuseChain(me, mode, true, planned);
+                    final String why = refuseChain(me, mode, true, planned, search);
                     if (why != null) {
                         return "mode " + possible.indexOf(mode) + ": " + why;
                     }
@@ -117,7 +125,7 @@ final class LineOwnTarget {
             // Forge AI chooses the modes: refused only when every mode it could choose is refused
             String first = null;
             for (AbilitySub mode : possible) {
-                final String why = refuseChain(me, mode, true, planned);
+                final String why = refuseChain(me, mode, true, planned, search);
                 if (why == null) {
                     return null;
                 }
@@ -125,7 +133,7 @@ final class LineOwnTarget {
             }
             return first;
         }
-        return refuseChain(me, sa, open, planned);
+        return refuseChain(me, sa, open, planned, search);
     }
 
     /**
@@ -147,9 +155,13 @@ final class LineOwnTarget {
         return choices;
     }
 
-    /** The first refusal of an ability and its sub-abilities, or null ({@code open}: every target is chosen at cast). */
-    private static String refuseChain(final Player me, final SpellAbility sa, final boolean open, final Set<Integer> planned) {
-        final Whole whole = new Whole(sa);
+    /**
+     * The first refusal of an ability and its sub-abilities, or null ({@code open}: every target is chosen at cast;
+     * {@code search}: the ability's own other effects may pay for the harm).
+     */
+    private static String refuseChain(final Player me, final SpellAbility sa, final boolean open, final Set<Integer> planned,
+            final boolean search) {
+        final Whole whole = search ? new Whole(sa) : null;
         for (SpellAbility l = sa; l != null; l = l.getSubAbility()) {
             final String why = refusePart(me, l, open, planned, whole);
             if (why != null) {
@@ -264,6 +276,8 @@ final class LineOwnTarget {
     /**
      * One targeting part. {@code open}: a modal spell's mode, whose targets are chosen as it is cast (any targets it holds
      * are stale); otherwise the targets it holds are the step's recorded ones (none = Forge AI picks them at cast).
+     * {@code whole}: the search's view of the whole ability (its own other effects may pay for the harm); null = the line
+     * check, which takes no such exception (review 1b of #251).
      */
     static String refusePart(final Player me, final SpellAbility p, final boolean open, final Set<Integer> planned,
             final Whole whole) {
@@ -271,10 +285,14 @@ final class LineOwnTarget {
             return null;
         }
         final Harm harm = harm(p);
-        if (harm == null || ownByDesign(p) || whole.benefit) {
-            return null; // not harmful, ours by design, or the ability's own other effect pays off
+        if (harm == null || ownByDesign(p)) {
+            return null; // not harmful, or ours by design
         }
-        final boolean only = whole.effects <= 1; // this part is all the ability does
+        if (whole != null && whole.benefit) {
+            return null; // the search: the ability's own other effect pays off (Swords' life, Beast Within's token)
+        }
+        // a destroy that can destroy nothing: refused in a line; in the search only when it is all the ability does
+        final boolean only = whole == null || whole.effects <= 1;
         if (!open && !p.getTargets().isEmpty()) {
             for (Card c : p.getTargets().getTargetCards()) {
                 if (!c.isInPlay()) {

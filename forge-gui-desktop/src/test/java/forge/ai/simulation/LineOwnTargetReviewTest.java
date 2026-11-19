@@ -36,6 +36,9 @@ import forge.game.zone.ZoneType;
  * each a false refusal or a mutation on ab126fdad63, now pass as "kept" (and "unchanged"); the reviewer's controls stay
  * kept; and what must still be refused is: game 1's Abrade (3 damage, no payoff, at our own creature), game 2's Snuff Out
  * (a destroy at our own indestructible Ulamog, its only effect) and the idle games' Tear Asunder at our own permanents.
+ * Review 1b (architect-o): the S1 2 exception (the ability's own follow-up benefit: Swords' and Oust's life, Beast
+ * Within's token, Cleansing Wildfire's land and card, and a destroy with other effects) holds for the search only; with a
+ * recorded target the line check refuses them.
  */
 public class LineOwnTargetReviewTest extends SimulationTest {
     private Game g;
@@ -135,28 +138,60 @@ public class LineOwnTargetReviewTest extends SimulationTest {
         }
     }
 
-    // ------------------------------------------------------------------ S1 2: the ability's own payoff
+    // ------------------------------------------------------------------ S1 2: the ability's own payoff (the search only)
+
+    /**
+     * Review 1b of #251 (architect-o): the ability's own follow-up benefit pays for the harm in the search only. Kept with
+     * every target open ({@code ownHarm}), refused with {@code target} recorded ({@code lineOwnTarget}); returns the
+     * recorded reason.
+     */
+    private String searchOnly(final String tag, final SpellAbility sa, final Card target) {
+        final String open = LookaheadSearch.ownHarmWhy(me, sa);
+        sa.getTargets().add(target);
+        final String recorded = LineOwnTarget.refuse(me, sa, null, null);
+        sa.resetTargets();
+        System.out.println("[own-target-review] " + tag + " open=" + open + " recorded=" + recorded);
+        Assert.assertNull(open, tag + " open: the search keeps it");
+        Assert.assertNotNull(recorded, tag + " recorded: a line step breaks");
+        return recorded;
+    }
 
     @Test
-    public void s1SwordsLifeGainIsItsOwnPayoff() {
+    public void s1SwordsLifeGainKeepsItInTheSearchNotInALine() {
         board();
         me.setLife(2, null);
         final Card c = ours("Grizzly Bears");
-        keptTarget("Swords on our Bears gains us 2 life", ability("Swords to Plowshares", ApiType.ChangeZone), c);
+        final String why = searchOnly("Swords on our Bears gains us 2 life", ability("Swords to Plowshares", ApiType.ChangeZone), c);
+        Assert.assertTrue(why.startsWith("remove on our own Grizzly Bears"), why);
+        // at an opposing creature it stays in both
+        final Card theirs = addCard("Grizzly Bears", opp);
+        final SpellAbility swords = ability("Swords to Plowshares", ApiType.ChangeZone);
+        Assert.assertNull(LookaheadSearch.ownHarmWhy(me, swords));
+        swords.getTargets().add(theirs);
+        Assert.assertNull(LineOwnTarget.refuse(me, swords, null, null));
+        swords.resetTargets();
+    }
+
+    /** Beast Within at our own indestructible land: kept in the search (its token), breaks a line (it destroys nothing). */
+    @Test
+    public void s1BeastWithinTokenKeepsItInTheSearchNotInALine() {
+        board();
+        final Card c = ours("Darksteel Citadel");
+        final String why = searchOnly("Beast Within: a Beast for us, the Citadel stays", ability("Beast Within", ApiType.Destroy), c);
+        Assert.assertTrue(why.startsWith("destroy has no effect on Darksteel Citadel"), why);
     }
 
     @Test
-    public void s1BeastWithinTokenIsItsOwnPayoff() {
+    public void s1CleansingWildfireRampKeepsItInTheSearchNotInALine() {
         board();
         final Card c = ours("Darksteel Citadel");
-        keptTarget("Beast Within: a Beast for us, the Citadel stays", ability("Beast Within", ApiType.Destroy), c);
-    }
-
-    @Test
-    public void s1CleansingWildfireRampIsItsOwnPayoff() {
-        board();
-        final Card c = ours("Darksteel Citadel");
-        keptTarget("Cleansing Wildfire: a land and a card for us", ability("Cleansing Wildfire", ApiType.Destroy), c);
+        final String why = searchOnly("Cleansing Wildfire: a land and a card for us",
+                ability("Cleansing Wildfire", ApiType.Destroy), c);
+        Assert.assertTrue(why.startsWith("destroy has no effect on Darksteel Citadel"), why);
+        // a destructible land of ours: the line refuses the destroy itself
+        final Card forest = ours("Forest");
+        final String why2 = searchOnly("Cleansing Wildfire at our Forest", ability("Cleansing Wildfire", ApiType.Destroy), forest);
+        Assert.assertTrue(why2.startsWith("destroy on our own Forest"), why2);
     }
 
     // ------------------------------------------------------------------ S1 3: +X/-Y that the target survives
