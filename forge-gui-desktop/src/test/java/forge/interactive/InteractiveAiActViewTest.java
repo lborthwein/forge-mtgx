@@ -6,12 +6,16 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import forge.ai.AITest;
 import forge.ai.simulation.GameCopier;
+import forge.bench.StateEncoder;
 import forge.game.Game;
+import forge.game.card.Card;
 import forge.game.event.GameEventPlayerPriority;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.PlayerController.FullControlFlag;
 import forge.game.player.PlayerView;
+import forge.game.spellability.SpellAbility;
+import forge.game.trigger.Trigger;
 import forge.game.zone.ZoneType;
 import forge.gui.control.FControlGameEventHandler;
 import forge.player.PlayerControllerHuman;
@@ -26,7 +30,9 @@ import java.io.PipedWriter;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -78,12 +84,20 @@ public class InteractiveAiActViewTest extends AITest {
         final AtomicBoolean closed = new AtomicBoolean();
 
         OneSeat(final boolean aiActViews) throws IOException {
+            this(aiActViews, List.of());
+        }
+
+        /** {@code aiPermanents}: more cards on the AI Player's battlefield. */
+        OneSeat(final boolean aiActViews, final List<String> aiPermanents) throws IOException {
             game = initAndCreateGame();
             seat = game.getPlayers().get(0);
             ai = game.getPlayers().get(1);
             // The AI Player's main phase 2 (a ritual for a permanent is cast in main 2: ManaAi.doManaRitualLogic)
             addCard("Plains", seat);
             addCardToZone("Serra Angel", seat, ZoneType.Hand);
+            for (String name : aiPermanents) {
+                addCard(name, ai);
+            }
             addCard("Swamp", ai);
             addCardToZone("Swamp", ai, ZoneType.Hand);
             addCardToZone("Dark Ritual", ai, ZoneType.Hand);
@@ -490,6 +504,111 @@ public class InteractiveAiActViewTest extends AITest {
             assertEquals(playerOf(views.get(0).getAsJsonObject("view"), 1).get("life").getAsInt(), 13);
             assertEquals(views.get(0).getAsJsonObject("view").get("phase"), stepped.get("phase"));
             assertFalse(stepped.get("phase").equals(first.get("phase")), "the step had moved: " + stepped);
+        }
+    }
+
+    /** The card named {@code name} in {@code zone}, or null. */
+    private static JsonObject card(final JsonArray zone, final String name) {
+        for (JsonElement c : zone) {
+            if (c.isJsonObject() && c.getAsJsonObject().has("name")
+                    && name.equals(c.getAsJsonObject().get("name").getAsString())) {
+                return c.getAsJsonObject();
+            }
+        }
+        return null;
+    }
+
+    /** Every ability of every card on the battlefield, with its activating player now (null stays a key's value). */
+    private static Map<SpellAbility, Player> activators(final Game game) {
+        final Map<SpellAbility, Player> out = new IdentityHashMap<>();
+        for (Card c : game.getCardsIn(ZoneType.Battlefield)) {
+            for (SpellAbility sa : c.getSpellAbilities()) {
+                out.put(sa, sa.getActivatingPlayer());
+            }
+        }
+        return out;
+    }
+
+    /** How many of the battlefield's triggers have their ability built ({@code Trigger.ensureAbility} builds it). */
+    private static int builtTriggerAbilities(final Game game) {
+        int n = 0;
+        for (Card c : game.getCardsIn(ZoneType.Battlefield)) {
+            for (Trigger t : c.getTriggers()) {
+                if (t.getOverridingAbility() != null) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    /**
+     * Astra review r1 S1: an AI act view is built at the AI Player's priority, before it decides, and must not write
+     * engine state. Asking a reflected-mana card (Reflecting Pool) what it produces writes live activating players
+     * ({@code CardUtil.getReflectableManaColors}), so the AI act view does not ask it: Reflecting Pool's entry has no
+     * {@code producedMana} keys there, while the other lands keep theirs. A request's view in the same game asks it as
+     * before.
+     */
+    @Test(timeOut = 900000)
+    public void anAiActViewWritesNoActivatorAndLeavesOutReflectedMana() throws Exception {
+        try (OneSeat s = new OneSeat(true, List.of("Reflecting Pool", "Wasteland"))) {
+            final Card pool = s.game.getCardsIn(ZoneType.Battlefield).stream()
+                    .filter(c -> c.getName().equals("Reflecting Pool")).findFirst().orElseThrow();
+            final Map<SpellAbility, Player> before = activators(s.game);
+            final int triggersBefore = builtTriggerAbilities(s.game);
+            int unset = 0;
+            for (Player p : before.values()) {
+                unset += p == null ? 1 : 0;
+            }
+            assertTrue(unset >= 3, "Reflecting Pool's and Wasteland's abilities start with no activator: " + before);
+
+            // the real game's priority-decision dispatch for the AI Player, as PhaseHandler fires it
+            s.game.firePriorityDecisionBefore(s.ai);
+            final List<JsonObject> out = s.drain();
+            final List<JsonObject> views = out.stream().filter(InteractiveAiActViewTest::isAiActView).toList();
+            assertEquals(views.size(), 1, "one AI act view: " + summary(out));
+            for (Map.Entry<SpellAbility, Player> e : before.entrySet()) {
+                assertTrue(e.getKey().getActivatingPlayer() == e.getValue(), "the view wrote the activator of "
+                        + e.getKey().getHostCard() + " " + e.getKey() + ": " + e.getValue() + " -> "
+                        + e.getKey().getActivatingPlayer());
+            }
+            assertEquals(activators(s.game).keySet().size(), before.size(), "no ability was added");
+            assertEquals(builtTriggerAbilities(s.game), triggersBefore, "no trigger ability was built");
+
+            final JsonArray aiLands = playerOf(views.get(0).getAsJsonObject("view"), 1).getAsJsonArray("battlefield");
+            final JsonObject poolSeen = card(aiLands, "Reflecting Pool");
+            assertNotNull(poolSeen, "Reflecting Pool is shown: " + aiLands);
+            assertFalse(poolSeen.has("producedMana") || poolSeen.has("producedManaKnown"),
+                    "Reflecting Pool is not asked: " + poolSeen);
+            assertTrue(card(aiLands, "Wasteland").get("producedManaKnown").getAsBoolean(), "Wasteland is: " + aiLands);
+            assertEquals(card(aiLands, "Wasteland").get("producedMana").toString(), "[\"C\"]");
+            assertEquals(card(aiLands, "Swamp").get("producedMana").toString(), "[\"B\"]");
+
+            // a request's view in the same game: Reflecting Pool asked, as before (and the AI act views still not)
+            final List<JsonObject> played = s.play();
+            final List<JsonObject> requests = played.stream()
+                    .filter(m -> "request".equals(m.get("type").getAsString())).toList();
+            assertFalse(requests.isEmpty(), "the seat got requests: " + summary(played));
+            for (JsonObject r : requests) {
+                final JsonObject poolAsked = card(playerOf(r.getAsJsonObject("view"), 1).getAsJsonArray("battlefield"),
+                        "Reflecting Pool");
+                if (poolAsked != null) {
+                    assertTrue(poolAsked.get("producedManaKnown").getAsBoolean(), "a request view asks it: " + poolAsked);
+                    assertTrue(poolAsked.has("producedMana"), "a request view asks it: " + poolAsked);
+                }
+            }
+            final JsonObject lastAsked = card(playerOf(requests.get(requests.size() - 1).getAsJsonObject("view"), 1)
+                    .getAsJsonArray("battlefield"), "Reflecting Pool");
+            assertNotNull(lastAsked, "Reflecting Pool in the last request's view");
+            // (what it answers depends on the activator earlier asks left on its ability: Forge's, unchanged here)
+            assertEquals(lastAsked.get("producedMana"), StateEncoder.encodeProducedMana(pool),
+                    "the request view's answer is the encoder's own");
+            for (JsonObject v : played.stream().filter(InteractiveAiActViewTest::isAiActView).toList()) {
+                final JsonObject seen = card(playerOf(v.getAsJsonObject("view"), 1).getAsJsonArray("battlefield"),
+                        "Reflecting Pool");
+                assertFalse(seen != null && (seen.has("producedMana") || seen.has("producedManaKnown")),
+                        "no AI act view asks it: " + seen);
+            }
         }
     }
 

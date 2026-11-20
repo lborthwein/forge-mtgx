@@ -14,6 +14,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 
 import forge.LobbyPlayer;
+import forge.bench.StateEncoder;
 import forge.card.GamePieceType;
 import forge.card.MagicColor;
 import forge.card.mana.ManaAtom;
@@ -252,10 +253,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     /** A game event reached this seat since its last view (a request's or an AI act's); true before its first. */
     private final AtomicBoolean aiActViewDirty = new AtomicBoolean(true);
     /**
-     * The last view this seat got, a request's or an AI act's, as {@link #aiActBoard} (its JSON text without
-     * {@code priorityPlayer} and {@code phase}), with {@link #aiActViewsOn}.
+     * The last view this seat got, a request's or an AI act's (a copy), with {@link #aiActViewsOn}; an AI act's view is
+     * compared with it through {@link #aiActBoard}.
      */
-    private volatile String aiActViewLast;
+    private volatile JsonObject aiActViewLast;
     /** The table seat whose action lane is running on this thread; see {@link #onCurrentThread}. */
     private static final ThreadLocal<InteractiveGuiGame> ACTION_OWNER = new ThreadLocal<>();
 
@@ -1904,7 +1905,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (aiActViewsOn) {
             // ai-beat-views-1120: the request's view is this seat's latest; an AI act's view starts over from it
             aiActViewDirty.set(false);
-            aiActViewLast = aiActBoard(view);
+            aiActViewLast = view.deepCopy();
         }
         final JsonObject prompt = new JsonObject();
         // The card being paid for need not yet be a committed stack item. Use
@@ -2254,16 +2255,23 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         sendAiActView();
     }
 
-    /** As {@link #sendWaitingView}: this seat's own view, a read under {@link #readOnlyQuery} and this seat's gate. */
+    /**
+     * As {@link #sendWaitingView}: this seat's own view, a read under {@link #readOnlyQuery} and this seat's gate. Built
+     * at the AI Player's priority, before it decides, so it must not write engine state: it does not ask a card whose
+     * mana abilities write when asked what they produce (reflected mana writes activating players; special mana its
+     * express choice; Astra review r1 S1). That card's {@code producedMana} keys are omitted
+     * ({@link StateEncoder#withoutManaWrites}), and the host keeps its printed derivation for it.
+     */
     private void sendAiActView() {
         final JsonObject view;
+        final Set<Integer> notAsked = new HashSet<>();
         final boolean wasQuery = readOnlyQuery.get();
         engineGate.lock();
         try {
             // A read: anything Forge fired from it would be an echo (isReadOnlyQueryEcho), never this seat's event.
             readOnlyQuery.set(true);
             aiActViewDirty.set(false);
-            view = visibleState();
+            view = StateEncoder.withoutManaWrites(notAsked, this::visibleState);
         } catch (Throwable failure) {
             // An extra, not a request: the seat's next view carries the board. The class only (a message could name a
             // card this seat may not see).
@@ -2274,12 +2282,13 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             readOnlyQuery.set(wasQuery);
             engineGate.unlock();
         }
-        // Dedup and filter in one: nothing when the board is the last view's (only who has priority, or the step, moved)
-        final String board = aiActBoard(view);
-        if (board.equals(aiActViewLast)) {
+        // Dedup and filter in one: nothing when the board is the last view's (only who has priority, or the step, moved;
+        // the produced mana of a card this view did not ask is left out of both sides)
+        final JsonObject last = aiActViewLast;
+        if (last != null && aiActBoard(view, notAsked).equals(aiActBoard(last, notAsked))) {
             return;
         }
-        aiActViewLast = board;
+        aiActViewLast = view.deepCopy();
         final JsonObject body = new JsonObject();
         body.addProperty("reason", AI_ACT_VIEW_REASON);
         body.add("view", view);
@@ -2298,10 +2307,41 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * the turn, the active player) is sent.
      */
     static String aiActBoard(final JsonObject view) {
+        return aiActBoard(view, Set.of());
+    }
+
+    /**
+     * As {@link #aiActBoard(JsonObject)}, also without {@code producedMana} and {@code producedManaKnown} on the cards
+     * (by {@code fid}) in {@code notAsked}: an AI act's view omits them for those cards and a request's view has them,
+     * so they are left out of both sides of the comparison.
+     */
+    static String aiActBoard(final JsonObject view, final Set<Integer> notAsked) {
         final JsonObject board = view.deepCopy();
         board.remove("priorityPlayer");
         board.remove("phase");
+        if (!notAsked.isEmpty()) {
+            withoutProducedMana(board, notAsked);
+        }
         return board.toString();
+    }
+
+    private static void withoutProducedMana(final JsonElement e, final Set<Integer> notAsked) {
+        if (e.isJsonArray()) {
+            for (JsonElement x : e.getAsJsonArray()) {
+                withoutProducedMana(x, notAsked);
+            }
+        } else if (e.isJsonObject()) {
+            final JsonObject o = e.getAsJsonObject();
+            final JsonElement fid = o.get("fid");
+            if (fid != null && fid.isJsonPrimitive() && fid.getAsJsonPrimitive().isNumber()
+                    && notAsked.contains(fid.getAsInt())) {
+                o.remove("producedMana");
+                o.remove("producedManaKnown");
+            }
+            for (Map.Entry<String, JsonElement> m : o.entrySet()) {
+                withoutProducedMana(m.getValue(), notAsked);
+            }
+        }
     }
 
     private Player playerAtSeat(final int seat) {
