@@ -4850,10 +4850,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * AI's own pick for the part with ours ruled out; else Forge AI's best opposing card, else an opponent); otherwise an
      * optional trigger is declined when it resolves ({@link #confirmTrigger}) and a mandatory one is left and logged
      * ({@code forced}). A followed solver line's own targets are its own guard's (lineOwnTarget), never touched here.
-     * Review 1: the guard fails open. A pick with a payoff shape the classifier does not model (a pending duration, a
-     * static or delayed return, a projected event or transform), a divided-amount part, or a search variant's forced pick
-     * is kept ({@code kept-unsure}, {@code kept-variant}); every forced or retargeted set is legal as Forge's own
-     * targeting (MustTarget included) or not taken.
+     * Reviews 1 and 2: the guard fails open with affirmative coverage. It retargets or declines only when every permanent
+     * of ours the pick harms is a plain asset taking plain loss ({@link forge.ai.simulation.TargetPicks#plainAsset}: a
+     * destroy, exile, sacrifice, lethal damage or lethal shrink, never a bounce; no divided amount; no opponent's object on
+     * the stack; no static ability of its own, nothing attached either way; no pending, static or delayed return, no
+     * trigger of ours, no projected event); otherwise the pick stands ({@code kept-unsure}). A search variant's forced pick
+     * is kept ({@code kept-variant}); every forced or retargeted set is legal as Forge's own targeting (MustTarget
+     * included) or not taken.
      */
     public boolean ownHarmPicks = false;
     /** target-picks-1119 ({@code targetLog=on}; null = off, the default: nothing is recorded or computed). */
@@ -5035,13 +5038,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     }
 
     /**
-     * target-picks-1119 (ownHarmPicks): the guard on one pick. It acts only on pure, payoff-free own harm that no unsure
-     * shape touches (review 1, S1 1: it fails open). Null = not own harm; "kept-unsure" = own harm, but a payoff shape the
-     * classifier does not model ({@link forge.ai.simulation.TargetPicks#unsure}), or a divided-amount part with an opposing
-     * target (S1 3: no allocation is made here), keeps the pick; "retarget" = moved to an opposing target; "kept" = an
-     * opposing target exists but no legal opposing set could be made (the pick stands); "decline" = an optional trigger
-     * with only our own to target (declined when it resolves); "forced" = a mandatory trigger with only our own (left,
-     * logged); "none-opposing" = a cast with only our own (its cast is the search's ownHarm check's).
+     * target-picks-1119 (ownHarmPicks): the guard on one pick. It acts only when every permanent of ours the pick harms is a
+     * plain asset taking plain loss ({@link forge.ai.simulation.TargetPicks#plainAsset}, review 2: affirmative coverage;
+     * the same predicate as the decline at resolution). Null = not own harm; "kept-unsure" = own harm, but a plainAsset
+     * condition fails (logged with it), so the pick stands; "retarget" = moved to an opposing target; "kept" = an opposing
+     * target exists but no legal opposing set could be made (the pick stands); "decline" = an optional trigger with only
+     * our own to target (declined when it resolves); "forced" = a mandatory trigger with only our own (left, logged);
+     * "none-opposing" = a cast with only our own (its cast is the search's ownHarm check's).
      */
     String guardPick(final SpellAbility root, final SpellAbility cur, final String origin, final List<GameEntity> legal) {
         final Player me = getPlayer();
@@ -5059,10 +5062,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 }
             }
         }
-        String unsure = forge.ai.simulation.TargetPicks.unsure(me, cur, whole);
-        if (unsure == null && !opp.isEmpty() && cur.isDividedAsYouChoose()) {
-            unsure = "divided amount: not retargeted";
-        }
+        final String unsure = forge.ai.simulation.TargetPicks.plainAsset(me, cur, whole);
         final String g;
         if (unsure != null) {
             g = "kept-unsure";
@@ -5149,9 +5149,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
 
     /**
      * target-picks-1119 (ownHarmPicks): an optional trigger of ours, resolving, whose targets are pure own harm: why to
-     * decline it (null = ask as usual). Review 1 (S1 1, fail open): own harm that an unsure shape touches
-     * ({@link forge.ai.simulation.TargetPicks#unsure}: Reclamation Sage at our Banishing Light holding our own creature) is
-     * never declined; it is logged ({@code kept-unsure}) and the seat is asked as usual.
+     * decline it (null = ask as usual). Declined only when the pick guard's own predicate holds now
+     * ({@link forge.ai.simulation.TargetPicks#plainAsset}, review 2: a plain asset taking plain loss, no opponent's object
+     * on the stack, ...); otherwise (Reclamation Sage at our Banishing Light holding our own creature; their spell on the
+     * stack) it is logged ({@code kept-unsure}) and the seat is asked as usual.
      */
     private String declineOwnHarm(final WrappedAbility w) {
         if (!ownHarmPicks || w == null || !seatPlays() || !w.isOptionalTrigger() || w.getActivatingPlayer() != getPlayer()) {
@@ -5161,7 +5162,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         for (SpellAbility cur = whole; cur != null; cur = cur.getSubAbility()) {
             final String why = forge.ai.simulation.TargetPicks.ownHarm(getPlayer(), cur, whole);
             if (why != null) {
-                final String unsure = forge.ai.simulation.TargetPicks.unsure(getPlayer(), cur, whole);
+                final String unsure = forge.ai.simulation.TargetPicks.plainAsset(getPlayer(), cur, whole);
                 if (unsure != null) {
                     note("ownHarmPicks.trigger.kept-unsure");
                     System.err.println("[own-harm-pick] trigger " + (w.getHostCard() == null ? "?" : w.getHostCard().getName())

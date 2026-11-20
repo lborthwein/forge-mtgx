@@ -670,25 +670,37 @@ final class LineOwnTarget {
     }
 
     /**
-     * target-picks-1119 (review 1, S1 1: the pick guard fails open): why the guard must leave the pick {@code p} (its
-     * chosen targets; {@code root} the whole ability) as it is although {@link #pickHarm} calls it own harm: a payoff shape
-     * the classifier does not model on one of the permanents of ours it harms. Null = none (the guard may act). Unsure
-     * shapes:
-     * <ul>
-     * <li>a pending duration or return held by the target: "until it leaves" commands (Banishing Light's exile, an
-     * "until ~ leaves" effect), cards exiled with it or exiled until it leaves, creatures it gained control of;</li>
-     * <li>a static or delayed return: any trigger of ours, Forge's static ones included, that could fire from the harm
-     * (Out of Time's phase-in effect), a delayed trigger of ours that remembers the target or watches it leave
-     * (Adarkar Valkyrie's return);</li>
-     * <li>a projected event: another part of the ability makes the target act (Garruk Relentless: "that creature deals
-     * damage equal to its power to him"; a fight), the ability's own card has a state trigger (his transform), or a
-     * shrink a filter on the projected power or toughness could match (Shirei, Shizo's Caretaker);</li>
-     * <li>the card's own hint that it wants to go ({@code SacMe});</li>
-     * <li>anything that cannot be read (an error).</li>
-     * </ul>
-     * Read-only; never throws.
+     * target-picks-1119 (the pick guard, {@code ownHarmPicks}; review 2: affirmative coverage, the coordinator's ruling):
+     * the one predicate the guard reads before it retargets or declines a pick {@link #pickHarm} calls own harm, at the
+     * pick (trigger or cast) and when an optional trigger resolves. The guard may act only when every permanent of ours the
+     * pick {@code p} harms (its chosen targets; {@code root} the whole ability) is a plain asset taking plain loss: null =
+     * a plain asset (the guard may act); otherwise the first condition that fails (the pick stands, logged
+     * {@code kept-unsure} with it). All must hold:
+     * <ol>
+     * <li>the harm removes it: a destroy, an exile, a sacrifice, lethal damage or a lethal toughness loss. A bounce is
+     * never overridden (on our own permanent it is usually a save, a reuse or an escape); damage or a shrink it survives
+     * (or whose amount cannot be read) is not plain loss;</li>
+     * <li>the part does not divide an amount (no allocation is made for a retarget);</li>
+     * <li>no spell or ability an opponent controls is on the stack (any own-target pick may be a response to it: Unsummon
+     * saving our creature from their Doom Blade);</li>
+     * <li>no other part of the ability projects an event from the target (Garruk Relentless: "that creature deals damage
+     * equal to its power to him"; a fight) and the ability's card has no state trigger (his transform);</li>
+     * <li>nothing is attached to the target and it is attached to nothing (their Pacifism on our creature: bouncing it is
+     * an escape; Equipment, Auras either side);</li>
+     * <li>the target has no static ability of its own (keyword statics aside): a drawback or lock permanent (Steel Golem,
+     * Ensnaring Bridge, Smokestack) may be removed on purpose;</li>
+     * <li>it holds no pending duration or return: "until it leaves" commands (Banishing Light's exile), cards exiled with
+     * it or until it leaves, permanents it gained control of;</li>
+     * <li>no trigger of ours could fire from the harm, read loosely (Forge's static triggers too: Out of Time's phase-in;
+     * a power/toughness filter for a shrink: Shirei, Shizo's Caretaker), and no delayed trigger of ours remembers it or
+     * watches it leave (Adarkar Valkyrie);</li>
+     * <li>the card does not hint that it wants to go ({@code SacMe});</li>
+     * <li>everything can be read (an error fails).</li>
+     * </ol>
+     * A search variant's own pick is never guarded, and a retarget must also pass the bridge's legality and MustTarget
+     * check: those are the bridge's. Read-only; never throws.
      */
-    static String pickUnsure(final Player me, final SpellAbility p, final SpellAbility root) {
+    static String plainAsset(final Player me, final SpellAbility p, final SpellAbility root) {
         try {
             if (me == null || p == null || !p.usesTargeting()) {
                 return null;
@@ -696,6 +708,16 @@ final class LineOwnTarget {
             final Harm harm = harm(p);
             if (harm == null) {
                 return null;
+            }
+            if (harm == Harm.BOUNCE) {
+                return "a bounce is never overridden (a save, a reuse or an escape)";
+            }
+            if (p.isDividedAsYouChoose()) {
+                return "divided amount: not retargeted";
+            }
+            final String response = opposingStack(me);
+            if (response != null) {
+                return response;
             }
             final SpellAbility whole = root == null ? p : root;
             final String shape = projected(p, whole);
@@ -706,6 +728,20 @@ final class LineOwnTarget {
                 final String what = c.getName() + " (" + c.getId() + ")";
                 if (shape != null) {
                     return shape + " (" + what + ")";
+                }
+                final String loss = removes(p, harm, c);
+                if (loss != null) {
+                    return loss + " (" + what + ")";
+                }
+                if (c.hasCardAttachments()) {
+                    return "something is attached to it: " + c.getAttachedCards() + " (" + what + ")";
+                }
+                if (c.isAttachedToEntity()) {
+                    return "it is attached to " + c.getEntityAttachedTo() + " (" + what + ")";
+                }
+                final String statics = ownStatic(c);
+                if (statics != null) {
+                    return statics + " (" + what + ")";
                 }
                 final String pending = pending(c);
                 if (pending != null) {
@@ -728,7 +764,70 @@ final class LineOwnTarget {
         }
     }
 
-    /** A pending duration or return held by {@code c} (see {@link #pickUnsure}), or null. */
+    /** A spell or ability an opponent of {@code me} controls on the stack (see {@link #plainAsset}), or null. */
+    private static String opposingStack(final Player me) {
+        for (forge.game.spellability.SpellAbilityStackInstance si : me.getGame().getStack()) {
+            final Player who = si.getActivatingPlayer();
+            if (who != null && me.isOpponentOf(who)) {
+                final Card src = si.getSourceCard();
+                return "an opponent's spell or ability is on the stack (" + (src == null ? "?" : src.getName())
+                        + "): the pick may be a response";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The harm {@code harm} of the part {@code p} removes {@code c} (see {@link #plainAsset}): null = it does (a destroy,
+     * an exile, a sacrifice; damage of at least what kills it, a creature that is not indestructible or a planeswalker's
+     * loyalty; a toughness loss it does not survive), else why not.
+     */
+    private static String removes(final SpellAbility p, final Harm harm, final Card c) {
+        switch (harm) {
+            case DESTROY:
+                return c.canBeDestroyed() ? null : "a destroy it survives (indestructible)";
+            case REMOVE:
+            case SACRIFICE:
+                return null;
+            case DAMAGE: {
+                final Integer n = amount(p, p.getParam("NumDmg"));
+                if (n == null) {
+                    return "damage of an amount that cannot be read";
+                }
+                if (c.isCreature() && !c.hasKeyword(forge.game.keyword.Keyword.INDESTRUCTIBLE)
+                        && n >= c.getLethal() - c.getDamage()) {
+                    return null;
+                }
+                if (c.isPlaneswalker() && n >= c.getCurrentLoyalty()) {
+                    return null;
+                }
+                return "damage it survives (" + n + ")";
+            }
+            case SHRINK: {
+                final Integer n = p.getApi() == ApiType.PutCounter
+                        ? amount(p, "-" + p.getParamOrDefault("CounterNum", "1")) : amount(p, p.getParam("NumDef"));
+                if (n == null) {
+                    return "a toughness loss of an amount that cannot be read";
+                }
+                return survives(c, n) ? "a toughness loss it survives (" + n + ")" : null;
+            }
+            default:
+                return "a bounce is never overridden (a save, a reuse or an escape)";
+        }
+    }
+
+    /** A static ability of {@code c}'s own, keyword statics aside (see {@link #plainAsset}), or null. */
+    private static String ownStatic(final Card c) {
+        for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {
+            if (st.getKeyword() == null) {
+                final String d = st.toString();
+                return "it has a static ability of its own: " + (d.length() > 80 ? d.substring(0, 80) + "..." : d);
+            }
+        }
+        return null;
+    }
+
+    /** A pending duration or return held by {@code c} (see {@link #plainAsset}), or null. */
     private static String pending(final Card c) {
         if (!c.getLeavesPlayCommands().isEmpty()) {
             return "a duration ends when it leaves";

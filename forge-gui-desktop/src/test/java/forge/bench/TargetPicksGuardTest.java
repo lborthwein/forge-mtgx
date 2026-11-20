@@ -37,7 +37,9 @@ import forge.game.zone.ZoneType;
 /**
  * target-picks-1119, review 1 of b8b01a0ed3e: the pick guard ({@code ownHarmPicks}) fails open (S1 1), forced and
  * retargeted target sets are legal as Forge's own targeting, MustTarget included (S1 2), and divided-amount abilities are
- * never forced or retargeted (S1 3). The reviewer's repros (review/r1/ReviewScratchTargetPicksTest.java), on the live
+ * never forced or retargeted (S1 3). Review 2 of 4d08eae3025: the guard acts only on a plain asset taking plain loss
+ * ({@code TargetPicks.plainAsset}: never a bounce, no opponent's object on the stack, nothing attached, no static ability
+ * of its own, a lethal harm). The reviewers' repros (review/r1 and review/r2 ReviewScratch*Test.java), on the live
  * controller's guard directly: seat 0 is a bridged seat whose local answerer says yes to every ask (a targets ask gets
  * no choices: Forge AI answers it), seat 1 a null seat.
  */
@@ -188,6 +190,131 @@ public class TargetPicksGuardTest extends SimulationTest {
         s.getTargets().add(bear);
         Assert.assertEquals(guard(p, s), "kept-unsure");
         Assert.assertTrue(s.getTargets().contains(bear));
+    }
+
+    // ------------------------------------------------------------------ review 2: affirmative coverage (plainAsset)
+
+    /** Their spell {@code name}, cast by {@code q} onto the stack at {@code target} (the reviewer's live fixture). */
+    private SpellAbility theirSpellOnTheStack(final Game g, final Player q, final String name,
+            final forge.game.GameObject target) {
+        Card c = addCardToZone(name, q, ZoneType.Hand);
+        g.copyLastState();
+        c = g.getAction().moveToStack(c, null);
+        final SpellAbility sa = c.getFirstSpellAbility();
+        sa.setActivatingPlayer(q);
+        sa.getTargets().add(target);
+        g.getStack().add(sa);
+        Assert.assertFalse(g.getStack().isEmpty());
+        return sa;
+    }
+
+    private static String why(final Player p, final SpellAbility s) {
+        return forge.ai.simulation.TargetPicks.plainAsset(p, s, s);
+    }
+
+    /**
+     * Review 2 repro: their Doom Blade at our Bears on the stack; our Unsummon at our Bears saves it. Kept (a bounce, and an
+     * opponent's spell on the stack); through resolution our Bears is in our hand, not their graveyard.
+     */
+    @Test
+    public void unsummonSavingOurBearsFromTheirDoomBladeIsKept() {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        final Card bear = addCard("Grizzly Bears", p);
+        addCard("Runeclaw Bear", q);
+        theirSpellOnTheStack(g, q, "Doom Blade", bear);
+        final SpellAbility s = spell(addCardToZone("Unsummon", p, ZoneType.Hand), p);
+        s.getTargets().add(bear);
+        Assert.assertEquals(guard(p, s), "kept-unsure");
+        Assert.assertTrue(why(p, s).startsWith("a bounce is never overridden"), why(p, s));
+        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(bear));
+        AbilityUtils.resolve(s);
+        AbilityUtils.resolve(g.getStack().peekAbility());
+        Assert.assertEquals(g.getCardState(bear).getZone().getZoneType(), ZoneType.Hand, "saved");
+    }
+
+    /** Review 2 repro: our Unsummon at our Bears wearing their Pacifism (the Aura escape): kept. */
+    @Test
+    public void unsummonFreeingOurBearsFromPacifismIsKept() {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        final Card bear = addCard("Grizzly Bears", p), aura = addCard("Pacifism", q);
+        aura.attachToEntity(bear, null);
+        g.getAction().checkStaticAbilities();
+        Assert.assertSame(aura.getEnchantingCard(), bear);
+        addCard("Runeclaw Bear", q);
+        final SpellAbility s = spell(addCardToZone("Unsummon", p, ZoneType.Hand), p);
+        s.getTargets().add(bear);
+        Assert.assertEquals(guard(p, s), "kept-unsure");
+        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(bear));
+    }
+
+    /** Condition 3 on its own: Doom Blade at our Bears wearing their Pacifism (a destroy, not a bounce): kept, attached. */
+    @Test
+    public void doomBladeAtOurEnchantedBearsIsKept() {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        final Card bear = addCard("Grizzly Bears", p), aura = addCard("Pacifism", q);
+        aura.attachToEntity(bear, null);
+        g.getAction().checkStaticAbilities();
+        addCard("Runeclaw Bear", q);
+        final SpellAbility s = spell(addCardToZone("Doom Blade", p, ZoneType.Hand), p);
+        s.getTargets().add(bear);
+        Assert.assertEquals(guard(p, s), "kept-unsure");
+        Assert.assertTrue(why(p, s).startsWith("something is attached to it"), why(p, s));
+        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(bear));
+    }
+
+    /** Review 2 repro: Doom Blade at our Steel Golem (it unlocks our creature spells): kept, its own static ability. */
+    @Test
+    public void doomBladeAtOurSteelGolemIsKept() {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        final Card golem = addCard("Steel Golem", p);
+        addCard("Runeclaw Bear", q);
+        addCardToZone("Grizzly Bears", p, ZoneType.Hand);
+        final SpellAbility s = spell(addCardToZone("Doom Blade", p, ZoneType.Hand), p);
+        s.getTargets().add(golem);
+        Assert.assertEquals(guard(p, s), "kept-unsure");
+        Assert.assertTrue(why(p, s).startsWith("it has a static ability of its own"), why(p, s));
+        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(golem));
+    }
+
+    /**
+     * Reclamation Sage at our only Sol Ring while their Lightning Bolt (at us) is on the stack: kept at the pick and at
+     * resolution (the seat's yes stands); the same board with an empty stack is declined (below).
+     */
+    @Test
+    public void sageAtOurOnlySolRingWhileTheirSpellIsOnTheStackIsKept() {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        final Card ring = addCard("Sol Ring", p);
+        final Card sage = addCard("Reclamation Sage", p);
+        theirSpellOnTheStack(g, q, "Lightning Bolt", p);
+        final Trigger tr = sage.getTriggers().get(0);
+        final SpellAbility sa = tr.ensureAbility().copy(p);
+        sa.setOptionalTrigger(true);
+        sa.getTargets().add(ring);
+        final WrappedAbility w = new WrappedAbility(tr, sa, p);
+        w.setActivatingPlayer(p);
+        pc(p).ownHarmPicks = true;
+        Assert.assertEquals(pc(p).guardPick(w, sa, "trigger", legal(sa)), "kept-unsure");
+        Assert.assertTrue(why(p, sa).startsWith("an opponent's spell or ability is on the stack"), why(p, sa));
+        Assert.assertTrue(pc(p).confirmTrigger(w), "kept at resolution: the seat's yes");
+    }
+
+    /** Condition 1, lethality: Shock (2) at our Hill Giant (3/3), their Runeclaw Bear legal: damage it survives, kept. */
+    @Test
+    public void shockAtOurHillGiantItSurvivesIsKept() {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        final Card giant = addCard("Hill Giant", p);
+        addCard("Runeclaw Bear", q);
+        final SpellAbility s = spell(addCardToZone("Shock", p, ZoneType.Hand), p);
+        s.getTargets().add(giant);
+        Assert.assertEquals(guard(p, s), "kept-unsure");
+        Assert.assertTrue(why(p, s).startsWith("damage it survives"), why(p, s));
+        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(giant));
     }
 
     /** Control: Doom Blade at our Bears with no payoff, their Runeclaw Bear legal: still retargeted. */

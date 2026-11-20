@@ -23,12 +23,13 @@ public final class TargetPicks {
     }
 
     /**
-     * Review 1 (S1 1: the guard fails open): why the guard must keep an own-harm pick of the part {@code part} of
-     * {@code root} as it is, a payoff shape the classifier does not model ({@link LineOwnTarget#pickUnsure}: a pending
-     * duration, a static or delayed return, a projected event or transform, a SacMe card, an unreadable state), or null.
+     * Review 2 (affirmative coverage): the one predicate the pick guard reads before it retargets or declines an own-harm
+     * pick of the part {@code part} of {@code root} ({@link LineOwnTarget#plainAsset}). Null = every permanent of ours it
+     * harms is a plain asset taking plain loss (the guard may act); otherwise the first condition that fails (the pick
+     * stands, {@code kept-unsure}).
      */
-    public static String unsure(final Player me, final SpellAbility part, final SpellAbility root) {
-        return LineOwnTarget.pickUnsure(me, part, root);
+    public static String plainAsset(final Player me, final SpellAbility part, final SpellAbility root) {
+        return LineOwnTarget.plainAsset(me, part, root);
     }
 
     /** The harm of one ability part ({@link LineOwnTarget#harm}: damage, destroy, shrink, remove, bounce, sacrifice), or null. */
