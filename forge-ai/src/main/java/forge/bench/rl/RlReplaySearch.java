@@ -385,7 +385,7 @@ public final class RlReplaySearch implements PriorityDecisionListener {
     @SuppressWarnings("unchecked")
     static Probe probe(final Game g, final Player p, final int seat, final RlSeat liveSeat, final RlKnowledge know,
             final CardIndex index, final int obs, final int decIdx, final RlSearch scorer) {
-        return PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+        return PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> throughBridge(p, () -> {
             final Probe pr = new Probe();
             final PlayerControllerBridge b = bridgeOf(p);
             if (b == null) {
@@ -424,7 +424,30 @@ public final class RlReplaySearch implements PriorityDecisionListener {
                 throw new java.io.UncheckedIOException(e);
             }
             return pr;
-        }));
+        })));
+    }
+
+    /**
+     * probe-bridge-1120: runs {@code body} (a probe's ask) with the seat's controller swapped from its tape controller to the
+     * inner bridge, then restores it. The live seat built its priority menu INSIDE its recorded priority frame, where the
+     * tape passes every nested ask (the enumeration's chooseOptionalCosts) to the bridge unrecorded
+     * ({@code AiTape.controllerHere}). A probe runs outside any frame, so the tape controller took that ask as the next
+     * recorded decision, and the replay diverged whenever the seat held an optional-cost card (Beseech the Mirror's
+     * bargain). Asking the bridge directly is the live nesting. A seat that is not taped, or is controlled by another
+     * player, runs {@code body} as it is.
+     */
+    static <T> T throughBridge(final Player p, final java.util.function.Supplier<T> body) {
+        final forge.game.player.PlayerController outer = p.getController();
+        if (!(outer instanceof AiTapeController tc) || p.getControllingPlayer() != null
+                || !(tc.inner() instanceof PlayerControllerBridge b)) {
+            return body.get();
+        }
+        p.dangerouslySetController(b);
+        try {
+            return body.get();
+        } finally {
+            p.dangerouslySetController(outer);
+        }
     }
 
     /** The pending position of {@code seat} the probe is (C and v_root), or null. */
