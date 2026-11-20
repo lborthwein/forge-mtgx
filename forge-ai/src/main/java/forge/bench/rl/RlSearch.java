@@ -198,6 +198,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          */
         public boolean workUnits = false;
         /**
+         * wb-seqlanes-1120 (false = off, the default, unrecorded, and then nothing changes; only with workUnits): the
+         * look-ahead builds no pool and runs its fixed virtual lanes one after another on the deciding thread
+         * ({@link LookaheadSearch.Config#seqLanes}). Same lanes, same lane clocks, same budget cuts as the pooled path,
+         * with nothing left to thread timing; the wall time grows. A bench key: live never sets it.
+         */
+        public boolean seqLanes = false;
+        /**
          * work-units-1107 (false = off, the default, unrecorded): block search's sampled declarations are seeded from the
          * game's seed instead of the per-run game uid (the service seeds a sample by uid, seat and dec_idx).
          */
@@ -520,6 +527,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState", "infoAttach", "beliefDeck", "choiceScorer", "alwaysKeep", "keepGate", "mullValue", "mullKeep",
                 "opponent", "leafSym", "beliefPrior", "beliefPriorSha256", "beliefPriorGain", "beliefDeckSha256", "playoutLoopGuard",
                 "playoutMaxDecisions", "replayMayPlayLoose", "copyCast", "copyDungeon", "copyStaleRefs", "copyTriggers", "chooseACard", "anytime", "workUnits", "workScale", "workWallMs",
+                "seqLanes", // wb-seqlanes-1120
                 "blockSampleSeed", "svcMemo", "honorDrawReason", "basicsByType", "beliefStatics", "beliefPlayerStatics", "beliefRememberedHand",
                 "copyTurnLimits", "offBattlefieldLimits", "historyLki", "copyBackFace", "stackAbilityCopies", "stackHistory", "reach", "valueSink",
                 "provenOnly", "explore", "lineGo", "planEvery", "imit", "prioGf", "prioGfMargin", "prioGfTurns", "prioGfHold",
@@ -605,6 +613,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("svcMemo")) c.svcMemo = o.get("svcMemo").getAsBoolean(); // svcmemo-1114
             if (o.has("workScale")) c.workScale = o.get("workScale").getAsDouble();
             if (o.has("workWallMs")) c.workWallMs = o.get("workWallMs").getAsLong();
+            if (o.has("seqLanes")) c.seqLanes = o.get("seqLanes").getAsBoolean(); // wb-seqlanes-1120
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
             if (o.has("choices")) c.choices = o.get("choices").getAsInt();
             if (o.has("choiceAlts")) c.choiceAlts = o.get("choiceAlts").getAsInt();
@@ -734,6 +743,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (!(workScale > 0) || workWallMs < 0 || (!workUnits && (workScale != 1.0 || workWallMs != 0))) {
                 throw new IllegalArgumentException("search: workScale > 0, workWallMs >= 0, both only with workUnits");
+            }
+            if (seqLanes && !workUnits) {
+                // wb-seqlanes-1120: the lanes exist only on the work clock; without it seqLanes would be threads 1
+                throw new IllegalArgumentException("search: seqLanes only with workUnits");
             }
             if (server == null) {
                 throw new IllegalArgumentException("search.server (host:port of the search service) is required");
@@ -931,6 +944,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("workUnits", true);
                 o.addProperty("workScale", workScale);
                 o.addProperty("workWallMs", workWallMs);
+            }
+            if (seqLanes) {
+                o.addProperty("seqLanes", true); // wb-seqlanes-1120: only when on
             }
             if (sameDepartures != 2) {
                 // cm-choice-search-1009: only when changed, so an S1 spec's JSON is unchanged
@@ -1402,6 +1418,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.leafExtraSteps = cfg.leafExtraSteps;
         lc.seed = splitmix(gameSeed ^ splitmix(cfg.seedSalt));
         lc.threads = cfg.threads;
+        lc.seqLanes = cfg.seqLanes; // wb-seqlanes-1120
         lc.departZ = cfg.departZ;
         lc.anytime = cfg.anytime;
         lc.prioGf = cfg.prioGf; // sdcc-c1-priogf-1117 (0 = off)
