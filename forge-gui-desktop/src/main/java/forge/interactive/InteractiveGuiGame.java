@@ -243,14 +243,18 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * {@link forge.game.PriorityDecisionListener} on that game only), this seat is sent a {@code state}
      * ({@code "reason": "aiAct"}) with its OWN view, built as a waiting view is ({@link #visibleState} under
      * {@link #readOnlyQuery}), when a game event reached it since its last view and the view differs from the last one
-     * it got. Never throttled: one per AI decision at most, on Forge's game thread, after the act's own events.
+     * it got in more than {@code priorityPlayer} and {@code phase} ({@link #aiActBoard}). Never throttled: one per AI
+     * decision at most, on Forge's game thread, after the act's own events.
      */
     static final String AI_ACT_VIEW_REASON = "aiAct";
     /** The config's {@code aiActViews} was true (set once, before the game starts); false: nothing below runs. */
     private volatile boolean aiActViewsOn;
     /** A game event reached this seat since its last view (a request's or an AI act's); true before its first. */
     private final AtomicBoolean aiActViewDirty = new AtomicBoolean(true);
-    /** The last view this seat got, a request's or an AI act's (its JSON text), with {@link #aiActViewsOn}. */
+    /**
+     * The last view this seat got, a request's or an AI act's, as {@link #aiActBoard} (its JSON text without
+     * {@code priorityPlayer} and {@code phase}), with {@link #aiActViewsOn}.
+     */
     private volatile String aiActViewLast;
     /** The table seat whose action lane is running on this thread; see {@link #onCurrentThread}. */
     private static final ThreadLocal<InteractiveGuiGame> ACTION_OWNER = new ThreadLocal<>();
@@ -1900,7 +1904,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (aiActViewsOn) {
             // ai-beat-views-1120: the request's view is this seat's latest; an AI act's view starts over from it
             aiActViewDirty.set(false);
-            aiActViewLast = view.toString();
+            aiActViewLast = aiActBoard(view);
         }
         final JsonObject prompt = new JsonObject();
         // The card being paid for need not yet be a committed stack item. Use
@@ -2229,7 +2233,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * the active player after each resolution, so on its own turn every act it makes is followed by one of these. Each
      * act's events went out on this same thread while it was played, so the view follows them and precedes the next
      * act's. Sent only when a game event reached this seat since its last view and the view differs from the last one
-     * it got (never throttled).
+     * it got in more than who has priority and the step ({@link #aiActBoard}; never throttled).
      */
     void offerAiActView(final Player p) {
         if (!aiActViewsOn || channel.isEnded() || game == null || human == null || game.isGameOver()) {
@@ -2270,11 +2274,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             readOnlyQuery.set(wasQuery);
             engineGate.unlock();
         }
-        final String text = view.toString();
-        if (text.equals(aiActViewLast)) {
+        // Dedup and filter in one: nothing when the board is the last view's (only who has priority, or the step, moved)
+        final String board = aiActBoard(view);
+        if (board.equals(aiActViewLast)) {
             return;
         }
-        aiActViewLast = text;
+        aiActViewLast = board;
         final JsonObject body = new JsonObject();
         body.addProperty("reason", AI_ACT_VIEW_REASON);
         body.add("view", view);
@@ -2283,6 +2288,20 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         } catch (InteractiveProtocol.ProtocolException e) {
             fail("eof", e.getMessage(), null, "state", null, e);
         }
+    }
+
+    /**
+     * ai-beat-views-1120 (architect-o, 2026-11-20): what an AI act view is compared on: the view's JSON text without
+     * {@code priorityPlayer} and {@code phase}. A view that differs from the seat's last one (a request's or an AI
+     * act's) only there is no new board for a beat (the AI Player getting priority after the seat passed, or passing
+     * from one step to the next), and it was half of all views. Any other difference (a card, the stack, combat, life,
+     * the turn, the active player) is sent.
+     */
+    static String aiActBoard(final JsonObject view) {
+        final JsonObject board = view.deepCopy();
+        board.remove("priorityPlayer");
+        board.remove("phase");
+        return board.toString();
     }
 
     private Player playerAtSeat(final int seat) {

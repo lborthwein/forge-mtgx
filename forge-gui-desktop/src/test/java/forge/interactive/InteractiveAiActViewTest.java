@@ -346,16 +346,17 @@ public class InteractiveAiActViewTest extends AITest {
             assertTrue(specterView > specter && onStack(m.get(specterView).getAsJsonObject("view"), "Hypnotic Specter"),
                     "the Specter's own view: " + trace);
 
-            // each view is the seat's own, and none is a duplicate of the one before it
+            // each view is the seat's own, and none is the board of the view before it (a request's or an AI act's)
+            // with only who has priority, or the step, moved
             String last = null;
             for (JsonObject x : m) {
                 if (isAiActView(x)) {
                     assertEquals(x.getAsJsonObject("view").get("seat").getAsInt(), 0);
-                    final String text = x.getAsJsonObject("view").toString();
-                    assertFalse(text.equals(last), "a repeated view: " + trace);
-                    last = text;
+                    final String board = InteractiveGuiGame.aiActBoard(x.getAsJsonObject("view"));
+                    assertFalse(board.equals(last), "a view with no new board: " + trace);
+                    last = board;
                 } else if ("request".equals(x.get("type").getAsString())) {
-                    last = x.getAsJsonObject("view").toString();
+                    last = InteractiveGuiGame.aiActBoard(x.getAsJsonObject("view"));
                 }
             }
         }
@@ -442,6 +443,53 @@ public class InteractiveAiActViewTest extends AITest {
             final List<JsonObject> views = out.stream().filter(InteractiveAiActViewTest::isAiActView).toList();
             assertEquals(views.size(), 1, "the changed board: " + summary(out));
             assertEquals(playerOf(views.get(0).getAsJsonObject("view"), 1).get("life").getAsInt(), 15);
+        }
+    }
+
+    /**
+     * The filter (architect-o, 2026-11-20): a view whose only differences from the seat's last one are
+     * {@code priorityPlayer} and {@code phase} is no new board for a beat and is not sent; the next real board change
+     * is, carrying the step it happened in.
+     */
+    @Test(timeOut = 900000)
+    public void aPriorityOrStepOnlyChangeSendsNothingAndTheNextBoardChangeIsSent() throws Exception {
+        try (OneSeat s = new OneSeat(true)) {
+            s.gui.offerAiActView(s.ai);
+            List<JsonObject> out = s.drain();
+            assertEquals(out.stream().filter(InteractiveAiActViewTest::isAiActView).count(), 1L, "the first view: " + summary(out));
+            final JsonObject first = out.stream().filter(InteractiveAiActViewTest::isAiActView).findFirst().orElseThrow()
+                    .getAsJsonObject("view");
+
+            // the step moves (main 2 -> end step), with its event: the view's `phase` changes and nothing else
+            s.game.getPhaseHandler().devModeSet(PhaseType.END_OF_TURN, s.ai);
+            final JsonObject stepped = InteractiveState.seatView(s.game, s.seat, 0);
+            assertFalse(stepped.toString().equals(first.toString()), "the view did change: " + stepped);
+            assertEquals(InteractiveGuiGame.aiActBoard(stepped), InteractiveGuiGame.aiActBoard(first), "only the step");
+            s.gui.offerAiActView(s.ai);
+            out = s.drain();
+            assertEquals(out.stream().filter(x -> "state".equals(x.get("type").getAsString())).count(), 0L,
+                    "a step-only change sends nothing: " + summary(out));
+
+            // priority moves to the seat and back, with its events: only `priorityPlayer` differs
+            s.game.getPhaseHandler().setPriority(s.seat);
+            s.game.fireEvent(new GameEventPlayerPriority(PlayerView.get(s.ai), PhaseType.END_OF_TURN, PlayerView.get(s.seat)));
+            s.gui.offerAiActView(s.ai);
+            s.game.getPhaseHandler().setPriority(s.ai);
+            s.game.fireEvent(new GameEventPlayerPriority(PlayerView.get(s.ai), PhaseType.END_OF_TURN, PlayerView.get(s.ai)));
+            s.gui.offerAiActView(s.ai);
+            out = s.drain();
+            assertEquals(out.stream().filter(x -> "state".equals(x.get("type").getAsString())).count(), 0L,
+                    "a priority-only change sends nothing: " + summary(out));
+
+            // the next real board change is sent, in the step it happened in
+            s.ai.setLife(13, null);
+            s.gui.offerAiActView(s.ai);
+            out = s.drain();
+            final List<JsonObject> views = out.stream().filter(InteractiveAiActViewTest::isAiActView).toList();
+            assertEquals(views.size(), 1, "the board change: " + summary(out));
+            assertEquals(playerOf(views.get(0).getAsJsonObject("view"), 1).get("life").getAsInt(), 13);
+            assertEquals(views.get(0).getAsJsonObject("view").get("phase"), stepped.get("phase"));
+            assertFalse(stepped.get("phase").equals(first.get("phase")), "the step had moved: " + stepped);
         }
     }
 
