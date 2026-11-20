@@ -46,6 +46,9 @@ import java.util.function.Predicate;
  * @since 1.0.15
  */
 public class SpellAbilityCondition extends SpellAbilityVariables {
+
+    /** The "Did not have activator set" stdout line: off unless -Dforge.logNoActivator=true (bench/live flood). */
+    private static final boolean LOG_NO_ACTIVATOR = Boolean.getBoolean("forge.logNoActivator");
     // A class for handling SpellAbility Conditions. These restrictions include:
     // Zone, Phase, OwnTurn, Speed (instant/sorcery), Amount per Turn, Player,
     // Threshold, Metalcraft, LevelRange, etc
@@ -256,8 +259,10 @@ public class SpellAbilityCondition extends SpellAbilityVariables {
         Player activator = sa.getActivatingPlayer();
         if (activator == null) {
             activator = sa.getHostCard().getController();
-            System.out.println(sa.getHostCard().getName()
-                    + " Did not have activator set in SpellAbility_Condition.checkConditions()");
+            if (LOG_NO_ACTIVATOR) {
+                System.out.println(sa.getHostCard().getName()
+                        + " Did not have activator set in SpellAbility_Condition.checkConditions()");
+            }
         }
         final Game game = activator.getGame();
         final PhaseHandler phase = game.getPhaseHandler();
