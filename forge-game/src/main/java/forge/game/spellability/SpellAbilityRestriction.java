@@ -49,6 +49,9 @@ import forge.util.collect.FCollection;
  * @version $Id$
  */
 public class SpellAbilityRestriction extends SpellAbilityVariables {
+
+    /** The "Did not have activator set" stdout line: off unless -Dforge.logNoActivator=true (bench/live flood). */
+    private static final boolean LOG_NO_ACTIVATOR = Boolean.getBoolean("forge.logNoActivator");
     // A class for handling SpellAbility Restrictions. These restrictions include:
     // Zone, Phase, OwnTurn, Speed (instant/sorcery), Amount per Turn, Player,
     // Threshold, Metalcraft, LevelRange, etc
@@ -553,7 +556,9 @@ public class SpellAbilityRestriction extends SpellAbilityVariables {
         if (activator == null) {
             activator = c.getController();
             sa.setActivatingPlayer(activator);
-            System.out.println(c.getName() + " Did not have activator set in SpellAbilityRestriction.canPlay()");
+            if (LOG_NO_ACTIVATOR) {
+                System.out.println(c.getName() + " Did not have activator set in SpellAbilityRestriction.canPlay()");
+            }
         }
 
         if (!sa.canCastTiming(c, activator) && !StaticAbilityCastWithFlash.anyWithFlashNeedsInfo(sa, c, activator)) {

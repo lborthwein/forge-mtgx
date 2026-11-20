@@ -35,6 +35,9 @@ import forge.game.staticability.StaticAbilityCantBeCast;
  */
 public abstract class AbilityActivated extends SpellAbility implements Cloneable {
 
+    /** The "Did not have activator set" stdout line: off unless -Dforge.logNoActivator=true (bench/live flood). */
+    private static final boolean LOG_NO_ACTIVATOR = Boolean.getBoolean("forge.logNoActivator");
+
     /**
      * <p>
      * Constructor for Ability_Activated.
@@ -119,7 +122,9 @@ public abstract class AbilityActivated extends SpellAbility implements Cloneable
         // with no activator set for the SA (by the AI). Most likely deserves a better fix in the future.
         if (this.getActivatingPlayer() == null) {
             this.setActivatingPlayer(this.getHostCard().getController());
-            System.out.println(this.getHostCard().getName() + " Did not have activator set in AbilityActivated.isPossible");
+            if (LOG_NO_ACTIVATOR) {
+                System.out.println(this.getHostCard().getName() + " Did not have activator set in AbilityActivated.isPossible");
+            }
         }
 
     	return this.getRestrictions().checkZoneRestrictions(this.getHostCard(), this) &&
