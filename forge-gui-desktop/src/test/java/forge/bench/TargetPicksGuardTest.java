@@ -29,7 +29,6 @@ import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;
 import forge.game.spellability.SpellAbility;
-import forge.game.staticability.StaticAbilityMustTarget;
 import forge.game.trigger.Trigger;
 import forge.game.trigger.WrappedAbility;
 import forge.game.zone.ZoneType;
@@ -394,16 +393,117 @@ public class TargetPicksGuardTest extends SimulationTest {
     /** The guard's retarget of a Bolt at our Bears, with their Standard Bearer and Runeclaw Bear, meets MustTarget. */
     @Test
     public void aRetargetMeetsMustTarget() {
+        // Review 3 expectation change: before, the retarget landed on Standard Bearer (the only MustTarget-legal
+        // candidate). Standard Bearer has a static ability (its MustTarget), so it is not a plain replacement; Runeclaw
+        // Bear and their face fail MustTarget. No candidate is both legal and safe: the seat's pick stands.
         final Game g = game();
         final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
         final Card bear = addCard("Grizzly Bears", p);
-        final Card flag = addCard("Standard Bearer", q);
+        addCard("Standard Bearer", q);
         addCard("Runeclaw Bear", q);
         final SpellAbility s = spell(addCardToZone("Lightning Bolt", p, ZoneType.Hand), p);
         s.getTargets().add(bear);
+        Assert.assertEquals(guard(p, s), "kept-unsafe-replacement");
+        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(bear), "the seat's pick restored");
+    }
+
+    // ------------------------------------------------------------------ review 3: the replacement side (plainReplacement)
+
+    /**
+     * Review 3 repro: at 2 life our Manic Vandal's mandatory ETB at our plain Ornithopter; their only artifact is Perilous
+     * Myr (dies: 2 damage to any target). Resolves {@code key} on or off and returns our life.
+     */
+    private int vandalAtTwoLife(final boolean key, final String theirArtifact, final String[] guardOut) {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        p.setLife(2, null);
+        final Card ours = addCard("Ornithopter", p);
+        final Card theirs = addCard(theirArtifact, q);
+        final Card vandal = addCard("Manic Vandal", p);
+        g.getAction().checkStaticAbilities();
+        g.getTriggerHandler().resetActiveTriggers();
+        g.copyLastState();
+        final Trigger tr = vandal.getTriggers().get(0);
+        final SpellAbility sa = tr.ensureAbility().copy(p);
+        sa.setActivatingPlayer(p);
+        sa.getTargets().add(ours);
+        final WrappedAbility w = new WrappedAbility(tr, sa, null);
+        w.setActivatingPlayer(p);
+        Assert.assertNull(forge.ai.simulation.TargetPicks.plainAsset(p, sa, sa), "our side is a plain asset");
+        Assert.assertFalse(w.isOptionalTrigger());
+        pc(p).ownHarmPicks = key;
+        guardOut[0] = key ? pc(p).guardPick(w, sa, "trigger", legal(sa)) : "key-off";
+        guardOut[1] = sa.getTargets().toString();
+        AbilityUtils.resolve(sa);
+        g.getAction().checkStateEffects(true);
+        g.getTriggerHandler().runWaitingTriggers();
+        g.getStack().addAllTriggeredAbilitiesToStack();
+        int n = 0;
+        while (!g.getStack().isEmpty() && n++ < 4) {
+            g.getStack().resolveStack();
+        }
+        Assert.assertTrue(n < 4, "bounded resolution");
+        guardOut[2] = String.valueOf(g.getCardState(ours).getZone().getZoneType());
+        guardOut[3] = String.valueOf(g.getCardState(theirs).getZone().getZoneType());
+        System.out.println("[target-picks-guard] Manic Vandal vs " + theirArtifact + " key=" + key + " => " + guardOut[0]
+                + " " + guardOut[1] + " life=" + p.getLife() + " ours=" + guardOut[2] + " theirs=" + guardOut[3]);
+        return p.getLife();
+    }
+
+    /** Key on: their Perilous Myr is not a safe replacement; our Ornithopter dies and we stay at 2 (kept-unsafe-replacement). */
+    @Test
+    public void vandalAtOurOrnithopterAtTwoLifeKeepsThePick() {
+        final String[] out = new String[4];
+        Assert.assertEquals(vandalAtTwoLife(true, "Perilous Myr", out), 2, "alive");
+        Assert.assertEquals(out[0], "kept-unsafe-replacement");
+        Assert.assertEquals(out[2], "Graveyard", "our Ornithopter dies");
+        Assert.assertEquals(out[3], "Battlefield", "their Myr stays");
+    }
+
+    /** Key off (control): the same board, our Ornithopter dies and we stay at 2. */
+    @Test
+    public void vandalAtOurOrnithopterAtTwoLifeKeyOff() {
+        final String[] out = new String[4];
+        Assert.assertEquals(vandalAtTwoLife(false, "Perilous Myr", out), 2);
+        Assert.assertEquals(out[2], "Graveyard");
+    }
+
+    /** Plain control: their vanilla Ornithopter is a safe replacement: retargeted; theirs dies, ours stays. */
+    @Test
+    public void vandalRetargetsToTheirPlainOrnithopter() {
+        final String[] out = new String[4];
+        Assert.assertEquals(vandalAtTwoLife(true, "Ornithopter", out), 2);
+        Assert.assertEquals(out[0], "retarget");
+        Assert.assertEquals(out[2], "Battlefield", "ours stays");
+        Assert.assertEquals(out[3], "Graveyard", "theirs dies");
+    }
+
+    /** Player damage, safe: Bolt at our Bears, their board empty and no damage or life trigger anywhere: to their face. */
+    @Test
+    public void boltRetargetsToTheirFaceWhenNothingFires() {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        final Card bear = addCard("Grizzly Bears", p);
+        final SpellAbility s = spell(addCardToZone("Lightning Bolt", p, ZoneType.Hand), p);
+        s.getTargets().add(bear);
         Assert.assertEquals(guard(p, s), "retarget");
-        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(flag));
-        Assert.assertTrue(StaticAbilityMustTarget.meetsMustTargetRestriction(s));
+        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(q));
+    }
+
+    /** Player damage, unsafe: the same with their Gonti's Machinations (whenever they lose life): the pick stands. */
+    @Test
+    public void boltKeepsThePickWhenTheirLifeLossTriggerCouldFire() {
+        final Game g = game();
+        final Player p = g.getPlayers().get(0), q = g.getPlayers().get(1);
+        final Card bear = addCard("Grizzly Bears", p);
+        addCard("Gonti's Machinations", q);
+        final SpellAbility s = spell(addCardToZone("Lightning Bolt", p, ZoneType.Hand), p);
+        s.getTargets().add(q);
+        Assert.assertNotNull(forge.ai.simulation.TargetPicks.plainReplacement(p, s), "their LifeLost trigger could fire");
+        s.resetTargets();
+        s.getTargets().add(bear);
+        Assert.assertEquals(guard(p, s), "kept-unsafe-replacement");
+        Assert.assertEquals(new ArrayList<>(s.getTargets()), List.of(bear));
     }
 
     // ------------------------------------------------------------------ S1 3: divided amounts

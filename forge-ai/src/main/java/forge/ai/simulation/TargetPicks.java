@@ -32,6 +32,14 @@ public final class TargetPicks {
         return LineOwnTarget.plainAsset(me, part, root);
     }
 
+    /**
+     * Review 3 (the replacement side): the guard's retarget of {@code part} to the targets it now holds is safe
+     * ({@link LineOwnTarget#plainReplacement}): null = safe; else the first condition that fails (never used).
+     */
+    public static String plainReplacement(final Player me, final SpellAbility part) {
+        return LineOwnTarget.plainReplacement(me, part);
+    }
+
     /** The harm of one ability part ({@link LineOwnTarget#harm}: damage, destroy, shrink, remove, bounce, sacrifice), or null. */
     public static String harm(final SpellAbility part) {
         try {

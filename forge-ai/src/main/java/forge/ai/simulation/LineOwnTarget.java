@@ -816,6 +816,153 @@ final class LineOwnTarget {
         }
     }
 
+    private static final Set<TriggerType> TARGETED = Set.of(TriggerType.BecomesTarget, TriggerType.BecomesTargetOnce,
+            TriggerType.Always);
+    private static final Set<TriggerType> LEAVES = Set.of(TriggerType.ChangesZone, TriggerType.ChangesZoneAll,
+            TriggerType.Destroyed, TriggerType.Exiled, TriggerType.Sacrificed, TriggerType.SacrificedOnce,
+            TriggerType.Unattached);
+    private static final Set<TriggerType> COUNTERS = Set.of(TriggerType.CounterAdded, TriggerType.CounterAddedOnce,
+            TriggerType.CounterAddedAll, TriggerType.CounterTypeAddedAll, TriggerType.CounterPlayerAddedAll);
+    private static final Set<TriggerType> DAMAGED = Set.of(TriggerType.DamageAll, TriggerType.DamageDealtOnce,
+            TriggerType.DamageDone, TriggerType.DamageDoneOnce, TriggerType.DamageDoneOnceByController,
+            TriggerType.DamagePreventedOnce, TriggerType.ExcessDamage, TriggerType.ExcessDamageAll,
+            TriggerType.CounterRemoved, TriggerType.CounterRemovedOnce, TriggerType.LifeLost, TriggerType.LifeLostAll,
+            TriggerType.LosesGame);
+
+    /**
+     * target-picks-1119 (review 3, the coordinator's ruling): the replacement side of the pick guard. The guard's retarget
+     * of the part {@code p} to the targets it now holds is taken only when this affirms it is safe: null = safe; else the
+     * first condition that fails. Every target must be:
+     * <ul>
+     * <li>a permanent an opponent controls with no triggered, static or replacement ability of any origin (keyword ones
+     * included: persist, undying, ward; Perilous Myr's dies trigger; plain keywords such as flying make none), nothing
+     * attached to it and attached to nothing; or an opponent, for damage only (the one player event modeled);</li>
+     * <li>such that no trigger on any card in a public zone, either side's, can fire on the projected event: its being
+     * targeted, and for a permanent its leaving the battlefield (a destroy, exile or sacrifice; damage or a shrink may
+     * kill it), damage to it, counters put on or taken off it; for a player, damage to them and their life loss. A
+     * state trigger ({@code Always}) anywhere is never modeled. A trigger of such a mode counts as firing unless Forge's
+     * own filter on the object refuses it ({@code ValidCard}, {@code ValidCards}, {@code ValidTarget},
+     * {@code ValidPlayer}), it watches another origin than the battlefield or only entering it, or it needs combat
+     * damage.</li>
+     * </ul>
+     * Anything else (a bounce, a divided amount, a spell on the stack, an error) is not modeled: not safe.
+     */
+    static String plainReplacement(final Player me, final SpellAbility p) {
+        try {
+            final Harm harm = harm(p);
+            if (harm == null || harm == Harm.BOUNCE) {
+                return "no modeled event for " + (harm == null ? "this effect" : "a bounce");
+            }
+            if (p.isDividedAsYouChoose() || p.getTargets().isEmpty()) {
+                return "not modeled: a divided amount or no target";
+            }
+            for (forge.game.GameObject o : p.getTargets()) {
+                if (o instanceof Card c) {
+                    final String what = c.getName() + " (" + c.getId() + ")";
+                    if (!c.isInPlay() || !me.isOpponentOf(c.getController())) {
+                        return "not an opponent's permanent: " + what;
+                    }
+                    final String ability = notPlain(c);
+                    if (ability != null) {
+                        return ability + ": " + what;
+                    }
+                    if (c.hasCardAttachments() || c.isAttachedToEntity()) {
+                        return "an attachment: " + what;
+                    }
+                    final Set<TriggerType> modes = new java.util.HashSet<>(TARGETED);
+                    modes.addAll(LEAVES);
+                    if (harm == Harm.DAMAGE) {
+                        modes.addAll(DAMAGED);
+                        modes.addAll(COUNTERS); // wither or infect damage
+                    } else if (harm == Harm.SHRINK) {
+                        modes.addAll(COUNTERS);
+                    }
+                    final String fires = anyFires(me.getGame(), modes, c);
+                    if (fires != null) {
+                        return fires + " on " + what;
+                    }
+                } else if (o instanceof Player pl) {
+                    if (!me.isOpponentOf(pl) || harm != Harm.DAMAGE) {
+                        return "a player: only damage to an opponent is modeled (" + pl + ", " + harm + ")";
+                    }
+                    final Set<TriggerType> modes = new java.util.HashSet<>(TARGETED);
+                    modes.addAll(DAMAGED);
+                    modes.addAll(COUNTERS); // infect: poison counters
+                    final String fires = anyFires(me.getGame(), modes, pl);
+                    if (fires != null) {
+                        return fires + " on " + pl;
+                    }
+                } else {
+                    return "not modeled: " + o;
+                }
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return "unreadable: " + e;
+        }
+    }
+
+    /** Evergreen keywords that trigger nothing: the statics or replacements Forge builds for them are plain. */
+    private static final Set<forge.game.keyword.Keyword> EVERGREEN = Set.of(forge.game.keyword.Keyword.FLYING,
+            forge.game.keyword.Keyword.REACH, forge.game.keyword.Keyword.VIGILANCE, forge.game.keyword.Keyword.TRAMPLE,
+            forge.game.keyword.Keyword.HASTE, forge.game.keyword.Keyword.MENACE, forge.game.keyword.Keyword.DEFENDER,
+            forge.game.keyword.Keyword.FIRST_STRIKE, forge.game.keyword.Keyword.DOUBLE_STRIKE,
+            forge.game.keyword.Keyword.DEATHTOUCH, forge.game.keyword.Keyword.LIFELINK, forge.game.keyword.Keyword.HEXPROOF,
+            forge.game.keyword.Keyword.SHROUD, forge.game.keyword.Keyword.INDESTRUCTIBLE,
+            forge.game.keyword.Keyword.INTIMIDATE, forge.game.keyword.Keyword.FEAR, forge.game.keyword.Keyword.SHADOW,
+            forge.game.keyword.Keyword.HORSEMANSHIP);
+
+    /**
+     * A triggered ability of any origin, or a static or replacement ability other than one Forge builds for an evergreen
+     * keyword that triggers nothing (flying's blocking rule), on {@code c}: what, or null (see {@link #plainReplacement}).
+     */
+    private static String notPlain(final Card c) {
+        for (Trigger t : c.getTriggers()) {
+            return "it has a triggered ability (" + t.getMode() + ")";
+        }
+        for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {
+            if (st.getKeyword() == null || !EVERGREEN.contains(st.getKeyword().getKeyword())) {
+                return "it has a static ability (" + st.getParamOrDefault("Mode", "?") + ")";
+            }
+        }
+        for (ReplacementEffect re : c.getReplacementEffects()) {
+            if (re.getKeyword() == null || !EVERGREEN.contains(re.getKeyword().getKeyword())) {
+                return "it has a replacement effect (" + re.getMode() + ")";
+            }
+        }
+        return null;
+    }
+
+    /** A trigger on any card in a public zone, either side's, that could fire on {@code o}'s event (see above), or null. */
+    private static String anyFires(final Game game, final Set<TriggerType> modes, final GameEntity o) {
+        for (ZoneType zt : new ZoneType[] {ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command}) {
+            for (Card h : game.getCardsIn(zt)) {
+                final Zone z = game.getZoneOf(h);
+                for (Trigger t : h.getTriggers()) {
+                    if (t.isSuppressed() || !t.zonesCheck(z) || !modes.contains(t.getMode())) {
+                        continue;
+                    }
+                    if (t.getMode() == TriggerType.Always) {
+                        return "a state trigger could fire (" + h.getName() + ")";
+                    }
+                    if (LEAVES.contains(t.getMode()) && (!zoneOk(t.getParam("Origin"), "Battlefield")
+                            || "Battlefield".equals(t.getParamOrDefault("Destination", "").trim()))) {
+                        continue; // another origin, or entering only
+                    }
+                    if ("True".equalsIgnoreCase(t.getParamOrDefault("CombatDamage", ""))) {
+                        continue; // the guard's effects deal no combat damage
+                    }
+                    if (fails(t, "ValidCard", o) || fails(t, "ValidCards", o) || fails(t, "ValidTarget", o)
+                            || fails(t, "ValidPlayer", o)) {
+                        continue; // Forge's own filter refuses the object
+                    }
+                    return "a trigger could fire: " + h.getName() + " (" + t.getMode() + ")";
+                }
+            }
+        }
+        return null;
+    }
+
     /** A static ability of {@code c}'s own, keyword statics aside (see {@link #plainAsset}), or null. */
     private static String ownStatic(final Card c) {
         for (forge.game.staticability.StaticAbility st : c.getStaticAbilities()) {

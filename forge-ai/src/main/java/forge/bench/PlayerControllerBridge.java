@@ -4856,7 +4856,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * the stack; no static ability of its own, nothing attached either way; no pending, static or delayed return, no
      * trigger of ours, no projected event); otherwise the pick stands ({@code kept-unsure}). A search variant's forced pick
      * is kept ({@code kept-variant}); every forced or retargeted set is legal as Forge's own targeting (MustTarget
-     * included) or not taken.
+     * included) or not taken. Review 3: a retarget's replacement must also be safe
+     * ({@link forge.ai.simulation.TargetPicks#plainReplacement}); with none, the pick stands
+     * ({@code kept-unsafe-replacement}).
      */
     public boolean ownHarmPicks = false;
     /** target-picks-1119 ({@code targetLog=on}; null = off, the default: nothing is recorded or computed). */
@@ -5041,8 +5043,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * target-picks-1119 (ownHarmPicks): the guard on one pick. It acts only when every permanent of ours the pick harms is a
      * plain asset taking plain loss ({@link forge.ai.simulation.TargetPicks#plainAsset}, review 2: affirmative coverage;
      * the same predicate as the decline at resolution). Null = not own harm; "kept-unsure" = own harm, but a plainAsset
-     * condition fails (logged with it), so the pick stands; "retarget" = moved to an opposing target; "kept" = an opposing
-     * target exists but no legal opposing set could be made (the pick stands); "decline" = an optional trigger with only
+     * condition fails (logged with it), so the pick stands; "retarget" = moved to an opposing target, a legal and safe
+     * replacement ({@link #retargetOpposing}); "kept-unsafe-replacement" = an opposing target exists but no candidate is
+     * both legal and a safe replacement (review 3: the pick stands, logged with the first candidate's failing condition);
+     * "decline" = an optional trigger with only
      * our own to target (declined when it resolves); "forced" = a mandatory trigger with only our own (left, logged);
      * "none-opposing" = a cast with only our own (its cast is the search's ownHarm check's).
      */
@@ -5062,12 +5066,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 }
             }
         }
-        final String unsure = forge.ai.simulation.TargetPicks.plainAsset(me, cur, whole);
+        String unsure = forge.ai.simulation.TargetPicks.plainAsset(me, cur, whole);
         final String g;
         if (unsure != null) {
             g = "kept-unsure";
         } else if (!opp.isEmpty()) {
-            g = retargetOpposing(whole, cur, opp, legal) ? "retarget" : "kept";
+            unsure = retargetOpposing(whole, cur, opp, legal); // review 3: the first candidate's failing condition
+            g = unsure == null ? "retarget" : "kept-unsafe-replacement";
         } else if (root.isTrigger() && root.isOptionalTrigger()) {
             g = "decline";
         } else {
@@ -5084,18 +5089,26 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * target-picks-1119: replace the own-harm pick on {@code cur} by an opposing one, tried in order: Forge AI's own pick
      * for the part, Forge AI's best card among the opposing permanents ({@link forge.ai.ComputerUtilCard#getBestAI}), then
      * each opposing candidate ({@code opp}, legal order; players last). An attempt is taken only when it harms nothing of
-     * ours, targets only opposing objects, and is legal as the normal path's and Forge's own ({@link #legalPick}, review 1
-     * S1 2: the MustTarget restriction included). False = none could be set: the seat's pick is restored.
+     * ours, targets only opposing objects, is legal as the normal path's and Forge's own ({@link #legalPick}, review 1
+     * S1 2: the MustTarget restriction included), and is a safe replacement
+     * ({@link forge.ai.simulation.TargetPicks#plainReplacement}, review 3). Null = retargeted; else no candidate passed:
+     * the seat's pick is restored and the first candidate's failing condition is returned. No unchecked candidate is
+     * ever used.
      */
-    private boolean retargetOpposing(final SpellAbility whole, final SpellAbility cur, final List<GameEntity> opp,
+    private String retargetOpposing(final SpellAbility whole, final SpellAbility cur, final List<GameEntity> opp,
             final List<GameEntity> legal) {
         final Player me = getPlayer();
         final TargetChoices before = cur.getTargets();
+        String first = null;
         try {
             clearForSeat(cur);
             cur.setTargetingPlayer(me);
-            if (super.chooseTargetsFor(cur) && !cur.getTargets().isEmpty() && retargetOk(whole, cur, legal)) {
-                return true;
+            if (super.chooseTargetsFor(cur) && !cur.getTargets().isEmpty()) {
+                first = retargetOk(whole, cur, legal);
+                if (first == null) {
+                    return null;
+                }
+                first = cur.getTargets() + ": " + first;
             }
             final List<GameEntity> order = new ArrayList<>();
             final List<Card> cards = new ArrayList<>();
@@ -5120,22 +5133,41 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 }
                 clearForSeat(cur);
                 cur.setTargetingPlayer(me);
-                if (cur.canTarget(pick) && cur.getTargets().add(pick) && retargetOk(whole, cur, legal)) {
-                    return true;
+                final String why = !cur.canTarget(pick) || !cur.getTargets().add(pick) ? "not targetable"
+                        : retargetOk(whole, cur, legal);
+                if (why == null) {
+                    return null;
+                }
+                if (first == null) {
+                    first = pick + ": " + why;
                 }
             }
         } catch (RuntimeException e) {
             JsonRpcChannel.logErr("own-harm retarget failed for " + cur, e);
+            if (first == null) {
+                first = "error: " + e;
+            }
         }
         cur.resetTargets();
         cur.setTargets(before);
-        return false;
+        return first == null ? "no candidate" : first;
     }
 
-    /** A retarget attempt on {@code cur}: no own harm left, only opposing targets, and a legal set ({@link #legalPick}). */
-    private boolean retargetOk(final SpellAbility whole, final SpellAbility cur, final List<GameEntity> legal) {
-        return forge.ai.simulation.TargetPicks.ownHarm(getPlayer(), cur, whole) == null && allOpposing(cur)
-                && legalPick(whole, cur, legal);
+    /**
+     * A retarget attempt on {@code cur}: no own harm left, only opposing targets, a legal set ({@link #legalPick}), and a
+     * safe replacement ({@link forge.ai.simulation.TargetPicks#plainReplacement}, review 3). Null = taken; else why not.
+     */
+    private String retargetOk(final SpellAbility whole, final SpellAbility cur, final List<GameEntity> legal) {
+        if (forge.ai.simulation.TargetPicks.ownHarm(getPlayer(), cur, whole) != null) {
+            return "it harms ours";
+        }
+        if (!allOpposing(cur)) {
+            return "not all opposing";
+        }
+        if (!legalPick(whole, cur, legal)) {
+            return "not legal (targets, count or MustTarget)";
+        }
+        return forge.ai.simulation.TargetPicks.plainReplacement(getPlayer(), cur);
     }
 
     private boolean allOpposing(final SpellAbility cur) {
