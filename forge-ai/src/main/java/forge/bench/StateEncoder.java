@@ -276,8 +276,20 @@ public final class StateEncoder {
      * and already walks reflected mana ({@code ManaReflected}) and combo mana. One colour
      * at a time so the result is the full set rather than a boolean, and colourless is
      * included — {@code COLORS_AND_COLORLESS} is the six-symbol vocabulary the host's
-     * {@code ManaType} uses. Read-only: no {@code setActivatingPlayer}, so encoding a state
-     * cannot perturb one.
+     * {@code ManaType} uses.
+     *
+     * <p><b>NOT read-only for two kinds of mana ability</b> (ai-beat-views-1120, Astra
+     * review r1 S1). A {@code ManaReflected} ability is answered by
+     * {@link forge.game.card.CardUtil#getReflectableManaColors}, which WRITES live
+     * activating players (its own when null, and every ability of each card its "Produce"
+     * branch walks) and may create trigger abilities ({@code ensureAbility}). A
+     * {@code Special} mana part (Jeweled Lotus's {@code LastNotedType}, the
+     * {@code EachColorAmong} lands) is answered through {@code ManaEffect.handleSpecialMana},
+     * which writes the part's express choice. Every other ability goes through
+     * {@code SpellAbility.canProduce}: its conditions, the mana part's produced string, combo
+     * and chosen colors, all reads. A request's view still asks all of them (unchanged);
+     * an AI act view, which is built at the AI Player's priority before it decides, does not
+     * ask a card with either kind ({@link #withoutManaWrites}).
      *
      * <p><b>Protocol v2.16 — the return is now NULLABLE, and that is the whole point.</b>
      * An empty array is a real answer: <i>this object's mana abilities produce nothing
@@ -302,6 +314,12 @@ public final class StateEncoder {
             if (c.getManaAbilities().isEmpty()) {
                 return a;
             }
+            final java.util.Set<Integer> notAsked = NOT_ASKED.get();
+            if (notAsked != null && writesWhenAsked(c)) {
+                // As the null path below: the caller omits both keys and the host keeps its printed derivation.
+                notAsked.add(c.getId());
+                return null;
+            }
             for (final String col : MagicColor.Constant.COLORS_AND_COLORLESS) {
                 if (c.canProduceColorMana(ImmutableSet.of(col))) {
                     a.add(MagicColor.toShortString(col));
@@ -315,6 +333,53 @@ public final class StateEncoder {
             return null;
         }
         return a;
+    }
+
+    /**
+     * Set only inside {@link #withoutManaWrites}: the cards (ids) whose produced mana that encoding did not ask. Null
+     * (every other encoding, a request's view among them): {@link #encodeProducedMana} asks every card, as it always
+     * has.
+     */
+    private static final ThreadLocal<java.util.Set<Integer>> NOT_ASKED = new ThreadLocal<>();
+
+    /**
+     * ai-beat-views-1120 (Astra review r1 S1): runs {@code body} (an encoding on this thread) without asking any card
+     * whose mana abilities write when asked ({@link #writesWhenAsked}); each such card's {@code producedMana} and
+     * {@code producedManaKnown} are omitted, as when the enumeration throws. {@code notAsked} receives their ids.
+     * Only the AI act view uses it: it is built at the AI Player's priority, before it decides.
+     */
+    public static <T> T withoutManaWrites(final java.util.Set<Integer> notAsked,
+            final java.util.function.Supplier<T> body) {
+        final java.util.Set<Integer> outer = NOT_ASKED.get();
+        NOT_ASKED.set(notAsked);
+        try {
+            return body.get();
+        } finally {
+            if (outer == null) {
+                NOT_ASKED.remove();
+            } else {
+                NOT_ASKED.set(outer);
+            }
+        }
+    }
+
+    /**
+     * Does asking {@code c}'s mana abilities what they produce write engine state? True for a {@code ManaReflected}
+     * ability (activating players, trigger abilities) and for a {@code Special} mana part anywhere in an ability's
+     * chain (its express choice); see {@link #encodeProducedMana}. Getters only.
+     */
+    static boolean writesWhenAsked(final Card c) {
+        for (final SpellAbility mana : c.getManaAbilities()) {
+            if (mana.getApi() == ApiType.ManaReflected) {
+                return true;
+            }
+            for (SpellAbility sa = mana; sa != null; sa = sa.getSubAbility()) {
+                if (sa.getManaPart() != null && sa.getManaPart().isSpecialMana()) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
