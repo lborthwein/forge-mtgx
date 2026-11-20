@@ -199,7 +199,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean workUnits = false;
         /**
          * wb-seqlanes-1120 (false = off, the default, unrecorded, and then nothing changes; only with workUnits): the
-         * look-ahead builds no pool and runs its fixed virtual lanes one after another on the deciding thread
+         * look-ahead builds no pool and runs its play-outs in task order on the deciding thread, each on its virtual lane
          * ({@link LookaheadSearch.Config#seqLanes}). Same lanes, same lane clocks, same budget cuts as the pooled path,
          * with nothing left to thread timing; the wall time grows. A bench key: live never sets it.
          */

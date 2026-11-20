@@ -101,8 +101,8 @@ public final class LookaheadSearch {
         /**
          * wb-seqlanes-1120 (bench key {@code search.seqLanes}; false = off, the default, unrecorded, and then nothing
          * changes): no pool is built. With a work clock on the deciding thread the play-outs keep the pooled path's fixed
-         * virtual lanes (task i on lane i mod L, L = threads, 8 when auto), but the lanes run one after another on the
-         * deciding thread, each under its own fork of the deciding clock, and then join ({@link #runLanesSeq}). The lane
+         * virtual lanes (task i on lane i mod L, L = threads, 8 when auto), but the tasks run in task order on the deciding
+         * thread, each under its lane's own fork of the deciding clock, and then join ({@link #runLanesSeq}). The lane
          * clocks, and so every budget cut, are the pooled path's; what the pool's thread interleaving made differ run to run
          * is gone, and the wall time grows. Without a work clock the tasks run in order on the deciding thread (as threads 1).
          */
@@ -6504,52 +6504,52 @@ public final class LookaheadSearch {
      * wb-seqlanes-1120 ({@link Config#seqLanes}; a work clock on the deciding thread, no pool): {@link #runLanes}'s lanes
      * and accounting, run on the deciding thread. The lanes are the pooled path's (task i on lane i mod L, L = the
      * configured threads, 8 when auto), each forked from the deciding clock at the decision's virtual now before any task
-     * runs; lane 0 runs its tasks in order under its own clock, then lane 1, and so on; then the deciding clock joins the
-     * lanes (it ends at the latest lane's end). A play-out's budget reads its lane's clock, so every cut is the pooled
-     * path's, and nothing depends on thread timing. The safety wall: a task is never interrupted (budgets past the wall
-     * stop as in the pooled path); once the real time passes the wall plus {@link #WALL_GRACE_MS}, the tasks not yet
-     * started are not run, the decision is capped and the hit is counted, as at a pooled cut.
+     * runs. SL' (second version, lead ruling 11-20): the tasks run in TASK-INDEX order, task 0 under lane 0's clock, task 1
+     * under lane 1's, ..., task L under lane 0's again, which is the order in which the pooled path starts them; the first
+     * version ran lane by lane (all of lane 0's tasks, then lane 1's), so work a task does first for the whole decision
+     * (a shared copy, a memo entry) always fell on the same lanes. Then the deciding clock joins the lanes (it ends at the
+     * latest lane's end). A play-out's budget reads its lane's clock, so every cut is on a per-lane clock, and nothing
+     * depends on thread timing. The safety wall: a task is never interrupted (budgets past the wall stop as in the pooled
+     * path); once the real time passes the wall plus {@link #WALL_GRACE_MS}, the tasks not yet started are not run, the
+     * decision is capped and the hit is counted, as at a pooled cut.
      */
     private boolean runLanesSeq(List<Runnable> tasks, Budget wall) {
         final forge.game.WorkClock.Clock parent = forge.game.WorkClock.current();
         final int lanesCfg = cfg.threads > 0 ? cfg.threads : 8;
         final int nl = Math.max(1, Math.min(lanesCfg, tasks.size()));
         final forge.game.WorkClock.Clock[] lanes = new forge.game.WorkClock.Clock[nl];
-        final List<List<Runnable>> per = new ArrayList<>();
         for (int i = 0; i < nl; i++) {
-            lanes[i] = parent.fork();
-            per.add(new ArrayList<>());
-        }
-        for (int i = 0; i < tasks.size(); i++) {
-            per.get(i % nl).add(tasks.get(i));
+            lanes[i] = parent.fork(); // every lane starts at the decision's virtual now, before any task runs
         }
         final long safety = parent.safetyWall();
         final boolean cutOk = wall != null && safety != 0;
         final long cut = safety + WALL_GRACE_MS * 1_000_000L;
-        for (int i = 0; i < nl; i++) {
-            for (Runnable r : per.get(i)) {
-                if (cutOk && System.nanoTime() - cut > 0) {
+        // SL': one pass over the tasks in index order; task i runs under lane (i mod nl)'s clock, so each lane still
+        // runs its own tasks (i, i + nl, i + 2 nl, ...) in order on its own clock, and the lanes take turns. The cuts
+        // and the span stay per-lane; only which lane meets a decision-wide first-time cost changes with the order.
+        for (int i = 0; i < tasks.size(); i++) {
+            if (cutOk && System.nanoTime() - cut > 0) {
+                wall.stop();
+                wall.wallCut = true;
+                stats.wallCuts++;
+                parent.markWallHit();
+                System.err.println("[lookahead] work-units safety wall (seqLanes): " + WALL_GRACE_MS + " ms past it;"
+                        + " the play-outs not yet started are not run, the decision is capped");
+                return false;
+            }
+            final forge.game.WorkClock.Clock prev = forge.game.WorkClock.install(lanes[i % nl]);
+            try {
+                tasks.get(i).run();
+            } catch (RuntimeException e) {
+                if (wall != null) {
                     wall.stop();
-                    wall.wallCut = true;
-                    stats.wallCuts++;
-                    parent.markWallHit();
-                    System.err.println("[lookahead] work-units safety wall (seqLanes): " + WALL_GRACE_MS + " ms past it;"
-                            + " the play-outs not yet started are not run, the decision is capped");
-                    return false;
                 }
-                final forge.game.WorkClock.Clock prev = forge.game.WorkClock.install(lanes[i]);
-                try {
-                    r.run();
-                } catch (RuntimeException e) {
-                    if (wall != null) {
-                        wall.stop();
-                    }
-                    throw new RuntimeException("look-ahead worker failed", e);
-                } finally {
-                    forge.game.WorkClock.install(prev);
-                }
+                throw new RuntimeException("look-ahead worker failed", e);
+            } finally {
+                forge.game.WorkClock.install(prev);
             }
         }
+        // the deciding clock ends at the latest lane's end; every lane's work goes into its meter (as runLanes)
         parent.join(lanes);
         return true;
     }

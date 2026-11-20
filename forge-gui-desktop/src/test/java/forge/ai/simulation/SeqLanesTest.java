@@ -129,6 +129,51 @@ public class SeqLanesTest {
     }
 
     @Test
+    public void taskIndexOrderEachOnItsLaneClock() throws Exception {
+        // SL': the tasks run in index order (0, 1, 2, ...), task k under lane (k mod L)'s clock, which starts at the
+        // decision's virtual now and has advanced only by that lane's earlier tasks (k - L, k - 2L, ...)
+        final LookaheadSearch.Config cfg = new LookaheadSearch.Config();
+        cfg.threads = LANES;
+        cfg.seqLanes = true;
+        final LookaheadSearch ls = new LookaheadSearch(cfg);
+        try {
+            final WorkClock.Clock c = WorkClock.newClock(1.0);
+            WorkClock.install(c);
+            WorkClock.tick(WorkClock.Site.STEP, 3);
+            final long now = WorkClock.nanoTime();
+            final long step = WorkClock.weights()[WorkClock.Site.STEP.ordinal()];
+            final List<Integer> order = new ArrayList<>();
+            final long[] start = new long[TASKS];
+            final List<Runnable> tasks = new ArrayList<>();
+            for (int k = 0; k < TASKS; k++) {
+                final int kk = k;
+                tasks.add(() -> {
+                    order.add(kk);
+                    start[kk] = WorkClock.nanoTime() - now;
+                    WorkClock.tick(WorkClock.Site.STEP, CAP[kk]);
+                });
+            }
+            final Method m = LookaheadSearch.class.getDeclaredMethod("runAll", List.class, LookaheadSearch.Budget.class);
+            m.setAccessible(true);
+            Assert.assertEquals(m.invoke(ls, tasks, null), Boolean.TRUE);
+            final List<Integer> want = new ArrayList<>();
+            final long[] lane = new long[LANES];
+            long longest = 0;
+            for (int k = 0; k < TASKS; k++) {
+                want.add(k);
+                Assert.assertEquals(start[k], lane[k % LANES], "task " + k + " starts at its lane's own time");
+                lane[k % LANES] += CAP[k] * step;
+                longest = Math.max(longest, lane[k % LANES]);
+            }
+            Assert.assertEquals(order, want, "task-index order");
+            Assert.assertEquals(WorkClock.nanoTime() - now, longest, "the join ends at the longest lane");
+        } finally {
+            ls.shutdown();
+            WorkClock.install(null);
+        }
+    }
+
+    @Test
     public void budgetsBindOnLaneClocksAsPooled() throws Exception {
         final Run seq = run(true, LANES);
         final Run pooled = run(false, LANES);
