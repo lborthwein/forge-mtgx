@@ -29,6 +29,17 @@ public class PlayerControllerPolicy extends PlayerControllerBridge {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        if (targetLog == null) {
+            return chooseSpellAbilityToPlay0();
+        }
+        try {
+            return chooseSpellAbilityToPlay0();
+        } finally {
+            live.priorityEnded(); // target-picks-1119 (targetLog on): the held decision line, with its cast's picks
+        }
+    }
+
+    private List<SpellAbility> chooseSpellAbilityToPlay0() {
         final long t0 = System.nanoTime();
         final List<SpellAbility> chosen = super.chooseSpellAbilityToPlay();
         if (getGame() != live.liveGame()) {

@@ -86,6 +86,12 @@ public final class RlLiveSeat {
         public AiFixes.Mode aiFixes0928 = AiFixes.Mode.OFF;
         /** One {@code [lookahead-decision]} line per searched decision. */
         public boolean log = true;
+        /**
+         * target-picks-1119 ({@code targetLog=on}; absent / off = false, the default, and then nothing is recorded): one
+         * record per targeted pick of the seat ({@link forge.bench.TargetPickLog}) on its decision lines ({@code targets})
+         * and the game's totals on the end line. Read-only: no decision changes.
+         */
+        public boolean targetLog = false;
         public String raw;
 
         /** sb-live-1018: the {@code plans.<key>} keys live accepts (numbers, or true/false for {@code solver}). */
@@ -332,6 +338,17 @@ public final class RlLiveSeat {
             }
         }
 
+        /** target-picks-1119: an on/off key's value, exactly on or off (as the host validator takes it). */
+        static boolean onOff(final String k, final String v) {
+            if ("on".equals(v)) {
+                return true;
+            }
+            if ("off".equals(v)) {
+                return false;
+            }
+            throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want on|off)");
+        }
+
         public static Spec parse(final String raw) {
             final Spec s = new Spec();
             s.raw = raw;
@@ -390,6 +407,11 @@ public final class RlLiveSeat {
                     case "deadPump": c.deadPump = v; break; // temp-pump-wrong-turn-1117 (live default off)
                     case "deadFaceUp": c.deadFaceUp = v; break; // turn-face-up-timing-1118 (live default off)
                     case "ownHarm": c.ownHarm = v; break; // line-own-target-1119 (live default off; c.check() takes off|shadow|on)
+                    // target-picks-1119 (absent = off, the seat byte for byte as before): the pick guard (off|on, checked by
+                    // c.check()), the pilot's target variants (0..16), and the pick log (on|off)
+                    case "ownHarmPicks": c.ownHarmPicks = v; break;
+                    case "targetVariants": c.targetVariants = Integer.parseInt(v); break;
+                    case "targetLog": s.targetLog = onOff(k, v); break;
                     case "lethalBlock": c.lethalBlock = v; break; // block-vs-open-pump-1118 (block search; live default off)
                     case "departMedian": c.departMedian = v; break;
                     case "budgetMs": c.budgetMs = Long.parseLong(v); break;
@@ -787,7 +809,41 @@ public final class RlLiveSeat {
         this.seat = rs;
         this.search = s;
         this.seatCalls0 = seatClient.calls;
+        if ("on".equals(spec.search.ownHarmPicks) || spec.targetLog) {
+            // target-picks-1119 (both off: nothing set, the controller as before)
+            final forge.game.player.PlayerController pc = g.getRegisteredPlayers().get(seatIndex).getController();
+            if (pc instanceof forge.bench.PlayerControllerBridge) {
+                final forge.bench.PlayerControllerBridge b = (forge.bench.PlayerControllerBridge) pc;
+                b.ownHarmPicks = "on".equals(spec.search.ownHarmPicks);
+                b.targetLog = spec.targetLog ? new forge.bench.TargetPickLog() : null;
+                pickBridge = b;
+            } else {
+                final JsonObject o = new JsonObject();
+                o.addProperty("targetPicks", false);
+                o.addProperty("reason", "no bridged controller for ownHarmPicks / targetLog");
+                line(o);
+            }
+        }
         session.setLocalAnswerer(rs);
+    }
+
+    /** target-picks-1119: the live controller carrying the pick guard or the pick log (null = both off). */
+    private volatile forge.bench.PlayerControllerBridge pickBridge;
+
+    /** target-picks-1119: the pick log (null = targetLog off). */
+    private forge.bench.TargetPickLog pickLog() {
+        final forge.bench.PlayerControllerBridge b = pickBridge;
+        return b == null ? null : b.targetLog;
+    }
+
+    /**
+     * target-picks-1119 (targetLog on): the seat's priority ask ended; its held decision line (with its own cast's picks)
+     * is written ({@link PlayerControllerPolicy}). Off: nothing.
+     */
+    synchronized void priorityEnded() {
+        if (spec.targetLog) {
+            flushDecisionLine();
+        }
     }
 
     public boolean degraded() {
@@ -810,7 +866,8 @@ public final class RlLiveSeat {
 
     private void decisionLine(final com.google.gson.JsonObject d) {
         flushDecisionLine();
-        if (k8Config != null && k8Config.dudCast != AiFixes.Mode.OFF) {
+        if (k8Config != null && k8Config.dudCast != AiFixes.Mode.OFF || spec.targetLog) {
+            // target-picks-1119: with targetLog on, held until the seat's ask ends, so it carries its own cast's picks
             heldLine = d;
         } else {
             System.err.println("[lookahead-decision] " + d);
@@ -819,6 +876,11 @@ public final class RlLiveSeat {
 
     private void flushDecisionLine() {
         if (heldLine != null) {
+            final forge.bench.TargetPickLog log = pickLog();
+            final com.google.gson.JsonArray picks = log == null ? null : log.drain();
+            if (picks != null) {
+                heldLine.add("targets", picks); // target-picks-1119 (targetLog on, picks since the last line)
+            }
             System.err.println("[lookahead-decision] " + heldLine);
             heldLine = null;
         }
@@ -955,12 +1017,22 @@ public final class RlLiveSeat {
             d.addProperty("wall", true);
         }
         d.addProperty("outcome", r.outcome);
-        d.addProperty("departed", r.chosen > 0);
+        d.addProperty("departed", r.chosen > 0 || r.chosenTarget != null);
         d.addProperty("failed", r.failed);
         d.addProperty("leafFallback", r.leafFallback);
         if (r.deadFaceUp != null) {
             // turn-face-up-timing-1118 (deadFaceUp on or shadow, a turn-up among the candidates; otherwise the line is unchanged)
             d.add("deadFaceUp", r.deadFaceUp);
+        }
+        if (r.targetVariants > 0) {
+            // target-picks-1119 (targetVariants on, and the decision offered some; otherwise the line is unchanged)
+            d.addProperty("variants", r.targetVariants);
+            if (r.chosenTarget != null) {
+                final JsonObject tv = new JsonObject();
+                tv.addProperty("ref", r.chosenTarget);
+                tv.addProperty("label", r.chosenTargetLabel);
+                d.add("variant", tv);
+            }
         }
         if (r.ownHarm != null) {
             // line-own-target-1119 (ownHarm on, and it changed this decision; otherwise the line is unchanged)
@@ -1205,6 +1277,15 @@ public final class RlLiveSeat {
                 o.add("search", search.summary());
             }
             flushDecisionLine();
+            final forge.bench.TargetPickLog picks = pickLog();
+            if (picks != null) {
+                // target-picks-1119 (targetLog on only): the game's pick totals, the picks no line took as its tail
+                final JsonObject t = picks.stats();
+                if (search != null) {
+                    t.addProperty("variantDropped", search.variantDropped);
+                }
+                o.add("targets", t);
+            }
             final JsonObject dud = dudStats(); // lane live-ai-quality-1030: only when the guard ran (dudCast on)
             if (dud != null) {
                 dud.addProperty("overrides", guardOverrides);

@@ -387,6 +387,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
          * step the rule refuses; SHADOW notes it ({@link #ownHarmNote}) and plays on.
          */
         AiFixes.Mode ownHarm = AiFixes.Mode.OFF;
+        /** target-picks-1119: the ownHarm check also reads permanent spells' enters triggers (false = off: as before). */
+        boolean ownHarmEtb;
         String ownHarmNote;
 
         Cursor(final PolicyPlan plan, final LookaheadSearch.FirstAction fa, final int from) {
@@ -437,7 +439,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             }
             if (ownHarm != AiFixes.Mode.OFF) {
                 final int ch = RlSearch.choiceOf(m, idx);
-                final String refused = ch > 0 && ch <= objs.size() ? LookaheadSearch.ownHarmWhy(p, objs.get(ch - 1)) : null;
+                final String refused = ch > 0 && ch <= objs.size() ? LookaheadSearch.ownHarmWhy(p, objs.get(ch - 1), ownHarmEtb) : null;
                 if (refused != null) {
                     ownHarmNote = st.label + ": " + refused;
                     if (ownHarm == AiFixes.Mode.ON) {
@@ -505,6 +507,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         Player seatPlayer;
         /** line-own-target-1119: check each recorded step against ownHarm; the first refused step's note (null = none). */
         boolean ownHarmCheck;
+        /** target-picks-1119: as {@link Cursor#ownHarmEtb}. */
+        boolean ownHarmEtb;
         String ownHarm;
 
         Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps) {
@@ -546,7 +550,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             final SpellAbility sa = choice == 0 ? null : objs.get(choice - 1);
             final String phase = String.valueOf(g.getPhaseHandler().getPhase());
             if (ownHarmCheck && ownHarm == null && sa != null) {
-                final String why = LookaheadSearch.ownHarmWhy(p, sa); // the recording copy's state, as the plan would play it
+                final String why = LookaheadSearch.ownHarmWhy(p, sa, ownHarmEtb); // the recording copy's state, as the plan would play it
                 if (why != null) {
                     ownHarm = (sa.getHostCard() == null ? "?" : sa.getHostCard().getName()) + ": " + why;
                 }
@@ -1371,6 +1375,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                         spec.maxSteps, spec.exactActions);
                 sampled.recordX = spec.planX;
                 sampled.ownHarmCheck = rs.ownHarmMode() != AiFixes.Mode.OFF; // line-own-target-1119
+                sampled.ownHarmEtb = rs.ownHarmEtb(); // target-picks-1119 (false: as before)
                 recs.add(sampled);
             }
             final boolean[] ok = rs.ls().recordPlans(g, p, recs, st.knownTop, deadline);
@@ -1410,6 +1415,26 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     }
 
     /**
+     * SETUP's row of the search's chosen candidate in {@code r.values}. With target variants offered
+     * ({@code r.targetVariants > 0}, target-picks-1119 review 1 S2), the chosen candidate's own row
+     * ({@link LookaheadSearch.GivenResult#chosenRow}): its base entry and its variants share one given index, and the last
+     * row with that index (the read below) may be another variant's. Otherwise (no variants: every key off) exactly as
+     * before: the last row whose given index is the chosen one's (-1 = none).
+     */
+    static int chosenRow(final LookaheadSearch.GivenResult r) {
+        if (r.targetVariants > 0 && r.chosenRow >= 0 && r.chosenRow < r.givenIndex.length) {
+            return r.chosenRow;
+        }
+        int jc = -1;
+        for (int j = 0; j < r.givenIndex.length; j++) {
+            if (r.givenIndex[j] == Math.max(r.chosen, 0)) {
+                jc = j;
+            }
+        }
+        return jc;
+    }
+
+    /**
      * After the play-outs: the chosen candidate. A plan index (>= {@code givenSize}) adopts the plan: a solver line goes
      * to the hook ({@link RlSeat.PrioritySearch#HOOK}), a policy plan is followed from its first step (its candidate
      * index here). Otherwise -2 (not a plan: the caller's answer stands).
@@ -1424,15 +1449,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         if (st.setup >= 0 && !r.proven && r.chosen != givenSize + st.setup) {
             // SETUP: the planner's play stands unless the search's choice beats it in the same worlds at its own z
             final int si = givenSize + st.setup;
-            int js = -1, jc = -1;
+            int js = -1;
             for (int j = 0; j < r.givenIndex.length; j++) {
                 if (r.givenIndex[j] == si) {
                     js = j;
                 }
-                if (r.givenIndex[j] == Math.max(r.chosen, 0)) {
-                    jc = j;
-                }
             }
+            final int jc = chosenRow(r);
             int n = 0;
             double sum = 0, sq = 0;
             boolean failedWorld = false;
@@ -1572,7 +1595,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         if (rs.ownHarmMode() == AiFixes.Mode.ON) {
             // line-own-target-1119: its first step refused here (its recording's check missed it): not adopted
             final int ch = RlSearch.choiceOf(m, idx);
-            final String why = ch > 0 && ch <= objs.size() ? LookaheadSearch.ownHarmWhy(me, objs.get(ch - 1)) : null;
+            final String why = ch > 0 && ch <= objs.size() ? LookaheadSearch.ownHarmWhy(me, objs.get(ch - 1), rs.ownHarmEtb()) : null;
             if (why != null) {
                 rs.ownHarmPlanRefused(g, pp.label(), pp.steps.get(0).label + ": " + why);
                 return -2;
@@ -1582,6 +1605,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         planTurns.add(g.getPhaseHandler().getTurn());
         live = new Cursor(pp, null, 1);
         live.ownHarm = rs.ownHarmMode(); // line-own-target-1119 (OFF: as before)
+        live.ownHarmEtb = rs.ownHarmEtb(); // target-picks-1119 (false: as before)
         if (!live.active()) {
             live = null;
             pointAgain = true;
