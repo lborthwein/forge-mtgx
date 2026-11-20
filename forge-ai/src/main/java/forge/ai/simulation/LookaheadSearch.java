@@ -3299,6 +3299,12 @@ public final class LookaheadSearch {
          */
         public int targetVariants;
         public String chosenTarget, chosenTargetLabel;
+        /**
+         * target-picks-1119 (review 1, S2): the chosen candidate's own row in {@link #givenIndex} / {@link #values} (0 =
+         * the default's; -1 = not searched). Unique where {@link #chosen} is not: a target variant shares its base
+         * entry's given index.
+         */
+        public int chosenRow = -1;
         /** Lane sc-wallguard-1009: the hard wall cut this decision's wait for its play-outs (outcome "capped"). */
         public boolean wall;
         /**
@@ -4323,6 +4329,7 @@ public final class LookaheadSearch {
             }
         }
         res.chosen = 0;
+        res.chosenRow = 0; // target-picks-1119 (S2): the default's row unless the search departs
         String outcome = "kept";
         if (best != 0 && !cfg.shadow) {
             final Cand chosen = cands.get(best);
@@ -4339,6 +4346,7 @@ public final class LookaheadSearch {
                 }
             } else {
                 res.chosen = at.get(best);
+                res.chosenRow = best;
                 res.proven = provenPick >= 0 && best == provenPick;
                 stats.departed++;
                 if (onStack) {
@@ -4359,6 +4367,7 @@ public final class LookaheadSearch {
         if (overBudget && !forcing) {
             stats.capped++;
             res.chosen = 0;
+            res.chosenRow = 0;
             res.chosenMacro = -1;
             outcome = "capped";
         }
@@ -4900,7 +4909,7 @@ public final class LookaheadSearch {
                         base = j;
                     }
                 }
-                if (base < 0) {
+                if (base < 0 || !variantLegal(g, me, v)) {
                     continue;
                 }
                 cands.add(v);
@@ -4914,6 +4923,37 @@ public final class LookaheadSearch {
             AiCache.installScope(prevAiCache);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /**
+     * target-picks-1119 (review 1, S1 2 and S1 3): the variant {@code v} may be offered on the given path. Its ability in
+     * the enumeration copy {@code g} must not divide an amount among its targets (no allocation is made for a forced
+     * target: excluded until one is), and its target set (the variant's target in the single-target slot, nothing else
+     * chosen yet) must meet Forge's MustTarget restriction (a Flagbearer is chosen if able). False on any error.
+     */
+    static boolean variantLegal(Game g, Player me, Cand v) {
+        try {
+            final SpellAbility sa = locate(g, me, v);
+            if (sa == null) {
+                return false;
+            }
+            sa.setActivatingPlayer(me);
+            final SpellAbility slot = singleTargetSlot(sa);
+            if (slot == null || slot.isDividedAsYouChoose()) {
+                return false;
+            }
+            for (SpellAbility sub = sa; sub != null; sub = sub.getSubAbility()) {
+                if (sub.usesTargeting()) {
+                    sub.resetTargets();
+                }
+            }
+            final boolean ok = applyTarget(sa, v.tgt, g)
+                    && forge.game.staticability.StaticAbilityMustTarget.meetsMustTargetRestriction(sa);
+            slot.resetTargets();
+            return ok;
+        } catch (RuntimeException e) {
+            return false;
         }
     }
 

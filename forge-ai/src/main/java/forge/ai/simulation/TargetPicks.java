@@ -22,6 +22,15 @@ public final class TargetPicks {
         return LineOwnTarget.pickHarm(me, part, root);
     }
 
+    /**
+     * Review 1 (S1 1: the guard fails open): why the guard must keep an own-harm pick of the part {@code part} of
+     * {@code root} as it is, a payoff shape the classifier does not model ({@link LineOwnTarget#pickUnsure}: a pending
+     * duration, a static or delayed return, a projected event or transform, a SacMe card, an unreadable state), or null.
+     */
+    public static String unsure(final Player me, final SpellAbility part, final SpellAbility root) {
+        return LineOwnTarget.pickUnsure(me, part, root);
+    }
+
     /** The harm of one ability part ({@link LineOwnTarget#harm}: damage, destroy, shrink, remove, bounce, sacrifice), or null. */
     public static String harm(final SpellAbility part) {
         try {

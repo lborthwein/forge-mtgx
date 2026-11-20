@@ -1415,6 +1415,26 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     }
 
     /**
+     * SETUP's row of the search's chosen candidate in {@code r.values}. With target variants offered
+     * ({@code r.targetVariants > 0}, target-picks-1119 review 1 S2), the chosen candidate's own row
+     * ({@link LookaheadSearch.GivenResult#chosenRow}): its base entry and its variants share one given index, and the last
+     * row with that index (the read below) may be another variant's. Otherwise (no variants: every key off) exactly as
+     * before: the last row whose given index is the chosen one's (-1 = none).
+     */
+    static int chosenRow(final LookaheadSearch.GivenResult r) {
+        if (r.targetVariants > 0 && r.chosenRow >= 0 && r.chosenRow < r.givenIndex.length) {
+            return r.chosenRow;
+        }
+        int jc = -1;
+        for (int j = 0; j < r.givenIndex.length; j++) {
+            if (r.givenIndex[j] == Math.max(r.chosen, 0)) {
+                jc = j;
+            }
+        }
+        return jc;
+    }
+
+    /**
      * After the play-outs: the chosen candidate. A plan index (>= {@code givenSize}) adopts the plan: a solver line goes
      * to the hook ({@link RlSeat.PrioritySearch#HOOK}), a policy plan is followed from its first step (its candidate
      * index here). Otherwise -2 (not a plan: the caller's answer stands).
@@ -1429,15 +1449,13 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         if (st.setup >= 0 && !r.proven && r.chosen != givenSize + st.setup) {
             // SETUP: the planner's play stands unless the search's choice beats it in the same worlds at its own z
             final int si = givenSize + st.setup;
-            int js = -1, jc = -1;
+            int js = -1;
             for (int j = 0; j < r.givenIndex.length; j++) {
                 if (r.givenIndex[j] == si) {
                     js = j;
                 }
-                if (r.givenIndex[j] == Math.max(r.chosen, 0)) {
-                    jc = j;
-                }
             }
+            final int jc = chosenRow(r);
             int n = 0;
             double sum = 0, sq = 0;
             boolean failedWorld = false;

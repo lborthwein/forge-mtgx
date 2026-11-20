@@ -615,6 +615,17 @@ final class LineOwnTarget {
      * ordinary trigger of the permanent, which is read. Read-only; never throws (an error = true).
      */
     static boolean couldFire(final Player me, final SpellAbility p, final Card target, final Harm harm) {
+        return couldFire(me, p, target, harm, false);
+    }
+
+    /**
+     * {@link #couldFire}; {@code loose} (target-picks-1119, the pick guard's unsure test only; false = exactly
+     * {@link #couldFire}): Forge's static triggers are read too (an effect's "these phase out until ~ leaves" return, Out of
+     * Time), and for a shrink a card filter on the target that names power or toughness passes (the filter is read on the
+     * target before the shrink; after it the card may match: Shirei, Shizo's Caretaker's "power 1 or less").
+     */
+    private static boolean couldFire(final Player me, final SpellAbility p, final Card target, final Harm harm,
+            final boolean loose) {
         try {
             final Game game = me.getGame();
             final SpellAbility root = p.getRootAbility() == null ? p : p.getRootAbility();
@@ -629,14 +640,14 @@ final class LineOwnTarget {
                 final boolean stack = z != null && z.is(ZoneType.Stack);
                 if (!stack) {
                     for (Trigger t : c.getTriggers()) {
-                        if (!t.isStatic() && !t.isSuppressed() && t.zonesCheck(z)
-                                && fires(t, me, p, root, source, target, harm, dest)) {
+                        if ((loose || !t.isStatic()) && !t.isSuppressed() && t.zonesCheck(z)
+                                && fires(t, me, p, root, source, target, harm, dest, loose)) {
                             return true;
                         }
                     }
                 }
                 for (ReplacementEffect re : c.getReplacementEffects()) {
-                    if (!re.isSuppressed() && re.zonesCheck(z) && replaces(re, p, source, target, harm, dest)) {
+                    if (!re.isSuppressed() && re.zonesCheck(z) && replaces(re, p, source, target, harm, dest, loose)) {
                         return true;
                     }
                 }
@@ -647,7 +658,7 @@ final class LineOwnTarget {
                     final Set<ZoneType> zs = t.getActiveZone();
                     if (!t.isStatic() && !t.isSuppressed() && CAST.contains(t.getMode())
                             && (zs == null || zs.isEmpty() || zs.contains(ZoneType.Stack))
-                            && fires(t, me, p, root, source, target, null, null)) {
+                            && fires(t, me, p, root, source, target, null, null, loose)) {
                         return true;
                     }
                 }
@@ -656,6 +667,126 @@ final class LineOwnTarget {
         } catch (RuntimeException e) {
             return true; // unsure: keep
         }
+    }
+
+    /**
+     * target-picks-1119 (review 1, S1 1: the pick guard fails open): why the guard must leave the pick {@code p} (its
+     * chosen targets; {@code root} the whole ability) as it is although {@link #pickHarm} calls it own harm: a payoff shape
+     * the classifier does not model on one of the permanents of ours it harms. Null = none (the guard may act). Unsure
+     * shapes:
+     * <ul>
+     * <li>a pending duration or return held by the target: "until it leaves" commands (Banishing Light's exile, an
+     * "until ~ leaves" effect), cards exiled with it or exiled until it leaves, creatures it gained control of;</li>
+     * <li>a static or delayed return: any trigger of ours, Forge's static ones included, that could fire from the harm
+     * (Out of Time's phase-in effect), a delayed trigger of ours that remembers the target or watches it leave
+     * (Adarkar Valkyrie's return);</li>
+     * <li>a projected event: another part of the ability makes the target act (Garruk Relentless: "that creature deals
+     * damage equal to its power to him"; a fight), the ability's own card has a state trigger (his transform), or a
+     * shrink a filter on the projected power or toughness could match (Shirei, Shizo's Caretaker);</li>
+     * <li>the card's own hint that it wants to go ({@code SacMe});</li>
+     * <li>anything that cannot be read (an error).</li>
+     * </ul>
+     * Read-only; never throws.
+     */
+    static String pickUnsure(final Player me, final SpellAbility p, final SpellAbility root) {
+        try {
+            if (me == null || p == null || !p.usesTargeting()) {
+                return null;
+            }
+            final Harm harm = harm(p);
+            if (harm == null) {
+                return null;
+            }
+            final SpellAbility whole = root == null ? p : root;
+            final String shape = projected(p, whole);
+            for (Card c : p.getTargets().getTargetCards()) {
+                if (!c.isInPlay() || !me.equals(c.getController())) {
+                    continue;
+                }
+                final String what = c.getName() + " (" + c.getId() + ")";
+                if (shape != null) {
+                    return shape + " (" + what + ")";
+                }
+                final String pending = pending(c);
+                if (pending != null) {
+                    return pending + " (" + what + ")";
+                }
+                if (couldFire(me, p, c, harm, true)) {
+                    return "a trigger of ours could fire, static or on its projected state (" + what + ")";
+                }
+                final String delayed = delayed(me, c);
+                if (delayed != null) {
+                    return delayed + " (" + what + ")";
+                }
+                if (c.hasSVar("SacMe")) {
+                    return "the card wants to go: SacMe (" + what + ")";
+                }
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return "unreadable: " + e; // unsure: the pick stands
+        }
+    }
+
+    /** A pending duration or return held by {@code c} (see {@link #pickUnsure}), or null. */
+    private static String pending(final Card c) {
+        if (!c.getLeavesPlayCommands().isEmpty()) {
+            return "a duration ends when it leaves";
+        }
+        if (!c.getUntilLeavesBattlefield().isEmpty() || c.hasExiledCard()) {
+            return "it holds exiled cards";
+        }
+        if (c.hasGainControlTarget()) {
+            return "it holds control of a permanent";
+        }
+        return null;
+    }
+
+    /** A delayed trigger of ours that remembers {@code c} or watches a card leave the battlefield (null = none). */
+    private static String delayed(final Player me, final Card c) {
+        for (Trigger t : me.getGame().getTriggerHandler().getDelayedTriggersView()) {
+            final Card host = t.getHostCard();
+            if (host == null || !(me.equals(host.getController()) || me.equals(host.getOwner()))) {
+                continue;
+            }
+            for (Object o : t.getTriggerRemembered()) {
+                if (o instanceof Card && ((Card) o).getId() == c.getId()) {
+                    return "a delayed trigger of ours remembers it (" + host.getName() + ")";
+                }
+            }
+            final TriggerType mode = t.getMode();
+            if ((mode == TriggerType.ChangesZone || mode == TriggerType.ChangesZoneAll || mode == TriggerType.Destroyed
+                    || mode == TriggerType.Exiled || mode == TriggerType.Sacrificed || mode == TriggerType.SacrificedOnce)
+                    && zoneOk(t.getParam("Origin"), "Battlefield") && !fails(t, "ValidCard", c) && !fails(t, "ValidCards", c)) {
+                return "a delayed trigger of ours watches it leave (" + host.getName() + ")";
+            }
+        }
+        return null;
+    }
+
+    /** Another part of the ability makes the target act, or the ability's card has a state trigger (null = neither). */
+    private static String projected(final SpellAbility p, final SpellAbility whole) {
+        for (SpellAbility x : tree(whole)) {
+            if (x == p || x.getApi() == null) {
+                continue;
+            }
+            if (x.getApi() == ApiType.Fight) {
+                return "projected: a fight";
+            }
+            final String src = x.getParam("DamageSource");
+            if (src != null && (src.contains("Targeted") || src.contains("ParentTarget"))) {
+                return "projected: the target deals damage";
+            }
+        }
+        final Card host = whole.getHostCard();
+        if (host != null) {
+            for (Trigger t : host.getTriggers()) {
+                if (t.getMode() == TriggerType.Always) {
+                    return "projected: its card has a state trigger";
+                }
+            }
+        }
+        return null;
     }
 
     /** The cards whose triggers and replacement effects could fire: ours in public zones, and ours they control. */
@@ -695,9 +826,25 @@ final class LineOwnTarget {
             TriggerType.CounterAddedAll, TriggerType.CounterTypeAddedAll, TriggerType.CounterRemoved,
             TriggerType.CounterRemovedOnce);
 
-    /** Could trigger {@code t} (active, ours) fire from this action? See {@link #couldFire}. */
+    /**
+     * {@link #fails} for a card filter on {@code target}; {@code loose} (the pick guard's unsure test) with a shrink: a
+     * filter naming power or toughness never fails (the shrink changes what it reads).
+     */
+    private static boolean failsCard(final CardTraitBase t, final String param, final Card target, final Harm harm,
+            final boolean loose) {
+        if (!fails(t, param, target)) {
+            return false;
+        }
+        if (!loose || harm != Harm.SHRINK) {
+            return true;
+        }
+        final String v = t.getParam(param).toLowerCase();
+        return !(v.contains("power") || v.contains("toughness"));
+    }
+
+    /** Could trigger {@code t} (active, ours) fire from this action? See {@link #couldFire}; {@code loose}: its loose read. */
     private static boolean fires(final Trigger t, final Player me, final SpellAbility p, final SpellAbility root,
-            final Card source, final Card target, final Harm harm, final String dest) {
+            final Card source, final Card target, final Harm harm, final String dest, final boolean loose) {
         final TriggerType mode = t.getMode();
         if (mode == null) {
             return false;
@@ -738,9 +885,9 @@ final class LineOwnTarget {
         }
         switch (mode) {
             case ChangesZone:
-                return (leaves(t, dest) || harm == Harm.BOUNCE && entersAgain(t)) && !fails(t, "ValidCard", target);
+                return (leaves(t, dest) || harm == Harm.BOUNCE && entersAgain(t)) && !failsCard(t, "ValidCard", target, harm, loose);
             case ChangesZoneAll:
-                return (leaves(t, dest) || harm == Harm.BOUNCE && entersAgain(t)) && !fails(t, "ValidCards", target);
+                return (leaves(t, dest) || harm == Harm.BOUNCE && entersAgain(t)) && !failsCard(t, "ValidCards", target, harm, loose);
             case Destroyed:
                 return (harm == Harm.DESTROY || harm == Harm.DAMAGE) && !fails(t, "ValidCard", target);
             case Sacrificed:
@@ -756,7 +903,7 @@ final class LineOwnTarget {
 
     /** Could replacement effect {@code re} (active, ours) act on this action's event? Filters as in {@link #fires}. */
     private static boolean replaces(final ReplacementEffect re, final SpellAbility p, final Card source, final Card target,
-            final Harm harm, final String dest) {
+            final Harm harm, final String dest, final boolean loose) {
         if (harm == null) {
             return false;
         }
@@ -766,7 +913,7 @@ final class LineOwnTarget {
         }
         switch (mode) {
             case Moved:
-                return (leaves(re, dest) || harm == Harm.BOUNCE && entersAgain(re)) && !fails(re, "ValidCard", target);
+                return (leaves(re, dest) || harm == Harm.BOUNCE && entersAgain(re)) && !failsCard(re, "ValidCard", target, harm, loose);
             case Destroy:
                 return (harm == Harm.DESTROY || harm == Harm.DAMAGE) && !fails(re, "ValidCard", target);
             case DamageDone:

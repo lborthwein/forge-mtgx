@@ -66,6 +66,8 @@ public class TargetPicksTest extends SimulationTest {
     static final String BOLT = "Lightning Bolt";
     static final String OURS = "Runeclaw Bear";
     static final String THEIRS = "Grizzly Bears";
+    static final String FLAG = "Standard Bearer";
+    static final String WIND = "Volcanic Wind";
 
     private static Path indexFile;
     private static final Map<Integer, String> NAMES = new HashMap<>();
@@ -73,7 +75,7 @@ public class TargetPicksTest extends SimulationTest {
     private static synchronized Path index() throws Exception {
         if (indexFile == null) {
             final TreeSet<String> names = new TreeSet<>(Arrays.asList("Forest", "Mountain", "Plains", "Island", "Swamp",
-                    SAGE, PRIMUS, SOL, STONE, SLASH, BOLT, OURS, THEIRS));
+                    SAGE, PRIMUS, SOL, STONE, SLASH, BOLT, OURS, THEIRS, FLAG, WIND));
             final StringBuilder sb = new StringBuilder("<pad>\t0\n<unk>\t1\n");
             int i = 2;
             for (String n : names) {
@@ -507,6 +509,77 @@ public class TargetPicksTest extends SimulationTest {
         Assert.assertEquals(r.answer, BOLT, r.summary());
         Assert.assertEquals(r.targets, List.of(THEIRS), r.summary());
         Assert.assertTrue(r.line() == null || !r.line().has("variants"), r.summary());
+    }
+
+    /**
+     * Review 1, S1 2 (the reviewer's live repro): their Standard Bearer must be targeted if able, so the face variant
+     * (better by the stubbed values) is not offered and never forced: the policy's Bolt at Standard Bearer stands.
+     */
+    @Test
+    public void boltVariantsMeetStandardBearer() throws Exception {
+        LookaheadSearch.testValues = OwnHarmSearchTest.gains(BOLT + "|-> Seat1", 0.05);
+        final Run r;
+        try {
+            r = run("targetVariants=4,targetLog=on", (g, p0, p1) -> {
+                addCard("Mountain", p0);
+                addCardToZone(BOLT, p0, ZoneType.Hand);
+                addCard(FLAG, p1);
+                addCard("Plains", p1);
+            }, new Script(BOLT, FLAG, null), PRIORITY);
+        } finally {
+            LookaheadSearch.testValues = null;
+        }
+        Assert.assertEquals(r.answer, BOLT, r.summary());
+        Assert.assertEquals(r.targets, List.of(FLAG), "MustTarget: the Flagbearer, never the face variant: " + r.summary());
+        final JsonObject d = r.line();
+        Assert.assertTrue(d == null || !d.has("variant") || !"P1".equals(d.getAsJsonObject("variant").get("ref").getAsString()),
+                r.summary());
+    }
+
+    /**
+     * Review 1, S1 3: Volcanic Wind divides its damage, so it is offered no target variant (none is forced) and its cast
+     * goes through the normal targets ask, with its allocation.
+     */
+    @Test
+    public void volcanicWindOffersNoVariant() throws Exception {
+        final Run r = run("targetVariants=4,targetLog=on", (g, p0, p1) -> {
+            for (int i = 0; i < 6; i++) {
+                addCard("Mountain", p0);
+            }
+            addCardToZone(WIND, p0, ZoneType.Hand);
+            addCard(THEIRS, p1);
+            addCard("Plains", p1);
+        }, new Script(WIND, THEIRS, null), PRIORITY);
+        Assert.assertEquals(r.answer, WIND, r.summary());
+        Assert.assertTrue(r.line() == null || !r.line().has("variants"), "no variant offered: " + r.summary());
+        final JsonObject t = r.end.getAsJsonObject("targets");
+        Assert.assertNotNull(t, r.summary());
+        Assert.assertEquals(t.get("variantArmed").getAsInt(), 0, t.toString());
+        Assert.assertEquals(t.get("variantApplied").getAsInt(), 0, t.toString());
+    }
+
+    /**
+     * Review 1, S2: SETUP compares the chosen candidate's own row. A base entry and two target variants share given index
+     * 0; the first variant (row 1) wins. With variants offered the row is the chosen one's (1), not the last match (2);
+     * with none (every key off) the read is as before (the last row with the chosen given index).
+     */
+    @Test
+    public void setupComparesTheChosenVariantsOwnRow() {
+        final LookaheadSearch.GivenResult r = new LookaheadSearch.GivenResult();
+        r.givenIndex = new int[] {0, 0, 0, 1};
+        r.chosen = 0;
+        r.chosenRow = 1;
+        r.targetVariants = 2;
+        Assert.assertEquals(PlanSearch.chosenRow(r), 1);
+        r.chosenRow = 0;
+        Assert.assertEquals(PlanSearch.chosenRow(r), 0, "the base entry kept: its own row, not a variant's");
+        r.targetVariants = 0;
+        r.givenIndex = new int[] {0, 1, 0};
+        r.chosenRow = 0;
+        Assert.assertEquals(PlanSearch.chosenRow(r), 2, "no variants: the last match, as before");
+        r.chosenRow = -1;
+        r.targetVariants = 2;
+        Assert.assertEquals(PlanSearch.chosenRow(r), 2, "no row recorded: the last match");
     }
 
     // ------------------------------------------------------------------ C: the pick log

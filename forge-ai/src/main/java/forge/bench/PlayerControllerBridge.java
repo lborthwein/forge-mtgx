@@ -4850,6 +4850,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * AI's own pick for the part with ours ruled out; else Forge AI's best opposing card, else an opponent); otherwise an
      * optional trigger is declined when it resolves ({@link #confirmTrigger}) and a mandatory one is left and logged
      * ({@code forced}). A followed solver line's own targets are its own guard's (lineOwnTarget), never touched here.
+     * Review 1: the guard fails open. A pick with a payoff shape the classifier does not model (a pending duration, a
+     * static or delayed return, a projected event or transform), a divided-amount part, or a search variant's forced pick
+     * is kept ({@code kept-unsure}, {@code kept-variant}); every forced or retargeted set is legal as Forge's own
+     * targeting (MustTarget included) or not taken.
      */
     public boolean ownHarmPicks = false;
     /** target-picks-1119 ({@code targetLog=on}; null = off, the default: nothing is recorded or computed). */
@@ -4890,9 +4894,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
 
     /**
      * target-picks-1119: the armed variant target on {@code cur}, the first targeting part of {@code root}, when they match;
-     * true = applied (no targets ask). A target no longer legal is a miss: the seat is asked as usual.
+     * true = applied (no targets ask). Review 1: a divided-amount part is never forced (S1 3: no allocation is made here;
+     * fail open), and the forced set must be legal as the normal path's and Forge's own (S1 2: {@link #legalPick}, the
+     * MustTarget restriction included). A target no longer legal, or an excluded or invalid set, is a miss: the targets
+     * are cleared and the seat is asked as usual (its normal legal choice).
      */
-    private boolean forcedCastTarget(final SpellAbility root, final SpellAbility cur) {
+    boolean forcedCastTarget(final SpellAbility root, final SpellAbility cur) {
         if (castRef == null || root.getHostCard() == null || root.getHostCard().getId() != castHost
                 || !java.util.Objects.equals(castDesc, root.getDescription()) || firstTargeting(root) != cur) {
             return false;
@@ -4900,7 +4907,14 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         final String ref = castRef;
         disarmCastTarget();
         final TargetPickLog log = targetLog;
-        if (forge.ai.simulation.LookaheadSearch.applyTargetRef(root, ref) && cur.isTargetNumberValid()) {
+        if (cur.isDividedAsYouChoose()) {
+            note("variant.divided");
+            if (log != null) {
+                log.variant("missed");
+            }
+            return false;
+        }
+        if (forge.ai.simulation.LookaheadSearch.applyTargetRef(root, ref) && legalPick(root, cur, null)) {
             note("variant.applied");
             if (log != null) {
                 log.variant("applied");
@@ -4914,6 +4928,41 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             log.variant("missed");
         }
         return false;
+    }
+
+    /**
+     * target-picks-1119 (review 1, S1 2): a forced or retargeted target set of the part {@code cur} of {@code root} is
+     * legal as the normal path's ({@link #chooseTargetsFor}: each target among the legal candidates {@code legal} (null =
+     * not read) and targetable, the count valid; no divided allocation, which nothing here makes) and as Forge's own
+     * targeting ({@code StaticAbilityMustTarget}: a Flagbearer must be chosen if able). An error = not legal.
+     */
+    private static boolean legalPick(final SpellAbility root, final SpellAbility cur, final List<GameEntity> legal) {
+        try {
+            if (cur.isDividedAsYouChoose() || !cur.isTargetNumberValid()) {
+                return false;
+            }
+            // rebuilt one target at a time, each checked before it is added, as addEntityTarget / addSpellTarget build the
+            // seat's answer (canTarget reads the targets already chosen: unique and related-target restrictions)
+            final List<GameObject> set = new ArrayList<>(cur.getTargets());
+            cur.resetTargets();
+            for (GameObject o : set) {
+                final boolean ok;
+                if (o instanceof GameEntity) {
+                    ok = (legal == null || legal.contains(o)) && cur.canTarget(o);
+                } else if (o instanceof SpellAbility) {
+                    ok = cur.canTargetSpellAbility((SpellAbility) o);
+                } else {
+                    ok = false;
+                }
+                if (!ok || !cur.getTargets().add(o)) {
+                    return false;
+                }
+            }
+            return cur.isTargetNumberValid()
+                    && forge.game.staticability.StaticAbilityMustTarget.meetsMustTargetRestriction(unwrap(root));
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private static SpellAbility firstTargeting(final SpellAbility root) {
@@ -4944,7 +4993,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * variant); the guard (ownHarmPicks) then the log (targetLog). {@code legal}: the part's legal targets, read before the
      * pick.
      */
-    private void picked(final SpellAbility root, final SpellAbility cur, final String origin, final String chooser,
+    void picked(final SpellAbility root, final SpellAbility cur, final String origin, final String chooser,
             final List<GameEntity> legal) {
         String by = chooser;
         if ("seat".equals(by)) {
@@ -4953,9 +5002,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
         String g = null;
         if (ownHarmPicks && seatPlays()) {
-            g = guardPick(root, cur, origin, legal);
-            if ("retarget".equals(g)) {
-                by = "guard";
+            if ("variant".equals(by)) {
+                g = keepVariant(root, cur, origin); // review 1 (S1 1): the search played this target out; never overridden
+            } else {
+                g = guardPick(root, cur, origin, legal);
+                if ("retarget".equals(g)) {
+                    by = "guard";
+                }
             }
         }
         final TargetPickLog log = targetLog;
@@ -4966,13 +5019,31 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     }
 
     /**
-     * target-picks-1119 (ownHarmPicks): the guard on one pick. Null = not own harm; "retarget" = moved to an opposing
-     * target; "kept" = an opposing target exists but none could be set (the pick stands); "decline" = an optional
-     * trigger with only our own to target (declined when it resolves); "forced" = a mandatory trigger with only our own
-     * (left, logged); "none-opposing" = a cast with only our own (its cast is the search's ownHarm check's).
+     * target-picks-1119 (review 1, S1 1): a search target variant's forced pick (the search played it out and chose it)
+     * is never overridden: "kept-variant" when it is own harm (logged), else null.
      */
-    private String guardPick(final SpellAbility root, final SpellAbility cur, final String origin,
-            final List<GameEntity> legal) {
+    private String keepVariant(final SpellAbility root, final SpellAbility cur, final String origin) {
+        final SpellAbility whole = unwrap(root);
+        final String why = forge.ai.simulation.TargetPicks.ownHarm(getPlayer(), cur, whole);
+        if (why == null) {
+            return null;
+        }
+        note("ownHarmPicks." + origin + ".kept-variant");
+        System.err.println("[own-harm-pick] " + origin + " " + (whole.getHostCard() == null ? "?" : whole.getHostCard().getName())
+                + ": " + why + " -> kept-variant");
+        return "kept-variant";
+    }
+
+    /**
+     * target-picks-1119 (ownHarmPicks): the guard on one pick. It acts only on pure, payoff-free own harm that no unsure
+     * shape touches (review 1, S1 1: it fails open). Null = not own harm; "kept-unsure" = own harm, but a payoff shape the
+     * classifier does not model ({@link forge.ai.simulation.TargetPicks#unsure}), or a divided-amount part with an opposing
+     * target (S1 3: no allocation is made here), keeps the pick; "retarget" = moved to an opposing target; "kept" = an
+     * opposing target exists but no legal opposing set could be made (the pick stands); "decline" = an optional trigger
+     * with only our own to target (declined when it resolves); "forced" = a mandatory trigger with only our own (left,
+     * logged); "none-opposing" = a cast with only our own (its cast is the search's ownHarm check's).
+     */
+    String guardPick(final SpellAbility root, final SpellAbility cur, final String origin, final List<GameEntity> legal) {
         final Player me = getPlayer();
         final SpellAbility whole = unwrap(root);
         final String why = forge.ai.simulation.TargetPicks.ownHarm(me, cur, whole);
@@ -4988,9 +5059,15 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 }
             }
         }
+        String unsure = forge.ai.simulation.TargetPicks.unsure(me, cur, whole);
+        if (unsure == null && !opp.isEmpty() && cur.isDividedAsYouChoose()) {
+            unsure = "divided amount: not retargeted";
+        }
         final String g;
-        if (!opp.isEmpty()) {
-            g = retargetOpposing(whole, cur, opp) ? "retarget" : "kept";
+        if (unsure != null) {
+            g = "kept-unsure";
+        } else if (!opp.isEmpty()) {
+            g = retargetOpposing(whole, cur, opp, legal) ? "retarget" : "kept";
         } else if (root.isTrigger() && root.isOptionalTrigger()) {
             g = "decline";
         } else {
@@ -4998,41 +5075,52 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
         note("ownHarmPicks." + origin + "." + g);
         System.err.println("[own-harm-pick] " + origin + " " + (whole.getHostCard() == null ? "?" : whole.getHostCard().getName())
-                + ": " + why + " -> " + g + (g.equals("retarget") ? " " + cur.getTargets() : ""));
+                + ": " + why + " -> " + g + (g.equals("retarget") ? " " + cur.getTargets() : "")
+                + (unsure != null ? " (" + unsure + ")" : ""));
         return g;
     }
 
     /**
-     * target-picks-1119: replace the own-harm pick on {@code cur} by an opposing one: Forge AI's own pick for the part when
-     * it is opposing and harms nothing of ours (its order among the opposing candidates), else Forge AI's best card among
-     * the opposing permanents ({@link forge.ai.ComputerUtilCard#getBestAI}), else the first opponent. False = none could
-     * be set: the pick is restored.
+     * target-picks-1119: replace the own-harm pick on {@code cur} by an opposing one, tried in order: Forge AI's own pick
+     * for the part, Forge AI's best card among the opposing permanents ({@link forge.ai.ComputerUtilCard#getBestAI}), then
+     * each opposing candidate ({@code opp}, legal order; players last). An attempt is taken only when it harms nothing of
+     * ours, targets only opposing objects, and is legal as the normal path's and Forge's own ({@link #legalPick}, review 1
+     * S1 2: the MustTarget restriction included). False = none could be set: the seat's pick is restored.
      */
-    private boolean retargetOpposing(final SpellAbility whole, final SpellAbility cur, final List<GameEntity> opp) {
+    private boolean retargetOpposing(final SpellAbility whole, final SpellAbility cur, final List<GameEntity> opp,
+            final List<GameEntity> legal) {
         final Player me = getPlayer();
         final TargetChoices before = cur.getTargets();
         try {
             clearForSeat(cur);
             cur.setTargetingPlayer(me);
-            if (super.chooseTargetsFor(cur) && cur.isTargetNumberValid() && !cur.getTargets().isEmpty()
-                    && forge.ai.simulation.TargetPicks.ownHarm(me, cur, whole) == null && allOpposing(cur)) {
+            if (super.chooseTargetsFor(cur) && !cur.getTargets().isEmpty() && retargetOk(whole, cur, legal)) {
                 return true;
             }
-            clearForSeat(cur);
-            cur.setTargetingPlayer(me);
+            final List<GameEntity> order = new ArrayList<>();
             final List<Card> cards = new ArrayList<>();
-            Player face = null;
             for (GameEntity e : opp) {
                 if (e instanceof Card) {
                     cards.add((Card) e);
-                } else if (face == null && e instanceof Player) {
-                    face = (Player) e;
                 }
             }
-            final GameEntity pick = !cards.isEmpty() ? forge.ai.ComputerUtilCard.getBestAI(cards) : face;
-            if (pick != null && cur.canTarget(pick)) {
-                cur.getTargets().add(pick);
-                if (cur.isTargetNumberValid() && forge.ai.simulation.TargetPicks.ownHarm(me, cur, whole) == null) {
+            if (!cards.isEmpty()) {
+                order.add(forge.ai.ComputerUtilCard.getBestAI(cards));
+            }
+            order.addAll(cards);
+            for (GameEntity e : opp) {
+                if (e instanceof Player) {
+                    order.add(e);
+                }
+            }
+            final Set<GameEntity> tried = new HashSet<>();
+            for (GameEntity pick : order) {
+                if (pick == null || !tried.add(pick) || tried.size() > 32) {
+                    continue;
+                }
+                clearForSeat(cur);
+                cur.setTargetingPlayer(me);
+                if (cur.canTarget(pick) && cur.getTargets().add(pick) && retargetOk(whole, cur, legal)) {
                     return true;
                 }
             }
@@ -5042,6 +5130,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         cur.resetTargets();
         cur.setTargets(before);
         return false;
+    }
+
+    /** A retarget attempt on {@code cur}: no own harm left, only opposing targets, and a legal set ({@link #legalPick}). */
+    private boolean retargetOk(final SpellAbility whole, final SpellAbility cur, final List<GameEntity> legal) {
+        return forge.ai.simulation.TargetPicks.ownHarm(getPlayer(), cur, whole) == null && allOpposing(cur)
+                && legalPick(whole, cur, legal);
     }
 
     private boolean allOpposing(final SpellAbility cur) {
@@ -5055,7 +5149,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
 
     /**
      * target-picks-1119 (ownHarmPicks): an optional trigger of ours, resolving, whose targets are pure own harm: why to
-     * decline it (null = ask as usual).
+     * decline it (null = ask as usual). Review 1 (S1 1, fail open): own harm that an unsure shape touches
+     * ({@link forge.ai.simulation.TargetPicks#unsure}: Reclamation Sage at our Banishing Light holding our own creature) is
+     * never declined; it is logged ({@code kept-unsure}) and the seat is asked as usual.
      */
     private String declineOwnHarm(final WrappedAbility w) {
         if (!ownHarmPicks || w == null || !seatPlays() || !w.isOptionalTrigger() || w.getActivatingPlayer() != getPlayer()) {
@@ -5065,6 +5161,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         for (SpellAbility cur = whole; cur != null; cur = cur.getSubAbility()) {
             final String why = forge.ai.simulation.TargetPicks.ownHarm(getPlayer(), cur, whole);
             if (why != null) {
+                final String unsure = forge.ai.simulation.TargetPicks.unsure(getPlayer(), cur, whole);
+                if (unsure != null) {
+                    note("ownHarmPicks.trigger.kept-unsure");
+                    System.err.println("[own-harm-pick] trigger " + (w.getHostCard() == null ? "?" : w.getHostCard().getName())
+                            + ": " + why + " -> kept-unsure (" + unsure + ")");
+                    return null;
+                }
                 return why;
             }
         }

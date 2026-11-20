@@ -23,7 +23,8 @@ import forge.game.spellability.SpellAbility;
  * card, {@code by} the chooser, {@code legal} [our permanents, the opponents' permanents, players, other (stack, other
  * zones)], {@code side} the side of the targets held after the pick (own, opp, self, face, other, mixed, none),
  * {@code harm} ({@link TargetPicks#harm}; absent = not harmful), {@code g} the pick guard's action (retarget, decline,
- * forced, kept, none-opposing; absent = none), {@code line} (a followed solver line's turn). Choosers: {@code line} (a
+ * declined, forced, kept, none-opposing, kept-unsure: a payoff shape the classifier does not model or a divided amount,
+ * kept-variant: a search variant's own pick; absent = none), {@code line} (a followed solver line's turn). Choosers: {@code line} (a
  * followed solver line's own targets: an ENGINE step's recorded target, or the line's prepared one), {@code forge}
  * (Forge AI: a line's lineChoices=forge ask, a capped or unposed menu, a refused answer, or kept after a failed seat
  * ask), {@code policy} (the policy network's answer), {@code single} (one legal choice, answered by the seat itself),
