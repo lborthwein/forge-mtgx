@@ -168,8 +168,10 @@ public final class InteractiveMain {
         }
 
         final InteractiveProtocol.Config config;
+        final boolean aiActViews;
         try {
             config = InteractiveProtocol.readConfig(configLine);
+            aiActViews = InteractiveProtocol.readAiActViews(configLine); // ai-beat-views-1120 (one-seat games only)
             EVENT_POOL.set(InteractiveProtocol.readBeliefPool(configLine)); // honest-belief-1020
             SEAT_NAMES.set(InteractiveProtocol.readSeatNames(configLine)); // votes-seatnames-1029
             BELIEF_SEEN.set(InteractiveProtocol.readBeliefSeen(configLine)); // deck-guess-1021
@@ -333,6 +335,7 @@ public final class InteractiveMain {
             game.subscribeToEvents(InteractiveGuiGame.uiEventsExceptEchoes(gui,
                     new FControlGameEventHandler(humanController)));
             game.subscribeToEvents(gui);
+            armAiActViews(aiActViews, game, gui);
             gui.startReader();
 
             final CompletableFuture<Void> gameFinished = new CompletableFuture<>();
@@ -425,6 +428,17 @@ public final class InteractiveMain {
         // This executable owns exactly one game, so terminate only after the final wire
         // message has been flushed and the interactive GUI has been closed.
         return completedNormally ? 0 : 1;
+    }
+
+    /**
+     * ai-beat-views-1120: with the config's {@code aiActViews}, the one-seat game's hook that sends the human seat its
+     * own view after each AI Player act ({@link InteractiveGuiGame#aiActViews}), on this REAL game only (a game copy has
+     * no listeners). Without the flag nothing is added and the game runs exactly as before.
+     */
+    static void armAiActViews(final boolean on, final Game game, final InteractiveGuiGame gui) {
+        if (on) {
+            game.addPriorityDecisionListener(gui.aiActViews());
+        }
     }
 
     /**

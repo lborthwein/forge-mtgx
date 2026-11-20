@@ -235,6 +235,23 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private volatile boolean waitingViewEverSent;
     /** The last waiting view sent (its JSON text), null after a request of this seat's own. */
     private volatile String waitingViewSent;
+    /**
+     * AI ACT VIEWS (ai-beat-views-1120; config {@code aiActViews}, default off; owner ask 2026-11-19: the AI Player's
+     * actions one at a time). In a one-seat game the seat got a view only with its own requests, so several acts of the
+     * AI Player inside one frame (a land, then a ritual) shared the frame's closing board. With the flag on, each time
+     * the AI Player is about to decide at priority in the REAL game ({@link #aiActViews()}, a
+     * {@link forge.game.PriorityDecisionListener} on that game only), this seat is sent a {@code state}
+     * ({@code "reason": "aiAct"}) with its OWN view, built as a waiting view is ({@link #visibleState} under
+     * {@link #readOnlyQuery}), when a game event reached it since its last view and the view differs from the last one
+     * it got. Never throttled: one per AI decision at most, on Forge's game thread, after the act's own events.
+     */
+    static final String AI_ACT_VIEW_REASON = "aiAct";
+    /** The config's {@code aiActViews} was true (set once, before the game starts); false: nothing below runs. */
+    private volatile boolean aiActViewsOn;
+    /** A game event reached this seat since its last view (a request's or an AI act's); true before its first. */
+    private final AtomicBoolean aiActViewDirty = new AtomicBoolean(true);
+    /** The last view this seat got, a request's or an AI act's (its JSON text), with {@link #aiActViewsOn}. */
+    private volatile String aiActViewLast;
     /** The table seat whose action lane is running on this thread; see {@link #onCurrentThread}. */
     private static final ThreadLocal<InteractiveGuiGame> ACTION_OWNER = new ThreadLocal<>();
 
@@ -475,6 +492,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             channel.send("event", body);
             if (table != null) {
                 waitingViewDirty.set(true);
+            } else if (aiActViewsOn) {
+                aiActViewDirty.set(true);
             }
         } catch (InteractiveProtocol.ProtocolException e) {
             fail("eof", e.getMessage(), null, "onEngineEvent", null, e);
@@ -1876,7 +1895,13 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         // table-live-view-1022: this seat's own request carries its view; a waiting view starts over from it.
         waitingViewDirty.set(false);
         waitingViewSent = null;
-        body.add("view", visibleState());
+        final JsonObject view = visibleState();
+        body.add("view", view);
+        if (aiActViewsOn) {
+            // ai-beat-views-1120: the request's view is this seat's latest; an AI act's view starts over from it
+            aiActViewDirty.set(false);
+            aiActViewLast = view.toString();
+        }
         final JsonObject prompt = new JsonObject();
         // The card being paid for need not yet be a committed stack item. Use
         // the real InputPayMana prompt source, not a remembered browser click
@@ -2169,6 +2194,94 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         if (busy) {
             scheduleWaitingView(WAITING_VIEW_MIN_MS * 1_000_000L);
+        }
+    }
+
+    /**
+     * ai-beat-views-1120: turn AI act views on for this one-seat game and return the hook that sends them. The caller
+     * adds it to the REAL game ({@link Game#addPriorityDecisionListener}) and to nothing else: a game copy (the pilot's
+     * look-ahead, PlanSearch, RlSearch, Forge AI simulation, GameSnapshot) is a new {@link Game} whose listener list is
+     * empty, so no search or simulation ever reaches it; {@link #offerAiActView} also ignores a player of any other
+     * game. Call once, before the game starts.
+     */
+    forge.game.PriorityDecisionListener aiActViews() {
+        if (table != null) {
+            throw new IllegalStateException("AI act views are a one-seat game's (a table has waiting views)");
+        }
+        aiActViewsOn = true;
+        return new forge.game.PriorityDecisionListener() {
+            @Override
+            public void beforeDecision(final Player p) {
+                offerAiActView(p);
+            }
+
+            @Override
+            public void afterDecision(final Player p, final List<SpellAbility> chosen) {
+                // the next decision's view shows what was played
+            }
+        };
+    }
+
+    /**
+     * ai-beat-views-1120: the AI Player ({@code p}) is about to decide at priority in this game: Forge's game thread is
+     * between actions (PhaseHandler's priority loop, after state-based actions, before {@code chooseSpellAbilityToPlay}).
+     * Forge gives priority back to the AI Player after each of its casts, activations and land plays (CR 117.3c) and to
+     * the active player after each resolution, so on its own turn every act it makes is followed by one of these. Each
+     * act's events went out on this same thread while it was played, so the view follows them and precedes the next
+     * act's. Sent only when a game event reached this seat since its last view and the view differs from the last one
+     * it got (never throttled).
+     */
+    void offerAiActView(final Player p) {
+        if (!aiActViewsOn || channel.isEnded() || game == null || human == null || game.isGameOver()) {
+            return;
+        }
+        // The seat's own decisions come with its requests; a player of any other game (a copy) is never this seat's.
+        if (p == null || p == human || p.getGame() != game) {
+            return;
+        }
+        // A "Continue from here" rebuild replays the game up to its live handover: no beats to show before it.
+        final InteractiveContinuation rebuild = continuation;
+        if (rebuild != null && !rebuild.isLive()) {
+            return;
+        }
+        if (!aiActViewDirty.get()) {
+            return;
+        }
+        sendAiActView();
+    }
+
+    /** As {@link #sendWaitingView}: this seat's own view, a read under {@link #readOnlyQuery} and this seat's gate. */
+    private void sendAiActView() {
+        final JsonObject view;
+        final boolean wasQuery = readOnlyQuery.get();
+        engineGate.lock();
+        try {
+            // A read: anything Forge fired from it would be an echo (isReadOnlyQueryEcho), never this seat's event.
+            readOnlyQuery.set(true);
+            aiActViewDirty.set(false);
+            view = visibleState();
+        } catch (Throwable failure) {
+            // An extra, not a request: the seat's next view carries the board. The class only (a message could name a
+            // card this seat may not see).
+            System.err.println("[forge.interactive] AI act view skipped for seat " + humanSeat + ": "
+                    + failure.getClass().getSimpleName());
+            return;
+        } finally {
+            readOnlyQuery.set(wasQuery);
+            engineGate.unlock();
+        }
+        final String text = view.toString();
+        if (text.equals(aiActViewLast)) {
+            return;
+        }
+        aiActViewLast = text;
+        final JsonObject body = new JsonObject();
+        body.addProperty("reason", AI_ACT_VIEW_REASON);
+        body.add("view", view);
+        try {
+            channel.send("state", body);
+        } catch (InteractiveProtocol.ProtocolException e) {
+            fail("eof", e.getMessage(), null, "state", null, e);
         }
     }
 
