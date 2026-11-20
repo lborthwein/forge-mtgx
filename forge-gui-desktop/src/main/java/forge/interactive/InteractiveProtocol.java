@@ -400,6 +400,22 @@ final class InteractiveProtocol {
         return List.copyOf(names);
     }
 
+    /**
+     * ai-beat-views-1120: the config line's {@code aiActViews} (boolean; absent or null: false). True asks a one-seat
+     * game to send the human seat its own view after each act of the AI Player ({@code state}, {@code "reason":
+     * "aiAct"}; {@link InteractiveGuiGame#aiActViews}). A table or a watch table ignores it. An old jar ignores the key.
+     */
+    static boolean readAiActViews(final String line) throws ProtocolException {
+        final JsonObject json = parseObject(line, "invalid_config", "config");
+        if (!json.has("aiActViews") || json.get("aiActViews").isJsonNull()) {
+            return false;
+        }
+        if (!json.get("aiActViews").isJsonPrimitive() || !json.getAsJsonPrimitive("aiActViews").isBoolean()) {
+            throw new ProtocolException("invalid_config", "aiActViews must be a boolean");
+        }
+        return json.get("aiActViews").getAsBoolean();
+    }
+
     private static boolean isSeatNumber(final JsonElement value, final int seat) {
         return value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber() && value.getAsDouble() == seat;
     }
