@@ -2265,6 +2265,12 @@ public final class RlActorBench {
             DecisionLog.SINK.close(); // bvw-decision-log-1027
         }
         // bvw-plr-1023: the replay's wall time and thread count (label throughput is read from them)
+        // sdcc-protectline-1120 I-2R (diagnostics only): the in-world protect counters of this replay JVM, its own line
+        final JsonObject pc = new JsonObject();
+        pc.addProperty("protect_in_world", forge.ai.simulation.ForcedWinSolver.PROTECT_IN_WORLD.get());
+        pc.addProperty("protect_livesolver_on_copy", forge.ai.simulation.ForcedWinSolver.PROTECT_LIVESOLVER_ON_COPY.get());
+        pc.add("copy_built", forge.bench.rl.SolverDriver.protectCopyBuiltJson()); // review concern 1: by construction site
+        System.err.println("[protect-counters] " + pc);
         final JsonObject sum = new JsonObject();
         sum.addProperty("type", "replay-summary");
         sum.addProperty("lines", n);

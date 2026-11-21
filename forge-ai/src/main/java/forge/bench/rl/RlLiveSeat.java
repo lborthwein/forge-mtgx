@@ -157,7 +157,10 @@ public final class RlLiveSeat {
                 "engineLoopLethalFirst",
                 // sdcc-loopclose-1119 (absent = off): a trigger variant aimed at the move's own host first, unless harmful
                 // (ForcedWinSolver.Config.engineLoopCloseFirst)
-                "engineLoopCloseFirst"));
+                "engineLoopCloseFirst",
+                // sdcc-protectline-1120 (absent = 0 = off; a whole number 0..3): an active line's protection of its own
+                // stack: 1 rows only, 2 R0, 3 R0 + R1 (ForcedWinSolver.Config.protectLine)
+                "protectLine"));
 
         /**
          * The solver keys above whose value is true or false (unified-search-1106: every key a bench arm can use, off unless

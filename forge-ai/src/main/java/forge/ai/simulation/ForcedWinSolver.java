@@ -544,6 +544,18 @@ public final class ForcedWinSolver {
          * ({@link LineOwnTarget}). Live seat only ({@link #liveSeat}); the search's play-out copies keep the old follower.
          */
         public boolean lineOwnTarget = false;
+        /**
+         * sdcc-protectline-1120 (0 = off, and then nothing changes): an active line's protection of its own stack in the
+         * seat's {@link #decide} (the play-outs' {@link LineAi} keeps the old protection).
+         * 1 = rows only: each entry into the protect branch with an opponent object on top writes a
+         * {@code FORCED_WIN protect-row} receipt (what R0 and R1 would do), the decision as at 0.
+         * 2 = R0 as well: {@link #protect} also sees an opponent spell that targets our spell as a CARD on the stack
+         * (a "return target spell" effect scripted with {@code TgtZone$ Stack}), not only as a spell ability.
+         * 3 = R1 as well: when protect has no answer, the top is an opponent SPELL, one of our objects waits under it and
+         * the line has nothing left but land drops (its win is already on the stack), counter the top with
+         * {@link #counterForLive}'s ranking, skipping the line's reserved hosts.
+         */
+        public int protectLine = 0;
         /** BVW opt-in generator: affordance probes also start from a belief-redrawn, own-library-shuffled root. */
         public boolean honestProbes = false;
         /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
@@ -1106,6 +1118,7 @@ public final class ForcedWinSolver {
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.breakOnCounter = "true".equals(get.apply("breakOnCounter")); // sdcc-leak-1111
             c.lineOwnTarget = "true".equals(get.apply("lineOwnTarget")); // line-own-target-1119
+            c.protectLine = Math.max(0, Math.min(3, intOr(get.apply("protectLine"), c.protectLine))); // sdcc-protectline-1120
             c.hiddenOrderLegacy = "true".equals(get.apply("hiddenOrderLegacy")); // sdcc-leak-1111
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
@@ -1754,11 +1767,52 @@ public final class ForcedWinSolver {
 
     private Decision decide0(Game live) {
         if (active != null && !active.done && !live.getStack().isEmpty()) {
+            if (live != me.getGame()) {
+                countProtectOnCopy(live); // sdcc-protectline-1120 I-2R: counts only, the branch runs as before
+            }
             // a counter of our line's spell: counter it back when we can
-            final SpellAbility guard = protect(live, me);
+            // sdcc-protectline-1120: R0 from level 2. Review concern 2: a look that ends without a cast puts the thread's id
+            // counters back, and the old protect then runs as at level 0, so the ids (which feed hashCode and with it some
+            // AI choices) stand where level 0 leaves them.
+            SpellAbility guard;
+            if (protectLevel() >= 2) {
+                final int[] ids0 = idsNow();
+                guard = protect(live, me, true);
+                if (guard == null) {
+                    idsBack(ids0);
+                    guard = protect(live, me, false);
+                }
+            } else {
+                guard = protect(live, me, false);
+            }
+            // sdcc-protectline-1120 (R1): it acts from level 3; at levels 1 and 2 it is looked at only for the receipt rows
+            // (receipts on). A look that does not cast puts the id counters back (review concern 2).
+            SpellAbility finish = null; // delta review C: with receipts at levels 1-2, finish and protectRow's own r0 copy can hold equal ids while both live; both are used for their host names only
+            if (guard == null && (protectLevel() >= 3 || protectLevel() >= 1 && RECEIPTS)) {
+                final int[] ids0 = idsNow();
+                finish = finishCounter(live);
+                if (finish == null || protectLevel() < 3) {
+                    idsBack(ids0);
+                }
+            }
+            if (protectLevel() >= 1) {
+                final int[] ids0 = idsNow();
+                protectRow(live, guard, finish);
+                idsBack(ids0); // rows only: protectRow's own protect() look never casts
+            }
             if (guard != null) {
                 receipt("FORCED_WIN protect turn=" + live.getPhaseHandler().getTurn() + " with=" + guard.getHostCard().getName());
+                if (protectLevel() >= 1) {
+                    protectCasts++;
+                }
                 return new Decision(true, guard);
+            }
+            if (finish != null && protectLevel() >= 3) {
+                receipt("FORCED_WIN protect-finish turn=" + live.getPhaseHandler().getTurn() + " with="
+                        + finish.getHostCard().getName() + tag());
+                finishCasts++;
+                active.finishCasts++;
+                return new Decision(true, finish);
             }
         }
         if (active != null && !active.done) {
@@ -1772,11 +1826,17 @@ public final class ForcedWinSolver {
             if (n.broken) {
                 receipt("FORCED_WIN broken" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " at=" + active.cursor + " "
                         + n.why);
+                if (protectLevel() >= 1) {
+                    lineEndRow(live, "broken");
+                }
                 replans++;
                 active = null;
                 noLineKey = null;
             } else {
                 // the line is played out: it has given up the turn or is waiting for its win to resolve
+                if (protectLevel() >= 1 && active.done) {
+                    lineEndRow(live, "done");
+                }
                 return n.waitingEnd ? Decision.PASS : Decision.NONE;
             }
         }
@@ -1851,7 +1911,7 @@ public final class ForcedWinSolver {
     }
 
     /** breakOnCounter: this solver follows lines in the live game (set by the live seat's driver, not a play-out copy's). */
-    public boolean liveSeat;
+    public boolean liveSeat; // delta review D: set only by SolverDriver's constructor (and one test); a later assignment would escape the construction count
 
     /** breakOnCounter: host ids of spells that resolved in the live game since they were last cast by a line. */
     final Set<Integer> resolvedHosts = Collections.synchronizedSet(new HashSet<>());
@@ -3805,10 +3865,18 @@ public final class ForcedWinSolver {
      * equals, a mana cost before an alternative cost (Force of Will's pitch, Daze's Island).
      */
     private SpellAbility counterForLive(Game g, SpellAbility top) {
+        return counterForLive(g, top, Collections.emptySet());
+    }
+
+    /** {@link #counterForLive(Game, SpellAbility)} from the hand cards not in {@code skip} (sdcc-protectline-1120 R1). */
+    private SpellAbility counterForLive(Game g, SpellAbility top, Set<Integer> skip) {
         SpellAbility best = null;
         int bestRank = Integer.MAX_VALUE;
         final Player opp = top.getActivatingPlayer();
         for (Card c : me.getCardsIn(ZoneType.Hand)) {
+            if (skip.contains(c.getId())) {
+                continue;
+            }
             for (SpellAbility sa : c.getAllPossibleAbilities(me, true)) {
                 if (sa.getApi() != ApiType.Counter || !sa.usesTargeting()) {
                     continue;
@@ -8213,9 +8281,64 @@ public final class ForcedWinSolver {
     /** kill-line-1106 (report only): discards where a reserved card was swapped out. */
     public int lineKeepSwaps;
 
+    /** sdcc-protectline-1120 (report only, {@link Config#protectLine} >= 1): protect-branch rows written. */
+    public int protectRows;
+    /** sdcc-protectline-1120 (report only): protect() counters cast with the key on (R0 included from level 2). */
+    public int protectCasts;
+    /** sdcc-protectline-1120 (report only): R1 counters cast (level 3). */
+    public int finishCasts;
+    /** sdcc-protectline-1120 (rows): why the last {@link #finishCounter} had no counter. */
+    private String finishWhy = "";
+
     /** Card ids the active line still needs in hand (discard choices avoid them). */
     public Set<Integer> reserved() {
         return active == null || active.done ? Collections.emptySet() : active.reserved();
+    }
+
+    /**
+     * sdcc-protectline-1120 I-2R (counters only, never read by a decision): protect-branch entries (an active line, a
+     * non-empty stack) on a game that is not the seat's own, i.e. inside a search world or play-out copy, at
+     * {@link #protectLevel()} >= 1. The I-2R identity test requires 0 at every key: no protectLine code runs in a world.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong PROTECT_IN_WORLD = new java.util.concurrent.atomic.AtomicLong();
+    /** sdcc-protectline-1120 I-2R (counters only): the same entries at any level by a live-seat solver ({@link #liveSeat}). */
+    public static final java.util.concurrent.atomic.AtomicLong PROTECT_LIVESOLVER_ON_COPY =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** sdcc-protectline-1120 (review concern 2): the thread's id scope counters now (IdScope.peek's form), or null. */
+    static int[] idsNow() {
+        final Object sc = forge.util.IdScope.capture();
+        return sc == null ? null : forge.util.IdScope.peek(sc);
+    }
+
+    /** sdcc-protectline-1120 (review concern 2): set the thread's id scope counters back to {@code ids} ({@link #idsNow}). Single-threaded by design (delta review B): the look runs synchronously on the deciding thread, and child threads share this InheritableThreadLocal scope's counters by reference, so no other thread may draw from it during the look (the searches open their own scopes). */
+    static void idsBack(final int[] ids) {
+        final Object sc = forge.util.IdScope.capture();
+        if (ids == null || sc == null) {
+            return;
+        }
+        for (forge.util.IdScope.Kind k : forge.util.IdScope.Kind.values()) {
+            forge.util.IdScope.set(sc, k, ids[k.ordinal()]);
+        }
+    }
+
+    /** sdcc-protectline-1120 I-2R: count a protect-branch entry on a copy game (and a receipt with the receipts flag). */
+    private void countProtectOnCopy(final Game g) {
+        if (liveSeat) {
+            PROTECT_LIVESOLVER_ON_COPY.incrementAndGet();
+        }
+        if (protectLevel() >= 1) {
+            PROTECT_IN_WORLD.incrementAndGet();
+            receipt("FORCED_WIN protect-in-world turn=" + g.getPhaseHandler().getTurn() + " level=" + protectLevel() + tag());
+        }
+    }
+
+    /**
+     * sdcc-protectline-1120: the seat's {@link Config#protectLine} level, on the live seat only ({@link #liveSeat}); a
+     * search's game-copy driver keeps level 0 (its play-outs as before).
+     */
+    public int protectLevel() {
+        return liveSeat ? cfg.protectLine : 0;
     }
 
     // ------------------------------------------------------------------ the follower (live seat and play-outs)
@@ -8514,6 +8637,34 @@ public final class ForcedWinSolver {
 
         /** search-bones-1015 (c): the position inside the current REPEAT step (repetition, body index). */
         int repIter, repPos;
+        /** sdcc-protectline-1120 (report only): R1 counters the seat cast for this line. */
+        int finishCasts;
+        /** sdcc-protectline-1120 (report only): protect-branch rows written for this line. */
+        int protectRows;
+
+        /**
+         * sdcc-protectline-1120 (R1): nothing is left of the line but land drops (no PASS, no spell, activation, mana or
+         * REPEAT step): what it still needs has been cast, so its win is on the stack or the line is through.
+         */
+        boolean finishing() {
+            for (int i = cursor; i < line.steps.size(); i++) {
+                final Step s = line.steps.get(i);
+                if (s.pass || s.kind != AbilKind.LAND) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** sdcc-protectline-1120 (rows): the kinds of the steps left, PASS as P (e.g. "LAND,ACTIVATE"; "-" when none). */
+        String remaining() {
+            final StringBuilder sb = new StringBuilder();
+            for (int i = cursor; i < line.steps.size(); i++) {
+                final Step s = line.steps.get(i);
+                sb.append(sb.length() == 0 ? "" : ",").append(s.pass ? "P" : s.kind.name());
+            }
+            return sb.length() == 0 ? "-" : sb.toString();
+        }
         /** line-adoption-1107: an offMain line has reached its first PASS or MAIN. */
         boolean offMainDone;
 
@@ -8932,11 +9083,19 @@ public final class ForcedWinSolver {
 
     /** Our counterspell for the opponent's spell on top of the stack when it targets one of our spells, or null. */
     static SpellAbility protect(Game g, Player me) {
+        return protect(g, me, false);
+    }
+
+    /**
+     * {@link #protect(Game, Player)}; with {@code cards} (sdcc-protectline-1120 R0) a target counts also when it is a card
+     * on the stack of one of our spells ({@link #targetsOurStack(Game, SpellAbility, Player, boolean)}).
+     */
+    static SpellAbility protect(Game g, Player me, boolean cards) {
         if (g.getStack().isEmpty()) {
             return null;
         }
         final SpellAbility top = g.getStack().peekAbility();
-        if (top == null || top.getActivatingPlayer() == me || !targetsOurStack(g, top, me)) {
+        if (top == null || top.getActivatingPlayer() == me || !targetsOurStack(g, top, me, cards)) {
             return null;
         }
         for (Card c : me.getCardsIn(ZoneType.Hand)) {
@@ -8961,6 +9120,16 @@ public final class ForcedWinSolver {
     }
 
     static boolean targetsOurStack(Game g, SpellAbility sa, Player me) {
+        return targetsOurStack(g, sa, me, false);
+    }
+
+    /**
+     * Does {@code sa} (or a sub-ability) target one of our stack objects? A spell-ability target of ours always counts;
+     * with {@code cards} (sdcc-protectline-1120 R0) also a targeted card that is the source of one of our spells on the
+     * stack (a "return target spell" effect is scripted {@code ValidTgts$ Card.inZoneStack | TgtZone$ Stack}, so its
+     * target is the card, never the spell ability).
+     */
+    static boolean targetsOurStack(Game g, SpellAbility sa, Player me, boolean cards) {
         for (SpellAbility l = sa; l != null; l = l.getSubAbility()) {
             if (!l.usesTargeting()) {
                 continue;
@@ -8970,8 +9139,157 @@ public final class ForcedWinSolver {
                     return true;
                 }
             }
+            if (cards) {
+                for (Card c : l.getTargets().getTargetCards()) {
+                    if (ourSpellOnStack(g, c, me)) {
+                        return true;
+                    }
+                }
+            }
         }
         return false;
+    }
+
+    /** sdcc-protectline-1120: {@code c} is in the stack zone as the source of a spell we cast. */
+    static boolean ourSpellOnStack(Game g, Card c, Player me) {
+        if (c == null || !c.isInZone(ZoneType.Stack)) {
+            return false;
+        }
+        for (SpellAbilityStackInstance si : g.getStack()) {
+            if (si.isSpell() && si.getActivatingPlayer() == me && c.equals(si.getSourceCard())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * sdcc-protectline-1120 (R1): our counter for the opponent's SPELL on top when one of our objects waits under it and
+     * the active line has nothing left but land drops ({@link Follower#finishing}): {@link #counterForLive}'s ranking
+     * (hard first, soft only when they cannot pay, bounce never, mana before an alternative cost), skipping the hosts the
+     * line still names ({@link Follower#reserved}). Null with {@link #finishWhy} set otherwise. Never casts anything.
+     */
+    SpellAbility finishCounter(Game live) {
+        finishWhy = "";
+        final SpellAbility top = live.getStack().peekAbility();
+        if (top == null || top.getActivatingPlayer() == me) {
+            finishWhy = "top-ours";
+            return null;
+        }
+        if (!top.isSpell()) {
+            finishWhy = "top-ability";
+            return null;
+        }
+        boolean below = false;
+        boolean first = true;
+        for (SpellAbilityStackInstance si : live.getStack()) {
+            if (!first && si.getActivatingPlayer() == me) {
+                below = true;
+                break;
+            }
+            first = false;
+        }
+        if (!below) {
+            finishWhy = "nothing-ours-below";
+            return null;
+        }
+        if (active == null || !active.finishing()) {
+            finishWhy = "steps-left";
+            return null;
+        }
+        final SpellAbility cs = counterForLive(live, top, active.reserved());
+        if (cs == null) {
+            finishWhy = "no-counter";
+        }
+        return cs;
+    }
+
+    /**
+     * sdcc-protectline-1120 ({@link Config#protectLine} >= 1, diagnostics only): one {@code FORCED_WIN protect-row}
+     * receipt per protect-branch entry with an opponent object on top, and every entry after an R1 cast of the line (so
+     * the rows show what the opponent did next): the stack, the top's targets, what the old protect, R0 and R1 would
+     * answer, and the seat's action. Reads only; never changes a decision.
+     */
+    private void protectRow(Game live, SpellAbility guard, SpellAbility finish) {
+        final SpellAbilityStackInstance top = live.getStack().peek();
+        final boolean oppTop = top != null && top.getActivatingPlayer() != me;
+        if (!oppTop && active.finishCasts == 0) {
+            return;
+        }
+        protectRows++;
+        active.protectRows++;
+        if (!RECEIPTS) {
+            return;
+        }
+        final SpellAbility tsa = top == null ? null : top.getSpellAbility();
+        final SpellAbility r0 = protectLevel() >= 2 ? guard : protect(live, me, true);
+        final String act = guard != null ? "protect:" + plName(guard) : finish != null && protectLevel() >= 3
+                ? "finish:" + plName(finish) : "pass";
+        receipt("FORCED_WIN protect-row turn=" + live.getPhaseHandler().getTurn() + " phase=" + live.getPhaseHandler().getPhase()
+                + " level=" + protectLevel() + " fol=" + Integer.toHexString(System.identityHashCode(active))
+                + " cursor=" + active.cursor + "/" + active.line.steps.size() + " rem=" + active.remaining()
+                + " stack=" + stackBrief(live) + " top=" + (oppTop ? "opp" : "ours") + ":" + (tsa == null ? "-" : plName(tsa))
+                + ":" + (tsa == null || tsa.getApi() == null ? "-" : tsa.getApi().name()) + ":"
+                + (top == null ? "-" : top.isSpell() ? "spell" : top.isTrigger() ? "trigger" : "ability")
+                + " tg=" + (tsa == null ? "-" : targetBrief(live, tsa))
+                + " oldTarget=" + (tsa != null && oppTop && targetsOurStack(live, tsa, me, false) ? 1 : 0)
+                + " cardTarget=" + (tsa != null && oppTop && targetsOurStack(live, tsa, me, true) ? 1 : 0)
+                + " r0=" + (r0 == null ? "-" : plName(r0)) + " r1=" + (finish != null ? "eligible:" + plName(finish)
+                        : guard != null ? "-" : finishWhy)
+                + " act=" + act + " r1sofar=" + active.finishCasts + " mana=" + me.getManaPool().totalMana()
+                + " hand=" + me.getCardsIn(ZoneType.Hand).size() + tag());
+    }
+
+    /** sdcc-protectline-1120 ({@link Config#protectLine} >= 1, diagnostics only): the active line's end. */
+    private void lineEndRow(Game live, String outcome) {
+        receipt("FORCED_WIN protect-line-end turn=" + live.getPhaseHandler().getTurn() + " level=" + protectLevel() + " fol="
+                + Integer.toHexString(System.identityHashCode(active)) + " outcome=" + outcome + " cursor=" + active.cursor
+                + "/" + active.line.steps.size() + " rows=" + active.protectRows + " r1casts=" + active.finishCasts + tag());
+    }
+
+    /** sdcc-protectline-1120 (rows): the stack top first, each "ours|opp:host:api:spell|trigger|ability" (6 at most). */
+    private String stackBrief(Game g) {
+        final StringBuilder sb = new StringBuilder("[");
+        int n = 0;
+        for (SpellAbilityStackInstance si : g.getStack()) {
+            if (n++ == 6) {
+                sb.append(",...");
+                break;
+            }
+            final SpellAbility sa = si.getSpellAbility();
+            sb.append(n == 1 ? "" : ",").append(si.getActivatingPlayer() == me ? "ours" : "opp").append(':')
+                    .append(sa == null ? "-" : plName(sa)).append(':')
+                    .append(sa == null || sa.getApi() == null ? "-" : sa.getApi().name()).append(':')
+                    .append(si.isSpell() ? "spell" : si.isTrigger() ? "trigger" : "ability");
+        }
+        return sb.append(']').toString();
+    }
+
+    /** sdcc-protectline-1120 (rows): the targets of {@code sa} and its sub-abilities. */
+    private String targetBrief(Game g, SpellAbility sa) {
+        final StringBuilder sb = new StringBuilder("[");
+        for (SpellAbility l = sa; l != null; l = l.getSubAbility()) {
+            if (!l.usesTargeting()) {
+                continue;
+            }
+            for (SpellAbility t : l.getTargets().getTargetSpells()) {
+                sb.append(sb.length() == 1 ? "" : ",").append("spell:").append(t.getActivatingPlayer() == me ? "ours" : "opp")
+                        .append(':').append(plName(t));
+            }
+            for (Card c : l.getTargets().getTargetCards()) {
+                sb.append(sb.length() == 1 ? "" : ",").append("card:").append(c.getZone() == null ? "-" : c.getZone().getZoneType().name())
+                        .append(':').append(c.getController() == me ? "ours" : "opp").append(':')
+                        .append(c.getName().replace(' ', '_'));
+            }
+            for (Player p : l.getTargets().getTargetPlayers()) {
+                sb.append(sb.length() == 1 ? "" : ",").append("player:").append(p == me ? "me" : "opp");
+            }
+        }
+        return sb.append(']').toString();
+    }
+
+    private static String plName(SpellAbility sa) {
+        return sa.getHostCard() == null ? "-" : sa.getHostCard().getName().replace(' ', '_');
     }
 
     // ------------------------------------------------------------------ play-out controllers
@@ -9583,7 +9901,10 @@ public final class ForcedWinSolver {
                 // engine found a kill behind, those taken (verified), prefixes that did not replay, and the time spent
                 + (!cfg.planBridge ? "" : " bridgePoints=" + bridgePoints + " bridgeTries=" + bridgeTries + " bridgeFound="
                         + bridgeFound + " bridgeTakes=" + bridgeTakes + " bridgeBroken=" + bridgeBroken + " bridgeMs="
-                        + bridgeNanos / 1_000_000);
+                        + bridgeNanos / 1_000_000)
+                // sdcc-protectline-1120 (only with protectLine >= 1): protect-branch rows, protect casts, R1 casts
+                + (protectLevel() == 0 ? "" : " protectLine=" + protectLevel() + " protectRows=" + protectRows
+                        + " protectCasts=" + protectCasts + " finishCasts=" + finishCasts);
     }
 
     /** Effects of a line's steps (for reports). */
