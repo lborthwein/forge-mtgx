@@ -1767,6 +1767,9 @@ public final class ForcedWinSolver {
 
     private Decision decide0(Game live) {
         if (active != null && !active.done && !live.getStack().isEmpty()) {
+            if (live != me.getGame()) {
+                countProtectOnCopy(live); // sdcc-protectline-1120 I-2R: counts only, the branch runs as before
+            }
             // a counter of our line's spell: counter it back when we can
             final SpellAbility guard = protect(live, me, protectLevel() >= 2); // sdcc-protectline-1120: R0 from level 2
             // sdcc-protectline-1120 (R1): the rows show it from level 1, it acts from level 3
@@ -8267,6 +8270,27 @@ public final class ForcedWinSolver {
     /** Card ids the active line still needs in hand (discard choices avoid them). */
     public Set<Integer> reserved() {
         return active == null || active.done ? Collections.emptySet() : active.reserved();
+    }
+
+    /**
+     * sdcc-protectline-1120 I-2R (counters only, never read by a decision): protect-branch entries (an active line, a
+     * non-empty stack) on a game that is not the seat's own, i.e. inside a search world or play-out copy, at
+     * {@link #protectLevel()} >= 1. The I-2R identity test requires 0 at every key: no protectLine code runs in a world.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong PROTECT_IN_WORLD = new java.util.concurrent.atomic.AtomicLong();
+    /** sdcc-protectline-1120 I-2R (counters only): the same entries at any level by a live-seat solver ({@link #liveSeat}). */
+    public static final java.util.concurrent.atomic.AtomicLong PROTECT_LIVESOLVER_ON_COPY =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** sdcc-protectline-1120 I-2R: count a protect-branch entry on a copy game (and a receipt with the receipts flag). */
+    private void countProtectOnCopy(final Game g) {
+        if (liveSeat) {
+            PROTECT_LIVESOLVER_ON_COPY.incrementAndGet();
+        }
+        if (protectLevel() >= 1) {
+            PROTECT_IN_WORLD.incrementAndGet();
+            receipt("FORCED_WIN protect-in-world turn=" + g.getPhaseHandler().getTurn() + " level=" + protectLevel() + tag());
+        }
     }
 
     /**
