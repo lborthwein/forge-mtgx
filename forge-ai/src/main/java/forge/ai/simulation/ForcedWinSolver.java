@@ -1787,7 +1787,7 @@ public final class ForcedWinSolver {
             }
             // sdcc-protectline-1120 (R1): it acts from level 3; at levels 1 and 2 it is looked at only for the receipt rows
             // (receipts on). A look that does not cast puts the id counters back (review concern 2).
-            SpellAbility finish = null;
+            SpellAbility finish = null; // delta review C: with receipts at levels 1-2, finish and protectRow's own r0 copy can hold equal ids while both live; both are used for their host names only
             if (guard == null && (protectLevel() >= 3 || protectLevel() >= 1 && RECEIPTS)) {
                 final int[] ids0 = idsNow();
                 finish = finishCounter(live);
@@ -1911,7 +1911,7 @@ public final class ForcedWinSolver {
     }
 
     /** breakOnCounter: this solver follows lines in the live game (set by the live seat's driver, not a play-out copy's). */
-    public boolean liveSeat;
+    public boolean liveSeat; // delta review D: set only by SolverDriver's constructor (and one test); a later assignment would escape the construction count
 
     /** breakOnCounter: host ids of spells that resolved in the live game since they were last cast by a line. */
     final Set<Integer> resolvedHosts = Collections.synchronizedSet(new HashSet<>());
@@ -8311,7 +8311,7 @@ public final class ForcedWinSolver {
         return sc == null ? null : forge.util.IdScope.peek(sc);
     }
 
-    /** sdcc-protectline-1120 (review concern 2): set the thread's id scope counters back to {@code ids} ({@link #idsNow}). */
+    /** sdcc-protectline-1120 (review concern 2): set the thread's id scope counters back to {@code ids} ({@link #idsNow}). Single-threaded by design (delta review B): the look runs synchronously on the deciding thread, and child threads share this InheritableThreadLocal scope's counters by reference, so no other thread may draw from it during the look (the searches open their own scopes). */
     static void idsBack(final int[] ids) {
         final Object sc = forge.util.IdScope.capture();
         if (ids == null || sc == null) {

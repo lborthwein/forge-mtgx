@@ -207,4 +207,56 @@ public class ProtectInWorldTest extends SimulationTest {
         }
         AssertJUnit.assertTrue("both answers PASS: " + k0, k0.startsWith("PASS PASS "));
     }
+
+    /** Every id-bearing trait of every card in the game and every stack item: (kind, id). */
+    private java.util.List<int[]> traitIds() {
+        final java.util.List<int[]> out = new java.util.ArrayList<>();
+        final int sa = forge.util.IdScope.Kind.SPELL_ABILITY.ordinal(), tr = forge.util.IdScope.Kind.TRIGGER.ordinal(),
+                st = forge.util.IdScope.Kind.STATIC.ordinal(), re = forge.util.IdScope.Kind.REPLACEMENT.ordinal();
+        for (Card c : game.getCardsInGame()) {
+            for (SpellAbility x : c.getAllPossibleAbilities(me, false)) {
+                out.add(new int[] {sa, x.getId()});
+            }
+            for (SpellAbility x : c.getSpellAbilities()) {
+                out.add(new int[] {sa, x.getId()});
+            }
+            for (forge.game.trigger.Trigger x : c.getTriggers()) {
+                out.add(new int[] {tr, x.getId()});
+            }
+            for (forge.game.staticability.StaticAbility x : c.getStaticAbilities()) {
+                out.add(new int[] {st, x.getId()});
+            }
+            for (forge.game.replacement.ReplacementEffect x : c.getReplacementEffects()) {
+                out.add(new int[] {re, x.getId()});
+            }
+        }
+        for (forge.game.spellability.SpellAbilityStackInstance si : game.getStack()) {
+            out.add(new int[] {sa, si.getSpellAbility().getId()});
+        }
+        return out;
+    }
+
+    @Test
+    public void noObjectKeepsAnIdTheLookHandedOut() {
+        // delta review A: after the no-cast look at key 3 (Counterspell copied, unpayable), the ids are put back; no spell
+        // ability, trigger, static or replacement effect on any card or the stack may hold an id the look handed out
+        final ForcedWinSolver s = tappedOut(p138(3, true, "Counterspell"));
+        final int[] saved, after;
+        forge.util.IdScope.open();
+        try {
+            saved = forge.util.IdScope.peek(forge.util.IdScope.capture());
+            AssertJUnit.assertEquals("PASS", cast(s.decide(game)));
+            after = forge.util.IdScope.peek(forge.util.IdScope.capture());
+        } finally {
+            forge.util.IdScope.close();
+        }
+        AssertJUnit.assertEquals("the ids are put back", java.util.Arrays.toString(saved), java.util.Arrays.toString(after));
+        // the walk runs with the scope closed: anything it makes itself takes a global id, below the scope's range
+        final java.util.List<int[]> held = traitIds();
+        AssertJUnit.assertFalse("traits found", held.isEmpty());
+        for (int[] k : held) {
+            AssertJUnit.assertTrue("kind " + forge.util.IdScope.Kind.values()[k[0]] + " id " + k[1] + " is at or above the saved "
+                    + saved[k[0]], k[1] <= saved[k[0]]);
+        }
+    }
 }
