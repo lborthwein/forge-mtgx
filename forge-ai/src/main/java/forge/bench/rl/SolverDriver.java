@@ -55,6 +55,36 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
     /** Choice answers the solver gave, by kind. */
     final Map<String, Integer> answers = new java.util.TreeMap<>();
 
+    /**
+     * sdcc-protectline-1120 I-2R (review concern 1; counters only, never read by a decision): drivers built for a game that
+     * is not the played game, by construction site, counted when their solver's effective protect level is above 0. A
+     * play-out copy's driver (copyLineHook) is built scoped=false, so level 0: any count at that site is a broken guarantee.
+     * Sites: copyLineHook (look-ahead play-outs), StepSearch (the labeller's copy), attachShadow (a replay's root seat, never
+     * installed: reported beside, not a play-out).
+     */
+    public static final java.util.Map<String, java.util.concurrent.atomic.AtomicLong> PROTECT_COPY_BUILT =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** sdcc-protectline-1120 I-2R: count {@code d} at {@code site} when its effective protect level is above 0; returns it. */
+    public static SolverDriver countCopy(final SolverDriver d, final String site) {
+        if (d != null && d.solver.protectLevel() > 0) {
+            PROTECT_COPY_BUILT.computeIfAbsent(site, k -> new java.util.concurrent.atomic.AtomicLong()).incrementAndGet();
+        }
+        return d;
+    }
+
+    /** sdcc-protectline-1120 I-2R: a play-out copy's driver (scoped false: level 0), counted at copyLineHook. */
+    public static SolverDriver forCopy(final Player copyMe, final ForcedWinSolver.Config cfg) {
+        return countCopy(new SolverDriver(copyMe, cfg, false), "copyLineHook");
+    }
+
+    /** sdcc-protectline-1120 I-2R: the counts by site, as one JSON object (sorted). */
+    public static JsonObject protectCopyBuiltJson() {
+        final JsonObject o = new JsonObject();
+        new java.util.TreeMap<>(PROTECT_COPY_BUILT).forEach((k, v) -> o.addProperty(k, v.get()));
+        return o;
+    }
+
     public SolverDriver(final Player me, final ForcedWinSolver.Config cfg) {
         this(me, cfg, true);
     }

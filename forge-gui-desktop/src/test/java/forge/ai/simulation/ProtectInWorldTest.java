@@ -69,6 +69,11 @@ public class ProtectInWorldTest extends SimulationTest {
      * cfg, false)) on its own game, as inside a search world.
      */
     private ForcedWinSolver p138(final int level, final boolean scoped) {
+        return p138(level, scoped, "Counterspell");
+    }
+
+    /** As above with {@code counter} the one counter in hand. */
+    private ForcedWinSolver p138(final int level, final boolean scoped, final String counter) {
         game = initAndCreateGame();
         me = game.getPlayers().get(0);
         opp = game.getPlayers().get(1);
@@ -78,7 +83,7 @@ public class ProtectInWorldTest extends SimulationTest {
         }
         addCard("Mountain", opp).tap(true, null, null);
         final Card oracle = addCardToZone("Thassa's Oracle", me, ZoneType.Hand);
-        addCardToZone("Counterspell", me, ZoneType.Hand);
+        addCardToZone(counter, me, ZoneType.Hand);
         game.getAction().checkStateEffects(true);
         final List<Step> steps = new ArrayList<>();
         steps.add(step(oracle));
@@ -149,5 +154,57 @@ public class ProtectInWorldTest extends SimulationTest {
         s.decide(game);
         AssertJUnit.assertEquals(w0 + 1, ForcedWinSolver.PROTECT_IN_WORLD.get());
         AssertJUnit.assertEquals(c0 + 1, ForcedWinSolver.PROTECT_LIVESOLVER_ON_COPY.get());
+    }
+
+    @Test
+    public void aCopyDriverBuiltScopedIsCounted() {
+        // review concern 1, mutation-style: forCopy (copyLineHook's construction) at key 3 is not counted; a driver wrongly
+        // built scoped (the one-argument constructor) on a copy's player at key 3 is counted
+        p138(3);
+        final long before = siteCount("copyLineHook"), m0 = siteCount("test-mutant");
+        AssertJUnit.assertEquals(0, SolverDriver.forCopy(me, SolverDriver.config(cfg(3))).solver().protectLevel());
+        AssertJUnit.assertEquals("copyLineHook's construction is level 0", before, siteCount("copyLineHook"));
+        SolverDriver.countCopy(new SolverDriver(me, SolverDriver.config(cfg(3))), "test-mutant");
+        AssertJUnit.assertEquals("a scoped copy driver at key 3 is counted", m0 + 1, siteCount("test-mutant"));
+        SolverDriver.countCopy(new SolverDriver(me, SolverDriver.config(cfg(0))), "test-mutant");
+        AssertJUnit.assertEquals("key 0 is not counted", m0 + 1, siteCount("test-mutant"));
+    }
+
+    private static long siteCount(final String site) {
+        final java.util.concurrent.atomic.AtomicLong n = SolverDriver.PROTECT_COPY_BUILT.get(site);
+        return n == null ? 0 : n.get();
+    }
+
+    /** The id scope counters after {@code s} decides the p138 stack twice (IdScope opened fresh before), with its answers. */
+    private String idsAfterTwoDecisions(final ForcedWinSolver s) {
+        forge.util.IdScope.open();
+        try {
+            final String a = cast(s.decide(game)), b = cast(s.decide(game));
+            return a + " " + b + " ids=" + java.util.Arrays.toString(forge.util.IdScope.peek(forge.util.IdScope.capture()));
+        } finally {
+            forge.util.IdScope.close();
+        }
+    }
+
+    private ForcedWinSolver tappedOut(final ForcedWinSolver s) {
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isLand() && !c.isTapped()) {
+                c.tap(true, null, null);
+            }
+        }
+        return s;
+    }
+
+    @Test
+    public void aLookWithoutACastLeavesTheIdsAsAtKey0() {
+        // review concern 2: Counterspell in hand but every land tapped, so R1 is eligible at key 3 and its look copies the
+        // counter (ids drawn) but cannot pay and does not cast: the look puts the ids back, and the next decision is level 0's
+        final String k0 = idsAfterTwoDecisions(tappedOut(p138(0, true, "Counterspell")));
+        for (int level : new int[] {1, 2, 3}) {
+            final ForcedWinSolver s = tappedOut(p138(level, true, "Counterspell"));
+            AssertJUnit.assertEquals("key " + level + ": answers and id counters as at key 0", k0, idsAfterTwoDecisions(s));
+            AssertJUnit.assertEquals(0, s.finishCasts);
+        }
+        AssertJUnit.assertTrue("both answers PASS: " + k0, k0.startsWith("PASS PASS "));
     }
 }
