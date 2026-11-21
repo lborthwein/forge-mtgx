@@ -1622,7 +1622,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** As above; {@code lineChoices}: the line's choice asks are Forge AI's (choice-search-1105, plans.lineChoices). */
     static PlayerControllerBridge.PlanHook copyLineHook(final Player copyMe, final ForcedWinSolver.Config cfg,
             final LinePlan lp, final LookaheadSearch.FirstAction fa, final boolean lineChoices, final boolean lineKeep) {
-        final SolverDriver d = new SolverDriver(copyMe, cfg, false);
+        final SolverDriver d = SolverDriver.forCopy(copyMe, cfg); // I-2R: counted when not level 0 (never, by construction)
         d.lineChoices = lineChoices;
         d.lineKeep = lineKeep;
         d.solver().adopt(lp.line);

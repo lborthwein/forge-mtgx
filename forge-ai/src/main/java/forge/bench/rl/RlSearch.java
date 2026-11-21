@@ -1650,6 +1650,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ps1.lineGo = cfg.provenOnly ? cfg.lineGo : 0.0;
             ps1.planEvery = cfg.provenOnly && cfg.planEvery;
             planSearches.put(p.getId(), ps1);
+            SolverDriver.countCopy(ps1.driver, "attachShadow"); // sdcc-protectline-1120 I-2R: reported beside (a replay's root)
         }
     }
 

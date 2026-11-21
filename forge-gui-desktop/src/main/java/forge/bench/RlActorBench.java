@@ -2269,6 +2269,7 @@ public final class RlActorBench {
         final JsonObject pc = new JsonObject();
         pc.addProperty("protect_in_world", forge.ai.simulation.ForcedWinSolver.PROTECT_IN_WORLD.get());
         pc.addProperty("protect_livesolver_on_copy", forge.ai.simulation.ForcedWinSolver.PROTECT_LIVESOLVER_ON_COPY.get());
+        pc.add("copy_built", forge.bench.rl.SolverDriver.protectCopyBuiltJson()); // review concern 1: by construction site
         System.err.println("[protect-counters] " + pc);
         final JsonObject sum = new JsonObject();
         sum.addProperty("type", "replay-summary");

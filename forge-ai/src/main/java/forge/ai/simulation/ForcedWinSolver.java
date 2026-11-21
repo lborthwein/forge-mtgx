@@ -1771,11 +1771,34 @@ public final class ForcedWinSolver {
                 countProtectOnCopy(live); // sdcc-protectline-1120 I-2R: counts only, the branch runs as before
             }
             // a counter of our line's spell: counter it back when we can
-            final SpellAbility guard = protect(live, me, protectLevel() >= 2); // sdcc-protectline-1120: R0 from level 2
-            // sdcc-protectline-1120 (R1): the rows show it from level 1, it acts from level 3
-            final SpellAbility finish = guard == null && protectLevel() >= 1 ? finishCounter(live) : null;
+            // sdcc-protectline-1120: R0 from level 2. Review concern 2: a look that ends without a cast puts the thread's id
+            // counters back, and the old protect then runs as at level 0, so the ids (which feed hashCode and with it some
+            // AI choices) stand where level 0 leaves them.
+            SpellAbility guard;
+            if (protectLevel() >= 2) {
+                final int[] ids0 = idsNow();
+                guard = protect(live, me, true);
+                if (guard == null) {
+                    idsBack(ids0);
+                    guard = protect(live, me, false);
+                }
+            } else {
+                guard = protect(live, me, false);
+            }
+            // sdcc-protectline-1120 (R1): it acts from level 3; at levels 1 and 2 it is looked at only for the receipt rows
+            // (receipts on). A look that does not cast puts the id counters back (review concern 2).
+            SpellAbility finish = null;
+            if (guard == null && (protectLevel() >= 3 || protectLevel() >= 1 && RECEIPTS)) {
+                final int[] ids0 = idsNow();
+                finish = finishCounter(live);
+                if (finish == null || protectLevel() < 3) {
+                    idsBack(ids0);
+                }
+            }
             if (protectLevel() >= 1) {
+                final int[] ids0 = idsNow();
                 protectRow(live, guard, finish);
+                idsBack(ids0); // rows only: protectRow's own protect() look never casts
             }
             if (guard != null) {
                 receipt("FORCED_WIN protect turn=" + live.getPhaseHandler().getTurn() + " with=" + guard.getHostCard().getName());
@@ -8282,6 +8305,23 @@ public final class ForcedWinSolver {
     public static final java.util.concurrent.atomic.AtomicLong PROTECT_LIVESOLVER_ON_COPY =
             new java.util.concurrent.atomic.AtomicLong();
 
+    /** sdcc-protectline-1120 (review concern 2): the thread's id scope counters now (IdScope.peek's form), or null. */
+    static int[] idsNow() {
+        final Object sc = forge.util.IdScope.capture();
+        return sc == null ? null : forge.util.IdScope.peek(sc);
+    }
+
+    /** sdcc-protectline-1120 (review concern 2): set the thread's id scope counters back to {@code ids} ({@link #idsNow}). */
+    static void idsBack(final int[] ids) {
+        final Object sc = forge.util.IdScope.capture();
+        if (ids == null || sc == null) {
+            return;
+        }
+        for (forge.util.IdScope.Kind k : forge.util.IdScope.Kind.values()) {
+            forge.util.IdScope.set(sc, k, ids[k.ordinal()]);
+        }
+    }
+
     /** sdcc-protectline-1120 I-2R: count a protect-branch entry on a copy game (and a receipt with the receipts flag). */
     private void countProtectOnCopy(final Game g) {
         if (liveSeat) {
@@ -8297,7 +8337,7 @@ public final class ForcedWinSolver {
      * sdcc-protectline-1120: the seat's {@link Config#protectLine} level, on the live seat only ({@link #liveSeat}); a
      * search's game-copy driver keeps level 0 (its play-outs as before).
      */
-    int protectLevel() {
+    public int protectLevel() {
         return liveSeat ? cfg.protectLine : 0;
     }
 

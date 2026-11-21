@@ -678,6 +678,9 @@ public final class StepSearch {
             }
             search.attach(c, rl, rs);
             final PlanSearch ps = search.planSearchOf(cp);
+            if (ps != null) {
+                SolverDriver.countCopy(ps.driver, "StepSearch"); // sdcc-protectline-1120 I-2R: the labeller's copy
+            }
             if (ps == null) {
                 throw new IllegalStateException("refused: no plan search on the label seat");
             }
