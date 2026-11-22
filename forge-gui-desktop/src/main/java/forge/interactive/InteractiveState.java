@@ -1472,6 +1472,7 @@ final class InteractiveState {
             } else {
                 addNamedCards(cardObject, game);
                 addCurrentRoom(cardObject, card);
+                omitNoManaMade(cardObject, card);
                 // Looking at an owned face-down card does not authorize the new provenance facts.
                 if (!card.isFaceDown()) {
                     InteractiveCardFacts.addTokenAndCopy(cardObject, card);
@@ -1530,6 +1531,29 @@ final class InteractiveState {
         final String room = card.getCurrentRoom();
         if (room != null && !room.isEmpty()) {
             cardObject.addProperty("currentRoom", room);
+        }
+    }
+
+    /**
+     * afford-amount-1122 (owner report 2026-11-22T05-54-09: an Everflowing Chalice with no charge counter showed
+     * {@code manaTypes: ['C']}). {@link StateEncoder} asks {@code Card.canProduceColorMana}, which reads the colors a mana
+     * ability names and not how much it makes, so a permanent whose every mana ability makes exactly nothing now
+     * ({@link forge.player.HumanManaAffordability#makesNoManaNow}: a count of its own counters at 0) listed {@code ['C']}.
+     * This view leaves its {@code producedMana} out and keeps {@code producedManaKnown: true}, the v2.16 statement
+     * "produces nothing". Only when the encoder made a statement (its enumeration succeeded); a card it did not ask, or
+     * could not, is left as it is. Only this browser payload changes: {@link StateEncoder}'s own output (the pilot's
+     * observation, the bench, the search's payloads) is untouched. Tapping the source for nothing is still offered.
+     */
+    private static void omitNoManaMade(final JsonObject cardObject, final Card card) {
+        if (!cardObject.has("producedMana") || !cardObject.has("producedManaKnown")) {
+            return;
+        }
+        try {
+            if (forge.player.HumanManaAffordability.makesNoManaNow(card)) {
+                cardObject.remove("producedMana");
+            }
+        } catch (RuntimeException unreadable) {
+            // The encoder's answer stands.
         }
     }
 
