@@ -262,6 +262,279 @@ public final class HumanManaAffordability {
         }
     }
 
+    /** {@link #sourceAmount}: an amount the proof cannot bound; the source makes its colors without limit. */
+    static final int AMOUNT_UNBOUNDED = -1;
+    /** {@link #assessPayable}: the mana an unbounded source stands for, more than any payment uses (each use caps it). */
+    private static final int UNBOUNDED_MANA = 1 << 16;
+    /** The variable amount read exactly: the counters of one kind (or ALL) on the ability's own card. */
+    private static final java.util.regex.Pattern OWN_COUNTERS =
+            java.util.regex.Pattern.compile("Count\\$CardCounters\\.[A-Za-z0-9_]+");
+
+    /**
+     * afford-amount-1122 (owner report 2026-11-22T05-54-09: Everflowing Chalice with no charge counter untapped beside a
+     * Swamp, and Glen Elendra Archmage, {3}{U}, and The Scarab God, {3}{U}{B}, glowing). A mana ability whose Amount was
+     * not a number made the payable proof give up before its color screen, so one such source lit every card. This is
+     * the mana one activation of {@code source} makes per symbol it produces, or {@link #AMOUNT_UNBOUNDED}:
+     * <ul>
+     *   <li>a number, as before;</li>
+     *   <li>{@code Count$CardCounters.<kind>} (Everflowing Chalice, Astral Cornucopia, Gyre Sage, City of Shadows): the
+     *       counters on the ability's own card now, read as {@code ManaEffect} reads them when it resolves
+     *       ({@code AbilityUtils.calculateAmount} on the host). That is the amount at payment: a cast pays with mana
+     *       abilities only (CR 601.2g), so the count changes only through a mana ability that puts or removes counters
+     *       (by its cost or its chain). It is unbounded when a mana ability of the same card does that
+     *       ({@link #countersChangeWhenUsed}), or when {@code countersMayGrow} says something may put a counter first
+     *       ({@link #countersMayGrowNow}: an ability usable now, a mana ability of another card, the cost being paid).
+     *       A mana trigger or replacement is {@link #activeHooks}' job;</li>
+     *   <li>any other form ({@code Count$Valid}, {@code Count$xPaid}, {@code Count$CardPower}, {@code Count$Compare},
+     *       {@code Count$ValidGraveyard}, {@code Sacrificed$}, ...): unbounded. Some grow during the payment (a graveyard
+     *       count once a creature is sacrificed for mana, an untapped-permanent count as sources tap).</li>
+     * </ul>
+     * Only a Mana effect's amount is read; a reflected ability's non-numeric amount is unbounded. {@code countersMayGrow}
+     * is asked only for a count of counters.
+     */
+    static int sourceAmount(final SpellAbility source, final BooleanSupplier countersMayGrow) {
+        final String text = source.getParamOrDefault("Amount", "1");
+        if (text.matches("[0-9]{1,3}")) return Integer.parseInt(text);
+        final Card card = source.getHostCard();
+        if (source.getApi() != ApiType.Mana || card == null) return AMOUNT_UNBOUNDED;
+        final String expression = text.indexOf('$') > 0 ? text : source.getSVar(text);
+        if (expression == null || !OWN_COUNTERS.matcher(expression.trim()).matches()) return AMOUNT_UNBOUNDED;
+        if (countersChangeWhenUsed(card) || countersMayGrow.getAsBoolean()) return AMOUNT_UNBOUNDED;
+        try {
+            final int now = forge.game.ability.AbilityUtils.calculateAmount(card, text, source);
+            return now < 0 || now > 999 ? AMOUNT_UNBOUNDED : now;
+        } catch (RuntimeException unreadable) {
+            return AMOUNT_UNBOUNDED;
+        }
+    }
+
+    /**
+     * afford-amount-1122: does every mana ability of {@code card}, a permanent on the battlefield, make exactly no mana
+     * now ({@link #sourceAmount} 0, as of now: nothing that may be used first is asked)? The human view then publishes
+     * no {@code producedMana} for it. False with no mana ability, off the battlefield (the count is not the one it will
+     * have when it can be used), or with any ability whose amount is not read exactly or whose chain makes more mana.
+     * A read: it sets no activating player.
+     *
+     * <p>Review S1 (Astra): zero printed output is not zero actual output. Forge runs the mana replacements and the
+     * mana triggers on an empty activation too ({@code produceMana("0")}): Contamination's "it produces {B} instead"
+     * makes a zero-counter City of Shadows add {B}, and Badgermole Cub's "add an additional {G}" makes a zero-counter
+     * Gyre Sage add {G}. So it is also false whenever any active trigger, replacement or static may act on mana this
+     * permanent makes for its controller: {@link #activeHooks} for this one source (a ProduceMana replacement, a
+     * TapsForMana or ManaAdded trigger, a mana conversion), or a hook whose reach it cannot tell. Those are
+     * public traits (battlefield, command zone, stack), so the answer gives nothing hidden away.</p>
+     */
+    public static boolean makesNoManaNow(final Card card) {
+        if (card == null || !card.isInZone(ZoneType.Battlefield)) return false;
+        final List<SpellAbility> abilities = new ArrayList<>(card.getManaAbilities());
+        if (abilities.isEmpty()) return false;
+        for (SpellAbility source : abilities) {
+            if (source.getManaPart() == null) return false;
+            for (SpellAbility tail = source.getSubAbility(); tail != null; tail = tail.getSubAbility()) {
+                if (tail.getApi() == ApiType.Mana || tail.getApi() == ApiType.ManaReflected) return false;
+            }
+            if (sourceAmount(source, () -> false) != 0) return false;
+        }
+        final Player controller = card.getController();
+        return controller != null && activeHooks(controller, null, false, List.of(card)) == 0;
+    }
+
+    /** {@link #sourceAmount}: does a mana ability of {@code card} put or remove counters, by its cost or its chain? */
+    private static boolean countersChangeWhenUsed(final Card card) {
+        for (SpellAbility mana : card.getManaAbilities()) {
+            if (mana.getPayCosts() != null && mana.getPayCosts().getCostParts().stream()
+                    .anyMatch(p -> p instanceof CostPutCounter || p instanceof CostRemoveCounter)) return true;
+            if (mayPutCounters(mana)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Effects that may put a counter on a permanent already there ({@link #mayPutCounters}). Every ApiType whose effect
+     * adds a counter to a card (afford-amount-1122 review S1, Astra: AddOrRemoveCounter was missing, so Jhoira's Timebug
+     * growing Rotating Fireplace left the count exact): the counter APIs ({@code PutCounter}, {@code PutCounterAll},
+     * {@code AddOrRemoveCounter}, {@code Proliferate}, {@code MoveCounter}, {@code MultiplyCounter}, and
+     * {@code ReplaceCounter}, the amount an AddCounter replacement puts), and the keyword actions that put one
+     * ({@code TimeTravel}, {@code Amass}, {@code Endure}, {@code Earthbend}, {@code Explore}, {@code Connive},
+     * {@code Blight}, {@code Empower}). Effects that put counters only on a card as it enters (a token, a card moved
+     * {@code WithCountersType}) make a new object, not more counters on a source; player counters (poison, rad) are not
+     * card counters. RemoveCounter only lowers a count, which keeps it an upper bound.
+     */
+    private static boolean counterApi(final ApiType api) {
+        return api == ApiType.PutCounter || api == ApiType.PutCounterAll || api == ApiType.AddOrRemoveCounter
+                || api == ApiType.Proliferate || api == ApiType.MoveCounter || api == ApiType.MultiplyCounter
+                || api == ApiType.ReplaceCounter || api == ApiType.TimeTravel || api == ApiType.Amass
+                || api == ApiType.Endure || api == ApiType.Earthbend || api == ApiType.Explore
+                || api == ApiType.Connive || api == ApiType.Blight || api == ApiType.Empower;
+    }
+
+    /** {@link #counterApi}, or a cost that puts a counter, in a card script's text. */
+    private static final java.util.regex.Pattern COUNTER_TEXT = java.util.regex.Pattern.compile(
+            "(?:AB|DB|SP)\\$\\s*(?:PutCounter|PutCounterAll|AddOrRemoveCounter|Proliferate|MoveCounter|MultiplyCounter"
+            + "|ReplaceCounter|TimeTravel|Amass|Endure|Earthbend|Explore|Connive|Blight|Empower)\\b"
+            + "|\\bAddCounter(?:You)?<");
+
+    /**
+     * The parameters by which a script names further SVars it may run or grant, for the counter walk: those of
+     * {@link #SVAR_REF_KEYS}, an effect's granted traits ({@code Abilities}, {@code StaticAbilities}), and a static's
+     * ({@code AddAbility}, {@code AddTrigger}, {@code AddReplacementEffects}, {@code AddStaticAbility}). The untap walk
+     * keeps its own keys. (Spelled out: {@link #SVAR_REF_KEYS} is initialized later in this class.)
+     */
+    private static final Set<String> COUNTER_REF_KEYS = Set.of("SubAbility", "Execute", "Triggers", "Choices",
+            "ReplacementEffects", "ReplaceWith", "RepeatSubAbility", "FallbackAbility", "UnlessSwitched",
+            "Abilities", "StaticAbilities", "AddAbility", "AddTrigger", "AddReplacementEffects", "AddStaticAbility");
+    private static final java.util.regex.Pattern COUNTER_REFS = java.util.regex.Pattern.compile(
+            "\\b(?:" + String.join("|", COUNTER_REF_KEYS) + ")\\$\\s*([^|]+)");
+
+    /** Keywords a static may grant whose traits put counters on a permanent ({@link #grantsCounters}). */
+    private static final java.util.regex.Pattern COUNTER_KEYWORDS = java.util.regex.Pattern.compile(
+            "etbCounter|Evolve|Persist|Undying|Modular|Graft|Bolster|Outlast|Adapt|Training|Mentor|Riot|Sunburst"
+            + "|Bloodthirst|Fabricate|Unleash|Devour|Amplify|Backup|Ravenous|Reinforce|Scavenge|Level up|Tribute"
+            + "|Renown|Monstrosity|Support|Proliferate|Vanishing|Fading|Cumulative upkeep");
+
+    /**
+     * afford-amount-1122: may this ability put a counter on a permanent? Its cost ({@code CostPutCounter}: a loyalty
+     * ability's +1, a -1/-1 counter as a cost), an effect in its chain ({@link #counterApi}), or one in an SVar the
+     * chain names or grants (a charm's modes, a repeat's sub-ability, an effect's triggers), followed as
+     * {@link #mayUntap} follows them ({@link #COUNTER_REF_KEYS}).
+     */
+    private static boolean mayPutCounters(final SpellAbility sa) {
+        if (sa.getPayCosts() != null && sa.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostPutCounter)) {
+            return true;
+        }
+        final Set<String> seen = new java.util.HashSet<>();
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (counterApi(s.getApi())) return true;
+            for (var param : s.getMapParams().entrySet()) {
+                if (COUNTER_REF_KEYS.contains(param.getKey())
+                        && namesMatch(s, param.getValue(), COUNTER_TEXT, COUNTER_REFS, seen)) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * afford-amount-1122 review S1: may this trigger or replacement put a counter on a permanent? Its built ability's
+     * chain ({@link #mayPutCounters}), or else the SVar it names ({@code Execute}, {@code ReplaceWith}) and every SVar
+     * that names or grants in turn, for counter text. Building the ability is not an option (it would create one).
+     */
+    private static boolean mayPutCounters(final forge.game.TriggerReplacementBase trait) {
+        final SpellAbility built = trait.getOverridingAbility();
+        if (built != null) return mayPutCounters(built);
+        return namesMatch(trait, trait.getParamOrDefault(trait instanceof ReplacementEffect ? "ReplaceWith" : "Execute", null),
+                COUNTER_TEXT, COUNTER_REFS, new java.util.HashSet<>());
+    }
+
+    /**
+     * afford-amount-1122 review S1: may this static give a permanent a way to get counters? A granted keyword that puts
+     * counters ({@link #COUNTER_KEYWORDS}) or a granted ability, trigger, replacement or static whose script may put one.
+     */
+    private static boolean grantsCounters(final StaticAbility s) {
+        if (COUNTER_KEYWORDS.matcher(s.getParamOrDefault("AddKeyword", "")).find()
+                || COUNTER_KEYWORDS.matcher(s.getParamOrDefault("AddHiddenKeyword", "")).find()) return true;
+        final Set<String> seen = new java.util.HashSet<>();
+        for (String key : List.of("AddAbility", "AddTrigger", "AddReplacementEffects", "AddStaticAbility")) {
+            if (namesMatch(s, s.getParam(key), COUNTER_TEXT, COUNTER_REFS, seen)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * afford-amount-1122: may a counter be put on a permanent of {@code player}'s before or while a cost is paid? True
+     * makes every count of counters unbounded ({@link #sourceAmount}). Conservative: any doubt counts as "it may".
+     * <ul>
+     *   <li>An activated ability (a mana ability too) of a card the player may identify ({@link #mayIdentify}) that may
+     *       put one ({@link #mayPutCounters}) and is usable in this priority window ({@link #activatableNow}; a {T}
+     *       ability of a tapped or summoning-sick permanent is not). Coretapper's "{T}: Put a charge counter on target
+     *       artifact" and Jhoira's Timebug's "{T}: ... put another time counter on it" grow a count before the payment,
+     *       as an untap reuses a source ({@link #unenumerated}). A spell is a separate action, as for untaps.</li>
+     *   <li>Review S1: any active trigger, replacement or static that may put one ({@link #counterTraitMayAct}),
+     *       whoever controls it and whatever sets it off: an activation, a tap for mana, a sacrifice or a life payment
+     *       before or during the payment can set it off.</li>
+     * </ul>
+     */
+    static boolean countersMayGrowNow(final Player player) {
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            if (card.isPhasedOut() || !mayIdentify(card, player)) continue;
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                if (sa.isSpell() || !activatableWhereItIs(card, sa) || !mayPutCounters(sa)) continue;
+                if (sa.getPayCosts() != null && sa.getPayCosts().hasTapCost() && (!card.isInZone(ZoneType.Battlefield)
+                        || card.isTapped() || card.isAbilitySick())) continue;
+                if (activatableNow(card, sa, player)) return true;
+            }
+        }
+        return counterTraitMayAct(player);
+    }
+
+    /**
+     * afford-amount-1122 review S1 (Astra): an active trigger, replacement or static, on a card the player may identify,
+     * that may put a counter on a permanent ({@link #mayPutCounters}, {@link #grantsCounters}). Active means: on a card
+     * on the battlefield, in the command zone or on the stack and active there ({@code zonesCheck}), or on a card in
+     * another zone that the trait names as its own ({@code TriggerZones}/{@code ActiveZones}: a graveyard trigger), or a
+     * delayed trigger. Two kinds are left out because nothing before the payment can set them off:
+     * <ul>
+     *   <li>a phase trigger ("at the beginning of your upkeep"): the step does not change before the payment;</li>
+     *   <li>a permanent's own enters trigger or enters-with-counters replacement while it is on the battlefield
+     *       (Everflowing Chalice's multikicker counters, Rotating Fireplace's time counter, Badgermole Cub's earthbend):
+     *       it acts only when that permanent enters again, as a new object.</li>
+     * </ul>
+     * A read: no ability is built and no activating player is set.
+     */
+    static boolean counterTraitMayAct(final Player player) {
+        final forge.game.Game game = player.getGame();
+        for (Trigger t : game.getTriggerHandler().getDelayedTriggersView()) {
+            if (t.getMode() != TriggerType.Phase && mayPutCounters(t)) return true;
+        }
+        for (Card card : game.getCardsInGame()) {
+            final forge.game.zone.Zone zone = game.getZoneOf(card);
+            if (zone == null || card.isPhasedOut() || !mayIdentify(card, player)) continue;
+            final boolean activeZone = zone.is(ZoneType.Battlefield) || zone.is(ZoneType.Command) || zone.is(ZoneType.Stack);
+            final boolean onBattlefield = zone.is(ZoneType.Battlefield);
+            for (Trigger t : card.getTriggers()) {
+                if (t.getMode() == TriggerType.Phase || !traitActive(t, zone, activeZone)) continue;
+                if (onBattlefield && t.getMode() == TriggerType.ChangesZone && ownEntry(t)) continue;
+                if (mayPutCounters(t)) return true;
+            }
+            for (ReplacementEffect r : card.getReplacementEffects()) {
+                if (!traitActive(r, zone, activeZone)) continue;
+                if (onBattlefield && r.getMode() == ReplacementType.Moved && ownEntry(r)) continue;
+                if (mayPutCounters(r)) return true;
+            }
+            for (StaticAbility s : card.getStaticAbilities()) {
+                if (holds(s::zonesCheck) && grantsCounters(s)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** {@link #counterTraitMayAct}: is this trigger or replacement active where its card is? */
+    private static boolean traitActive(final forge.game.TriggerReplacementBase trait, final forge.game.zone.Zone zone,
+                                       final boolean activeZone) {
+        if (!trait.zonesCheck(zone)) return false;
+        return activeZone || trait.getActiveZone() != null && trait.getActiveZone().contains(zone.getZoneType());
+    }
+
+    /**
+     * {@link #counterTraitMayAct}: does this trait act only on its own card entering the battlefield (from any origin:
+     * Badgermole Cub's {@code Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self})?
+     */
+    private static boolean ownEntry(final forge.game.TriggerReplacementBase trait) {
+        return "Battlefield".equals(trait.getParam("Destination"))
+                && trait.getParamOrDefault("ValidCard", "").matches("Card\\.Self(?:\\+[^,]*)?");
+    }
+
+    /** {@code test}, asked at most once (afford-amount-1122: the counter scan runs only when a count needs it). */
+    private static BooleanSupplier once(final BooleanSupplier test) {
+        final boolean[] state = new boolean[2]; // {asked, answer}
+        return () -> {
+            if (!state[0]) {
+                state[1] = test.getAsBoolean();
+                state[0] = true;
+            }
+            return state[1];
+        };
+    }
+
     /**
      * afford-reflected-1114 (owner report 2026-11-15T01-17-17: Grim Monolith tapped with its "{4}: Untap" usable, and
      * Kiki-Jiki, {2}{R}{R}{R}, and Ulamog, {11}, glowing with two red sources and four mana in all). An untap ability
@@ -291,6 +564,11 @@ public final class HumanManaAffordability {
      * and any tap or untap replacement that puts something in its place, refuses the bound.</p>
      */
     public static Integer untapWidening(final Player player) {
+        return untapWidening(player, once(() -> countersMayGrowNow(player)));
+    }
+
+    /** {@link #untapWidening}; {@code countersMayGrow} as {@link #sourceAmount} reads it (afford-amount-1122). */
+    static Integer untapWidening(final Player player, final BooleanSupplier countersMayGrow) {
         if (costStaticInPlay(player) || cycleReaction(player) || tapsOthersForMana(player)) return null;
         int widen = 0;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
@@ -305,7 +583,7 @@ public final class HumanManaAffordability {
                 if (pay == null || pay.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana))) return null;
                 final List<ManaCostShard> own = ownManaCost(pay);
                 if (own == null || own.isEmpty()) return null;
-                final Integer output = tapOutput(player, card);
+                final Integer output = tapOutput(player, card, countersMayGrow);
                 if (output == null || (output >>> 8) > own.size()) return null;
                 widen |= output & 0xFF;
             }
@@ -477,18 +755,33 @@ public final class HumanManaAffordability {
 
     /** {@link #mayUntap}: may any SVar in this comma-separated list of names, or any it names in turn, untap? */
     private static boolean namesMayUntap(final CardTraitBase holder, final String names, final Set<String> seen) {
+        return namesMatch(holder, names, UNTAP_TEXT, seen);
+    }
+
+    /**
+     * Does any SVar in this comma-separated list of names, or any it names in turn, contain {@code text}? A chain too
+     * long to follow counts as a match (afford-amount-1122: {@link #namesMayUntap}'s walk, for any text).
+     */
+    private static boolean namesMatch(final CardTraitBase holder, final String names, final java.util.regex.Pattern text,
+                                      final Set<String> seen) {
+        return namesMatch(holder, names, text, SVAR_REFS, seen);
+    }
+
+    /** {@link #namesMatch}, following the SVar names that {@code refs} finds (afford-amount-1122 review). */
+    private static boolean namesMatch(final CardTraitBase holder, final String names, final java.util.regex.Pattern text,
+                                      final java.util.regex.Pattern refsPattern, final Set<String> seen) {
         if (names == null) return false;
         for (String raw : names.split(",")) {
             final String name = raw.trim();
             if (name.isEmpty() || !seen.add(name)) continue;
             if (seen.size() > 64) return true;
             if (!holder.hasSVar(name)) continue;
-            final String text = holder.getSVar(name);
-            if (text == null) continue;
-            if (UNTAP_TEXT.matcher(text).find()) return true;
-            final java.util.regex.Matcher refs = SVAR_REFS.matcher(text);
+            final String script = holder.getSVar(name);
+            if (script == null) continue;
+            if (text.matcher(script).find()) return true;
+            final java.util.regex.Matcher refs = refsPattern.matcher(script);
             while (refs.find()) {
-                if (namesMayUntap(holder, refs.group(1), seen)) return true;
+                if (namesMatch(holder, refs.group(1), text, refsPattern, seen)) return true;
             }
         }
         return false;
@@ -584,9 +877,10 @@ public final class HumanManaAffordability {
     /**
      * What one untap of {@code card} gives back ({@link #untapWidening}): the most mana any one of its {T} mana abilities
      * makes, shifted left 8 bits, OR'd with the colours they can make. Null when one of its mana abilities is not a
-     * plain {T} ability the proof can read.
+     * plain {T} ability the proof can read. afford-amount-1122: its amount as {@link #sourceAmount} reads it (a count of
+     * its own counters, which no cycle changes); null when that is unbounded.
      */
-    private static Integer tapOutput(final Player player, final Card card) {
+    private static Integer tapOutput(final Player player, final Card card, final BooleanSupplier countersMayGrow) {
         int most = 0, colours = 0;
         for (SpellAbility source : card.getManaAbilities()) {
             final forge.game.cost.Cost pay = source.getPayCosts();
@@ -595,9 +889,8 @@ public final class HumanManaAffordability {
                     || pay.getCostParts().stream().anyMatch(p -> !(p instanceof CostTap) && !(p instanceof CostPartMana))) {
                 return null;
             }
-            final String amountText = source.getParamOrDefault("Amount", "1");
-            if (!amountText.matches("[0-9]{1,3}")) return null;
-            final int amount = Integer.parseInt(amountText);
+            final int amount = sourceAmount(source, countersMayGrow);
+            if (amount == AMOUNT_UNBOUNDED) return null;
             final Integer reflected = reflectedColours(player, source);
             if (reflected != null) {
                 if (reflected != 0) most = Math.max(most, amount);
@@ -729,6 +1022,14 @@ public final class HumanManaAffordability {
                 sources.add(card);
             }
         }
+        return activeHooks(player, host, spell, sources);
+    }
+
+    /**
+     * {@link #activeHooks}, for the given mana sources of {@code player} (afford-amount-1122 review S1: the human view
+     * asks it for one permanent, {@link #makesNoManaNow}). A read: matched with the traits' own scope tests.
+     */
+    static int activeHooks(final Player player, final Card host, final boolean spell, final List<Card> sources) {
         int hooks = 0;
         for (Card card : player.getGame().getCardsInGame()) {
             if (!card.isInZone(ZoneType.Battlefield) && !card.isInZone(ZoneType.Command)
@@ -1068,9 +1369,11 @@ public final class HumanManaAffordability {
                     if (tail.getApi() != ApiType.DealDamage && tail.getApi() != ApiType.LoseLife) plainTail = false;
                 }
                 if (!plainTail) continue;
-                final String amountText = source.getParamOrDefault("Amount", "1");
+                // afford-amount-1122: a count of the source's own counters read now is sure mana (the player may tap it
+                // first, and only more counters could come); an amount the proof cannot read is no sure mana.
+                final int made = sourceAmount(source, () -> false);
                 final String produced = source.getManaPart().getOrigProduced();
-                if (produced == null || !amountText.matches("[0-9]{1,2}")) continue;
+                if (produced == null || made == AMOUNT_UNBOUNDED || made > 99) continue;
                 final boolean choice = "Any".equals(produced) || produced.startsWith("Combo ");
                 final String simple = "Any".equals(produced) ? "W U B R G"
                         : produced.startsWith("Combo ") ? produced.substring(6) : produced;
@@ -1081,7 +1384,7 @@ public final class HumanManaAffordability {
                     final byte colour = ManaAtom.fromName(symbol);
                     colours |= colour | player.getManaPool().getPossibleColorUses(colour);
                 }
-                final int amount = Integer.parseInt(amountText) * (choice ? 1 : symbols.length);
+                final int amount = made * (choice ? 1 : symbols.length);
                 if (amount <= 0) continue;
                 outs.add(new int[] {amount, colours, choice ? 1 : 0});
                 symbolsOf.add(symbols);
@@ -1143,6 +1446,9 @@ public final class HumanManaAffordability {
      *       (its control is false when nothing else can pay it).</li>
      *   <li>afford-jar-1021: mana triggers, replacements and conversions count only when they can act on
      *       this player's mana and the player has mana or a source for them to act on ({@link #activeHooks}).</li>
+     *   <li>afford-amount-1122: a source whose amount is not a number counts by {@link #sourceAmount}: a count of
+     *       its own counters exactly (none: it adds no mana), any other amount as its colors without limit.
+     *       Before, it made the whole answer unknown.</li>
      * </ul></p>
      *
      * <p>Like {@link #assess}, this is a read. It runs no AI payment simulation, calls no
@@ -1231,6 +1537,12 @@ public final class HumanManaAffordability {
         final List<int[]> freeGroups = new ArrayList<>();   // {amount, colors}: sources with no mana cost
         final List<Unit> units = new ArrayList<>();          // sources with a mana-costed ability
         int costShards = 0;
+        // afford-amount-1122: may a counter be put on a permanent before the payment ends (this ability's own cost, or an
+        // ability usable now)? Then no count of counters is exact (sourceAmount). Asked only when a source needs it.
+        final boolean ownCostPutsCounters = ability.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostPutCounter);
+        final BooleanSupplier countersMayGrow = once(() -> ownCostPutsCounters || countersMayGrowNow(player));
+        // A source that makes exactly nothing now still counts as one for a mana hook (it may act on the empty tap).
+        boolean zeroSource = false;
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             if (card.isPhasedOut()) continue;
@@ -1310,9 +1622,15 @@ public final class HumanManaAffordability {
                             && tail.getApi() != ApiType.Sacrifice) plainTail = false;
                 }
                 if (!plainTail) return unknown("source-sub-ability", card);
-                final String amountText = source.getParamOrDefault("Amount", "1");
                 final String produced = source.getManaPart().getOrigProduced();
-                if (!amountText.matches("[0-9]{1,3}")) return unknown("source-amount", card);
+                // afford-amount-1122: the amount by sourceAmount. Exactly nothing now (a count of counters at 0): the source
+                // adds no mana. Unbounded: it makes its colors without limit (cap tokens below), so an unknown AMOUNT
+                // never hides a missing COLOR.
+                final int amount = sourceAmount(source, countersMayGrow);
+                if (amount == 0) {
+                    zeroSource = true;
+                    continue;
+                }
                 // afford-reflected-1114: a reflected source (Chrome Mox) counts with the colours it reflects now, one
                 // mana per activation and amount; with none to reflect it makes no mana at all.
                 final Integer reflected = reflectedColours(player, source);
@@ -1338,7 +1656,8 @@ public final class HumanManaAffordability {
                         colors |= color | player.getManaPool().getPossibleColorUses(color);
                     }
                 }
-                alts.add(new Alt(activations * Integer.parseInt(amountText) * per, colors, own));
+                final long made = amount == AMOUNT_UNBOUNDED ? UNBOUNDED_MANA : (long) activations * amount * per;
+                alts.add(new Alt((int) Math.min(made, UNBOUNDED_MANA), colors, own));
                 allTap &= tap;
             }
             if (alts.isEmpty()) continue;
@@ -1375,7 +1694,7 @@ public final class HumanManaAffordability {
         // The own costs are the printed ones: a cost reduction that may reach a mana ability (Training Grounds)
         // would make them an overestimate, so the proof gives up.
         if ((manaAbility || !units.isEmpty()) && manaAbilityCostsMayFall(player)) return unknown("mana-ability-cost-may-fall", host);
-        final boolean anySource = freeGroups.stream().anyMatch(g -> g[0] > 0) || !units.isEmpty();
+        final boolean anySource = freeGroups.stream().anyMatch(g -> g[0] > 0) || !units.isEmpty() || zeroSource;
         if (spell) {
             // CR 702.51a convoke: each creature tapped pays {1} or one mana of its colour, sick or not.
             // CR 702.126a improvise: each artifact tapped pays {1}. Either way it must be untapped.
@@ -1422,7 +1741,7 @@ public final class HumanManaAffordability {
             // in the graveyard where costStaticInPlay does not look) grows with a creature an untap brings back.
             final Integer widen = (hooks & HOOK_CONVERT) != 0
                     || spell && (host.hasKeyword(Keyword.IMPROVISE) || ability.isHarmonize()) ? null
-                    : untapWidening(player);
+                    : untapWidening(player, countersMayGrow);
             if (widen != null) {
                 final List<Token> wideBase = new ArrayList<>();
                 for (Token t : base) {
