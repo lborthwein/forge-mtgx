@@ -18,14 +18,20 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import forge.ai.AITest;
+import forge.ai.ComputerUtil;
 import forge.ai.ComputerUtilMana;
 import forge.bench.StateEncoder;
 import forge.game.Game;
+import forge.game.ability.AbilityFactory;
+import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.card.CounterEnumType;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
+import forge.game.replacement.ReplacementHandler;
 import forge.game.spellability.SpellAbility;
+import forge.game.trigger.TriggerHandler;
+import forge.game.trigger.TriggerType;
 import forge.game.zone.ZoneType;
 import forge.player.HumanManaAffordability;
 import forge.player.HumanManaAffordability.Assessment;
@@ -369,5 +375,260 @@ public class HumanManaAffordabilityAmountTest extends AITest {
 
         final JsonObject shown = card(InteractiveState.seatView(game, me, StateEncoder.playerIndex(game, me)), cradle.getId());
         assertEquals(shown.get("producedMana").toString(), "[\"G\"]", "an amount the view cannot read keeps the colors: " + shown);
+    }
+
+    // ------------------------------------------------------------------ review S1 (Astra): a count that may grow first
+
+    /** An effect that puts a charge counter on each artifact its controller controls. */
+    private static final String CHARGE_MY_ARTIFACTS =
+            "DB$ PutCounter | Defined$ Valid Artifact.YouCtrl | CounterType$ CHARGE | CounterNum$ 1";
+
+    /**
+     * Lit only because a counter may be put first: offered as before, payable true, the proof UNKNOWN (neither proved
+     * unpayable nor provably payable), and Forge's payer, which puts no counter first, cannot pay it yet.
+     */
+    private void litBeforeGrowth(final Card card) {
+        sameOffer(card);
+        assertEquals(flag(card), Boolean.TRUE, card.getName() + " is lit: a counter may be put on a source first");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(card)), Assessment.PROVEN_UNAFFORDABLE,
+                card.getName() + ": the payable proof");
+        assertEquals(HumanManaAffordability.proof(me, spell(card)), Proof.UNKNOWN, card.getName() + ": the wire's proof");
+        assertFalse(forgePays(spell(card)), card.getName() + ": Forge's payer puts no counter first");
+    }
+
+    /** Taps {@code source} for mana with Forge's own activation (no stack: a mana ability). */
+    private void tapForMana(final Card source) {
+        final SpellAbility mana = source.getManaAbilities().get(0);
+        mana.setActivatingPlayer(me);
+        assertTrue(ComputerUtil.playNoStack(me, mana, game, false), "Forge activates " + mana);
+    }
+
+    /** Opponent's turn; Rotating Fireplace with one time counter ({C}); Spatial Contortion ({1}{C}, an instant) in hand. */
+    private Card fireplaceBoard() {
+        board();
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, foe);
+        final Card fireplace = mine("Rotating Fireplace", false);
+        fireplace.setCounters(CounterEnumType.TIME, 1);
+        return fireplace;
+    }
+
+    /**
+     * Review S1-1 (Astra's repro): Jhoira's Timebug's "{T}: ... put another time counter on it" is an AddOrRemoveCounter
+     * ability, usable now, that grows the Fireplace before the payment. The count is then not exact: Spatial Contortion
+     * is lit. Forge is the judge: the Timebug's ability resolves and Forge's payer then pays {1}{C}. Without the Timebug
+     * it is dark (the Fireplace's own Time Travel is sorcery speed).
+     */
+    @Test
+    public void review_timebugAddOrRemoveCounter_countIsNotExact() {
+        final Card fireplace = fireplaceBoard();
+        final Card contortion = hand("Spatial Contortion");
+        settle();
+        noGlow(contortion);
+
+        final Card bug = mine("Jhoira's Timebug", false);
+        settle();
+        litBeforeGrowth(contortion);
+
+        final SpellAbility grow = bug.getSpellAbilities().stream()
+                .filter(a -> a.getApi() == ApiType.AddOrRemoveCounter).findFirst().orElseThrow();
+        grow.setActivatingPlayer(me);
+        grow.getTargets().add(fireplace);
+        assertTrue(ComputerUtil.playNoStack(me, grow, game, false), "Forge resolves the Timebug's ability");
+        assertEquals(fireplace.getCounters(CounterEnumType.TIME), 2, "the Timebug added a second time counter");
+        assertTrue(forgePays(spell(contortion)), "Forge's payer pays {1}{C} after the Timebug's ability");
+    }
+
+    /** The control: a tapped Timebug cannot act, so the count stays exact and Spatial Contortion stays dark. */
+    @Test
+    public void review_tappedTimebug_countStaysExact() {
+        fireplaceBoard();
+        mine("Jhoira's Timebug", true);
+        final Card contortion = hand("Spatial Contortion");
+        settle();
+        noGlow(contortion);
+    }
+
+    /**
+     * The control for triggers: Badgermole Cub's own "When this creature enters, earthbend 1" (a +1/+1 counter) acts
+     * only when the Cub enters again, as a new object, so beside the 0-counter Chalice it leaves the count exact: {4}
+     * stays dark. (The Cub's mana trigger is for creatures tapped for mana; neither the Swamp nor the Chalice is one.)
+     */
+    @Test
+    public void review_ownEntryTrigger_countStaysExact() {
+        reportedBoard(0);
+        mine("Badgermole Cub", false);
+        final Card solemn = hand("Solemn Simulacrum");
+        settle();
+        noGlow(solemn);
+    }
+
+    /** The Chalice with no counter and an untapped Island; Spatial Contortion ({1}{C}) in hand: {C} is missing. */
+    private Card chaliceIslandBoard() {
+        board();
+        final Card chalice = mine("Everflowing Chalice", false);
+        mine("Island", false);
+        return chalice;
+    }
+
+    private Card myIsland() {
+        return me.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals("Island")).findFirst().orElseThrow();
+    }
+
+    /**
+     * Review S1-1, a trigger: "Whenever this Island becomes tapped, put a charge counter on each artifact you control"
+     * (a Taps trigger, not a mana trigger, so the proof's mana-hook screen does not see it). Tapping the Island for mana
+     * during the payment sets it off. The count is not exact: lit. Forge is the judge: the tap adds {U} and a charge
+     * counter, and its payer then pays {1}{C}.
+     */
+    @Test
+    public void review_triggerPutsCounter_countIsNotExact() {
+        final Card chalice = chaliceIslandBoard();
+        final Card island = myIsland();
+        final Card contortion = hand("Spatial Contortion");
+        settle();
+        noGlow(contortion);
+
+        island.setSVar("TrigCharge", CHARGE_MY_ARTIFACTS);
+        island.addTrigger(TriggerHandler.parseTrigger("Mode$ Taps | ValidCard$ Card.Self | Static$ True"
+                + " | TriggerZones$ Battlefield | Execute$ TrigCharge | TriggerDescription$ Whenever CARDNAME becomes"
+                + " tapped, put a charge counter on each artifact you control.", island, true));
+        settle();
+        game.getTriggerHandler().resetActiveTriggers();
+        litBeforeGrowth(contortion);
+
+        tapForMana(island);
+        assertEquals(chalice.getCounters(CounterEnumType.CHARGE), 1, "the trigger put a charge counter on the Chalice");
+        assertTrue(forgePays(spell(contortion)), "Forge's payer pays {1}{C} with the {U} and the Chalice's {C}");
+    }
+
+    /**
+     * Review S1-1, a replacement: "If you would draw a card, put a charge counter on each artifact you control instead",
+     * beside a free draw ability. The count is not exact: lit. Forge is the judge: the draw resolves as a charge counter
+     * and its payer then pays {1}{C}. Without the replacement the draw ability puts no counter: dark.
+     */
+    @Test
+    public void review_replacementPutsCounter_countIsNotExact() {
+        final Card chalice = chaliceIslandBoard();
+        addCardToZone("Island", me, ZoneType.Library);
+        final Card bears = mine("Grizzly Bears", false);
+        final SpellAbility draw = AbilityFactory.getAbility("AB$ Draw | Cost$ 0 | NumCards$ 1 | SpellDescription$ Draw a card.", bears);
+        bears.addSpellAbility(draw);
+        final Card contortion = hand("Spatial Contortion");
+        settle();
+        noGlow(contortion);
+
+        bears.setSVar("RepCharge", CHARGE_MY_ARTIFACTS);
+        bears.addReplacementEffect(ReplacementHandler.parseReplacement("Event$ Draw | ActiveZones$ Battlefield"
+                + " | ValidPlayer$ You | ReplaceWith$ RepCharge | Description$ If you would draw a card, put a charge"
+                + " counter on each artifact you control instead.", bears, true));
+        settle();
+        litBeforeGrowth(contortion);
+
+        draw.setActivatingPlayer(me);
+        assertTrue(ComputerUtil.playNoStack(me, draw, game, false), "Forge resolves the draw");
+        assertEquals(chalice.getCounters(CounterEnumType.CHARGE), 1, "the draw became a charge counter on the Chalice");
+        assertTrue(forgePays(spell(contortion)), "Forge's payer pays {1}{C} with the Island and the Chalice");
+    }
+
+    /**
+     * Review S1-1, a static: "Lands you control have 'Whenever this land becomes tapped, put a charge counter on each
+     * artifact you control'". The count is not exact: lit. Forge is the judge: the Island has the granted trigger,
+     * tapping it adds {U} and a charge counter, and its payer then pays {1}{C}.
+     */
+    @Test
+    public void review_staticGrantsCounterTrigger_countIsNotExact() {
+        final Card chalice = chaliceIslandBoard();
+        final Card island = myIsland();
+        final Card bears = mine("Grizzly Bears", false);
+        final Card contortion = hand("Spatial Contortion");
+        settle();
+        noGlow(contortion);
+
+        bears.setSVar("TapTrig", "Mode$ Taps | ValidCard$ Card.Self | Static$ True | Execute$ TrigCharge"
+                + " | TriggerDescription$ Whenever CARDNAME becomes tapped, put a charge counter on each artifact you control.");
+        bears.setSVar("TrigCharge", CHARGE_MY_ARTIFACTS);
+        bears.addStaticAbility("Mode$ Continuous | Affected$ Land.YouCtrl | AddTrigger$ TapTrig | Description$ Lands"
+                + " you control have \"Whenever this land becomes tapped, put a charge counter on each artifact you control.\"");
+        settle();
+        game.getTriggerHandler().resetActiveTriggers();
+        assertTrue(island.getTriggers().stream().anyMatch(t -> t.getMode() == TriggerType.Taps), "the Island has the granted trigger");
+        litBeforeGrowth(contortion);
+
+        tapForMana(island);
+        assertEquals(chalice.getCounters(CounterEnumType.CHARGE), 1, "the granted trigger put a charge counter on the Chalice");
+        assertTrue(forgePays(spell(contortion)), "Forge's payer pays {1}{C} with the {U} and the Chalice's {C}");
+    }
+
+    // ------------------------------------------------------------------ review S1 (Astra): zero printed, not zero made
+
+    /** The card's {@code producedMana} in each seat's view and in an AI act view (null when it lists none). */
+    private String[] shownProduced(final Card card) {
+        final String[] shown = new String[3];
+        int i = 0;
+        for (Player viewer : new Player[] {me, foe}) {
+            final JsonObject c = card(InteractiveState.seatView(game, viewer, StateEncoder.playerIndex(game, viewer)), card.getId());
+            assertTrue(c.get("producedManaKnown").getAsBoolean(), "producedManaKnown stays: " + c);
+            shown[i++] = c.has("producedMana") ? c.get("producedMana").toString() : null;
+        }
+        final JsonObject aiAct = StateEncoder.withoutManaWrites(new HashSet<>(),
+                () -> InteractiveState.seatView(game, me, StateEncoder.playerIndex(game, me)));
+        final JsonObject c = card(aiAct, card.getId());
+        shown[i] = c.has("producedMana") ? c.get("producedMana").toString() : null;
+        return shown;
+    }
+
+    private String encoded(final Card card) {
+        return card(StateEncoder.encode(game, me), card.getId()).get("producedMana").toString();
+    }
+
+    /**
+     * Review S1-2 (Astra's repro): Gyre Sage with no +1/+1 counter beside Badgermole Cub ("Whenever you tap a creature
+     * for mana, add an additional {G}"). The Sage's activation makes {G}, so every view keeps the encoder's
+     * {@code producedMana}. Forge is the judge: the activation adds {G} and its payer spends it on Llanowar Elves. The
+     * Chalice beside them (not a creature: the Cub's trigger does not apply) still lists nothing.
+     */
+    @Test
+    public void review_view_manaTriggerOnZeroSource_keepsProducedMana() {
+        board();
+        mine("Badgermole Cub", false);
+        final Card sage = mine("Gyre Sage", false);
+        final Card chalice = mine("Everflowing Chalice", false);
+        final Card elves = hand("Llanowar Elves");
+        settle();
+        assertEquals(sage.getCounters(CounterEnumType.P1P1), 0);
+
+        assertEquals(encoded(sage), "[\"G\"]", "the encoder (the pilot's observation) is unchanged");
+        for (String shown : shownProduced(sage)) assertEquals(shown, "[\"G\"]", "the Sage makes {G} with the Cub");
+        for (String shown : shownProduced(chalice)) assertEquals(shown, null, "the Chalice still makes nothing");
+        assertEquals(encoded(chalice), "[\"C\"]");
+
+        tapForMana(sage);
+        assertEquals(me.getManaPool().totalMana(), 1, "Forge: the Cub's trigger adds {G} to the empty activation");
+        assertTrue(forgePays(spell(elves)), "Forge's payer pays Llanowar Elves with that {G}");
+    }
+
+    /**
+     * Review S1-2 (Astra's repro): City of Shadows with no storage counter under Contamination ("If a land is tapped for
+     * mana, it produces {B} instead of any other type and amount"). The activation makes {B}, so every view keeps the
+     * encoder's {@code producedMana}. Forge is the judge: it adds one mana and its payer pays Dark Ritual. The Chalice
+     * (not a land) still lists nothing.
+     */
+    @Test
+    public void review_view_manaReplacementOnZeroSource_keepsProducedMana() {
+        board();
+        final Card city = mine("City of Shadows", false);
+        mine("Contamination", false);
+        final Card chalice = mine("Everflowing Chalice", false);
+        final Card ritual = hand("Dark Ritual");
+        settle();
+        assertEquals(city.getCounters(CounterEnumType.STORAGE), 0);
+
+        final String encodedCity = encoded(city);
+        for (String shown : shownProduced(city)) assertEquals(shown, encodedCity, "City makes {B} under Contamination");
+        for (String shown : shownProduced(chalice)) assertEquals(shown, null, "the Chalice still makes nothing");
+
+        tapForMana(city);
+        assertEquals(me.getManaPool().totalMana(), 1, "Forge: Contamination replaces the empty output with {B}");
+        assertTrue(forgePays(spell(ritual)), "Forge's payer pays Dark Ritual with that {B}");
     }
 }
