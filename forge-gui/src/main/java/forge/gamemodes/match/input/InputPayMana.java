@@ -57,6 +57,12 @@ public abstract class InputPayMana extends InputSyncronizedBase {
     private boolean autoPayManaSourcesKnown = false;
 
     private boolean locked = false;
+    /**
+     * True from {@link #activateManaAbility}'s hand-off of a chosen mana ability to the game thread until that
+     * activation's game work is over (just before its {@link #onStateChanged}). Read on the EDT by
+     * {@link #showMessage}, hence volatile.
+     */
+    private volatile boolean activationRunning = false;
 
     protected InputPayMana(final PlayerControllerHuman controller, final SpellAbility saPaidFor0, final Player player0, final boolean effect) {
         super(controller);
@@ -616,63 +622,69 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         // System.out.println("Chosen sa=" + chosen + " of " + chosen.getHostCard() + " to pay mana");
 
         locked = true;
+        // Set before the hand-off, cleared when the activation's game work is over (see showMessage).
+        activationRunning = true;
         game.getAction().invoke(() -> {
-            if (askColour) {
-                // ManaEffect narrows a combo source to the express choice's first colour, so the
-                // question is asked here, on the game thread, as ManaEffect asks at priority.
-                final byte picked = getController().chooseColor(
-                        Localizer.getInstance().getMessage("lblSelectManaProduce"), chosen,
-                        ColorSet.fromMask(offered));
-                if (picked != 0) {
-                    chosen.setManaExpressChoice(ColorSet.fromMask(picked));
+            try {
+                if (askColour) {
+                    // ManaEffect narrows a combo source to the express choice's first colour, so the
+                    // question is asked here, on the game thread, as ManaEffect asks at priority.
+                    final byte picked = getController().chooseColor(
+                            Localizer.getInstance().getMessage("lblSelectManaProduce"), chosen,
+                            ColorSet.fromMask(offered));
+                    if (picked != 0) {
+                        chosen.setManaExpressChoice(ColorSet.fromMask(picked));
+                    }
                 }
-            }
-            if (askCombination) {
-                // ManaEffect narrows "any combination" mana by position from the express choice, so
-                // the combination is asked here among the colours that can pay, as ManaEffect asks
-                // it at priority, and written back one colour per mana.
-                final Map<Byte, Integer> picked = getController().specifyManaCombo(chosen,
-                        ColorSet.fromMask(offered), comboAmount,
-                        chosen.getManaPart().getOrigProduced().contains("Different"));
-                final StringBuilder each = new StringBuilder();
-                if (picked != null) {
-                    for (final byte color : ManaAtom.MANATYPES) {
-                        final Integer count = picked.get(color);
-                        for (int i = 0; count != null && i < count; i++) {
-                            each.append(each.length() == 0 ? "" : " ").append(MagicColor.toShortString(color));
+                if (askCombination) {
+                    // ManaEffect narrows "any combination" mana by position from the express choice, so
+                    // the combination is asked here among the colours that can pay, as ManaEffect asks
+                    // it at priority, and written back one colour per mana.
+                    final Map<Byte, Integer> picked = getController().specifyManaCombo(chosen,
+                            ColorSet.fromMask(offered), comboAmount,
+                            chosen.getManaPart().getOrigProduced().contains("Different"));
+                    final StringBuilder each = new StringBuilder();
+                    if (picked != null) {
+                        for (final byte color : ManaAtom.MANATYPES) {
+                            final Integer count = picked.get(color);
+                            for (int i = 0; count != null && i < count; i++) {
+                                each.append(each.length() == 0 ? "" : " ").append(MagicColor.toShortString(color));
+                            }
                         }
                     }
+                    chosen.getManaPart().setExpressChoice(each.toString());
                 }
-                chosen.getManaPart().setExpressChoice(each.toString());
-            }
-            if (PlaySpellAbility.playSpellAbility(getController(), chosen.getActivatingPlayer(), chosen)) {
-                final List<AbilityManaPart> manaAbilities = chosen.getAllManaParts();
-                boolean restrictionsMet = true;
+                if (PlaySpellAbility.playSpellAbility(getController(), chosen.getActivatingPlayer(), chosen)) {
+                    final List<AbilityManaPart> manaAbilities = chosen.getAllManaParts();
+                    boolean restrictionsMet = true;
 
-                for (AbilityManaPart sa : manaAbilities) {
-                    if (!sa.meetsManaRestrictions(saPaidFor)) {
-                        restrictionsMet = false;
-                        break;
+                    for (AbilityManaPart sa : manaAbilities) {
+                        if (!sa.meetsManaRestrictions(saPaidFor)) {
+                            restrictionsMet = false;
+                            break;
+                        }
                     }
-                }
 
-                if (restrictionsMet && !player.getController().isFullControl(FullControlFlag.NoPaymentFromManaAbility)) {
-                    player.getManaPool().payManaFromAbility(saPaidFor, manaCost, chosen);
+                    if (restrictionsMet && !player.getController().isFullControl(FullControlFlag.NoPaymentFromManaAbility)) {
+                        player.getManaPool().payManaFromAbility(saPaidFor, manaCost, chosen);
+                    }
+                    if (!restrictionsMet || chosen.getPayCosts().hasManaCost()) {
+                        // force refresh in case too much mana got spent
+                        updateButtons();
+                        invalidateAutoPayManaSources();
+                    }
+                    if (forcedColour != 0) {
+                        getController().getGui().notifyManaColourForced(CardView.get(chosen.getHostCard()), forcedColour);
+                    }
+                } else {
+                    // The activation was cancelled, usually while paying its own cost. The ability object
+                    // outlives this payment, so the narrowing must not: left set, a later activation with
+                    // no cost pending made this payment's colour without a question (a source tapped for a
+                    // {B}{B}{B} and cancelled made {B} two turns later, owner report 2026-11-06T20-10-11).
+                    chosen.clearManaExpressChoice();
                 }
-                if (!restrictionsMet || chosen.getPayCosts().hasManaCost()) {
-                    // force refresh in case too much mana got spent
-                    updateButtons();
-                    invalidateAutoPayManaSources();
-                }
-                if (forcedColour != 0) {
-                    getController().getGui().notifyManaColourForced(CardView.get(chosen.getHostCard()), forcedColour);
-                }
-            } else {
-                // The activation was cancelled, usually while paying its own cost. The ability object
-                // outlives this payment, so the narrowing must not: left set, a later activation with
-                // no cost pending made this payment's colour without a question (a source tapped for a
-                // {B}{B}{B} and cancelled made {B} two turns later, owner report 2026-11-06T20-10-11).
-                chosen.clearManaExpressChoice();
+            } finally {
+                activationRunning = false;
             }
             // Need to call this to unlock
             onStateChanged();
@@ -838,6 +850,18 @@ public abstract class InputPayMana extends InputSyncronizedBase {
     @Override
     public void showMessage() {
         if (isFinished()) { return; }
+        if (activationRunning) {
+            // A nested input of the running activation (its cost's "Sacrifice ...?" confirm, say) was just
+            // removed, and the InputProxy shows this input again on the EDT while the game thread is still
+            // activating: still paying that cost or resolving the mana. Showing it reads the game and writes
+            // it (the prompt's ability view goes through the game's tracker, which only the game thread may
+            // touch), so it raced that thread: an EDT write into the tracker's delayed changes while the game
+            // thread replayed them ended a game with a ConcurrentModificationException. The activation
+            // shows this input itself when it ends (onStateChanged); until then only the buttons, which are
+            // the GUI's alone, are set back to this input's.
+            updateButtons();
+            return;
+        }
         getController().pushActionableCards(true);
         updateButtons();
         onStateChanged();
