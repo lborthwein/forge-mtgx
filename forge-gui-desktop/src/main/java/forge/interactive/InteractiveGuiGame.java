@@ -2557,8 +2557,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         seatPhase("fail " + code);
         if (failure != null) {
-            System.err.println("[forge.interactive] " + method + ": " + safeThrowable(failure));
-            failure.printStackTrace(System.err);
+            // One print: the line, then the stack, kept together on this game's stderr (a shared host frames
+            // System.err per game: an action lane and a hosted game's EDT task both carry the game's context).
+            System.err.print("[forge.interactive] " + method + ": " + safeThrowable(failure) + "\n"
+                    + cappedStack(failure));
+            System.err.flush();
         }
         channel.fatal(code, message, requestId, method, kind);
         final ModalRequest modal = modalRequest.getAndSet(null);
@@ -2643,6 +2646,44 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         return object.has(field) && object.get(field).isJsonPrimitive()
                 && object.getAsJsonPrimitive(field).isString()
                 ? object.get(field).getAsString() : null;
+    }
+
+    /** The most frames {@link #cappedStack} prints of a failure itself; a cause gets {@link #FAIL_CAUSE_FRAMES}. */
+    static final int FAIL_STACK_FRAMES = 40;
+    static final int FAIL_CAUSE_FRAMES = 10;
+    private static final int FAIL_CAUSES = 3;
+
+    /**
+     * host-cme-petal-1122 (Part 2b): a failure's stack as {@code printStackTrace} prints it, but short enough to stay
+     * in what the mtgx host keeps of a game's stderr (its last 16 KB; the {@code [forge-fatal]} log keeps 8 KB from the
+     * stack's first line). The first line is the throwable itself ({@code java.util.ConcurrentModificationException},
+     * the host's JAVA_STACK_HEADER), then at most {@link #FAIL_STACK_FRAMES} frames, then up to three causes with at
+     * most {@link #FAIL_CAUSE_FRAMES} frames each, the frames a cause shares with the trace above it left out as
+     * {@code printStackTrace} leaves them. Every line ends with a newline.
+     */
+    static String cappedStack(final Throwable failure) {
+        final StringBuilder out = new StringBuilder();
+        final java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        StackTraceElement[] enclosing = new StackTraceElement[0];
+        Throwable t = failure;
+        for (int depth = 0; t != null && seen.add(t) && depth <= FAIL_CAUSES; depth++) {
+            final StackTraceElement[] trace = t.getStackTrace();
+            int unique = trace.length;
+            for (int e = enclosing.length - 1; unique > 0 && e >= 0 && trace[unique - 1].equals(enclosing[e]); e--) {
+                unique--;
+            }
+            final int shown = Math.min(unique, depth == 0 ? FAIL_STACK_FRAMES : FAIL_CAUSE_FRAMES);
+            out.append(depth == 0 ? "" : "Caused by: ").append(t).append('\n');
+            for (int i = 0; i < shown; i++) {
+                out.append("\tat ").append(trace[i]).append('\n');
+            }
+            if (shown < trace.length) {
+                out.append("\t... ").append(trace.length - shown).append(" more\n");
+            }
+            enclosing = trace;
+            t = t.getCause();
+        }
+        return out.toString();
     }
 
     private static String safeThrowable(final Throwable throwable) {

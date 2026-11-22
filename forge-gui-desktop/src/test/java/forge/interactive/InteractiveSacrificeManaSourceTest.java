@@ -5,7 +5,9 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import forge.ai.AITest;
 import forge.game.Game;
+import forge.game.GlobalIds;
 import forge.game.card.Card;
+import forge.game.cost.CostPart;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.PlayerController.FullControlFlag;
@@ -14,6 +16,10 @@ import forge.game.zone.ZoneType;
 import forge.gui.control.FControlGameEventHandler;
 import forge.player.PlayerControllerHuman;
 import forge.trackable.Tracker;
+import forge.util.GameContext;
+import forge.util.IdScope;
+import forge.util.MyRandom;
+import forge.util.ScopedSlot;
 import forge.util.ThreadUtil;
 import org.testng.annotations.Test;
 
@@ -40,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.regex.Pattern;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -68,6 +75,10 @@ import static org.testng.Assert.fail;
 public class InteractiveSacrificeManaSourceTest extends AITest {
 
     private static final String SESSION = "sacrifice-mana-source-test";
+    /** The host's JAVA_STACK_HEADER (mtgx tools/forge/interactive-session.ts), the exception-class branch. */
+    private static final Pattern JAVA_STACK_HEADER =
+            Pattern.compile("^[a-z][\\w$]*(?:\\.[\\w$]+)+(?:Exception|Error)(?::|$)");
+
     /** The browser seat's sacrifice source pays the last pip (the live report's order). */
     @Test(timeOut = 120000)
     public void aSacrificeSourcePaysTheLastPip() throws Exception {
@@ -82,6 +93,109 @@ public class InteractiveSacrificeManaSourceTest extends AITest {
     @Test(timeOut = 120000)
     public void aSacrificeSourcePaysAMiddlePip() throws Exception {
         pay(2);
+    }
+
+    /**
+     * Part 2b: a failed action's stack goes to its game's own stderr frames on a shared host, where the host's
+     * {@code lastJavaStack} looks for it: first the throwable's line (the host's stack header), then at most
+     * {@link InteractiveGuiGame#FAIL_STACK_FRAMES} frames; nothing of it on the host's own stderr.
+     */
+    @Test(timeOut = 120000)
+    public void aFailedActionsStackGoesToItsGamesStderrFrames() throws Exception {
+        final ByteArrayOutputStream frames = new ByteArrayOutputStream();
+        final ByteArrayOutputStream hostErr = new ByteArrayOutputStream();
+        final AtomicReference<Throwable> problem = new AtomicReference<>();
+        final AtomicReference<JsonObject> fatal = new AtomicReference<>();
+        final PrintStream savedErr = System.err;
+        GameContext.enableHosting();
+        try {
+            System.setErr(new PrintStream(routedErr(hostErr), true, StandardCharsets.UTF_8));
+            // as InteractiveHost.serve: the game's context, ids and stderr frames, on the game's own thread
+            final Thread game = new Thread(null, () -> {
+                final GameContext context = GameContext.open("fail-stack-test");
+                final Object ids = IdScope.scopeAt(GlobalIds.capture());
+                IdScope.install(ids);
+                context.setGameIds(ids);
+                gameErr().set(new InteractiveHost.LineFramer(new InteractiveHost.FrameSink(frames), 'E', 'e', false));
+                try {
+                    fatal.set(failInTheSacrificeConfirm());
+                } catch (Throwable t) {
+                    problem.set(t);
+                }
+            }, "test-host-game", 0, false);
+            game.start();
+            game.join(TimeUnit.SECONDS.toMillis(90));
+        } finally {
+            System.setErr(savedErr);
+            GameContext.stopHostingForTests();
+            MyRandom.setThreadRandom(null);
+            IdScope.close();
+        }
+        if (problem.get() != null) {
+            throw new AssertionError("the hosted game", problem.get());
+        }
+        assertNotNull(fatal.get(), "the forced failure ends the game");
+        assertTrue(fatal.get().toString().contains("human action failed: IllegalStateException: forced"),
+                fatal.get().toString());
+
+        final List<String> err = new ArrayList<>();
+        for (String frame : frames.toString(StandardCharsets.UTF_8).split("\n")) {
+            if (frame.startsWith("E")) {
+                err.add(frame.substring(1));
+            }
+        }
+        int header = -1;
+        for (int i = 0; i < err.size(); i++) {
+            if (JAVA_STACK_HEADER.matcher(err.get(i)).find() && err.get(i).contains("forced")) {
+                header = i;
+            }
+        }
+        assertTrue(header > 0, "the game's stderr frames hold the exception's line: " + err);
+        assertEquals(err.get(header), "java.lang.IllegalStateException: forced failure in the sacrifice confirm");
+        assertTrue(err.get(header - 1).startsWith("[forge.interactive] dispatch:selectCard: IllegalStateException"),
+                err.get(header - 1));
+        int frameCount = 0;
+        boolean throwingFrame = false;
+        for (int i = header + 1; i < err.size() && err.get(i).startsWith("\tat "); i++) {
+            frameCount++;
+            throwingFrame |= err.get(i).contains("confirmPayment");
+        }
+        assertTrue(throwingFrame, "the frames start where it was thrown: " + err.subList(header, err.size()));
+        assertTrue(frameCount > 0 && frameCount <= InteractiveGuiGame.FAIL_STACK_FRAMES,
+                frameCount + " frames: " + err.subList(header, err.size()));
+        assertFalse(hostErr.toString(StandardCharsets.UTF_8).contains("forced failure"),
+                "none of it on the host's own stderr");
+    }
+
+    /** Part 2b: a deep failure prints its line first, then 40 frames, then a short cause; nothing past the caps. */
+    @Test
+    public void aFailuresStackIsCappedWithItsLineFirst() {
+        final RuntimeException cause = new RuntimeException("inner");
+        cause.setStackTrace(frames("inner", 30));
+        final IllegalStateException failure = new IllegalStateException("outer", cause);
+        failure.setStackTrace(frames("outer", 100));
+        final String[] lines = InteractiveGuiGame.cappedStack(failure).split("\n");
+        assertEquals(lines[0], "java.lang.IllegalStateException: outer");
+        assertTrue(JAVA_STACK_HEADER.matcher(lines[0]).find(), "the host's stack header");
+        for (int i = 1; i <= InteractiveGuiGame.FAIL_STACK_FRAMES; i++) {
+            assertEquals(lines[i], "\tat x.outer.m" + (i - 1) + "(X.java:" + (i - 1) + ")");
+        }
+        int at = InteractiveGuiGame.FAIL_STACK_FRAMES + 1;
+        assertEquals(lines[at++], "\t... 60 more");
+        assertEquals(lines[at++], "Caused by: java.lang.RuntimeException: inner");
+        for (int i = 0; i < InteractiveGuiGame.FAIL_CAUSE_FRAMES; i++) {
+            assertEquals(lines[at++], "\tat x.inner.m" + i + "(X.java:" + i + ")");
+        }
+        assertEquals(lines[at++], "\t... 20 more");
+        assertEquals(lines.length, at, "nothing past the caps");
+    }
+
+    private static StackTraceElement[] frames(final String name, final int n) {
+        final StackTraceElement[] trace = new StackTraceElement[n];
+        for (int i = 0; i < n; i++) {
+            trace[i] = new StackTraceElement("x." + name, "m" + i, "X.java", i);
+        }
+        return trace;
     }
 
     /** Cast with the four lands and the sacrifice source at {@code sourceAt}, confirming its sacrifice. */
@@ -102,7 +216,7 @@ public class InteractiveSacrificeManaSourceTest extends AITest {
             spell[0] = addCardToZone("The Scarab God", seat, ZoneType.Hand);
             addCardToZone("Glen Elendra Archmage", seat, ZoneType.Hand);
             addCard("Forest", foe);
-        }, queue)) {
+        }, queue, null)) {
             JsonObject request = h.request();
             assertEquals(kind(request), "priority", request.toString());
             h.acked(h.sendSelect(request, spell[0]));
@@ -179,6 +293,53 @@ public class InteractiveSacrificeManaSourceTest extends AITest {
                     "the spell resolved onto the battlefield: " + h.game.getCardState(spell[0]).getZone());
             assertTrue(source[0].isInZone(ZoneType.Graveyard), "the source stays in the graveyard");
             assertFalse(h.gui.hasFailed(), "the game goes on");
+        }
+    }
+
+    /** Part 2b's game: the seat's controller throws in the source's sacrifice confirm, on the action lane. */
+    private JsonObject failInTheSacrificeConfirm() throws Exception {
+        final Card[] source = new Card[1];
+        final Card[] spell = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            addCard("Island", seat);
+            addCard("Swamp", seat);
+            addCard("Swamp", seat);
+            addCard("Swamp", seat);
+            source[0] = addCard("Lotus Petal", seat);
+            spell[0] = addCardToZone("The Scarab God", seat, ZoneType.Hand);
+            addCard("Forest", foe);
+        }, null, (game, seat) -> new PlayerControllerHuman(game, seat, seat.getLobbyPlayer()) {
+            @Override
+            public boolean confirmPayment(final CostPart costPart, final String question, final SpellAbility sa) {
+                throw new IllegalStateException("forced failure in the sacrifice confirm");
+            }
+        })) {
+            JsonObject request = h.request();
+            h.acked(h.sendSelect(request, spell[0]));
+            request = h.request();
+            assertEquals(kind(request), "mana", request.toString());
+            h.sendSelect(request, source[0]);
+            return h.awaitFatal();
+        }
+    }
+
+    /** The host's routed System.err ({@code InteractiveHost.RoutedErr}): a hosted game's frames, else {@code host}. */
+    private static OutputStream routedErr(final OutputStream host) throws ReflectiveOperationException {
+        final java.lang.reflect.Constructor<?> c = Class.forName("forge.interactive.InteractiveHost$RoutedErr")
+                .getDeclaredConstructor(OutputStream.class);
+        c.setAccessible(true);
+        return (OutputStream) c.newInstance(host);
+    }
+
+    /** {@code InteractiveHost.GAME_ERR}: a hosted game's stderr frames. */
+    @SuppressWarnings("unchecked")
+    private static ScopedSlot<OutputStream> gameErr() {
+        try {
+            final java.lang.reflect.Field f = InteractiveHost.class.getDeclaredField("GAME_ERR");
+            f.setAccessible(true);
+            return (ScopedSlot<OutputStream>) f.get(null);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
         }
     }
 
@@ -301,6 +462,10 @@ public class InteractiveSacrificeManaSourceTest extends AITest {
         }
     }
 
+    private interface ControllerFactory {
+        PlayerControllerHuman create(Game game, Player seat);
+    }
+
     private final class Harness implements AutoCloseable {
         final Game game;
         final Player seat;
@@ -312,7 +477,8 @@ public class InteractiveSacrificeManaSourceTest extends AITest {
         final AtomicBoolean closed = new AtomicBoolean();
         final Map<String, JsonObject> acks = new HashMap<>();
 
-        Harness(final BiConsumer<Player, Player> board, final RaceQueue queue) throws IOException {
+        Harness(final BiConsumer<Player, Player> board, final RaceQueue queue, final ControllerFactory controllers)
+                throws IOException {
             game = initAndCreateGame();
             seat = game.getPlayers().get(1);
             foe = game.getPlayers().get(0);
@@ -330,7 +496,8 @@ public class InteractiveSacrificeManaSourceTest extends AITest {
                 }
             }
 
-            controller = new PlayerControllerHuman(game, seat, seat.getLobbyPlayer());
+            controller = controllers == null ? new PlayerControllerHuman(game, seat, seat.getLobbyPlayer())
+                    : controllers.create(game, seat);
             // As InteractiveMain.configureHumanPayment: produced mana waits in the pool.
             controller.getFullControl().add(FullControlFlag.NoPaymentFromManaAbility);
             seat.dangerouslySetController(controller);
@@ -376,6 +543,21 @@ public class InteractiveSacrificeManaSourceTest extends AITest {
                     acks.put(message.get("inputId").getAsString(), message);
                 }
                 if (type.equals(got)) {
+                    return message;
+                }
+            }
+        }
+
+        JsonObject awaitFatal() throws InterruptedException {
+            final long deadline = System.currentTimeMillis() + 30000;
+            while (true) {
+                final JsonObject message = wire.poll(Math.max(0, deadline - System.currentTimeMillis()),
+                        TimeUnit.MILLISECONDS);
+                if (message == null) {
+                    return null;
+                }
+                final String got = message.get("type").getAsString();
+                if ("error".equals(got) || "fatal".equals(got)) {
                     return message;
                 }
             }
