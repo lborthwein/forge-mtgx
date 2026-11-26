@@ -1072,7 +1072,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         // InputProxy publishes its new input before queuing showMessageInitial
         // on the EDT. Earlier event callbacks must not serialize stale buttons
-        // or declare that not-yet-presented input unsupported.
+        // or declare that not-yet-presented input unsupported. Only an input's
+        // own prompt sets presentedInput, never a status prompt (2-arg showPromptMessage).
         if (input != presentedInput) {
             return;
         }
@@ -2880,6 +2881,22 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         promptCard = card;
         promptSubject = card;
         presentedInput = controller == null ? null : controller.getInputProxy().getInput();
+        schedulePresentedInputPublish();
+    }
+
+    /**
+     * A status prompt, which no input presents: "Waiting for ..." (the awaitNextInput timer), the auto-yield prompt, the
+     * prompt cleared at game end. An input presents itself with the three-argument form (InputBase.showMessage), so a
+     * status prompt never marks the input the proxy names as presented. The awaitNextInput timer's task can run after
+     * the InputProxy has named the next input and before it queues that input's showMessageInitial; its publish then
+     * enumerated that input with the status prompt's disabled buttons and declared it unsupported (lane
+     * mulligan-no-controls-1126: the opening mulligan, "exposed no human controls", the game fatal on turn 0).
+     */
+    @Override
+    public void showPromptMessage(final PlayerView playerView, final String message) {
+        promptMessage = Objects.requireNonNullElse(message, "");
+        promptCard = null;
+        promptSubject = null;
         schedulePresentedInputPublish();
     }
 
