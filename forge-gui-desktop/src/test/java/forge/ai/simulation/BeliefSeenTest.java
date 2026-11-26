@@ -5,7 +5,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +37,19 @@ public class BeliefSeenTest extends SimulationTest {
     @AfterMethod
     public void clearHook() {
         LookaheadSearch.BELIEF_SEEN_HOOK = null;
+    }
+
+    /**
+     * defense-other-cubes-1126: a toy prior with an empty row for every pool name. It covers the pool, so fillBasics
+     * applies ({@link LookaheadSearch#PRIOR_COVERAGE_MIN}); an empty row links nothing, so the draws are those of the
+     * prior without it.
+     */
+    private static Map<String, Map<String, Double>> covering() {
+        final Map<String, Map<String, Double>> m = new HashMap<>();
+        for (String n : CUBE) {
+            m.put(n, Map.of());
+        }
+        return m;
     }
 
     private static String cubeFile() throws IOException {
@@ -108,7 +120,7 @@ public class BeliefSeenTest extends SimulationTest {
     public void offIsTheStrongOppPriorDrawForDraw() throws Exception {
         final String cube = cubeFile();
         final Game game = board();
-        final Map<String, Map<String, Double>> syn = new HashMap<>();
+        final Map<String, Map<String, Double>> syn = covering();
         syn.put("Shock", Map.of("Lightning Bolt", 0.8));
         forge.util.IdScope.open();
         final LookaheadSearch base = search(cube, null);
@@ -132,7 +144,7 @@ public class BeliefSeenTest extends SimulationTest {
         forge.util.IdScope.open();
         // Shock was seen in game 1 AND is in their graveyard now: a singleton pool has it located, never drawn
         final LookaheadSearch on = search(cube, Arrays.asList("Serra Angel", "Wrath of God", "Shock"));
-        final ForcedWinSolver.Redraw rd = on.opponentRedrawPrior(Collections.emptyMap(), 20, true, 4);
+        final ForcedWinSolver.Redraw rd = on.opponentRedrawPrior(covering(), 20, true, 4);
         int angel = 0;
         for (long seed = 0; seed < 20; seed++) {
             final List<String> got = draw(game, rd, seed);
@@ -159,13 +171,13 @@ public class BeliefSeenTest extends SimulationTest {
         forge.util.IdScope.open();
         final LookaheadSearch on = search(cube, Arrays.asList("Serra Angel"));
         LookaheadSearch.BELIEF_SEEN_HOOK = g -> g == game ? Arrays.asList("Mana Leak") : null;
-        final ForcedWinSolver.Redraw rd = on.opponentRedrawPrior(Collections.emptyMap(), 20, true, 4);
+        final ForcedWinSolver.Redraw rd = on.opponentRedrawPrior(covering(), 20, true, 4);
         final List<String> got = draw(game, rd, 7);
         AssertJUnit.assertTrue(got.toString(), got.stream().anyMatch(s -> s.endsWith("Mana Leak")));
         AssertJUnit.assertFalse(got.toString(), got.stream().anyMatch(s -> s.endsWith("Serra Angel")));
         // a hook that knows nothing about this game falls back to the config's list
         LookaheadSearch.BELIEF_SEEN_HOOK = g -> null;
-        final List<String> got2 = draw(game, on.opponentRedrawPrior(Collections.emptyMap(), 20, true, 4), 7);
+        final List<String> got2 = draw(game, on.opponentRedrawPrior(covering(), 20, true, 4), 7);
         AssertJUnit.assertTrue(got2.toString(), got2.stream().anyMatch(s -> s.endsWith("Serra Angel")));
         on.shutdown();
         forge.util.IdScope.close();

@@ -14572,7 +14572,8 @@ public final class LookaheadSearch {
      * As above; {@code fillBasics}: a drawn card the prior does not boost (weight 1: no co-draft link to anything they
      * showed) enters the copy as a basic land instead. The defender's threat check then reads (and probes) only the
      * cards their shown cards point to; an unlinked card rarely makes a forced win, and every new card name costs an
-     * affordance probe (strong-opp-1020: about 50 per game, the defense's main cost).
+     * affordance probe (strong-opp-1020: about 50 per game, the defense's main cost). defense-other-cubes-1126: only on a
+     * belief pool the prior covers ({@link #PRIOR_COVERAGE_MIN}); on any other pool an unlinked card stays as drawn.
      */
     public ForcedWinSolver.Redraw opponentRedrawPrior(final Map<String, Map<String, Double>> syn, final double gain,
             final boolean fillBasics) {
@@ -14627,9 +14628,66 @@ public final class LookaheadSearch {
         return cfg.beliefSeen;
     }
 
+    /**
+     * defense-other-cubes-1126 (owner, 2026-11-26: "yes apply the defense fix, casual only for now"): the least share of
+     * the belief pool's non-basic names that must have a row in the co-draft prior for {@code fillBasics} to apply.
+     * {@code fillBasics} turns every drawn card with no co-draft link into a basic. That is right on the pool the prior was
+     * built from, but on another cube most names have no row, so most of the opponent's hidden cards would become lands
+     * and the defense would miss their instant-speed answers. A pool below this share is treated as {@code fillBasics=false}
+     * (the existing path): an unlinked card stays the card drawn from the event's own pool. At or above it, nothing changes.
+     * Measured in the jar (2026-11-26) on Forge names, the names {@link #beliefPoolFor} draws from, with the jar's prior
+     * (497 rows):
+     * - the jar's bundled pool ({@link BeliefSampler#LIVE_CUBE}, mush): 497 of 540 names, 92.0%;
+     * - the client's mush event pool (the same 540 names sent as beliefPool): 497 of 540, 92.0%;
+     * - the Sacred Geometry event pool (360 names): 83 of 360, 23.1%.
+     * 0.6 sits 32 points under mush and 37 points over Sacred Geometry. So mush keeps today's path even after many cube
+     * changes without a refreshed prior, and a pool counts as covered only when most of it has co-draft data.
+     */
+    static final double PRIOR_COVERAGE_MIN = 0.6;
+
+    /** defense-other-cubes-1126: each (pool, prior) pair's coverage, by object identity (pools and priors are interned per JVM). */
+    private static final Map<BeliefSampler.Cube, Map<Map<String, Map<String, Double>>, Double>> PRIOR_COVERAGE =
+            new java.util.IdentityHashMap<>();
+
+    /**
+     * defense-other-cubes-1126: the share of {@code cube}'s non-basic names with a row in {@code syn}. These are the
+     * names {@link #beliefPoolFor} draws from, before it removes the cards the seat knows. A pool with no non-basic name
+     * counts as fully covered. Computed once per (pool, prior) pair and cached; thread-safe.
+     */
+    static double priorCoverage(final BeliefSampler.Cube cube, final Map<String, Map<String, Double>> syn) {
+        synchronized (PRIOR_COVERAGE) {
+            return PRIOR_COVERAGE.computeIfAbsent(cube, k -> new java.util.IdentityHashMap<>()).computeIfAbsent(syn, k -> {
+                final double c = coverageOf(cube.names, syn);
+                if (c < PRIOR_COVERAGE_MIN) {
+                    System.err.println("[lookahead] defense prior: " + Math.round(c * 1000) / 10.0 + "% of the belief pool's "
+                            + "names have a row (< " + Math.round(PRIOR_COVERAGE_MIN * 100) + "%): unlinked draws stay as drawn");
+                }
+                return c;
+            });
+        }
+    }
+
+    /** defense-other-cubes-1126: the share of the non-basic {@code names} with a row in {@code syn} (1 if there are none). */
+    static double coverageOf(final java.util.Collection<String> names, final Map<String, Map<String, Double>> syn) {
+        int all = 0;
+        int rows = 0;
+        for (String name : names) {
+            if (BeliefSampler.isBasic(name)) {
+                continue;
+            }
+            all++;
+            if (syn.containsKey(name)) {
+                rows++;
+            }
+        }
+        return all == 0 ? 1.0 : (double) rows / all;
+    }
+
     private void redrawOpponentsPrior(Game live, Player liveMe, Game g, Player me, Random rng,
             Map<String, Map<String, Double>> syn, double gain, boolean fillBasics,
             java.util.Collection<String> seenBefore, double seenGain) {
+        // defense-other-cubes-1126: fillBasics only on a pool the prior covers ({@link #PRIOR_COVERAGE_MIN})
+        final boolean fill = fillBasics && priorCoverage(beliefCube, syn) >= PRIOR_COVERAGE_MIN;
         boolean changed = false;
         final Set<String> seen = seenBefore == null || seenGain <= 0 ? Collections.emptySet() : new HashSet<>(seenBefore);
         final PlayerView myView = liveMe.getView();
@@ -14722,7 +14780,7 @@ public final class LookaheadSearch {
             }
             for (int k = 0; k < all.size(); k++) {
                 String nm = d.slotName[all.get(k)];
-                if (fillBasics && !BeliefSampler.isBasic(nm)) {
+                if (fill && !BeliefSampler.isBasic(nm)) {
                     final Integer it = itemOf.get(nm);
                     if (it == null || !linked[it]) {
                         nm = BeliefSampler.basics()[rng.nextInt(BeliefSampler.basics().length)];
