@@ -14645,25 +14645,61 @@ public final class LookaheadSearch {
      */
     static final double PRIOR_COVERAGE_MIN = 0.6;
 
-    /** defense-other-cubes-1126: each (pool, prior) pair's coverage, by object identity (pools and priors are interned per JVM). */
-    private static final Map<BeliefSampler.Cube, Map<Map<String, Map<String, Double>>, Double>> PRIOR_COVERAGE =
-            new java.util.IdentityHashMap<>();
+    /**
+     * defense-other-cubes-1126 (review S1): how many (pool, prior) pairs the coverage cache keeps. The host's JVM plays
+     * many games, each of which may send its own pool, so the cache is bounded: on a miss with every slot taken, the least
+     * recently used pair goes and a later lookup of it recomputes the same value.
+     */
+    static final int PRIOR_COVERAGE_MAX = 16;
+    /** defense-other-cubes-1126: the cached pairs, by object identity (pools and priors are interned per JVM); the lock. */
+    private static final BeliefSampler.Cube[] COVERAGE_POOL = new BeliefSampler.Cube[PRIOR_COVERAGE_MAX];
+    @SuppressWarnings("unchecked")
+    private static final Map<String, Map<String, Double>>[] COVERAGE_PRIOR = new Map[PRIOR_COVERAGE_MAX];
+    private static final double[] COVERAGE_VALUE = new double[PRIOR_COVERAGE_MAX];
+    /** Each slot's last use on {@link #coverageClock} (0 = empty, so an empty slot is taken first). */
+    private static final long[] COVERAGE_USED = new long[PRIOR_COVERAGE_MAX];
+    private static long coverageClock = 0;
 
     /**
      * defense-other-cubes-1126: the share of {@code cube}'s non-basic names with a row in {@code syn}. These are the
      * names {@link #beliefPoolFor} draws from, before it removes the cards the seat knows. A pool with no non-basic name
-     * counts as fully covered. Computed once per (pool, prior) pair and cached; thread-safe.
+     * counts as fully covered. Cached per (pool, prior) pair, at most {@link #PRIOR_COVERAGE_MAX} pairs; thread-safe.
      */
     static double priorCoverage(final BeliefSampler.Cube cube, final Map<String, Map<String, Double>> syn) {
-        synchronized (PRIOR_COVERAGE) {
-            return PRIOR_COVERAGE.computeIfAbsent(cube, k -> new java.util.IdentityHashMap<>()).computeIfAbsent(syn, k -> {
-                final double c = coverageOf(cube.names, syn);
-                if (c < PRIOR_COVERAGE_MIN) {
-                    System.err.println("[lookahead] defense prior: " + Math.round(c * 1000) / 10.0 + "% of the belief pool's "
-                            + "names have a row (< " + Math.round(PRIOR_COVERAGE_MIN * 100) + "%): unlinked draws stay as drawn");
+        synchronized (COVERAGE_POOL) {
+            int slot = 0;
+            for (int i = 0; i < PRIOR_COVERAGE_MAX; i++) {
+                if (COVERAGE_POOL[i] != null && COVERAGE_POOL[i] == cube && COVERAGE_PRIOR[i] == syn) {
+                    COVERAGE_USED[i] = ++coverageClock;
+                    return COVERAGE_VALUE[i];
                 }
-                return c;
-            });
+                if (COVERAGE_USED[i] < COVERAGE_USED[slot]) {
+                    slot = i;
+                }
+            }
+            final double c = coverageOf(cube.names, syn);
+            if (c < PRIOR_COVERAGE_MIN) {
+                System.err.println("[lookahead] defense prior: " + Math.round(c * 1000) / 10.0 + "% of the belief pool's "
+                        + "names have a row (< " + Math.round(PRIOR_COVERAGE_MIN * 100) + "%): unlinked draws stay as drawn");
+            }
+            COVERAGE_POOL[slot] = cube;
+            COVERAGE_PRIOR[slot] = syn;
+            COVERAGE_VALUE[slot] = c;
+            COVERAGE_USED[slot] = ++coverageClock;
+            return c;
+        }
+    }
+
+    /** defense-other-cubes-1126 (review S1): how many (pool, prior) pairs the coverage cache holds now (tests). */
+    static int priorCoverageCached() {
+        synchronized (COVERAGE_POOL) {
+            int n = 0;
+            for (BeliefSampler.Cube c : COVERAGE_POOL) {
+                if (c != null) {
+                    n++;
+                }
+            }
+            return n;
         }
     }
 

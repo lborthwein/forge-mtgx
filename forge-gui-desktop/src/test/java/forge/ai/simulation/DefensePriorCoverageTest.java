@@ -356,4 +356,53 @@ public class DefensePriorCoverageTest extends SimulationTest {
             forge.util.IdScope.close();
         }
     }
+
+    /**
+     * Review S1: the coverage cache is bounded. A host JVM plays many games, each of which may send its own pool; after
+     * many distinct pools the cache keeps at most {@link LookaheadSearch#PRIOR_COVERAGE_MAX} of them (the rest can be
+     * collected), and a pool it dropped gets the same value again on its next lookup.
+     */
+    @Test
+    public void theCoverageCacheKeepsAtMostItsBound() throws Exception {
+        final int bound = LookaheadSearch.PRIOR_COVERAGE_MAX;
+        final int n = 4 * bound;
+        final Map<String, Map<String, Double>> syn = new HashMap<>();
+        final List<java.lang.ref.WeakReference<BeliefSampler.Cube>> refs = new ArrayList<>();
+        // a pool kept by the test throughout: dropped from the cache by the others, then looked up again
+        final BeliefSampler.Cube first = new BeliefSampler.Cube();
+        first.names.addAll(List.of("First A", "First B", "First C", "Island"));
+        syn.put("First A", Map.of());
+        syn.put("First B", Map.of());
+        syn.put("First C", Map.of());
+        AssertJUnit.assertEquals(1.0, LookaheadSearch.priorCoverage(first, syn), 1e-12);
+        List<BeliefSampler.Cube> pools = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            // 2 of 3 non-basic names with a row: covered (no stderr line), and a value to check
+            final BeliefSampler.Cube c = new BeliefSampler.Cube();
+            c.names.addAll(List.of("P" + i + " A", "P" + i + " B", "P" + i + " C", "Forest"));
+            syn.put("P" + i + " A", Map.of());
+            syn.put("P" + i + " B", Map.of());
+            AssertJUnit.assertEquals(2.0 / 3, LookaheadSearch.priorCoverage(c, syn), 1e-12);
+            pools.add(c);
+            refs.add(new java.lang.ref.WeakReference<>(c));
+        }
+        pools = null;
+        int alive = n;
+        for (int attempt = 0; attempt < 50 && alive > bound; attempt++) {
+            System.gc();
+            Thread.sleep(20);
+            alive = 0;
+            for (java.lang.ref.WeakReference<BeliefSampler.Cube> r : refs) {
+                if (r.get() != null) {
+                    alive++;
+                }
+            }
+        }
+        AssertJUnit.assertTrue(n + " distinct pools: " + alive + " still held after GC, the bound is " + bound,
+                alive <= bound);
+        AssertJUnit.assertTrue(LookaheadSearch.priorCoverageCached() <= bound);
+        // the kept pool was dropped (n > bound newer pairs); its next lookup gives the same value
+        AssertJUnit.assertEquals(1.0, LookaheadSearch.priorCoverage(first, syn), 1e-12);
+        AssertJUnit.assertEquals(1.0, LookaheadSearch.priorCoverage(first, syn), 1e-12);
+    }
 }
