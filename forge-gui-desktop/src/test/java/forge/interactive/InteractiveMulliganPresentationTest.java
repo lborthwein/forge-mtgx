@@ -14,6 +14,7 @@ import forge.gui.interfaces.IGuiBase;
 import forge.player.PlayerControllerHuman;
 import org.testng.annotations.Test;
 
+import java.awt.EventQueue;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -32,10 +33,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
@@ -47,12 +50,15 @@ import static org.testng.Assert.fail;
  * its {@code awaitNextInput}). 250 ms later {@code AbstractGuiGame}'s timer posts "Waiting for &lt;opponent&gt;..." to
  * the EDT: a status prompt ({@code showPromptMessage(view, text)}) and disabled buttons. The next input's
  * {@code showMessageInitial} cancels that timer, but the {@code InputProxy} names the new input before it queues
- * {@code showMessageInitial}. When the status update runs in that window, the bridge took the status prompt for the
+ * {@code showMessageInitial}. When the status update ran in that window, the bridge took the status prompt for the
  * presentation of the input the proxy named, and its publish (queued ahead of the input's own presentation) enumerated
- * the mulligan with the "waiting" buttons: no human control, so the game ended fatal on turn 0.</p>
+ * the mulligan with the "waiting" buttons: no human control, so the game ended fatal on turn 0. The bridge now
+ * validates an input only once its own presentation has completed ({@code InputProxy.getPresentedInput}).</p>
  *
- * <p>The test holds Forge's game thread in that window (at the proxy's queuing of {@code showMessageInitial}) until
- * the status update has run on the EDT, so the order is the reported one on every run.</p>
+ * <p>The race tests hold the timer thread until Forge's game thread is inside that window, and hold the game thread
+ * there (at the proxy's queuing of {@code showMessageInitial}) until the timer's task has run on the EDT, so the order
+ * is the reported one on every run, whichever thread is late. The unsupported tests check that an input whose own
+ * presentation offers no human control still fails, including one whose only prompt is a status prompt.</p>
  */
 public class InteractiveMulliganPresentationTest extends AITest {
 
@@ -175,15 +181,41 @@ public class InteractiveMulliganPresentationTest extends AITest {
         return null;
     }
 
+    /** The forced order's evidence: what the hold saw, set by {@link #forcedRace}. */
+    private static final class Race {
+        final CountDownLatch timerPosting = new CountDownLatch(1);
+        final CountDownLatch inWindow = new CountDownLatch(1);
+        final CountDownLatch timerTaskRan = new CountDownLatch(1);
+        final AtomicBoolean timerHeld = new AtomicBoolean();
+        final AtomicBoolean gameHeld = new AtomicBoolean();
+        final AtomicBoolean gameInWindow = new AtomicBoolean();
+        final AtomicBoolean timerTaskRunning = new AtomicBoolean();
+        /** The input the proxy named when Forge's game thread reached the window. */
+        final AtomicReference<Object> named = new AtomicReference<>();
+        /** The input the proxy named when the timer's EDT task began, and whether the game thread was still held. */
+        final AtomicReference<Object> namedAtTimerTask = new AtomicReference<>();
+        final AtomicBoolean gameInWindowAtTimerTask = new AtomicBoolean();
+        /** EDT work the timer task queued while it ran: the bridge's publishes for its prompt and its buttons. */
+        final AtomicInteger postsByTimerTask = new AtomicInteger();
+    }
+
+    private static void await(final CountDownLatch latch, final String what) throws InterruptedException {
+        if (!latch.await(30, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("timed out: " + what);
+        }
+    }
+
     /**
-     * Forge's EDT entry point with one hold: when {@code gameThread} queues EDT work while the seat's InputProxy names
-     * an {@link InputConfirmMulligan} (that is InputProxy.update queuing the input's showMessageInitial, right after
-     * naming it), the queuing waits until this game's awaitNextInput timer task has run on the EDT.
+     * Forge's EDT entry point with two holds that force the reported order whatever the scheduling:
+     * <ol>
+     *   <li>this game's awaitNextInput timer thread, when it posts its "Waiting for ..." task, waits until Forge's game
+     *       thread is inside the InputProxy window;</li>
+     *   <li>the game thread, when it queues EDT work while the seat's InputProxy names an {@link InputConfirmMulligan}
+     *       (InputProxy.update queuing the input's showMessageInitial, right after naming it), marks the window entered
+     *       and waits until the timer's task has run on the EDT.</li>
+     * </ol>
      */
-    private static IGuiBase holdShowUntilWaitingPromptRan(final IGuiBase forge, final Harness h,
-                                                           final AtomicReference<Thread> gameThread,
-                                                           final CountDownLatch waitingRan,
-                                                           final AtomicBoolean held) {
+    private static IGuiBase forceOrder(final IGuiBase forge, final Harness h, final Thread gameThread, final Race race) {
         final String timerThread = "awaitNextInputTimer Game:" + h.game.getView().getId() + " ";
         return (IGuiBase) Proxy.newProxyInstance(IGuiBase.class.getClassLoader(), new Class<?>[]{IGuiBase.class},
                 (proxy, method, args) -> {
@@ -191,19 +223,32 @@ public class InteractiveMulliganPresentationTest extends AITest {
                     if ("invokeInEdtLater".equals(method.getName()) && args != null && args.length == 1
                             && args[0] instanceof Runnable task) {
                         final Thread caller = Thread.currentThread();
-                        if (caller.getName().startsWith(timerThread)) {
+                        if (caller.getName().startsWith(timerThread) && race.timerHeld.compareAndSet(false, true)) {
+                            race.timerPosting.countDown();
+                            await(race.inWindow, "Forge's game thread reaching the InputProxy window");
                             call = new Object[]{(Runnable) () -> {
+                                race.namedAtTimerTask.set(h.controller.getInputProxy().getInput());
+                                race.gameInWindowAtTimerTask.set(race.gameInWindow.get());
+                                race.timerTaskRunning.set(true);
                                 try {
                                     task.run();
                                 } finally {
-                                    waitingRan.countDown();
+                                    race.timerTaskRunning.set(false);
+                                    race.timerTaskRan.countDown();
                                 }
                             }};
-                        } else if (caller == gameThread.get()
+                        } else if (race.timerTaskRunning.get() && EventQueue.isDispatchThread()) {
+                            race.postsByTimerTask.incrementAndGet();
+                        } else if (caller == gameThread
                                 && h.controller.getInputProxy().getInput() instanceof InputConfirmMulligan
-                                && held.compareAndSet(false, true)) {
-                            if (!waitingRan.await(30, TimeUnit.SECONDS)) {
-                                throw new IllegalStateException("the awaitNextInput timer task never ran");
+                                && race.gameHeld.compareAndSet(false, true)) {
+                            race.named.set(h.controller.getInputProxy().getInput());
+                            race.gameInWindow.set(true);
+                            race.inWindow.countDown();
+                            try {
+                                await(race.timerTaskRan, "the awaitNextInput timer task running on the EDT");
+                            } finally {
+                                race.gameInWindow.set(false);
                             }
                         }
                     }
@@ -216,38 +261,52 @@ public class InteractiveMulliganPresentationTest extends AITest {
     }
 
     /**
-     * The reported order, forced: "Waiting for ..." (status prompt, both buttons off) runs on the EDT after the
+     * The reported order, forced: "Waiting for ..." (a status prompt, both buttons off) runs on the EDT after the
      * InputProxy has named the seat's mulligan input and before it queues that input's showMessageInitial. The seat
      * still gets exactly one mulligan request, with Keep and Mulligan, and Keep is answered.
+     *
+     * @param gameThreadLate the reviewer's early-timer variant: Forge's game thread pauses after awaitNextInput until
+     *                       the timer has fired and the EDT is drained (a scheduling pause longer than 250 ms)
      */
-    @Test(timeOut = 120000)
-    public void aWaitingPromptBeforeTheMulligansOwnPresentationIsNotItsPresentation() throws Exception {
+    private void forcedRace(final boolean gameThreadLate) throws Exception {
         final IGuiBase forge = GuiBase.getInterface();
         final Harness h = new Harness();
-        final AtomicReference<Thread> gameThread = new AtomicReference<>();
-        final CountDownLatch waitingRan = new CountDownLatch(1);
-        final AtomicBoolean held = new AtomicBoolean();
+        final Race race = new Race();
         final AtomicReference<Boolean> kept = new AtomicReference<>();
         final CountDownLatch decided = new CountDownLatch(1);
-        GuiBase.setInterface(holdShowUntilWaitingPromptRan(forge, h, gameThread, waitingRan, held));
-        try {
-            final Thread forgeThread = new Thread(() -> {
-                try {
-                    // GameAction.determineFirstTurnPlayer: the seat that does not choose who plays first waits.
-                    h.controller.awaitNextInput();
-                    // MulliganService.runPlayerMulligans: the opponent (on the play) has decided; now this seat.
-                    kept.set(h.controller.mulliganKeepHand(h.foe, 0));
-                } finally {
-                    decided.countDown();
+        final Thread forgeThread = new Thread(() -> {
+            try {
+                // GameAction.determineFirstTurnPlayer: the seat that does not choose who plays first waits.
+                h.controller.awaitNextInput();
+                if (gameThreadLate) {
+                    await(race.timerPosting, "the awaitNextInput timer firing");
+                    EventQueue.invokeAndWait(() -> { });
                 }
-            }, "Game thread (mulligan presentation test)");
-            forgeThread.setDaemon(true);
-            gameThread.set(forgeThread);
+                // MulliganService.runPlayerMulligans: the opponent (on the play) has decided; now this seat.
+                kept.set(h.controller.mulliganKeepHand(h.foe, 0));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            } finally {
+                decided.countDown();
+            }
+        }, "Game thread (mulligan presentation test)");
+        forgeThread.setDaemon(true);
+        GuiBase.setInterface(forceOrder(forge, h, forgeThread, race));
+        try {
             forgeThread.start();
 
             final JsonObject first = h.nextRequestOrError(60000);
             assertNotNull(first, "a request or an error; wire: " + h.log);
-            assertTrue(held.get(), "the game thread was held in the InputProxy window");
+            // The order was the reported one: the timer task ran in the window, on the input the proxy had named.
+            assertTrue(race.timerHeld.get() && race.gameHeld.get(), "both holds engaged");
+            assertTrue(race.named.get() instanceof InputConfirmMulligan, "the proxy named the mulligan: " + race.named);
+            assertSame(race.namedAtTimerTask.get(), race.named.get(),
+                    "the timer task ran while the proxy named the held mulligan input");
+            assertTrue(race.gameInWindowAtTimerTask.get(),
+                    "the timer task ran while Forge's game thread was held before queuing the presentation");
+            assertTrue(race.postsByTimerTask.get() >= 2,
+                    "the timer task showed its prompt and buttons (each queues a publish): " + race.postsByTimerTask);
+
             assertEquals(first.get("type").getAsString(), "request",
                     "the mulligan was published before Forge presented it: " + first);
             assertEquals(first.get("kind").getAsString(), "mulligan", first.toString());
@@ -269,18 +328,36 @@ public class InteractiveMulliganPresentationTest extends AITest {
         }
     }
 
+    @Test(timeOut = 120000)
+    public void aWaitingPromptBeforeTheMulligansOwnPresentationIsNotItsPresentation() throws Exception {
+        forcedRace(false);
+    }
+
+    /** Review S1-1: the game thread is late (the timer fired first); the holds still force the reported order. */
+    @Test(timeOut = 120000)
+    public void theSameOrderWhenTheTimerFiresBeforeTheGameThreadMoves() throws Exception {
+        forcedRace(true);
+    }
+
     /** An input that presents itself with both buttons off and nothing selectable: the bridge offers no human control. */
     private static final class NothingToPress extends InputSyncronizedBase {
         private static final long serialVersionUID = 1L;
+        private final boolean statusPromptOnly;
 
-        NothingToPress(final PlayerControllerHuman controller) {
+        /** @param statusPromptOnly its prompt is a status prompt (the two-argument showPromptMessage) */
+        NothingToPress(final PlayerControllerHuman controller, final boolean statusPromptOnly) {
             super(controller);
+            this.statusPromptOnly = statusPromptOnly;
         }
 
         @Override
         protected void showMessage() {
             getController().getGui().updateButtons(getOwner(), false, false, false);
-            showMessage("Nothing here can be answered");
+            if (statusPromptOnly) {
+                getController().getGui().showPromptMessage(getOwner(), "Nothing here can be answered");
+            } else {
+                showMessage("Nothing here can be answered");
+            }
         }
 
         @Override
@@ -289,18 +366,16 @@ public class InteractiveMulliganPresentationTest extends AITest {
         }
     }
 
-    /** An input whose own presentation has no human control still ends the game as unsupported. */
-    @Test(timeOut = 120000)
-    public void aPresentedInputWithNoHumanControlStillFails() throws Exception {
+    private void presentedWithNoHumanControl(final boolean statusPromptOnly) throws Exception {
         final Harness h = new Harness();
         try {
-            final Thread forgeThread = new Thread(() -> new NothingToPress(h.controller).showAndWait(),
+            final Thread forgeThread = new Thread(() -> new NothingToPress(h.controller, statusPromptOnly).showAndWait(),
                     "Game thread (mulligan presentation test, unsupported)");
             forgeThread.setDaemon(true);
             forgeThread.start();
 
             final JsonObject first = h.nextRequestOrError(60000);
-            assertNotNull(first, "a request or an error; wire: " + h.log);
+            assertNotNull(first, "a request or an error (not a silent hang); wire: " + h.log);
             if (!"error".equals(first.get("type").getAsString())) {
                 fail("an input with no human control was published: " + first);
             }
@@ -311,5 +386,17 @@ public class InteractiveMulliganPresentationTest extends AITest {
         } finally {
             h.close();
         }
+    }
+
+    /** An input whose own presentation has no human control still ends the game as unsupported. */
+    @Test(timeOut = 120000)
+    public void aPresentedInputWithNoHumanControlStillFails() throws Exception {
+        presentedWithNoHumanControl(false);
+    }
+
+    /** Review S1-2: the same when the input's only prompt is a status prompt; once presented, it fails, not hangs. */
+    @Test(timeOut = 120000)
+    public void anInputPresentedOnlyByAStatusPromptStillFails() throws Exception {
+        presentedWithNoHumanControl(true);
     }
 }

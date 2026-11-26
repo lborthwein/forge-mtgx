@@ -44,6 +44,8 @@ public class InputProxy implements Observer {
 
     /** The input. */
     private AtomicReference<Input> input = new AtomicReference<>();
+    /** mtgx (mulligan-no-controls-1126): the input whose own presentation (showMessageInitial) last completed. */
+    private volatile Input presented;
     private final PlayerControllerHuman controller;
 
 //    private static final boolean DEBUG_INPUT = true; // false;
@@ -69,6 +71,7 @@ public class InputProxy implements Observer {
             controller.getInputQueue().syncPoint();
             //System.out.printf("\t%s > showMessage @ %s/%s during %s%n", FThreads.debugGetCurrThreadId(), nextInput.getClass().getSimpleName(), current.getClass().getSimpleName(), game.getPhaseHandler().debugPrintState());
             current.showMessageInitial();
+            presented = current;
         };
         FThreads.invokeInEdtLater(showMessage);
     }
@@ -171,5 +174,15 @@ public class InputProxy implements Observer {
     /** @return {@link forge.gui.InputProxy.InputBase} */
     public Input getInput() {
         return input.get();
+    }
+
+    /**
+     * mtgx (mulligan-no-controls-1126): the input whose own presentation last completed on the EDT, or null. This
+     * proxy names a new input before it queues that input's showMessageInitial; until that has run, the input named
+     * by {@link #getInput()} is not this one, and what the GUI shows (a "Waiting for ..." status prompt, say) is not
+     * that input's presentation.
+     */
+    public Input getPresentedInput() {
+        return presented;
     }
 }
